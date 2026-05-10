@@ -53,6 +53,17 @@ When something here gets activated for a release, move it out of this file and i
 
 v0.1 inherits the cherry-picked code's hardening (S1-S6 + M1-M3 + L5 from upstream PHASE4_HARDENING_RESULTS.md). New v0.1-specific code (cli, sas, relay_client, relay_server) needs its own hardening pass before 1.0.
 
+## Iter-tracked TODOs (carried forward from current build)
+
+- [ ] **iter 5: SPAKE2 PAKE handshake** — `spake2` crate or RustCrypto's `spake2`; replaces the placeholder `<handle>-<fingerprint>` code phrase from `wire init`. Pairs with `wire join` real implementation.
+- [ ] **iter 5: PGP word-list code phrases** — replace the deterministic placeholder with two-syllable English words (magic-wormhole pattern) for human-friendly aloud-readout.
+- [ ] **iter 5: MCP server (`wire mcp`)** — JSON-RPC over stdio. Tools: `wire_send`, `wire_tail`, `wire_peers`, `wire_verify`, `wire_whoami`. Deliberately NOT exposed: `wire_init`, `wire_join` (security boundary).
+- [ ] **iter 6: relay-server (`wire relay-server`)** — axum + tokio + sqlite mailbox. AGPL header on this file specifically.
+- [ ] **iter 6: relay-client + daemon** — flushes `outbox/<peer>.jsonl` to relay, dedupes by `event_id`, populates `inbox/<peer>.jsonl` after Ed25519 verify.
+- [ ] **iter 6: content-addressed dedupe** — daemon recognizes that two `wire send` invocations with identical canonical body produce the same `event_id` and refuses to double-flush. (Today timestamps make every event unique; once the daemon adds it, the failing-on-purpose test in `tests/cli.rs` flips from `assert_ne!` → `assert_eq!`.)
+- [ ] **iter 7: file-system contract daemon** — long-running unit watches `outbox/`, signs partial events appended by sandboxed agents, flushes to relay, writes verified inbound to `inbox/`. Per `docs/AGENT_INTEGRATION.md` Path 3.
+- [ ] **iter 8: 3-party mesh-of-bilateral demo** — bash test scripting paul + willard + carol pairing, sending, tailing.
+
 ## What does NOT belong in this BACKLOG
 
 Anything from `archive/2026-05-10-enterprise-frame/` (regulated-buyer GTM artifacts) — that lives in operator's separate company doc, not this OSS project. R3-E confirmed: tribe smells gematik energy and bails.

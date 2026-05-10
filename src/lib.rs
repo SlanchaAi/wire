@@ -13,6 +13,8 @@ pub mod canonical;
 pub mod signing;
 pub mod agent_card;
 pub mod trust;
+pub mod config;
+pub mod cli;
 
 // Curated re-exports for ergonomic call sites.
 pub use signing::{

@@ -13,7 +13,9 @@ categories = ["command-line-utilities", "cryptography", "network-programming"]
 name = "wire"
 path = "src/lib.rs"
 
-# [[bin]] for `wire` CLI lands in a later iter (cli.rs not yet written).
+[[bin]]
+name = "wire"
+path = "src/bin/wire.rs"
 
 [dependencies]
 ed25519-dalek = { version = "2", features = ["rand_core"] }
@@ -25,6 +27,9 @@ hex = "0.4"
 rand = "0.8"
 thiserror = "1"
 time = { version = "0.3", features = ["formatting", "macros", "parsing", "serde"] }
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+anyhow = "1"
 
 [dev-dependencies]
 proptest = "1"
