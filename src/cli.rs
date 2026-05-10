@@ -482,9 +482,22 @@ fn cmd_mcp() -> Result<()> {
     crate::mcp::run()
 }
 
-fn cmd_relay_server(_bind: &str) -> Result<()> {
-    eprintln!("wire relay-server lands in iter 6 — axum + tokio + SQLite mailbox. See BACKLOG.md.");
-    std::process::exit(2);
+fn cmd_relay_server(bind: &str) -> Result<()> {
+    // Default state dir for the relay process: $WIRE_HOME/state/wire-relay
+    // (or `dirs::state_dir()/wire-relay`). Distinct from the CLI's state dir
+    // so a single user can run both client and server on one machine.
+    let state_dir = if let Ok(home) = std::env::var("WIRE_HOME") {
+        std::path::PathBuf::from(home).join("state").join("wire-relay")
+    } else {
+        dirs::state_dir()
+            .or_else(dirs::data_local_dir)
+            .ok_or_else(|| anyhow::anyhow!("could not resolve XDG_STATE_HOME — set WIRE_HOME"))?
+            .join("wire-relay")
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(crate::relay_server::serve(bind, state_dir))
 }
 
 // Integration tests for the CLI live in `tests/cli.rs` (cargo's tests/ dir).

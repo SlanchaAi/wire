@@ -30,6 +30,10 @@ time = { version = "0.3", features = ["formatting", "macros", "parsing", "serde"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
 anyhow = "1"
+axum = "0.7"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "fs", "io-util"] }
+tower = "0.5"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 proptest = "1"

@@ -16,6 +16,7 @@ pub mod trust;
 pub mod config;
 pub mod cli;
 pub mod mcp;
+pub mod relay_server;
 
 // Curated re-exports for ergonomic call sites.
 pub use signing::{
