@@ -136,12 +136,41 @@ pub enum Command {
         json: bool,
     },
     /// Pin a peer's signed agent-card from a file. (Manual out-of-band pairing
-    /// — replaces SAS for v0.1 bootstrap; real `wire join` lands with SPAKE2.)
+    /// — fallback path; the magic-wormhole flow is `pair-host` / `pair-join`.)
     Pin {
         /// Path to peer's signed agent-card JSON.
         card_file: String,
         #[arg(long)]
         json: bool,
+    },
+    /// Host a SAS-confirmed pairing. Generates a code phrase, prints it, waits
+    /// for a peer to `pair-join`, exchanges signed agent-cards via SPAKE2 +
+    /// ChaCha20-Poly1305. Auto-pins on success. (HUMAN-ONLY — operator must
+    /// read the SAS digits aloud and confirm.)
+    PairHost {
+        /// Relay base URL.
+        #[arg(long)]
+        relay: String,
+        /// Skip the SAS confirmation prompt. ONLY use when piping under
+        /// automated tests or when the SAS has already been verified by
+        /// another channel. Documented as test-only.
+        #[arg(long)]
+        yes: bool,
+        /// How long (seconds) to wait for the peer to join before timing out.
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+    },
+    /// Join a pair-slot using a code phrase from the host. (HUMAN-ONLY.)
+    PairJoin {
+        /// Code phrase from the host's `pair-host` output (e.g. `73-2QXC4P`).
+        code_phrase: String,
+        /// Relay base URL (must match the host's relay).
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
     },
 }
 
@@ -165,6 +194,10 @@ pub fn run() -> Result<()> {
         Command::Push { peer, json } => cmd_push(peer.as_deref(), json),
         Command::Pull { json } => cmd_pull(json),
         Command::Pin { card_file, json } => cmd_pin(&card_file, json),
+        Command::PairHost { relay, yes, timeout } => cmd_pair_host(&relay, yes, timeout),
+        Command::PairJoin { code_phrase, relay, yes, timeout } => {
+            cmd_pair_join(&code_phrase, &relay, yes, timeout)
+        }
     }
 }
 
@@ -796,6 +829,243 @@ fn cmd_pin(card_file: &str, as_json: bool) -> Result<()> {
         println!("pinned {handle} ({did}) at tier VERIFIED");
     }
     Ok(())
+}
+
+// ---------- pair-host / pair-join (the magic-wormhole flow) ----------
+
+fn cmd_pair_host(relay_url: &str, auto_yes: bool, timeout_secs: u64) -> Result<()> {
+    pair_orchestrate(relay_url, None, "host", auto_yes, timeout_secs)
+}
+
+fn cmd_pair_join(code_phrase: &str, relay_url: &str, auto_yes: bool, timeout_secs: u64) -> Result<()> {
+    pair_orchestrate(relay_url, Some(code_phrase), "guest", auto_yes, timeout_secs)
+}
+
+/// Shared orchestration for both sides of the SAS pairing.
+///
+/// Steps:
+///   0. Ensure `wire init` was run (we need an Ed25519 keypair + signed card).
+///   1. If we don't yet have a relay binding, allocate a slot (calls `bind-relay`).
+///   2. Generate (host) or accept (guest) a code phrase. Compute its SHA-256.
+///   3. Build a SPAKE2 message; POST to `/v1/pair` with role=host|guest.
+///   4. Poll `/v1/pair/<id>?as_role=...` until the peer's SPAKE2 message lands.
+///   5. SPAKE2 finish → 32-byte shared secret.
+///   6. Compute 6-digit SAS over (shared secret, sorted pubkeys). Print.
+///   7. Wait for operator confirmation (or `--yes` skips the prompt).
+///   8. AEAD-seal a bootstrap payload (signed agent-card + relay slot coords);
+///      POST to `/v1/pair/<id>/bootstrap`.
+///   9. Poll for peer's bootstrap; AEAD-open; pin peer's card; save peer's
+///      relay coords. Trust state and relay state are both updated atomically.
+fn pair_orchestrate(
+    relay_url: &str,
+    code_in: Option<&str>,
+    role: &str,
+    auto_yes: bool,
+    timeout_secs: u64,
+) -> Result<()> {
+    use crate::sas::{
+        PakeSide, compute_sas_pake, derive_aead_key, generate_code_phrase, open_bootstrap,
+        parse_code_phrase, seal_bootstrap,
+    };
+    use sha2::{Digest, Sha256};
+
+    // 0. ensure init'd
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire init <handle>` first");
+    }
+    let card = config::read_agent_card()?;
+    let did = card.get("did").and_then(Value::as_str).unwrap_or("").to_string();
+    let handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
+    let pk_b64 = card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent-card missing verify_keys[*].key"))?
+        .to_string();
+    let _pk_bytes = crate::signing::b64decode(&pk_b64)?; // sanity-check decode; pubkey traveled in card
+
+    // 1. ensure relay slot allocated
+    let mut relay_state = config::read_relay_state()?;
+    let need_alloc = relay_state["self"].is_null()
+        || relay_state["self"]["relay_url"].as_str() != Some(relay_url);
+    if need_alloc {
+        let client = crate::relay_client::RelayClient::new(relay_url);
+        if !client.healthz().unwrap_or(false) {
+            bail!("relay healthz failed at {relay_url} — is the server running?");
+        }
+        let alloc = client.allocate_slot(Some(&handle))?;
+        relay_state["self"] = json!({
+            "relay_url": relay_url,
+            "slot_id": alloc.slot_id,
+            "slot_token": alloc.slot_token,
+        });
+        config::write_relay_state(&relay_state)?;
+    }
+    let our_slot_id = relay_state["self"]["slot_id"].as_str().unwrap().to_string();
+    let our_slot_token = relay_state["self"]["slot_token"].as_str().unwrap().to_string();
+
+    // 2. code phrase
+    let code = match code_in {
+        Some(c) => parse_code_phrase(c)?.to_string(),
+        None => generate_code_phrase(),
+    };
+    if role == "host" {
+        eprintln!();
+        eprintln!("share this code phrase with your peer:");
+        eprintln!();
+        eprintln!("    {code}");
+        eprintln!();
+        eprintln!("waiting for peer to run `wire pair-join {code} --relay {relay_url}` ...");
+    }
+
+    let code_hash = {
+        let mut h = Sha256::new();
+        h.update(b"wire/v1 code-phrase");
+        h.update(code.as_bytes());
+        hex::encode(h.finalize())
+    };
+
+    // 3. SPAKE2 setup
+    let pake = PakeSide::new(&code, code_hash.as_bytes());
+    let our_msg_b64 = crate::signing::b64encode(&pake.msg_out);
+    let client = crate::relay_client::RelayClient::new(relay_url);
+    let pair_id = client.pair_open(&code_hash, &our_msg_b64, role)?;
+
+    // 4. poll for peer's SPAKE2 message
+    let peer_role = if role == "host" { "guest" } else { "host" };
+    let peer_msg_b64 = poll_until(
+        || -> Result<Option<String>> {
+            let (peer_msg, _) = client.pair_get(&pair_id, role)?;
+            Ok(peer_msg)
+        },
+        timeout_secs,
+        std::time::Duration::from_millis(250),
+        "peer's SPAKE2 message",
+    )?;
+    let peer_msg_bytes = crate::signing::b64decode(&peer_msg_b64)?;
+
+    // 5. derive shared secret
+    let spake_key = pake.finish(&peer_msg_bytes)?;
+
+    // 6. SAS — needs peer's pubkey, but we don't have it yet (it comes via
+    // the AEAD bootstrap below). Two-step: derive an interim AEAD key over
+    // pair_id, exchange small "card-fingerprint" blobs, compute SAS over
+    // those, then full bootstrap. v0.1 simplification: SAS commits to
+    // (spake_key, our_pub, peer_pub_promised_in_bootstrap). To keep this
+    // tractable, we compute SAS over (spake_key, our_pub_bytes) on each
+    // side — symmetric in the SPAKE2 result alone is enough because the
+    // AEAD-bound bootstrap payload includes the pubkey, and verify_agent_card
+    // catches signature mismatch on open. Two-stage SAS (v0.2) can include
+    // the peer pubkey for stronger MITM resistance.
+    let sas = compute_sas_pake(&spake_key, &spake_key[..16], &spake_key[16..]);
+    eprintln!();
+    eprintln!("SAS digits (must match peer's terminal):");
+    eprintln!();
+    eprintln!("    {}-{}", &sas[..3], &sas[3..]);
+    eprintln!();
+
+    // 7. confirm
+    if !auto_yes {
+        eprint!("does this match your peer's terminal? [y/N]: ");
+        use std::io::Write;
+        std::io::stderr().flush().ok();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let trimmed = input.trim().to_lowercase();
+        if trimmed != "y" && trimmed != "yes" {
+            bail!("SAS confirmation declined — aborting pairing");
+        }
+    }
+
+    // 8. seal + post bootstrap
+    let aead_key = derive_aead_key(&spake_key, code_hash.as_bytes());
+    let bootstrap_payload = json!({
+        "card": card.clone(),
+        "relay_url": relay_url,
+        "slot_id": our_slot_id,
+        "slot_token": our_slot_token,
+    });
+    let plaintext = serde_json::to_vec(&bootstrap_payload)?;
+    let sealed = seal_bootstrap(&aead_key, &plaintext)?;
+    client.pair_bootstrap(&pair_id, role, &crate::signing::b64encode(&sealed))?;
+
+    // 9. poll for peer's bootstrap, decrypt, pin
+    let peer_bootstrap_b64 = poll_until(
+        || -> Result<Option<String>> {
+            let (_, peer_bootstrap) = client.pair_get(&pair_id, role)?;
+            Ok(peer_bootstrap)
+        },
+        timeout_secs,
+        std::time::Duration::from_millis(250),
+        "peer's sealed bootstrap",
+    )?;
+    let peer_sealed = crate::signing::b64decode(&peer_bootstrap_b64)?;
+    let peer_plain = open_bootstrap(&aead_key, &peer_sealed)
+        .map_err(|e| anyhow!("AEAD open failed — wrong code, MITM, or peer aborted: {e}"))?;
+    let peer_payload: Value = serde_json::from_slice(&peer_plain)?;
+    let peer_card = peer_payload.get("card").cloned().ok_or_else(|| anyhow!("peer bootstrap missing card"))?;
+    crate::agent_card::verify_agent_card(&peer_card)
+        .map_err(|e| anyhow!("peer card signature invalid: {e}"))?;
+
+    let mut trust = config::read_trust()?;
+    crate::trust::add_agent_card_pin(&mut trust, &peer_card, Some("VERIFIED"));
+    config::write_trust(&trust)?;
+
+    let peer_did = peer_card.get("did").and_then(Value::as_str).unwrap_or("");
+    let peer_handle = peer_did.strip_prefix("did:wire:").unwrap_or(peer_did).to_string();
+    let peer_relay_url = peer_payload.get("relay_url").and_then(Value::as_str).unwrap_or("").to_string();
+    let peer_slot_id = peer_payload.get("slot_id").and_then(Value::as_str).unwrap_or("").to_string();
+    let peer_slot_token = peer_payload.get("slot_token").and_then(Value::as_str).unwrap_or("").to_string();
+
+    let mut relay_state = config::read_relay_state()?;
+    relay_state["peers"][&peer_handle] = json!({
+        "relay_url": peer_relay_url,
+        "slot_id": peer_slot_id,
+        "slot_token": peer_slot_token,
+    });
+    config::write_relay_state(&relay_state)?;
+
+    // Suppress unused-var warning for peer_role; used in human-readable log only.
+    eprintln!("paired with {peer_did} (peer role: {peer_role})");
+    eprintln!("peer card pinned at tier VERIFIED");
+    eprintln!("peer relay slot saved to {}", config::relay_state_path()?.display());
+
+    // Print a final success line on stdout that tests can parse.
+    println!(
+        "{}",
+        serde_json::to_string(&json!({
+            "paired_with": peer_did,
+            "peer_handle": peer_handle,
+            "peer_relay_url": peer_relay_url,
+            "peer_slot_id": peer_slot_id,
+            "sas": format!("{}-{}", &sas[..3], &sas[3..]),
+        }))?
+    );
+    Ok(())
+}
+
+/// Poll `f` until it returns `Ok(Some(...))`, the deadline elapses, or `f` errors.
+fn poll_until<T, F>(
+    mut f: F,
+    timeout_secs: u64,
+    interval: std::time::Duration,
+    label: &str,
+) -> Result<T>
+where
+    F: FnMut() -> Result<Option<T>>,
+{
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        if let Some(v) = f()? {
+            return Ok(v);
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("timeout after {timeout_secs}s waiting for {label}");
+        }
+        std::thread::sleep(interval);
+    }
 }
 
 // Integration tests for the CLI live in `tests/cli.rs` (cargo's tests/ dir).

@@ -120,6 +120,65 @@ impl RelayClient {
         let resp = self.client.get(format!("{}/healthz", self.base_url)).send()?;
         Ok(resp.status().is_success())
     }
+
+    /// Open or join a pair-slot. Returns the relay-assigned `pair_id`.
+    /// `role` must be `"host"` or `"guest"`. The host calls first; the guest
+    /// uses the same `code_hash` and finds the existing slot.
+    pub fn pair_open(&self, code_hash: &str, msg_b64: &str, role: &str) -> Result<String> {
+        let body = serde_json::json!({"code_hash": code_hash, "msg": msg_b64, "role": role});
+        let resp = self
+            .client
+            .post(format!("{}/v1/pair", self.base_url))
+            .json(&body)
+            .send()?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().unwrap_or_default();
+            return Err(anyhow!("pair_open failed: {status}: {detail}"));
+        }
+        let v: Value = resp.json()?;
+        v.get("pair_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("pair_open response missing pair_id"))
+    }
+
+    /// Read peer's SPAKE2 message + (eventually) sealed bootstrap from a pair-slot.
+    pub fn pair_get(
+        &self,
+        pair_id: &str,
+        as_role: &str,
+    ) -> Result<(Option<String>, Option<String>)> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/pair/{pair_id}?as_role={as_role}", self.base_url))
+            .send()?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().unwrap_or_default();
+            return Err(anyhow!("pair_get failed: {status}: {detail}"));
+        }
+        let v: Value = resp.json()?;
+        let peer_msg = v.get("peer_msg").and_then(Value::as_str).map(str::to_string);
+        let peer_bootstrap = v.get("peer_bootstrap").and_then(Value::as_str).map(str::to_string);
+        Ok((peer_msg, peer_bootstrap))
+    }
+
+    /// POST a sealed bootstrap payload to the pair-slot.
+    pub fn pair_bootstrap(&self, pair_id: &str, role: &str, sealed_b64: &str) -> Result<()> {
+        let body = serde_json::json!({"role": role, "sealed": sealed_b64});
+        let resp = self
+            .client
+            .post(format!("{}/v1/pair/{pair_id}/bootstrap", self.base_url))
+            .json(&body)
+            .send()?;
+        if !resp.status().is_success() {
+            let s = resp.status();
+            let detail = resp.text().unwrap_or_default();
+            return Err(anyhow!("pair_bootstrap failed: {s}: {detail}"));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

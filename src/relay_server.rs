@@ -58,6 +58,22 @@ struct Inner {
     slots: HashMap<String, Vec<Value>>,
     /// slot_id -> bearer token. Token holder may read + write that slot.
     tokens: HashMap<String, String>,
+    /// code_hash -> pair_id (lookup so guests find the host).
+    pair_lookup: HashMap<String, String>,
+    /// pair_id -> ephemeral pairing state.
+    pair_slots: HashMap<String, PairSlot>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PairSlot {
+    /// SPAKE2 message from the host side.
+    host_msg: Option<String>,
+    /// SPAKE2 message from the guest side.
+    guest_msg: Option<String>,
+    /// Sealed bootstrap payload from host (after SAS confirm).
+    host_bootstrap: Option<String>,
+    /// Sealed bootstrap payload from guest.
+    guest_bootstrap: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -86,6 +102,8 @@ impl Relay {
         let mut inner = Inner {
             slots: HashMap::new(),
             tokens: HashMap::new(),
+            pair_lookup: HashMap::new(),
+            pair_slots: HashMap::new(),
         };
         // Reload tokens
         let token_path = state_dir.join("tokens.json");
@@ -124,6 +142,9 @@ impl Relay {
             .route("/healthz", get(healthz))
             .route("/v1/slot/allocate", post(allocate_slot))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
+            .route("/v1/pair", post(pair_open))
+            .route("/v1/pair/:pair_id", get(pair_get))
+            .route("/v1/pair/:pair_id/bootstrap", post(pair_bootstrap))
             .with_state(self)
     }
 
@@ -252,6 +273,104 @@ async fn post_event(
         Json(json!({"event_id": event_id, "status": "stored"})),
     )
         .into_response()
+}
+
+// ---------- pair-slot handlers ----------
+
+#[derive(Deserialize)]
+pub struct PairOpenRequest {
+    pub code_hash: String,
+    /// SPAKE2 message (base64).
+    pub msg: String,
+    pub role: String, // "host" or "guest"
+}
+
+#[derive(Deserialize)]
+pub struct PairBootstrapRequest {
+    pub role: String,
+    pub sealed: String,
+}
+
+async fn pair_open(
+    State(relay): State<Relay>,
+    Json(req): Json<PairOpenRequest>,
+) -> impl IntoResponse {
+    if req.role != "host" && req.role != "guest" {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "role must be 'host' or 'guest'"}))).into_response();
+    }
+    let mut inner = relay.inner.lock().await;
+    let pair_id = match inner.pair_lookup.get(&req.code_hash).cloned() {
+        Some(id) => id,
+        None => {
+            let new_id = random_hex(16);
+            inner.pair_lookup.insert(req.code_hash.clone(), new_id.clone());
+            inner.pair_slots.insert(new_id.clone(), PairSlot::default());
+            new_id
+        }
+    };
+    let slot = inner.pair_slots.entry(pair_id.clone()).or_default();
+    if req.role == "host" {
+        if slot.host_msg.is_some() {
+            return (StatusCode::CONFLICT, Json(json!({"error": "host already registered for this code"}))).into_response();
+        }
+        slot.host_msg = Some(req.msg);
+    } else {
+        if slot.guest_msg.is_some() {
+            return (StatusCode::CONFLICT, Json(json!({"error": "guest already registered for this code"}))).into_response();
+        }
+        slot.guest_msg = Some(req.msg);
+    }
+    (StatusCode::CREATED, Json(json!({"pair_id": pair_id}))).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct PairGetQuery {
+    /// "host" or "guest" — caller's role; we return the OTHER side's data.
+    pub as_role: String,
+}
+
+async fn pair_get(
+    State(relay): State<Relay>,
+    Path(pair_id): Path<String>,
+    Query(q): Query<PairGetQuery>,
+) -> impl IntoResponse {
+    let inner = relay.inner.lock().await;
+    let slot = match inner.pair_slots.get(&pair_id) {
+        Some(s) => s.clone(),
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown pair_id"}))).into_response(),
+    };
+    let (peer_msg, peer_bootstrap) = match q.as_role.as_str() {
+        "host" => (slot.guest_msg, slot.guest_bootstrap),
+        "guest" => (slot.host_msg, slot.host_bootstrap),
+        _ => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "as_role must be 'host' or 'guest'"}))).into_response();
+        }
+    };
+    (
+        StatusCode::OK,
+        Json(json!({"peer_msg": peer_msg, "peer_bootstrap": peer_bootstrap})),
+    )
+        .into_response()
+}
+
+async fn pair_bootstrap(
+    State(relay): State<Relay>,
+    Path(pair_id): Path<String>,
+    Json(req): Json<PairBootstrapRequest>,
+) -> impl IntoResponse {
+    let mut inner = relay.inner.lock().await;
+    let slot = match inner.pair_slots.get_mut(&pair_id) {
+        Some(s) => s,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown pair_id"}))).into_response(),
+    };
+    match req.role.as_str() {
+        "host" => slot.host_bootstrap = Some(req.sealed),
+        "guest" => slot.guest_bootstrap = Some(req.sealed),
+        _ => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "role must be 'host' or 'guest'"}))).into_response();
+        }
+    }
+    (StatusCode::CREATED, Json(json!({"ok": true}))).into_response()
 }
 
 async fn list_events(
