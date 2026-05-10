@@ -159,6 +159,14 @@ impl Relay {
     }
 
     async fn append_event_to_disk(&self, slot_id: &str, event: &Value) -> Result<()> {
+        // Defense in depth: only allow lowercase hex slot_ids of the exact length
+        // we ever produce ourselves (16 random bytes -> 32 hex chars). Blocks
+        // any future code path that might let attacker-controlled slot_ids reach
+        // disk operations. allocate_slot() always meets this; this assert is
+        // belt-and-suspenders against future regressions.
+        if !is_valid_slot_id(slot_id) {
+            return Err(anyhow::anyhow!("invalid slot_id format: {slot_id:?}"));
+        }
         let path = self.state_dir.join("slots").join(format!("{slot_id}.jsonl"));
         let mut line = serde_json::to_vec(event)?;
         line.push(b'\n');
@@ -451,6 +459,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     acc == 0
 }
 
+fn is_valid_slot_id(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
 fn random_hex(n_bytes: usize) -> String {
     let mut buf = vec![0u8; n_bytes];
     rand::thread_rng().fill_bytes(&mut buf);
@@ -490,5 +502,23 @@ mod tests {
         let s = random_hex(16);
         assert_eq!(s.len(), 32); // 16 bytes -> 32 hex chars
         assert!(s.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn slot_id_validator_accepts_only_lowercase_32hex() {
+        assert!(is_valid_slot_id("0123456789abcdef0123456789abcdef"));
+        assert!(is_valid_slot_id(&random_hex(16)));
+        // wrong length
+        assert!(!is_valid_slot_id("abc"));
+        assert!(!is_valid_slot_id("0123456789abcdef0123456789abcde"));   // 31
+        assert!(!is_valid_slot_id("0123456789abcdef0123456789abcdef0")); // 33
+        // uppercase
+        assert!(!is_valid_slot_id("0123456789ABCDEF0123456789abcdef"));
+        // path traversal attempts
+        assert!(!is_valid_slot_id("../etc/passwd0123456789abcdef0000"));
+        assert!(!is_valid_slot_id("..%2Fetc%2Fpasswd00000000000000000"));
+        assert!(!is_valid_slot_id("/absolute/path/that/looks/like/key"));
+        // null bytes
+        assert!(!is_valid_slot_id("0123456789abcdef\0123456789abcdef"));
     }
 }
