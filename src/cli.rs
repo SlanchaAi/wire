@@ -43,14 +43,8 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Pair with a peer using their SAS code phrase. (HUMAN-ONLY.)
-    Join {
-        /// SAS code phrase from peer's `wire init` output.
-        code_phrase: String,
-        /// Emit JSON.
-        #[arg(long)]
-        json: bool,
-    },
+    // (Old `Join` stub removed in iter 11 — superseded by `pair-join` with
+    // `join` alias. See PairJoin below.)
     /// Print this agent's identity (DID, fingerprint, mailbox slot).
     Whoami {
         #[arg(long)]
@@ -161,6 +155,9 @@ pub enum Command {
         timeout: u64,
     },
     /// Join a pair-slot using a code phrase from the host. (HUMAN-ONLY.)
+    ///
+    /// Aliased as `wire join <code>` for magic-wormhole muscle-memory.
+    #[command(alias = "join")]
     PairJoin {
         /// Code phrase from the host's `pair-host` output (e.g. `73-2QXC4P`).
         code_phrase: String,
@@ -179,7 +176,6 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init { handle, name, json } => cmd_init(&handle, name.as_deref(), json),
-        Command::Join { code_phrase, json } => cmd_join(&code_phrase, json),
         Command::Whoami { json } => cmd_whoami(json),
         Command::Peers { json } => cmd_peers(json),
         Command::Send { peer, kind, body, json } => cmd_send(&peer, &kind, &body, json),
@@ -258,17 +254,7 @@ fn cmd_init(handle: &str, name: Option<&str>, as_json: bool) -> Result<()> {
     Ok(())
 }
 
-// ---------- join (stub) ----------
-
-fn cmd_join(_code_phrase: &str, as_json: bool) -> Result<()> {
-    let msg = "wire join lands in iter 5 — needs SPAKE2 handshake + relay client. See docs/AGENT_INTEGRATION.md and BACKLOG.md.";
-    if as_json {
-        println!("{}", serde_json::to_string(&json!({"error": "not_yet_implemented", "iter": 5, "detail": msg}))?);
-    } else {
-        eprintln!("{msg}");
-    }
-    std::process::exit(2);
-}
+// (Old cmd_join stub removed — superseded by cmd_pair_join below.)
 
 // ---------- whoami ----------
 

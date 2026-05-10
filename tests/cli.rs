@@ -189,12 +189,21 @@ fn verify_rejects_tampered_event() {
 }
 
 #[test]
-fn join_subcommand_is_stub_and_exits_nonzero() {
+fn join_alias_resolves_to_pair_join() {
+    // `wire join` is a clap alias for `wire pair-join`. Without a relay it
+    // should fail at the not-initialized check (we haven't run init in this
+    // home), but the failure must come from pair-join's logic, not from clap
+    // saying "unknown subcommand".
     let home = fresh_home();
-    let out = run(&home, &["join", "paul-7-crossover-clockwork"]);
+    let out = run(&home, &["join", "12-ABCDEF", "--relay", "http://127.0.0.1:1"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("iter 5"), "stub message changed: {stderr}");
+    // Either "not initialized" (uninited home) or relay healthz failure —
+    // both prove the alias dispatched into pair_orchestrate.
+    assert!(
+        stderr.contains("not initialized") || stderr.contains("healthz"),
+        "join alias didn't dispatch to pair-join (stderr: {stderr})"
+    );
 }
 
 #[test]

@@ -19,46 +19,57 @@ Two friends. Two agents. One signed log they both keep.
 ## Demo (60 seconds, both terminals)
 
 ```bash
-# Operator A
+# Operator A — paul
 $ curl -fsSL https://wire.example.com/install.sh | sh
 $ wire init paul
-generated did:wire:paul (ed25519:paul:f8bcf90c)
-mailbox slot allocated at https://mailbox.example.com
+generated did:wire:paul (ed25519:paul:b2e5aae7)
+config written to ~/.config/wire
+
+$ wire pair-host --relay http://relay.example.com
+
 share this code phrase with your peer:
 
-    paul-7-crossover-clockwork
+    58-NMTY7A
 
-waiting for peer (Ctrl-C to cancel)...
+waiting for peer to run `wire pair-join 58-NMTY7A --relay http://relay.example.com` ...
+
+SAS digits (must match peer's terminal):
+
+    676-580
+
+does this match your peer's terminal? [y/N]: y
+paired with did:wire:willard
+peer card pinned at tier VERIFIED
 ```
 
 ```bash
-# Operator B (different laptop)
+# Operator B — willard, different laptop
 $ curl -fsSL https://wire.example.com/install.sh | sh
-$ wire join paul-7-crossover-clockwork
-running PAKE handshake with paul...
+$ wire init willard
+$ wire join 58-NMTY7A --relay http://relay.example.com   # alias for `pair-join`
+
 SAS digits (must match peer's terminal):
 
-    384-217
+    676-580
 
-both terminals show 384-217? type y to confirm: y
-
+does this match your peer's terminal? [y/N]: y
 paired with did:wire:paul
-exchanged agent-cards
-first signed heartbeat received at 2026-05-11T03:45:14Z
 ```
 
 ```bash
 # Op A sends
-$ wire send paul.peer decision "ship the v0.1 demo"
+$ wire send willard decision "ship the v0.1 demo"
+$ wire push                                               # flush outbox to relay
 
-# Op B tails
+# Op B receives
+$ wire pull                                               # poll relay, verify, write inbox
 $ wire tail
-[2026-05-11T03:46:01Z paul kind=1 decision]
-  ship the v0.1 demo
-  sig verified ✓
+[2026-05-10T03:46:01Z paul kind=1 decision] ship the v0.1 demo | sig ✓
 ```
 
 That's the whole loop. No GitHub account. No OAuth login. No vendor IdP. Both sides own a complete signed log of every exchange.
+
+**Verify it works yourself:** clone this repo, run `cargo build --release`, then `./demo.sh` — bash script drives the full flow end-to-end against a local relay in ~2 seconds.
 
 ---
 
