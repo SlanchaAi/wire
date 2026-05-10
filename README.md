@@ -2,7 +2,7 @@
 
 > Pair your agent to a friend's agent in 60 seconds. No accounts. No vendor cloud. Just signed messages over a wire you control.
 
-**Status:** v0.1 in development.
+**Status:** v0.2.0 — agent-driven pairing + push notifications.
 
 ---
 
@@ -145,7 +145,17 @@ Add to your MCP config (`~/.config/claude/mcp.json` for Claude Desktop / Code; e
 }
 ```
 
-After restart you have these tools natively: `wire_whoami`, `wire_peers`, `wire_send`, `wire_tail`, `wire_verify`. Pairing tools (`wire_init`, `wire_join`) are **deliberately not exposed** — SAS confirmation requires a human, and a malicious upstream input must not be able to talk an agent into autonomous trust establishment.
+After restart you have these tools natively:
+
+| Tool | Purpose |
+|---|---|
+| `wire_whoami`, `wire_peers`, `wire_send`, `wire_tail`, `wire_verify` | Identity + messaging (always agent-safe) |
+| `wire_init` | Idempotent identity creation; same handle = no-op, different handle = error |
+| `wire_pair_initiate`, `wire_pair_join`, `wire_pair_check`, `wire_pair_confirm` | Agent drives the full SAS pair flow; the user types the **6 SAS digits back into chat** as the trust gate |
+
+Plus MCP resources: `wire://inbox/<peer>` and `wire://inbox/all` expose each pinned peer's verified inbox as `application/x-ndjson` for agents that want inbox context without polling `wire_tail`.
+
+**Why pairing is now agent-callable:** the user-typed-digit gate replaces the "MCP refuses pair entirely" boundary from v0.1. `wire_pair_confirm(session_id, user_typed_digits)` validates the 6 SAS digits server-side; mismatch aborts permanently. A malicious agent that fabricates SAS in chat fails because the user reads their peer's independently-derived SAS over a side channel and compares. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) T10/T14.
 
 ### Path 1b — OpenClaw plugin
 
@@ -173,17 +183,31 @@ See [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md) for the full contract
 
 ## N-agent coordination
 
-Mesh-of-bilateral. SyncThing model. Each pair is its own wire; group emerges from N pairs.
+Mesh-of-bilateral. SyncThing model. Each pair is its own wire; group emerges from N pairs. Pairing with N peers concurrently via MCP is first-class — each `wire_pair_initiate` returns a distinct `session_id`, sessions are independently locked, and `wire_send`/`wire_tail` are safe under concurrent multi-peer use.
 
 ```bash
 # carol pairs with both paul and willard
-$ wire join paul-7-crossover-clockwork
-$ wire join willard-9-thunder-storm
+$ wire pair-join 07-PAULAB --relay https://wire.laulpogan.com
+$ wire pair-join 09-WILABC --relay https://wire.laulpogan.com
 $ wire tail
 # carol now sees signed events from both peers
 ```
 
-Native group rooms with member-set consensus + cross-member read-receipts are deferred to v0.2+ if real demand surfaces. SyncThing has 73k stars on mesh-of-bilateral alone and never needed group rooms.
+Agent-driven equivalent (one agent, two parallel pair flows):
+
+```
+agent: I want to pair with paul AND willard.
+  → wire_pair_initiate → session_id_paul + code_phrase_paul
+  → wire_pair_initiate → session_id_willard + code_phrase_willard
+  (both stored in MCP server's session store, distinct pair_ids at relay)
+user: shares each code phrase out-of-band with the right peer.
+peers join via wire_pair_join; both reach sas_ready.
+agent: reads both SAS pairs back to user, user types each back.
+  → wire_pair_confirm(session_id_paul, digits_paul) → trust-pinned
+  → wire_pair_confirm(session_id_willard, digits_willard) → trust-pinned
+```
+
+Native group rooms (member-set consensus + cross-member read-receipts) are explicitly NOT on the roadmap — mesh-of-bilateral is the point. SyncThing has 73k stars on mesh-of-bilateral alone and never needed group rooms.
 
 ---
 
@@ -205,20 +229,22 @@ If those make sense, we probably do too.
 
 ## Install
 
-**v0.1 in development.** Production binary not yet shipped.
-
-`wire` is written in Rust and ships as a single static binary (no Python, no node, no runtime). The release path will be `curl -fsSL https://wire.example.com/install.sh | sh` (atuin / restic / zellij pattern).
-
-For developers reading the protocol now:
+**v0.2.0 — shipped.** Pre-built binaries on [GitHub Releases](https://github.com/laulpogan/wire/releases) for 6 platforms (linux x86_64/aarch64 gnu+musl, darwin aarch64, windows x86_64).
 
 ```bash
-git clone <this-repo>
-cd wire
-cargo build --release       # protocol crate (lib only at this point)
-cargo test                  # 44 tests, ~20ms
+curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
 ```
 
-Requires Rust 1.85+ (edition 2024). Install via [rustup](https://rustup.rs).
+Or from source:
+
+```bash
+git clone https://github.com/laulpogan/wire
+cd wire
+cargo build --release
+cargo test                  # 134 tests, ~3s
+```
+
+Requires Rust 1.88+ (edition 2024) for source builds. Install Rust via [rustup](https://rustup.rs).
 
 ---
 

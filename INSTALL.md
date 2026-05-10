@@ -30,7 +30,7 @@ curl -fsSL https://wire.slancha.ai/install.sh | sh
 If pre-built binary unavailable, install.sh falls back to this. You can also do it directly:
 
 ```bash
-git clone https://github.com/slancha/wire
+git clone https://github.com/laulpogan/wire
 cd wire
 cargo build --release
 ./target/release/wire --version
@@ -39,7 +39,7 @@ cargo build --release
 cargo install --path . --bin wire
 ```
 
-Requires Rust 1.85+ (edition 2024). [rustup.rs](https://rustup.rs) installs Rust in 60 seconds.
+Requires Rust 1.88+ (edition 2024). [rustup.rs](https://rustup.rs) installs Rust in 60 seconds.
 
 ## 3. Package managers (planned)
 
@@ -57,7 +57,7 @@ Tracking in [BACKLOG.md](BACKLOG.md) under "Distribution + tooling."
 
 ```bash
 $ wire --version
-wire 0.1.0
+wire 0.2.0
 
 $ wire --help
 Magic-wormhole for AI agents — bilateral signed-message bus
@@ -146,17 +146,55 @@ For AI agents (Claude Desktop, Claude Code, Cursor, Cline, Zed, anything MCP-awa
 }
 ```
 
-Drops `wire_whoami`, `wire_peers`, `wire_send`, `wire_tail`, `wire_verify` as native tools after restart. Pairing tools deliberately blocked at the MCP layer — see [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md).
+After restart the agent has:
 
-## 10. OpenClaw plugin
+**Tools** (10):
+- Always agent-safe: `wire_whoami`, `wire_peers`, `wire_send`, `wire_tail`, `wire_verify`
+- Identity: `wire_init` (idempotent — same handle no-op, different handle errors)
+- Pairing (SAS-typed-back is the gate): `wire_pair_initiate`, `wire_pair_join`, `wire_pair_check`, `wire_pair_confirm`
 
-For OpenClaw users:
+**Resources** (`application/x-ndjson`):
+- `wire://inbox/all` — recent verified events across all pinned peers
+- `wire://inbox/<peer>` — recent verified events from a specific peer
+
+The pair flow is now fully agent-callable. The user types the 6 SAS digits back into chat to satisfy `wire_pair_confirm`; mismatch aborts permanently. See [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) (T10/T14).
+
+## 10. OS-level event notifications (`wire notify`)
+
+```bash
+# Fire desktop toasts on each new verified inbox event
+wire notify --interval 2
+
+# Filter to one peer
+wire notify --peer willard
+
+# Pipe JSONL to other tools instead of OS toast
+wire notify --json | jq .
+
+# Single sweep + exit (cron / smoke)
+wire notify --once
+```
+
+Platform shim: `notify-send` on Linux, `osascript display notification` on macOS, stderr fallback on Windows (BurntToast/WinRT bindings v0.2.1).
+
+Cursor at `$WIRE_HOME/state/wire/notify.cursor` persists across restarts.
+
+systemd user unit:
+
+```bash
+cp examples/systemd/wire-notify.service ~/.config/systemd/user/
+systemctl --user enable --now wire-notify
+```
+
+## 11. OpenClaw plugin
+
+For OpenClaw users (npm publish pending — operator must `npm adduser` first):
 
 ```bash
 npm install @slancha/openclaw-channel-wire
 ```
 
-Then register the channel per OpenClaw's plugin API. See the plugin's [README](https://github.com/slancha/openclaw-channel-wire) for details.
+Then register the channel per OpenClaw's plugin API. See [github.com/laulpogan/openclaw-channel-wire](https://github.com/laulpogan/openclaw-channel-wire) for details.
 
 ---
 

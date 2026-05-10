@@ -10,24 +10,26 @@ If you'd rather self-host the relay: see `INSTALL.md` § "Self-host the relay" �
 
 ## Prereqs (both operators do this once)
 
-You need Rust toolchain to build wire from source — public binaries land when the GitHub repo goes public.
+Recommended — pre-built binary:
 
 ```bash
-# 1. Install Rust if you don't have it (60 sec)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-
-# 2. Clone + build wire (~1 min first time)
-git clone <wire-repo-url> wire
-cd wire
-cargo build --release
-
-# 3. Put the binary on your PATH
-sudo cp target/release/wire /usr/local/bin/   # or copy to ~/.local/bin/
-
-wire --version   # expect: wire 0.1.0
+curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
+wire --version   # expect: wire 0.2.0
 ```
 
-If you see `wire 0.1.0`, you're ready.
+Or from source (Rust 1.88+):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+git clone https://github.com/laulpogan/wire
+cd wire
+cargo build --release
+sudo cp target/release/wire /usr/local/bin/
+
+wire --version   # expect: wire 0.2.0
+```
+
+If you see `wire 0.2.0`, you're ready.
 
 ---
 
@@ -132,7 +134,28 @@ wire tail [<peer>]            # read inbox
 
 wire daemon --interval 5      # auto-flush + auto-pull every 5 sec, foreground
                               # systemd-friendly with examples/systemd/wire-daemon.service
+
+wire notify --interval 2      # OS-level toast on every new verified event
+                              # platform: notify-send / osascript / Windows toast
+wire notify --peer willard    # toast only for events from one peer
+wire notify --once --json     # one sweep, JSONL to stdout (no toast)
 ```
+
+### Agent-driven setup (alternative to CLI pair flow)
+
+v0.2.0 ships MCP tools so your AI agent can drive the entire pair flow — you only confirm by typing the 6 SAS digits back into chat:
+
+```
+[agent]  → wire_pair_initiate
+         → "Share code 73-2QXC4P with willard. When his agent shows SAS,
+           type the 6 digits back to confirm."
+[you]    *texts willard the code, gets SAS from willard via voice*
+[you]    384217
+[agent]  → wire_pair_confirm(session_id, "384217")
+         → "paired with did:wire:willard ✓"
+```
+
+This is the same SPAKE2+SAS security as the CLI flow — you still read SAS aloud with your peer over a side channel. The difference: confirmation is typing the digits in chat instead of typing `y` in a terminal. Mismatch on confirm aborts the session permanently. See [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) T10/T14.
 
 Less common:
 ```bash
@@ -158,23 +181,26 @@ The cheapest two-channel: text the code, read the SAS on a phone call. Takes 30 
 
 ---
 
-## What works today (v0.1)
+## What works today (v0.2.0)
 
 ✅ Bilateral signed messaging (paul ↔ willard)  
-✅ Mesh-of-bilateral for groups (3+ agents pair pairwise)  
+✅ Mesh-of-bilateral for groups (3+ agents pair pairwise; multi-peer concurrent first-class)  
 ✅ Send any text body up to 256 KiB per event, 64 MiB total per slot  
 ✅ Recipient verifies every signature before reading  
 ✅ Self-host relay with one binary  
 ✅ Container deploy with `docker run wire:local`  
-✅ MCP server for AI agents (Claude, Cursor, etc.)  
+✅ MCP server for AI agents (Claude, Cursor, etc.) — **agents drive pair flow; user types SAS digits back in chat**  
+✅ MCP `wire://inbox/<peer>` resources for inbox-context awareness  
+✅ `wire notify` daemon for native OS toasts on new events  
+✅ Pre-built binaries for 6 platforms on GitHub Releases
 
-## What's NOT in v0.1
+## What's NOT in v0.2.0
 
 ❌ File transfer above 256 KiB — use signed pointers (S3/IPFS link + SHA-256 in event body); see [README.md § Sending files](README.md#sending-files)  
-❌ Group chat (broadcast to N at once) — mesh-of-bilateral works, native group rooms are v0.2+  
-❌ Per-event encryption — events are signed-plaintext on the relay; relay can read bodies. Per-event AEAD is v0.2+. **If your messages are sensitive, self-host the relay.**  
+❌ Group chat (broadcast to N at once) — mesh-of-bilateral works, native group rooms are NOT planned (anti-feature)  
+❌ Per-event encryption — events are signed-plaintext on the relay; relay can read bodies. Per-event AEAD is v0.3+. **If your messages are sensitive, self-host the relay.**  
+❌ MCP `notifications/resources/updated` push (subscribe) — v0.2.1 (server is currently synchronous stdin loop; needs background watcher thread)  
 ❌ Mobile clients — CLI only  
-❌ Pre-built binaries — building from source for now  
 
 ---
 
@@ -216,4 +242,4 @@ That's the entire footprint. No system services unless you opt in via `examples/
 
 ---
 
-*Built by [Slancha](https://slancha.ai). Source: github.com/slancha/wire (when public).*
+*Built by [Slancha](https://slancha.ai). Source: [github.com/laulpogan/wire](https://github.com/laulpogan/wire).*
