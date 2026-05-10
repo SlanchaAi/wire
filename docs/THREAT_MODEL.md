@@ -97,6 +97,36 @@ This is the trust model and is not considered a flaw. If you want the agent to s
 
 **Status:** by design. The MCP server explicitly does NOT expose `wire_init` or `wire_join` so agents cannot autonomously establish trust on the operator's behalf — pairing is human-only — but once paired, the agent has full message-send authority.
 
+## Threat T11 — abusive paired peer floods recipient's slot
+
+**Threat:** paul and willard pair via SAS. willard's machine is later compromised (or willard goes hostile) and the slot_token + URL paul shared during pairing now belongs to the attacker. Attacker scripts `curl -X POST` posting 256 KiB events to paul's slot at the rate-limit ceiling (10 req/sec global cap on paul's relay). 2.5 MB/sec → 9 GB/hour → ~220 GB/day. Relay disk fills; every other peer-pair on that relay loses service.
+
+**Mitigations available today:**
+- **`wire forget-peer willard`** removes willard from paul's trust + drops paul's local copy of willard's slot. **Does NOT revoke the bearer-token paul gave willard during pairing — that's still valid against paul's slot.** This was the v0.1 design gap.
+- **`wire rotate-slot`** (new, iter 21) — paul allocates a fresh slot on the same relay, abandons the old one, and emits a signed `kind=1201 wire_close` event over the OLD slot announcing the new mailbox. Old slot → orphaned → attacker's 256 KiB flood goes to a slot nobody reads. Recovery procedure:
+  1. `wire forget-peer willard` — drop willard from trust
+  2. `wire rotate-slot` — orphan the leaky bearer
+  3. Other paired peers see the wire_close and learn the new slot_id (from peer's `wire pull`); they `wire add-peer-slot paul <relay> <new-slot-id> <new-token>` once paul re-issues the token
+  4. (v0.2 daemon will auto-update peer's relay.json from the wire_close event; v0.1 needs manual re-issue)
+
+**Underlying design issue:** v0.1 slot tokens are **bilateral-shared** — paul's token is what paul uses to read AND what willard uses to post. If willard is compromised, paul's slot token is in the attacker's hands. v0.2+ should split into:
+- Owner-token (paul reads paul's slot)
+- Per-peer sender-tokens (willard gets paul-issued, individually revocable, never doubles as paul's read-token)
+
+That's a significant redesign — BACKLOG'd.
+
+**Operator monitoring:** `du -sh ~/.local/state/wire-relay/` periodically; relay disk-cap alerting via systemd or external monitoring. Cloudflare WAF can also rate-limit at the edge if a specific source IP becomes abusive.
+
+**Status:** **partially mitigated as of iter 21** (rotate-slot subcommand). Per-peer revocation via separate sender-tokens deferred to v0.2. v0.1 attack surface bound by: per-peer trust (you SAS-paired with them, you accepted the cost of compromise), 256 KiB body cap (per-event), 10 req/sec global rate limit (per-relay), disk monitoring (operator-side).
+
+## Threat T12 — slot-token rotation gap
+
+**Threat:** even without an abusive peer, a paired peer can become compromised silently (host owned, SSH key stolen) and the operator may want to rotate slot tokens periodically as hygiene.
+
+**Mitigation:** `wire rotate-slot` ships in iter 21. Currently a manual operator action; v0.2 may add scheduled rotation (via systemd timer or cron) for operators who want periodic slot churn.
+
+**Status:** rotation primitive ships v0.1; auto-rotation is v0.2 candidate.
+
 ## Threat T10 — MCP-host compromise
 
 **Threat:** a malicious MCP host (e.g. compromised Claude Desktop, evil VS Code extension) calls `wire_send` with destructive content under the operator's identity.

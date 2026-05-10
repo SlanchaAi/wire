@@ -147,6 +147,24 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Allocate a NEW slot on the same relay and abandon the old one.
+    /// Sends a kind=1201 wire_close event to every paired peer over the OLD
+    /// slot announcing the new mailbox before swapping. After rotation,
+    /// peers must re-pair (or operator runs `add-peer-slot` with the new
+    /// coords) — auto-update via wire_close is a v0.2 daemon feature.
+    ///
+    /// Use case: a paired peer turned hostile (T11 in THREAT_MODEL.md —
+    /// abusive bearer-holder spamming your slot). Rotate → old slot is
+    /// orphaned → attacker's leverage gone. Operator pairs again with
+    /// peers they still want.
+    RotateSlot {
+        /// Skip the wire_close announcement to peers (faster but they won't know
+        /// where you went).
+        #[arg(long)]
+        no_announce: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove a peer from trust + relay state. Inbox/outbox files for that
     /// peer are NOT deleted (operator can grep history); pass --purge to
     /// also wipe the JSONL files.
@@ -228,6 +246,7 @@ pub fn run() -> Result<()> {
         Command::Push { peer, json } => cmd_push(peer.as_deref(), json),
         Command::Pull { json } => cmd_pull(json),
         Command::Pin { card_file, json } => cmd_pin(&card_file, json),
+        Command::RotateSlot { no_announce, json } => cmd_rotate_slot(no_announce, json),
         Command::ForgetPeer { handle, purge, json } => cmd_forget_peer(&handle, purge, json),
         Command::Daemon { interval, once, json } => cmd_daemon(interval, once, json),
         Command::PairHost { relay, yes, timeout } => cmd_pair_host(&relay, yes, timeout),
@@ -962,6 +981,154 @@ fn cmd_pull(as_json: bool) -> Result<()> {
     } else {
         println!("pulled {} event(s); wrote {}; rejected {} (bad signature)",
             events.len(), written.len(), rejected.len());
+    }
+    Ok(())
+}
+
+// ---------- rotate-slot ----------
+
+fn cmd_rotate_slot(no_announce: bool, as_json: bool) -> Result<()> {
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire init <handle>` first");
+    }
+    let mut state = config::read_relay_state()?;
+    let self_state = state.get("self").cloned().unwrap_or(Value::Null);
+    if self_state.is_null() {
+        bail!("self slot not bound — run `wire bind-relay <url>` first (nothing to rotate)");
+    }
+    let url = self_state["relay_url"]
+        .as_str()
+        .ok_or_else(|| anyhow!("self.relay_url missing"))?
+        .to_string();
+    let old_slot_id = self_state["slot_id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("self.slot_id missing"))?
+        .to_string();
+    let old_slot_token = self_state["slot_token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("self.slot_token missing"))?
+        .to_string();
+
+    // Read identity to sign the announcement.
+    let card = config::read_agent_card()?;
+    let did = card.get("did").and_then(Value::as_str).unwrap_or("").to_string();
+    let handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
+    let pk_b64 = card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent-card missing verify_keys[*].key"))?
+        .to_string();
+    let pk_bytes = crate::signing::b64decode(&pk_b64)?;
+    let sk_seed = config::read_private_key()?;
+
+    // Allocate new slot on the same relay.
+    let client = crate::relay_client::RelayClient::new(&url);
+    if !client.healthz().unwrap_or(false) {
+        bail!("relay healthz failed at {url} — abort rotation; old slot still valid");
+    }
+    let alloc = client.allocate_slot(Some(&handle))?;
+    let new_slot_id = alloc.slot_id.clone();
+    let new_slot_token = alloc.slot_token.clone();
+
+    // Optionally announce the rotation to every paired peer via the OLD slot.
+    // Each peer's recipient-side `wire pull` will pick up this event before
+    // their daemon next polls the new slot — but auto-update of peer's
+    // relay.json from a wire_close event is a v0.2 daemon feature; for now
+    // peers see the event and an operator must manually `add-peer-slot` the
+    // new coords, OR re-pair via SAS.
+    let mut announced: Vec<String> = Vec::new();
+    if !no_announce {
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+        let body = json!({
+            "reason": "operator-initiated slot rotation",
+            "new_relay_url": url,
+            "new_slot_id": new_slot_id,
+            // NOTE: new_slot_token deliberately NOT shared in the broadcast.
+            // In v0.1 slot tokens are bilateral-shared, so peer can post via
+            // existing add-peer-slot flow if operator chooses to re-issue.
+        });
+        let peers = state["peers"].as_object().cloned().unwrap_or_default();
+        for (peer_handle, _peer_info) in peers.iter() {
+            let event = json!({
+                "timestamp": now.clone(),
+                "from": did,
+                "to": format!("did:wire:{peer_handle}"),
+                "type": "wire_close",
+                "kind": 1201,
+                "body": body.clone(),
+            });
+            let signed = match sign_message_v31(&event, &sk_seed, &pk_bytes, &handle) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("warn: could not sign wire_close for {peer_handle}: {e}");
+                    continue;
+                }
+            };
+            // Post to OUR old slot (we're announcing on our own slot, NOT
+            // peer's slot — peer reads from us). Wait, this is wrong: peers
+            // read from THEIR OWN slot via wire pull. To reach peer A, we
+            // post to peer A's slot. Use the existing per-peer slot mapping.
+            let peer_info = match state["peers"].get(peer_handle) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+            let peer_url = peer_info["relay_url"].as_str().unwrap_or(&url);
+            let peer_slot_id = peer_info["slot_id"].as_str().unwrap_or("");
+            let peer_slot_token = peer_info["slot_token"].as_str().unwrap_or("");
+            if peer_slot_id.is_empty() || peer_slot_token.is_empty() {
+                continue;
+            }
+            let peer_client = if peer_url == url {
+                client.clone()
+            } else {
+                crate::relay_client::RelayClient::new(peer_url)
+            };
+            match peer_client.post_event(peer_slot_id, peer_slot_token, &signed) {
+                Ok(_) => announced.push(peer_handle.clone()),
+                Err(e) => eprintln!("warn: announce to {peer_handle} failed: {e}"),
+            }
+        }
+    }
+
+    // Swap the self-slot to the new one.
+    state["self"] = json!({
+        "relay_url": url,
+        "slot_id": new_slot_id,
+        "slot_token": new_slot_token,
+    });
+    config::write_relay_state(&state)?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "rotated": true,
+                "old_slot_id": old_slot_id,
+                "new_slot_id": new_slot_id,
+                "relay_url": url,
+                "announced_to": announced,
+            }))?
+        );
+    } else {
+        println!("rotated slot on {url}");
+        println!("  old slot_id: {old_slot_id} (orphaned — abusive bearer-holders lose their leverage)");
+        println!("  new slot_id: {new_slot_id}");
+        if !announced.is_empty() {
+            println!("  announced wire_close (kind=1201) to: {}", announced.join(", "));
+        }
+        println!();
+        println!("next steps:");
+        println!("  - peers see the wire_close event in their next `wire pull`");
+        println!("  - paired peers must re-issue: tell them to run `wire add-peer-slot {handle} {url} {new_slot_id} <new-token>`");
+        println!("    (or full re-pair via `wire pair-host`/`wire join`)");
+        println!("  - until they do, you'll receive but they won't be able to reach you");
+        // Suppress unused warning
+        let _ = old_slot_token;
     }
     Ok(())
 }

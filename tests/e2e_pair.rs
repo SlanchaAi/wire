@@ -113,6 +113,90 @@ async fn daemon_once_drives_full_sync_after_pairing() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rotate_slot_after_pairing_orphans_old_slot() {
+    let relay_dir = fresh_dir("relay-rotate");
+    let relay = wire::relay_server::Relay::new(relay_dir).await.unwrap();
+    let app = relay.router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let relay_url = format!("http://{addr}");
+
+    let paul = fresh_dir("paul-rotate");
+    let willard = fresh_dir("willard-rotate");
+    assert!(wire(&paul, &["init", "paul"]).status.success());
+    assert!(wire(&willard, &["init", "willard"]).status.success());
+
+    // Pair via existing helper logic (inlined from other tests).
+    let mut host = std::process::Command::new(wire_bin())
+        .args(["pair-host", "--relay", &relay_url, "--yes", "--timeout", "30"])
+        .env("WIRE_HOME", &paul)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr_pipe = host.stderr.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader};
+        let reader = BufReader::new(stderr_pipe);
+        let mut found = false;
+        for line in reader.lines().map_while(Result::ok) {
+            let trimmed = line.trim();
+            if !found && trimmed.len() == 9 && trimmed.chars().nth(2) == Some('-') {
+                tx.send(trimmed.to_string()).ok();
+                found = true;
+            }
+        }
+    });
+    let code = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let join_handle = std::thread::spawn({
+        let willard = willard.clone();
+        let relay_url = relay_url.clone();
+        move || wire(&willard, &["pair-join", &code, "--relay", &relay_url, "--yes", "--timeout", "30"])
+    });
+    join_handle.join().unwrap();
+    host.wait().unwrap();
+
+    // Capture paul's pre-rotation slot_id.
+    let pre: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(paul.join("config/wire/relay.json")).unwrap()).unwrap();
+    let old_slot = pre["self"]["slot_id"].as_str().unwrap().to_string();
+
+    // Rotate.
+    let rotate_out = wire(&paul, &["rotate-slot", "--json"]);
+    assert!(rotate_out.status.success(), "rotate failed: {:?}", rotate_out);
+    let rj: serde_json::Value = serde_json::from_slice(&rotate_out.stdout).unwrap();
+    assert_eq!(rj["rotated"], true);
+    assert_eq!(rj["old_slot_id"], old_slot);
+    let new_slot = rj["new_slot_id"].as_str().unwrap().to_string();
+    assert_ne!(old_slot, new_slot);
+    assert_eq!(rj["announced_to"].as_array().unwrap().len(), 1);
+    assert_eq!(rj["announced_to"][0], "willard");
+
+    // Confirm relay.json now has the new slot.
+    let post: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(paul.join("config/wire/relay.json")).unwrap()).unwrap();
+    assert_eq!(post["self"]["slot_id"], new_slot);
+
+    // Confirm willard sees the wire_close event when pulling.
+    let pull = wire(&willard, &["pull", "--json"]);
+    let pj: serde_json::Value = serde_json::from_slice(&pull.stdout).unwrap();
+    assert!(pj["written"].as_array().unwrap().len() >= 1);
+    let tail = wire(&willard, &["tail", "paul", "--json"]);
+    let tail_str = String::from_utf8(tail.stdout).unwrap();
+    let close_event = tail_str
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|e| e["type"] == "wire_close")
+        .expect("expected willard's tail to include the wire_close event");
+    assert_eq!(close_event["kind"], 1201);
+    assert_eq!(close_event["verified"], true);
+    assert_eq!(close_event["body"]["new_slot_id"], new_slot);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn paul_pair_hosts_willard_joins_then_send_round_trips() {
     // ---- 1. boot relay ----
     let relay_dir = fresh_dir("relay");

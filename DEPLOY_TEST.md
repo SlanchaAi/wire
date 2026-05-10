@@ -1,13 +1,15 @@
 # wire — test deployment runbook (laulpogan.com)
 
-**Status:** v0.1 test deployment is LIVE on `*.laulpogan.com`.
+**Status:** v0.1 test deployment is LIVE — unified URL on `wire.laulpogan.com`.
 
-| Endpoint | Backend | Purpose |
+| Path on `wire.laulpogan.com` | Backend | Purpose |
 |---|---|---|
-| `https://wire.laulpogan.com` | Spark `127.0.0.1:8771` | static landing page |
-| `https://relay.laulpogan.com` | Spark `127.0.0.1:8770` | public-good `wire relay-server` |
+| `/healthz`, `/v1/*`, `/.well-known/*` | `127.0.0.1:8770` | `wire relay-server` (HTTP API) |
+| everything else | `127.0.0.1:8771` | static landing page |
 
-Both routed via Cloudflare Tunnel `wire` (id `96d4dc82-44b8-4ef3-9a30-8bca6f6ee265`).
+Legacy `relay.laulpogan.com` still works (same backend) during a grace period; will sunset after operators migrate to the unified URL.
+
+All routed via Cloudflare Tunnel `wire` (id `96d4dc82-44b8-4ef3-9a30-8bca6f6ee265`) using path-based ingress rules.
 
 ## Components on Spark
 
