@@ -27,11 +27,50 @@ When something here gets activated for a release, move it out of this file and i
 
 ## Distribution + tooling
 
-- [ ] **PyPI package publish** post-v0.1 launch (operator-gated).
-- [ ] **Homebrew tap** (atuin pattern).
-- [ ] **macOS / Windows PyInstaller binaries** (v0.1 ships Linux x86_64 + ARM64 first).
+- [ ] **PyPI package publish** post-v0.1 launch (operator-gated). [Note: project is now Rust; PyPI play retired in favor of crates.io + Homebrew + cargo install.]
+- [ ] **crates.io publish** of the `wire` crate.
+- [ ] **Homebrew tap** (atuin pattern). `brew install wire` as primary macOS path.
+- [ ] **GitHub Actions CI matrix** publishing pre-built binaries: linux-x86_64, linux-arm64, linux-musl-x86_64, linux-musl-arm64, darwin-x86_64, darwin-arm64, windows-x86_64.exe.
 - [ ] **AUR package** for Arch.
-- [ ] **Nix package**.
+- [ ] **Nix package** + flake.
+- [ ] **Scoop / winget manifest** for Windows native install.
+- [ ] **Windows ACL helper** to match `set_file_mode_0600` on `#[cfg(windows)]` for `private.key` + `relay.json`.
+- [ ] **install.ps1** mirror of `install.sh` for PowerShell users.
+
+## Integration plugins (be the transport everyone else picks; don't fight for terminal share)
+
+Strategic thesis: wire wins by living *inside* whichever agent runtime wins. Each plugin is a small separate repo, ~150-300 LOC, that shells out to or wraps the `wire` CLI. Wire core stays unbloated.
+
+- [ ] **openclaw-channel-wire** — TypeScript plugin for OpenClaw (100k★ self-host personal-agent gateway, 20+ channels). Adds wire as channel #21 — "the channel that doesn't go through Apple/Meta/Telegram." ~200 LOC TS shelling out to `wire send` / `wire tail --json` / `wire peers --json`. Distribution win: instant exposure to OpenClaw user base.
+- [ ] **claude-flow-plugin-wire** — wire as a transport option in claude-flow (48k★, already independently chose Ed25519 + mTLS — primitive validated). Plugin lets claude-flow agents speak wire to non-claude-flow peers. ~250 LOC.
+- [ ] **langgraph-tool-wire** — wire as a tool node in LangChain LangGraph workflows. Agents call `wire_send` / `wire_tail` from within graph state. ~200 LOC Python.
+- [ ] **crewai-channel-wire** — wire as agent-to-agent channel in CrewAI. Same shape as LangGraph adapter. ~200 LOC Python.
+- [ ] **photon-spectrum-channel-wire** — Spectrum is OSS multi-channel TS SDK (April 2026 launch); add wire as channel option. Pre-empts Spectrum building bilateral A2A natively.
+- [ ] **smol-agents wire transport** — Hugging Face's smol-agents framework. ~150 LOC Python plugin.
+- [ ] **autogen wire transport** — Microsoft AutoGen multi-agent. ~150 LOC Python.
+- [ ] **vscode/zed extension** — surfaces `wire peers`, `wire tail`, send compose UI in editor sidebar. Same shape as GitLens/GitHub extensions for git.
+
+Pattern for all: separate repo under `slancha/` or `laulpogan/`, MIT-licensed, calls `wire` CLI subprocess (no FFI complexity), README cross-links to wire main repo, two-way visibility zero coupling. Like Tailscale's docker/k8s integrations or atuin's shell-specific integrations.
+
+## Crypto / interop bridges (cross-tribe gateways)
+
+Strategic thesis: bridge to adjacent ecosystems where the userbase already has identity, but DON'T merge into them. Bridges are 100-300 LOC, optional, gated on real cross-tribe demand.
+
+- [ ] **did:pkh / did:ethr interop bridge** — accept Ethereum wallet sigs as a verify_keys algorithm alongside ed25519. Lets wire pair with XMTP-keyed agents via gateway. ~150 LOC. Re-evaluate after XMTP mainnet (Q3 2026 expected) shows real agent traffic.
+- [ ] **A2A `/.well-known/agent-card.json` shim** (already in v0.2 list above; re-iterate here as cross-tribe play). Lets the 100+ A2A backers discover wire-based agents without changing their stack.
+- [ ] **AGNTCY OASF `/.well-known/oasf-record.json` bridge** (also above). Pairs with AGNTCY's directory layer.
+- [ ] **AMP (Agent Messaging Protocol, agentmessaging/protocol)** interop — closest spec-stage neighbor to wire; adapter to receive/send AMP-formatted events transparently. ~200 LOC if the spec stabilizes.
+- [ ] **SLIM (AGNTCY/Cisco) gateway** — bidirectional bridge to SLIM's MLS-based mesh. Heavy (~400 LOC) but unlocks Cisco-ecosystem agents. Track `draft-mpsb-agntcy-slim-XX` quarterly; if it lands as IETF RFC, build the gateway.
+- [ ] **Matrix transport adapter** — vodozemac (Apache-2.0 Olm) for the messaging cryptography layer; a wire-over-Matrix mode where Matrix is the relay+transport. Heavy refactor; only worth it if Matrix-tribe demand surfaces.
+- [ ] **DIDComm v2 envelope wrapping** — already in v0.2 list above as cherry-pick of `thid`/`pthid` threading + `application/wire-event+json` media type.
+- [ ] **Nostr extension (NIP-W1/W2/W3)** — already documented above; reusing existing 10k+ Nostr relays for transport. Highest-leverage cross-tribe bridge.
+
+## Cryptographic stack hardening (if/when threat model evolves)
+
+- [ ] **vodozemac swap for symmetric session layer** — Apache-2.0 Olm Double Ratchet (Matrix's pure-Rust implementation). Replaces `seal_bootstrap`/`open_bootstrap` ChaCha20-Poly1305-with-static-key with forward-secure ratchet. Buys forward secrecy + post-compromise security per message. Swap is local to `sas.rs` post-pairing channel. ~300 LOC delta.
+- [ ] **MLS (OpenMLS or mls-rs) for v0.3+ group rooms** — only when group rooms become real (which we deliberately deferred). Both crates Apache/MIT.
+- [ ] **Post-quantum hybrid signatures** — Ed25519 + ML-DSA-65 dual-sign. Match XMTP's PQ stance. Track NIST FIPS 204 stabilization.
+- [ ] **OPAQUE / CPace migration** if PAKE-in-TLS (`draft-bmw-tls-pake13`) ships. Could let pairing happen during TLS handshake instead of via separate pair-slot endpoints.
 
 ## Demo + GTM
 
