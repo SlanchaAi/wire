@@ -41,7 +41,7 @@ When something here gets activated for a release, move it out of this file and i
 
 Strategic thesis: wire wins by living *inside* whichever agent runtime wins. Each plugin is a small separate repo, ~150-300 LOC, that shells out to or wraps the `wire` CLI. Wire core stays unbloated.
 
-- [ ] **openclaw-channel-wire** — TypeScript plugin for OpenClaw (100k★ self-host personal-agent gateway, 20+ channels). Adds wire as channel #21 — "the channel that doesn't go through Apple/Meta/Telegram." ~200 LOC TS shelling out to `wire send` / `wire tail --json` / `wire peers --json`. Distribution win: instant exposure to OpenClaw user base.
+- [x] **openclaw-channel-wire** — TypeScript plugin for OpenClaw (100k★ self-host personal-agent gateway, 20+ channels). Adds wire as channel #21 — "the channel that doesn't go through Apple/Meta/Telegram." ~200 LOC TS shelling out to `wire send` / `wire tail --json` / `wire peers --json`. Distribution win: instant exposure to OpenClaw user base. **Scaffolded at `~/Source/openclaw-channel-wire/`** (separate repo, MIT, ready for npm publish when wire goes public).
 - [ ] **claude-flow-plugin-wire** — wire as a transport option in claude-flow (48k★, already independently chose Ed25519 + mTLS — primitive validated). Plugin lets claude-flow agents speak wire to non-claude-flow peers. ~250 LOC.
 - [ ] **langgraph-tool-wire** — wire as a tool node in LangChain LangGraph workflows. Agents call `wire_send` / `wire_tail` from within graph state. ~200 LOC Python.
 - [ ] **crewai-channel-wire** — wire as agent-to-agent channel in CrewAI. Same shape as LangGraph adapter. ~200 LOC Python.

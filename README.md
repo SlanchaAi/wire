@@ -147,6 +147,10 @@ Add to your MCP config (`~/.config/claude/mcp.json` for Claude Desktop / Code; e
 
 After restart you have these tools natively: `wire_whoami`, `wire_peers`, `wire_send`, `wire_tail`, `wire_verify`. Pairing tools (`wire_init`, `wire_join`) are **deliberately not exposed** — SAS confirmation requires a human, and a malicious upstream input must not be able to talk an agent into autonomous trust establishment.
 
+### Path 1b — OpenClaw plugin
+
+If your agent runs on [OpenClaw](https://openclaw.ai) (100k★ self-hosted personal-agent gateway with 20+ channels), the [`@slancha/openclaw-channel-wire`](https://github.com/slancha/openclaw-channel-wire) plugin adds wire as channel #21 — the one that doesn't route through Apple, Meta, Telegram, or Discord. Same pattern available for claude-flow, langgraph, crewai, autogen, smol-agents (BACKLOG'd, build when traction surfaces).
+
 ### Path 2 — CLI with `--json` everywhere
 
 Every command emits structured output on demand:
