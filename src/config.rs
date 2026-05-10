@@ -143,6 +143,31 @@ pub fn read_trust() -> Result<Value> {
     Ok(serde_json::from_slice(&body)?)
 }
 
+// ---------- relay binding state ----------
+
+/// Path to `relay.json` — holds our own slot binding and pinned peer slots.
+/// Contains slot-tokens, so always written mode 0600.
+pub fn relay_state_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("relay.json"))
+}
+
+pub fn read_relay_state() -> Result<Value> {
+    let path = relay_state_path()?;
+    if !path.exists() {
+        return Ok(serde_json::json!({"self": Value::Null, "peers": {}}));
+    }
+    let body = fs::read(&path).with_context(|| format!("reading {path:?}"))?;
+    Ok(serde_json::from_slice(&body)?)
+}
+
+pub fn write_relay_state(state: &Value) -> Result<()> {
+    let path = relay_state_path()?;
+    let body = serde_json::to_vec_pretty(state)?;
+    fs::write(&path, body).with_context(|| format!("writing {path:?}"))?;
+    set_file_mode_0600(&path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
