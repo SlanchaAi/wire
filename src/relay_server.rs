@@ -40,6 +40,7 @@ use axum::{
 use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder, key_extractor::GlobalKeyExtractor};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -64,7 +65,7 @@ struct Inner {
     pair_slots: HashMap<String, PairSlot>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct PairSlot {
     /// SPAKE2 message from the host side.
     host_msg: Option<String>,
@@ -74,7 +75,25 @@ struct PairSlot {
     host_bootstrap: Option<String>,
     /// Sealed bootstrap payload from guest.
     guest_bootstrap: Option<String>,
+    /// Last activity time (monotonic) — used for TTL eviction.
+    last_touched: std::time::Instant,
 }
+
+impl Default for PairSlot {
+    fn default() -> Self {
+        Self {
+            host_msg: None,
+            guest_msg: None,
+            host_bootstrap: None,
+            guest_bootstrap: None,
+            last_touched: std::time::Instant::now(),
+        }
+    }
+}
+
+/// Pair-slot idle TTL. After this many seconds without activity, the slot
+/// is evicted to free memory + bound brute-force surface (PENTEST.md §code-review #3).
+const PAIR_SLOT_TTL_SECS: u64 = 300;
 
 #[derive(Deserialize)]
 pub struct AllocateRequest {
@@ -138,14 +157,69 @@ impl Relay {
     }
 
     pub fn router(self) -> Router {
+        // Rate limit applied to write endpoints that create new state (slots,
+        // pair-sessions, bootstraps). 10 req/sec sustained, 50 req burst.
+        // v0.1 uses the GLOBAL key extractor (single bucket for all callers) —
+        // per-IP needs ConnectInfo middleware which axum 0.7 wires differently.
+        // Per-IP keying is a v0.2 hardening; for now Cloudflare WAF + this
+        // global cap shoulder DDoS protection in series.
+        let governor_conf = std::sync::Arc::new(
+            GovernorConfigBuilder::default()
+                .per_second(10)
+                .burst_size(50)
+                .key_extractor(GlobalKeyExtractor)
+                .finish()
+                .expect("valid governor config"),
+        );
+        let governor_layer = GovernorLayer { config: governor_conf };
+
+        // Hot writes group — rate limited.
+        let hot_writes = Router::new()
+            .route("/v1/slot/allocate", post(allocate_slot))
+            .route("/v1/pair", post(pair_open))
+            .route("/v1/pair/:pair_id/bootstrap", post(pair_bootstrap))
+            .layer(governor_layer);
+
         Router::new()
             .route("/healthz", get(healthz))
-            .route("/v1/slot/allocate", post(allocate_slot))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
-            .route("/v1/pair", post(pair_open))
             .route("/v1/pair/:pair_id", get(pair_get))
-            .route("/v1/pair/:pair_id/bootstrap", post(pair_bootstrap))
+            .merge(hot_writes)
             .with_state(self)
+    }
+
+    /// Evict pair-slots that have been idle past `PAIR_SLOT_TTL_SECS`.
+    /// Called inline on every pair-slot mutation; a background sweeper task
+    /// (see `Self::start_sweeper`) covers the long-idle case.
+    async fn evict_expired_pair_slots(&self) {
+        let now = std::time::Instant::now();
+        let ttl = std::time::Duration::from_secs(PAIR_SLOT_TTL_SECS);
+        let mut inner = self.inner.lock().await;
+        let mut to_remove = Vec::new();
+        for (id, slot) in inner.pair_slots.iter() {
+            if now.duration_since(slot.last_touched) > ttl {
+                to_remove.push(id.clone());
+            }
+        }
+        for id in to_remove {
+            inner.pair_slots.remove(&id);
+            inner.pair_lookup.retain(|_, v| v != &id);
+        }
+    }
+
+    /// Spawn a background tokio task that runs `evict_expired_pair_slots` every
+    /// 60 seconds. Call once after `Relay::new`; the handle is leaked deliberately
+    /// — process exit reaps it. Safe to skip in tests where you'd rather test
+    /// eviction inline.
+    pub fn spawn_pair_sweeper(&self) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                me.evict_expired_pair_slots().await;
+            }
+        });
     }
 
     async fn persist_tokens(&self) -> Result<()> {
@@ -306,6 +380,7 @@ async fn pair_open(
     if req.role != "host" && req.role != "guest" {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "role must be 'host' or 'guest'"}))).into_response();
     }
+    relay.evict_expired_pair_slots().await;
     let mut inner = relay.inner.lock().await;
     let pair_id = match inner.pair_lookup.get(&req.code_hash).cloned() {
         Some(id) => id,
@@ -317,6 +392,7 @@ async fn pair_open(
         }
     };
     let slot = inner.pair_slots.entry(pair_id.clone()).or_default();
+    slot.last_touched = std::time::Instant::now();
     if req.role == "host" {
         if slot.host_msg.is_some() {
             return (StatusCode::CONFLICT, Json(json!({"error": "host already registered for this code"}))).into_response();
@@ -342,9 +418,13 @@ async fn pair_get(
     Path(pair_id): Path<String>,
     Query(q): Query<PairGetQuery>,
 ) -> impl IntoResponse {
-    let inner = relay.inner.lock().await;
-    let slot = match inner.pair_slots.get(&pair_id) {
-        Some(s) => s.clone(),
+    relay.evict_expired_pair_slots().await;
+    let mut inner = relay.inner.lock().await;
+    let slot = match inner.pair_slots.get_mut(&pair_id) {
+        Some(s) => {
+            s.last_touched = std::time::Instant::now();
+            s.clone()
+        }
         None => return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown pair_id"}))).into_response(),
     };
     let (peer_msg, peer_bootstrap) = match q.as_role.as_str() {
@@ -366,11 +446,13 @@ async fn pair_bootstrap(
     Path(pair_id): Path<String>,
     Json(req): Json<PairBootstrapRequest>,
 ) -> impl IntoResponse {
+    relay.evict_expired_pair_slots().await;
     let mut inner = relay.inner.lock().await;
     let slot = match inner.pair_slots.get_mut(&pair_id) {
         Some(s) => s,
         None => return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown pair_id"}))).into_response(),
     };
+    slot.last_touched = std::time::Instant::now();
     match req.role.as_str() {
         "host" => slot.host_bootstrap = Some(req.sealed),
         "guest" => slot.guest_bootstrap = Some(req.sealed),
@@ -472,6 +554,7 @@ fn random_hex(n_bytes: usize) -> String {
 /// Run the relay until SIGINT/SIGTERM.
 pub async fn serve(bind: &str, state_dir: PathBuf) -> Result<()> {
     let relay = Relay::new(state_dir).await?;
+    relay.spawn_pair_sweeper();
     let app = relay.router();
     let listener = tokio::net::TcpListener::bind(bind)
         .await
@@ -502,6 +585,43 @@ mod tests {
         let s = random_hex(16);
         assert_eq!(s.len(), 32); // 16 bytes -> 32 hex chars
         assert!(s.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pair_slot_evicts_when_idle_past_ttl() {
+        let dir = std::env::temp_dir().join(format!("wire-evict-{}", random_hex(8)));
+        let _ = std::fs::remove_dir_all(&dir);
+        let relay = Relay::new(dir.clone()).await.unwrap();
+
+        // Seed a pair-slot manually with a past last_touched.
+        {
+            let mut inner = relay.inner.lock().await;
+            inner.pair_lookup.insert("hash-A".to_string(), "id-A".to_string());
+            inner.pair_slots.insert(
+                "id-A".to_string(),
+                PairSlot {
+                    last_touched: std::time::Instant::now()
+                        - std::time::Duration::from_secs(PAIR_SLOT_TTL_SECS + 60),
+                    ..PairSlot::default()
+                },
+            );
+
+            // And a fresh one — should survive.
+            inner.pair_lookup.insert("hash-B".to_string(), "id-B".to_string());
+            inner.pair_slots.insert("id-B".to_string(), PairSlot::default());
+
+            assert_eq!(inner.pair_slots.len(), 2);
+            assert_eq!(inner.pair_lookup.len(), 2);
+        }
+
+        relay.evict_expired_pair_slots().await;
+
+        let inner = relay.inner.lock().await;
+        assert_eq!(inner.pair_slots.len(), 1, "expired slot should have been evicted");
+        assert!(inner.pair_slots.contains_key("id-B"));
+        assert_eq!(inner.pair_lookup.len(), 1);
+        assert!(inner.pair_lookup.contains_key("hash-B"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
