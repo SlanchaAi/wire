@@ -17,7 +17,8 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs && \
 # Now the real source.
 COPY . .
 RUN cargo build --release --locked --bin wire && \
-    strip target/release/wire
+    strip target/release/wire && \
+    mkdir -p /tmp/wire-data && chown 65532:65532 /tmp/wire-data
 
 # ---- runtime stage ----
 # Distroless static — no shell, no package manager, no /tmp by default.
@@ -26,6 +27,8 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /home/nonroot
 COPY --from=build /build/target/release/wire /usr/local/bin/wire
+# Pre-create state dir with nonroot ownership so VOLUME inherits it.
+COPY --from=build --chown=65532:65532 /tmp/wire-data /data
 
 # State dirs — bind-mount or volume here for persistence.
 # WIRE_HOME governs both config + state paths (see src/config.rs).

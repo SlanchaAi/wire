@@ -47,6 +47,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 const MAX_EVENT_BYTES: usize = 256 * 1024;
+/// Total bytes a single slot can hold before further POSTs are rejected (413).
+/// Defends against an abusive bearer-holder filling relay disk (T11). At 64 MB
+/// per slot, an attacker pushing the rate-limit ceiling fills their own slot
+/// in ~25 seconds, then gets 413 forever — disk impact bounded.
+const MAX_SLOT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct Relay {
@@ -59,6 +64,8 @@ struct Inner {
     slots: HashMap<String, Vec<Value>>,
     /// slot_id -> bearer token. Token holder may read + write that slot.
     tokens: HashMap<String, String>,
+    /// slot_id -> total bytes stored. Enforced against MAX_SLOT_BYTES.
+    slot_bytes: HashMap<String, usize>,
     /// code_hash -> pair_id (lookup so guests find the host).
     pair_lookup: HashMap<String, String>,
     /// pair_id -> ephemeral pairing state.
@@ -121,6 +128,7 @@ impl Relay {
         let mut inner = Inner {
             slots: HashMap::new(),
             tokens: HashMap::new(),
+            slot_bytes: HashMap::new(),
             pair_lookup: HashMap::new(),
             pair_slots: HashMap::new(),
         };
@@ -148,6 +156,12 @@ impl Relay {
                     events.push(v);
                 }
             }
+            // Recompute byte usage for the slot from its persisted events.
+            let bytes: usize = events
+                .iter()
+                .map(|e| serde_json::to_vec(e).map(|v| v.len()).unwrap_or(0))
+                .sum();
+            inner.slot_bytes.insert(stem.clone(), bytes);
             inner.slots.insert(stem, events);
         }
         Ok(Self {
@@ -313,6 +327,23 @@ async fn post_event(
         )
             .into_response();
     }
+    // Per-slot quota: cap accumulated bytes per slot at MAX_SLOT_BYTES.
+    {
+        let inner = relay.inner.lock().await;
+        let used = inner.slot_bytes.get(&slot_id).copied().unwrap_or(0);
+        if used + body_bytes.len() > MAX_SLOT_BYTES {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({
+                    "error": "slot quota exceeded",
+                    "slot_bytes_used": used,
+                    "slot_bytes_max": MAX_SLOT_BYTES,
+                    "remediation": "operator should `wire rotate-slot` to drain old slot",
+                })),
+            )
+                .into_response();
+        }
+    }
     let event_id = req
         .event
         .get("event_id")
@@ -340,8 +371,10 @@ async fn post_event(
 
     {
         let mut inner = relay.inner.lock().await;
+        let event_size = body_bytes.len();
         let slot = inner.slots.entry(slot_id.clone()).or_default();
         slot.push(req.event.clone());
+        *inner.slot_bytes.entry(slot_id.clone()).or_insert(0) += event_size;
     }
     if let Err(e) = relay.append_event_to_disk(&slot_id, &req.event).await {
         return (
