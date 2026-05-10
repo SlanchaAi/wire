@@ -1,0 +1,36 @@
+[package]
+name = "wire"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Magic-wormhole for AI agents — bilateral signed-message bus over a mailbox relay"
+license = "AGPL-3.0-or-later AND Apache-2.0 AND MIT"
+readme = "README.md"
+keywords = ["agent", "p2p", "ed25519", "wormhole", "mailbox"]
+categories = ["command-line-utilities", "cryptography", "network-programming"]
+
+[lib]
+name = "wire"
+path = "src/lib.rs"
+
+# [[bin]] for `wire` CLI lands in a later iter (cli.rs not yet written).
+
+[dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+hex = "0.4"
+rand = "0.8"
+thiserror = "1"
+time = { version = "0.3", features = ["formatting", "macros", "parsing", "serde"] }
+
+[dev-dependencies]
+proptest = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

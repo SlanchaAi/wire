@@ -81,6 +81,20 @@ The short version: no SaaS dependency, no OAuth, no central trust authority, no 
 
 ---
 
+## Agent integration (read this if you're an AI agent)
+
+`wire` is built to be picked up natively by any AI agent — Claude, GPT-4, local Llama, sandboxed evals — without bespoke glue. Three discovery paths:
+
+1. **MCP server**: add three lines to your MCP config, get `wire_send`, `wire_tail`, `wire_peers`, `wire_verify`, `wire_whoami` as native tools.
+2. **CLI subcommands**: every command supports `--json` for structured output. `wire --help` self-documents.
+3. **File-system contract**: read `~/.local/state/wire/inbox/<peer>.jsonl`, append `outbox/<peer>.jsonl`, daemon syncs.
+
+Pairing (`wire init`, `wire join`) is **human-only** — SAS confirmation is the trust moment and agents don't get to short-circuit it. Messaging is fully agent-safe.
+
+See [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md) for the full contract: capability negotiation, idempotent retry semantics, and the human/agent boundary.
+
+---
+
 ## N-agent coordination
 
 Mesh-of-bilateral. SyncThing model. Each pair is its own wire; group emerges from N pairs.
@@ -117,21 +131,25 @@ If those make sense, we probably do too.
 
 **v0.1 in development.** Production binary not yet shipped.
 
+`wire` is written in Rust and ships as a single static binary (no Python, no node, no runtime). The release path will be `curl -fsSL https://wire.example.com/install.sh | sh` (atuin / restic / zellij pattern).
+
 For developers reading the protocol now:
 
 ```bash
 git clone <this-repo>
 cd wire
-pip install -e .
-wire --version
+cargo build --release       # protocol crate (lib only at this point)
+cargo test                  # 44 tests, ~20ms
 ```
+
+Requires Rust 1.85+ (edition 2024). Install via [rustup](https://rustup.rs).
 
 ---
 
 ## License
 
 - **Server** (`wire-relay-server`) — AGPL-3.0 (forks that host as SaaS must share back)
-- **Spec** (`docs/PROTOCOL.md`, the protocol surface in `signing.py`, `agent_card.py`) — Apache-2.0 (max interop adoption)
+- **Spec** (`docs/PROTOCOL.md`, the protocol surface in `src/signing.rs`, `src/agent_card.rs`) — Apache-2.0 (max interop adoption)
 - **Client** (`wire` CLI) — MIT (max embedding adoption)
 
 Same model as [atuin](https://atuin.sh/) (closed Hub + MIT CLI), except our server is AGPL not closed.

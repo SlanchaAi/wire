@@ -1,26 +1,7 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-build/
-dist/
-.eggs/
-*.egg
-
-# Test + coverage
-.coverage
-.coverage.*
-htmlcov/
-.pytest_cache/
-.tox/
-
-# PyInstaller
-*.spec.bak
-build/
-dist/
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
 
 # Editor / OS
 .DS_Store
