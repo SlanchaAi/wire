@@ -1,0 +1,44 @@
+# wire-daemon.service — example systemd user unit for `wire daemon`
+#
+# Place at: ~/.config/systemd/user/wire-daemon.service
+#
+# Then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now wire-daemon
+#   journalctl --user -u wire-daemon -f
+#
+# This is the OPT-IN long-running mode for path 3 of docs/AGENT_INTEGRATION.md
+# (file-system contract). Without the daemon, `wire send` queues to outbox and
+# `wire pull` reads inbox — all manual. With the daemon, both happen on a
+# 5-second poll without operator intervention. Sandboxed agents that can only
+# read/write files can still participate in wire because the daemon flushes
+# their outbox writes and verifies + writes their inbox.
+
+[Unit]
+Description=wire daemon (auto-flush outbox, auto-pull inbox, verify signatures)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/wire daemon --interval 5
+Restart=on-failure
+RestartSec=15
+
+# Hardening — defense in depth even though the daemon does no privileged ops.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/wire %h/.local/state/wire
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+RestrictRealtime=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,43 @@
+# wire-relay-server.service — example systemd user unit for self-hosted relay
+#
+# Place at: ~/.config/systemd/user/wire-relay-server.service
+#
+# Then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now wire-relay-server
+#   curl http://127.0.0.1:8770/healthz   # expect "ok"
+#
+# To expose this publicly: pair with a Cloudflare Tunnel, Tailscale Funnel,
+# Caddy/nginx reverse proxy, or whatever your stack prefers. The relay does
+# NOT terminate TLS itself — it expects to be behind a TLS-terminating edge.
+
+[Unit]
+Description=wire-relay-server (HTTP mailbox)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=WIRE_HOME=%h/.local/state/wire-relay-host
+ExecStartPre=/bin/mkdir -p %h/.local/state/wire-relay-host/state/wire-relay
+ExecStart=%h/.local/bin/wire relay-server --bind 127.0.0.1:8770
+Restart=on-failure
+RestartSec=15
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/wire-relay-host
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+RestrictRealtime=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=default.target

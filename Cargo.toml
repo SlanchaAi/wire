@@ -6,6 +6,10 @@ rust-version = "1.85"
 description = "Magic-wormhole for AI agents — bilateral signed-message bus over a mailbox relay"
 license = "AGPL-3.0-or-later AND Apache-2.0 AND MIT"
 readme = "README.md"
+authors = ["Paul Logan <paul@slancha.ai>"]
+homepage = "https://wire.slancha.ai"
+repository = "https://github.com/slancha/wire"
+documentation = "https://wire.slancha.ai"
 keywords = ["agent", "p2p", "ed25519", "wormhole", "mailbox"]
 categories = ["command-line-utilities", "cryptography", "network-programming"]
 
