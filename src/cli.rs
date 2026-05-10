@@ -224,6 +224,26 @@ pub enum Command {
         #[arg(long, default_value_t = 300)]
         timeout: u64,
     },
+    /// Watch the inbox for new verified events and fire an OS notification per
+    /// event. Long-running; background under systemd / `&` / tmux. Cursor is
+    /// persisted to `$WIRE_HOME/state/wire/notify.cursor` so restarts don't
+    /// re-emit history.
+    Notify {
+        /// Poll interval in seconds.
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
+        /// Only notify for events from this peer (handle, no did: prefix).
+        #[arg(long)]
+        peer: Option<String>,
+        /// Run a single sweep and exit (useful for cron / tests).
+        #[arg(long)]
+        once: bool,
+        /// Suppress the OS notification call; print one JSON line per event to
+        /// stdout instead (for piping into other tooling or smoke-testing
+        /// without a desktop session).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Entry point — parse and dispatch.
@@ -282,6 +302,12 @@ pub fn run() -> Result<()> {
             yes,
             timeout,
         } => cmd_pair_join(&code_phrase, &relay, yes, timeout),
+        Command::Notify {
+            interval,
+            peer,
+            once,
+            json,
+        } => cmd_notify(interval, peer.as_deref(), once, json),
     }
 }
 
@@ -1633,5 +1659,100 @@ fn pair_orchestrate(
 
 // (poll_until helper removed — pair flow now uses pair_session::pair_session_wait_for_sas
 // and pair_session_finalize, both of which inline their own deadline loops.)
+
+// ---------- notify (Goal 2) ----------
+
+fn cmd_notify(
+    interval_secs: u64,
+    peer_filter: Option<&str>,
+    once: bool,
+    as_json: bool,
+) -> Result<()> {
+    use crate::inbox_watch::InboxWatcher;
+    let cursor_path = config::state_dir()?.join("notify.cursor");
+    let mut watcher = InboxWatcher::from_cursor_file(&cursor_path)?;
+
+    let sweep = |watcher: &mut InboxWatcher| -> Result<()> {
+        let events = watcher.poll()?;
+        for ev in events {
+            if let Some(p) = peer_filter {
+                if ev.peer != p {
+                    continue;
+                }
+            }
+            if as_json {
+                println!("{}", serde_json::to_string(&ev)?);
+            } else {
+                os_notify_inbox_event(&ev);
+            }
+        }
+        watcher.save_cursors(&cursor_path)?;
+        Ok(())
+    };
+
+    if once {
+        return sweep(&mut watcher);
+    }
+
+    let interval = std::time::Duration::from_secs(interval_secs.max(1));
+    loop {
+        if let Err(e) = sweep(&mut watcher) {
+            eprintln!("wire notify: sweep error: {e}");
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+/// Best-effort OS-level toast for one inbox event. Each backend shells out to
+/// the platform-native binary (notify-send / osascript / powershell). Failures
+/// are swallowed — we'd rather lose a toast than crash the daemon.
+fn os_notify_inbox_event(ev: &crate::inbox_watch::InboxEvent) {
+    let title = if ev.verified {
+        format!("wire ← {}", ev.peer)
+    } else {
+        format!("wire ← {} (UNVERIFIED)", ev.peer)
+    };
+    let body = format!("{}: {}", ev.kind, ev.body_preview);
+    os_toast(&title, &body);
+}
+
+#[cfg(target_os = "linux")]
+fn os_toast(title: &str, body: &str) {
+    let _ = std::process::Command::new("notify-send")
+        .arg("--app-name=wire")
+        .arg("--icon=mail-message-new")
+        .arg(title)
+        .arg(body)
+        .output();
+}
+
+#[cfg(target_os = "macos")]
+fn os_toast(title: &str, body: &str) {
+    // osascript expects double-quoted strings — escape backslashes + quotes.
+    let safe = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        "display notification \"{}\" with title \"{}\"",
+        safe(body),
+        safe(title),
+    );
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output();
+}
+
+#[cfg(target_os = "windows")]
+fn os_toast(title: &str, body: &str) {
+    // Native Windows toasts require WinRT bindings; powershell BurntToast is
+    // an opt-in module. The portable fallback is to print to stderr — the
+    // operator can pipe `wire notify` into any toast manager they prefer
+    // (e.g. wsl-notify-send, eww). v0.2 BACKLOG: ship a WinRT bindings shim.
+    eprintln!("[wire notify] {title}\n  {body}");
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn os_toast(title: &str, body: &str) {
+    eprintln!("[wire notify] {title}\n  {body}");
+}
 
 // Integration tests for the CLI live in `tests/cli.rs` (cargo's tests/ dir).

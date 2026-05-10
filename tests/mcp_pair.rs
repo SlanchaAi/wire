@@ -482,6 +482,117 @@ async fn pair_confirm_with_wrong_digits_aborts_session() {
     assert!(err2.contains("no such session"), "got: {err2}");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mcp_resources_list_includes_inbox_per_peer_after_pairing() {
+    let relay_url = spawn_relay().await;
+    let host_home = fresh_dir("res-host");
+    let guest_home = fresh_dir("res-guest");
+
+    let mut mcp = McpProc::spawn(&host_home);
+    mcp.tool_call(
+        1,
+        "wire_init",
+        json!({"handle": "paul", "relay_url": relay_url}),
+        Duration::from_secs(10),
+    )
+    .unwrap();
+
+    let init_g = Command::new(wire_bin())
+        .args(["init", "willard"])
+        .env("WIRE_HOME", &guest_home)
+        .output()
+        .unwrap();
+    assert!(init_g.status.success());
+
+    // Pair host ↔ guest
+    let init_resp = mcp
+        .tool_call(
+            2,
+            "wire_pair_initiate",
+            json!({"max_wait_secs": 0}),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+    let session_id = init_resp["session_id"].as_str().unwrap().to_string();
+    let code = init_resp["code_phrase"].as_str().unwrap().to_string();
+
+    let guest_handle = thread::spawn({
+        let guest_home = guest_home.clone();
+        let relay_url = relay_url.clone();
+        move || {
+            let out = Command::new(wire_bin())
+                .args([
+                    "pair-join",
+                    &code,
+                    "--relay",
+                    &relay_url,
+                    "--yes",
+                    "--timeout",
+                    "30",
+                ])
+                .env("WIRE_HOME", &guest_home)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+        }
+    });
+
+    // Drive host to sas_ready + confirm
+    let mut req_id = 10u64;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut host_sas = None;
+    while Instant::now() < deadline {
+        let resp = mcp
+            .tool_call(
+                req_id,
+                "wire_pair_check",
+                json!({"session_id": session_id, "max_wait_secs": 2}),
+                Duration::from_secs(10),
+            )
+            .unwrap();
+        req_id += 1;
+        if resp["state"] == "sas_ready" {
+            host_sas = Some(resp["sas"].as_str().unwrap().to_string());
+            break;
+        }
+    }
+    let host_sas = host_sas.unwrap();
+    let typed: String = host_sas.chars().filter(|c| c.is_ascii_digit()).collect();
+    mcp.tool_call(
+        req_id,
+        "wire_pair_confirm",
+        json!({"session_id": session_id, "user_typed_digits": typed}),
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    guest_handle.join().unwrap();
+
+    // resources/list should now include wire://inbox/willard + wire://inbox/all
+    let list = mcp.rpc(100, "resources/list", json!({}), Duration::from_secs(5));
+    let uris: Vec<&str> = list["result"]["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["uri"].as_str())
+        .collect();
+    assert!(uris.contains(&"wire://inbox/all"), "got: {uris:?}");
+    assert!(uris.contains(&"wire://inbox/willard"), "got: {uris:?}");
+
+    // resources/read on willard's inbox returns empty (nothing sent yet) but
+    // succeeds — it's a JSONL response, not an error.
+    let read = mcp.rpc(
+        101,
+        "resources/read",
+        json!({"uri": "wire://inbox/willard"}),
+        Duration::from_secs(5),
+    );
+    assert!(read["result"]["contents"].is_array(), "got: {read}");
+    assert_eq!(
+        read["result"]["contents"][0]["mimeType"],
+        "application/x-ndjson"
+    );
+}
+
 #[test]
 fn concurrent_outbox_appends_do_not_corrupt_lines() {
     use wire::config::append_outbox_record;

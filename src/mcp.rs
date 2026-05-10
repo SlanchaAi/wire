@@ -107,9 +107,167 @@ fn handle_request(req: &Value) -> Value {
         "notifications/initialized" => Value::Null, // notification — no reply
         "tools/list" => handle_tools_list(&id),
         "tools/call" => handle_tools_call(&id, req.get("params").unwrap_or(&Value::Null)),
+        "resources/list" => handle_resources_list(&id),
+        "resources/read" => handle_resources_read(&id, req.get("params").unwrap_or(&Value::Null)),
         "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
         other => error_response(&id, -32601, &format!("method not found: {other}")),
     }
+}
+
+// ---------- resources (Goal 2) ----------
+//
+// MCP resources expose semi-static state for agents that want a "read this
+// when relevant" surface instead of polling tools. v0.2 ships read-only;
+// subscribe (push-notify on inbox grow) is v0.2.1 — requires a background
+// watcher thread + async stdout writer.
+//
+// Resource URI scheme:
+//   wire://inbox/<peer>    last 50 verified events for that pinned peer
+//   wire://inbox/all       last 50 events across all peers, newest first
+
+fn handle_resources_list(id: &Value) -> Value {
+    let mut resources = vec![json!({
+        "uri": "wire://inbox/all",
+        "name": "wire inbox (all peers)",
+        "description": "Most recent verified events from all pinned peers, JSONL.",
+        "mimeType": "application/x-ndjson"
+    })];
+
+    if let Ok(trust) = crate::config::read_trust() {
+        let agents = trust
+            .get("agents")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let self_did = crate::config::read_agent_card()
+            .ok()
+            .and_then(|c| c.get("did").and_then(Value::as_str).map(str::to_string));
+        for (handle, agent) in agents.iter() {
+            let did = agent
+                .get("did")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if Some(did.as_str()) == self_did.as_deref() {
+                continue;
+            }
+            resources.push(json!({
+                "uri": format!("wire://inbox/{handle}"),
+                "name": format!("inbox from {handle}"),
+                "description": format!("Recent verified events from did:wire:{handle}."),
+                "mimeType": "application/x-ndjson"
+            }));
+        }
+    }
+
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "resources": resources
+        }
+    })
+}
+
+fn handle_resources_read(id: &Value, params: &Value) -> Value {
+    let uri = match params.get("uri").and_then(Value::as_str) {
+        Some(u) => u,
+        None => return error_response(id, -32602, "missing 'uri'"),
+    };
+    let peer_opt = parse_inbox_uri(uri);
+    match read_inbox_resource(peer_opt) {
+        Ok(payload) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "contents": [{
+                    "uri": uri,
+                    "mimeType": "application/x-ndjson",
+                    "text": payload,
+                }]
+            }
+        }),
+        Err(e) => error_response(id, -32603, &e.to_string()),
+    }
+}
+
+/// Parse `wire://inbox/<peer>` → Some(peer). `wire://inbox/all` → None.
+/// Anything else → returns a marker that triggers "unknown URI" on read.
+fn parse_inbox_uri(uri: &str) -> Option<String> {
+    if let Some(rest) = uri.strip_prefix("wire://inbox/") {
+        if rest == "all" {
+            return None;
+        }
+        if !rest.is_empty() {
+            return Some(rest.to_string());
+        }
+    }
+    Some(format!("__invalid__{uri}"))
+}
+
+fn read_inbox_resource(peer_opt: Option<String>) -> Result<String, String> {
+    const LIMIT: usize = 50;
+    // Validate URI shape FIRST — an invalid URI is an error regardless of
+    // whether the inbox dir exists yet.
+    if let Some(ref p) = peer_opt {
+        if p.starts_with("__invalid__") {
+            return Err(
+                "unknown resource URI (must be wire://inbox/<peer> or wire://inbox/all)".into(),
+            );
+        }
+    }
+    let inbox = crate::config::inbox_dir().map_err(|e| e.to_string())?;
+    if !inbox.exists() {
+        return Ok(String::new());
+    }
+    let trust = crate::config::read_trust().map_err(|e| e.to_string())?;
+
+    let paths: Vec<std::path::PathBuf> = match peer_opt {
+        Some(p) => {
+            let path = inbox.join(format!("{p}.jsonl"));
+            if !path.exists() {
+                return Ok(String::new());
+            }
+            vec![path]
+        }
+        None => std::fs::read_dir(&inbox)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("jsonl"))
+            .collect(),
+    };
+
+    let mut events: Vec<(String, bool, Value)> = Vec::new();
+    for path in paths {
+        let body = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let peer = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        for line in body.lines() {
+            let event: Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let verified = crate::signing::verify_message_v31(&event, &trust).is_ok();
+            events.push((peer.clone(), verified, event));
+        }
+    }
+    // Newest last (JSONL append order is chronological); take tail LIMIT.
+    let take_from = events.len().saturating_sub(LIMIT);
+    let tail = &events[take_from..];
+
+    let mut out = String::new();
+    for (_peer, verified, mut event) in tail.iter().cloned() {
+        if let Some(obj) = event.as_object_mut() {
+            obj.insert("verified".into(), json!(verified));
+        }
+        out.push_str(&serde_json::to_string(&event).map_err(|e| e.to_string())?);
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 fn handle_initialize(id: &Value) -> Value {
@@ -119,13 +277,21 @@ fn handle_initialize(id: &Value) -> Value {
         "result": {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {
-                "tools": {"listChanged": false}
+                "tools": {"listChanged": false},
+                "resources": {
+                    "listChanged": false,
+                    // Subscribe support is v0.2.1 — the current MCP server is a
+                    // synchronous stdin loop, and pushing notifications/resources/updated
+                    // requires a background watcher thread + async stdout writer. Read
+                    // (poll-driven) is shipped now.
+                    "subscribe": false
+                }
             },
             "serverInfo": {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION,
             },
-            "instructions": "wire — magic-wormhole for AI agents. Agents drive pairing via wire_pair_initiate/join/check; the user types the 6-digit SAS back into chat for wire_pair_confirm — this is the only human-in-loop step. See docs/AGENT_INTEGRATION.md and THREAT_MODEL.md (T10/T14)."
+            "instructions": "wire — magic-wormhole for AI agents. Agents drive pairing via wire_pair_initiate/join/check; the user types the 6-digit SAS back into chat for wire_pair_confirm — this is the only human-in-loop step. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). See docs/AGENT_INTEGRATION.md and THREAT_MODEL.md (T10/T14)."
         }
     })
 }
@@ -850,6 +1016,51 @@ mod tests {
         assert_eq!(resp["result"]["isError"], true);
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("no such session_id"), "got: {text}");
+    }
+
+    #[test]
+    fn initialize_advertises_resources_capability() {
+        let req = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
+        let resp = handle_request(&req);
+        let caps = &resp["result"]["capabilities"];
+        assert!(
+            caps["resources"].is_object(),
+            "resources capability must be present, got {resp}"
+        );
+        assert_eq!(
+            caps["resources"]["subscribe"], false,
+            "subscribe is v0.2.1; v0.2 advertises subscribe=false"
+        );
+    }
+
+    #[test]
+    fn resources_read_with_bad_uri_errors() {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/read",
+            "params": {"uri": "http://example.com/not-a-wire-uri"}
+        });
+        let resp = handle_request(&req);
+        assert!(resp.get("error").is_some(), "expected error, got {resp}");
+    }
+
+    #[test]
+    fn parse_inbox_uri_handles_variants() {
+        assert_eq!(parse_inbox_uri("wire://inbox/paul"), Some("paul".into()));
+        assert_eq!(parse_inbox_uri("wire://inbox/all"), None);
+        assert!(
+            parse_inbox_uri("wire://inbox/")
+                .unwrap()
+                .starts_with("__invalid__"),
+            "empty peer must be invalid"
+        );
+        assert!(
+            parse_inbox_uri("http://other")
+                .unwrap()
+                .starts_with("__invalid__"),
+            "non-wire scheme must be invalid"
+        );
     }
 
     #[test]
