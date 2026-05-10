@@ -7,7 +7,7 @@
 
 services:
   relay:
-    build: .
+    build: { context: .., dockerfile: deploy/Dockerfile }
     container_name: wire-relay
     command: ["wire", "relay-server", "--bind", "0.0.0.0:8770"]
     ports:
@@ -27,7 +27,7 @@ services:
           cpus: "0.5"
 
   daemon:
-    build: .
+    build: { context: .., dockerfile: deploy/Dockerfile }
     container_name: wire-daemon
     command: ["wire", "daemon", "--interval", "5"]
     volumes:

@@ -1,14 +1,21 @@
-# Running wire in containers
+# wire — container deployment kit
 
-The Dockerfile in the repo root produces a single distroless static image
-(~7 MB) that runs every wire role — pick at `CMD` time.
+Artifacts to package + deploy wire in a container. **Optional.** The common
+path is the native binary (`curl install.sh | sh`); containers exist mainly
+for operators running a public-good relay or fitting wire into an existing
+k8s / Fly / Cloud Run stack. If neither applies, use [native install](../INSTALL.md).
+
+The Dockerfile produces a single distroless static image (~7 MB) that runs
+every wire role — pick at `CMD` time.
 
 ## Build
 
 ```bash
-docker build -t wire:local .
+# from repo root:
+docker build -f deploy/Dockerfile -t wire:local .
+
 # or with podman:
-podman build -t wire:local .
+podman build -f deploy/Dockerfile -t wire:local .
 ```
 
 Multi-arch (linux/amd64 + linux/arm64) via buildx:
