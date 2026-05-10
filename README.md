@@ -22,8 +22,10 @@ Install + register wire as an MCP server (both operators, once):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
-echo '{"mcpServers":{"wire":{"command":"wire","args":["mcp"]}}}' > ~/.config/claude/mcp.json
+wire setup --apply    # idempotently merges wire into Claude Code / Cursor / project-local MCP configs
 ```
+
+Restart your agent client after `wire setup --apply` so wire's MCP tools load. `wire setup` (no `--apply`) dry-runs and prints what would change.
 
 **Host (A) — one prompt:**
 

@@ -224,6 +224,15 @@ pub enum Command {
         #[arg(long, default_value_t = 300)]
         timeout: u64,
     },
+    /// Detect known MCP host config locations (Claude Desktop, Claude Code,
+    /// Cursor, project-local) and either print or auto-merge the wire MCP
+    /// server entry. Default prints; pass `--apply` to actually modify config
+    /// files. Idempotent — re-running is safe.
+    Setup {
+        /// Actually write the changes (default = print only).
+        #[arg(long)]
+        apply: bool,
+    },
     /// Watch the inbox for new verified events and fire an OS notification per
     /// event. Long-running; background under systemd / `&` / tmux. Cursor is
     /// persisted to `$WIRE_HOME/state/wire/notify.cursor` so restarts don't
@@ -302,6 +311,7 @@ pub fn run() -> Result<()> {
             yes,
             timeout,
         } => cmd_pair_join(&code_phrase, &relay, yes, timeout),
+        Command::Setup { apply } => cmd_setup(apply),
         Command::Notify {
             interval,
             peer,
@@ -1659,6 +1669,125 @@ fn pair_orchestrate(
 
 // (poll_until helper removed — pair flow now uses pair_session::pair_session_wait_for_sas
 // and pair_session_finalize, both of which inline their own deadline loops.)
+
+// ---------- setup — one-shot MCP host registration ----------
+
+fn cmd_setup(apply: bool) -> Result<()> {
+    use std::path::PathBuf;
+
+    let entry = json!({"command": "wire", "args": ["mcp"]});
+    let entry_pretty = serde_json::to_string_pretty(&json!({"wire": &entry}))?;
+
+    // Detect probable MCP host config locations. Cross-platform — we only
+    // touch the file if it already exists OR --apply was passed.
+    let mut targets: Vec<(&str, PathBuf)> = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        // Claude Code (CLI) — XDG-ish default
+        targets.push(("Claude Code", home.join(".config/claude/mcp.json")));
+        // Claude Desktop macOS
+        #[cfg(target_os = "macos")]
+        targets.push((
+            "Claude Desktop (macOS)",
+            home.join("Library/Application Support/Claude/claude_desktop_config.json"),
+        ));
+        // Claude Desktop Windows
+        #[cfg(target_os = "windows")]
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            targets.push((
+                "Claude Desktop (Windows)",
+                PathBuf::from(appdata).join("Claude/claude_desktop_config.json"),
+            ));
+        }
+        // Cursor
+        targets.push(("Cursor", home.join(".cursor/mcp.json")));
+    }
+    // Project-local — works for several MCP-aware tools
+    targets.push(("project-local (.mcp.json)", PathBuf::from(".mcp.json")));
+
+    println!("wire setup\n");
+    println!("MCP server snippet (add this to your client's mcpServers):");
+    println!();
+    println!("{entry_pretty}");
+    println!();
+
+    if !apply {
+        println!("Probable MCP host config locations on this machine:");
+        for (name, path) in &targets {
+            let marker = if path.exists() {
+                "✓ found"
+            } else {
+                "  (would create)"
+            };
+            println!("  {marker:14}  {name}: {}", path.display());
+        }
+        println!();
+        println!("Run `wire setup --apply` to merge wire into each config above.");
+        println!(
+            "Existing entries with a different command keep yours unchanged unless wire's exact entry is missing."
+        );
+        return Ok(());
+    }
+
+    let mut modified: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for (name, path) in &targets {
+        match upsert_mcp_entry(path, "wire", &entry) {
+            Ok(true) => modified.push(format!("✓ {name} ({})", path.display())),
+            Ok(false) => skipped.push(format!("  {name} ({}): already configured", path.display())),
+            Err(e) => skipped.push(format!("✗ {name} ({}): {e}", path.display())),
+        }
+    }
+    if !modified.is_empty() {
+        println!("Modified:");
+        for line in &modified {
+            println!("  {line}");
+        }
+        println!();
+        println!("Restart the app(s) above to load wire MCP.");
+    }
+    if !skipped.is_empty() {
+        println!();
+        println!("Skipped:");
+        for line in &skipped {
+            println!("  {line}");
+        }
+    }
+    Ok(())
+}
+
+/// Idempotent merge of an `mcpServers.<name>` entry into a JSON config file.
+/// Returns Ok(true) if file was changed, Ok(false) if entry already matched.
+fn upsert_mcp_entry(path: &std::path::Path, server_name: &str, entry: &Value) -> Result<bool> {
+    let mut cfg: Value = if path.exists() {
+        let body = std::fs::read_to_string(path).context("reading config")?;
+        serde_json::from_str(&body).unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
+    if !cfg.is_object() {
+        cfg = json!({});
+    }
+    let root = cfg.as_object_mut().unwrap();
+    let servers = root
+        .entry("mcpServers".to_string())
+        .or_insert_with(|| json!({}));
+    if !servers.is_object() {
+        *servers = json!({});
+    }
+    let map = servers.as_object_mut().unwrap();
+    if map.get(server_name) == Some(entry) {
+        return Ok(false);
+    }
+    map.insert(server_name.to_string(), entry.clone());
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).context("creating parent dir")?;
+    }
+    let out = serde_json::to_string_pretty(&cfg)? + "\n";
+    std::fs::write(path, out).context("writing config")?;
+    Ok(true)
+}
 
 // ---------- notify (Goal 2) ----------
 
