@@ -282,15 +282,19 @@ fn mcp_initialize_then_tools_list_round_trip() {
         .iter()
         .filter_map(|t| t["name"].as_str())
         .collect();
+    // Always-safe messaging tools
     assert!(names.contains(&"wire_whoami"));
     assert!(names.contains(&"wire_send"));
-    assert!(
-        !names.contains(&"wire_init"),
-        "wire_init MUST NOT be exposed via MCP"
-    );
+    // Goal 1: pairing tools now exposed (with SAS-digit type-back as the gate)
+    assert!(names.contains(&"wire_init"));
+    assert!(names.contains(&"wire_pair_initiate"));
+    assert!(names.contains(&"wire_pair_join"));
+    assert!(names.contains(&"wire_pair_check"));
+    assert!(names.contains(&"wire_pair_confirm"));
+    // Legacy wire_join is not advertised — superseded by wire_pair_join
     assert!(
         !names.contains(&"wire_join"),
-        "wire_join MUST NOT be exposed via MCP"
+        "wire_join is the deprecated alias; surface wire_pair_join instead"
     );
 }
 
@@ -334,9 +338,11 @@ fn mcp_tools_call_wire_whoami() {
 }
 
 #[test]
-fn mcp_tools_call_wire_init_is_refused() {
-    // Even if a malicious agent tries to call wire_init via MCP, the server
-    // returns isError: true with a security explanation.
+fn mcp_tools_call_wire_init_idempotent_on_repeat() {
+    // Goal 1: wire_init is now exposed via MCP, idempotent. First call creates,
+    // second call with same handle returns already_initialized=true.
+    // (A different-handle second call returns isError — covered in
+    // tests/mcp_pair.rs::wire_init_via_mcp_is_idempotent_for_same_handle.)
     use std::io::Write as _;
     use std::process::Stdio;
 
@@ -356,7 +362,12 @@ fn mcp_tools_call_wire_init_is_refused() {
         writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"initialize"}}"#).unwrap();
         writeln!(
             stdin,
-            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"wire_init","arguments":{{"handle":"attacker"}}}}}}"#
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"wire_init","arguments":{{"handle":"alice"}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"wire_init","arguments":{{"handle":"alice"}}}}}}"#
         )
         .unwrap();
     }
@@ -364,23 +375,26 @@ fn mcp_tools_call_wire_init_is_refused() {
     let out = child.wait_with_output().expect("server didn't exit");
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
-    let last = stdout.lines().last().unwrap();
-    let resp: serde_json::Value = serde_json::from_str(last).unwrap();
-    assert_eq!(resp["result"]["isError"], true);
-    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(
-        text.contains("not exposed via MCP"),
-        "unexpected refusal: {text}"
-    );
-    assert!(
-        text.contains("human-in-loop"),
-        "missing security explanation: {text}"
-    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "expected init + 2 tools/call responses");
 
-    // Critical: verify no config files were created — the server refused at the
-    // protocol layer, so init's side effects must not have happened.
-    assert!(!home.join("config/wire/private.key").exists());
-    assert!(!home.join("config/wire/agent-card.json").exists());
+    let r1: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(r1["result"]["isError"], false);
+    let p1: serde_json::Value =
+        serde_json::from_str(r1["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(p1["did"], "did:wire:alice");
+    assert_eq!(p1["already_initialized"], false);
+
+    let r2: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    assert_eq!(r2["result"]["isError"], false);
+    let p2: serde_json::Value =
+        serde_json::from_str(r2["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(p2["already_initialized"], true);
+    assert_eq!(p2["fingerprint"], p1["fingerprint"]);
+
+    // Config files exist after first init
+    assert!(home.join("config/wire/private.key").exists());
+    assert!(home.join("config/wire/agent-card.json").exists());
 }
 
 #[test]

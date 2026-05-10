@@ -18,8 +18,11 @@
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Root configuration directory. Honors `WIRE_HOME` for testing.
 ///
@@ -64,6 +67,51 @@ pub fn inbox_dir() -> Result<PathBuf> {
 }
 pub fn outbox_dir() -> Result<PathBuf> {
     Ok(state_dir()?.join("outbox"))
+}
+
+/// Per-outbox-path mutex registry. Serializes intra-process appends so that
+/// concurrent `wire_send` calls (e.g. multiple agents driving the same MCP
+/// server) cannot interleave bytes mid-line. POSIX `O_APPEND` is atomic only
+/// for writes ≤ PIPE_BUF (typically 4096 bytes); wire events can exceed that
+/// (per-event cap is 256 KiB).
+///
+/// **Inter-process scope (CLI vs MCP-server vs daemon):** v0.1 does not take
+/// an OS-level flock — the daemon only reads the outbox + a cursor file, and
+/// concurrent CLI `wire send` invocations against a running MCP server are
+/// rare enough we accept the risk for now. v0.2 BACKLOG: switch to
+/// `fs2::FileExt::lock_exclusive` for cross-process safety.
+static OUTBOX_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+fn outbox_lock(path: &Path) -> Arc<Mutex<()>> {
+    let registry = OUTBOX_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut g = registry.lock().expect("OUTBOX_LOCKS poisoned");
+    g.entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+/// Append a single JSONL record to the outbox for `peer`, holding the
+/// per-path mutex to keep concurrent appenders from interleaving lines.
+///
+/// `record_bytes` should be the full canonical JSON of the signed event,
+/// without trailing newline (the helper appends it). All bytes are written
+/// in one `write_all` while the lock is held.
+pub fn append_outbox_record(peer: &str, record_bytes: &[u8]) -> Result<PathBuf> {
+    ensure_dirs()?;
+    let path = outbox_dir()?.join(format!("{peer}.jsonl"));
+    let lock = outbox_lock(&path);
+    let _g = lock.lock().expect("outbox per-path mutex poisoned");
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening outbox {path:?}"))?;
+    let mut buf = Vec::with_capacity(record_bytes.len() + 1);
+    buf.extend_from_slice(record_bytes);
+    buf.push(b'\n');
+    f.write_all(&buf)
+        .with_context(|| format!("appending to {path:?}"))?;
+    Ok(path)
 }
 
 /// Whether `wire init` has already been run (private key + card both present).

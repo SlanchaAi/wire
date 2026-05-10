@@ -14,6 +14,7 @@ pub mod canonical;
 pub mod cli;
 pub mod config;
 pub mod mcp;
+pub mod pair_session;
 pub mod relay_client;
 pub mod relay_server;
 pub mod sas;
