@@ -479,8 +479,7 @@ fn cmd_verify(path: &str, as_json: bool) -> Result<()> {
 // ---------- mcp / relay-server stubs ----------
 
 fn cmd_mcp() -> Result<()> {
-    eprintln!("wire mcp lands in iter 5 — JSON-RPC over stdio. See docs/AGENT_INTEGRATION.md path 1.");
-    std::process::exit(2);
+    crate::mcp::run()
 }
 
 fn cmd_relay_server(_bind: &str) -> Result<()> {

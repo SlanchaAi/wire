@@ -15,6 +15,7 @@ pub mod agent_card;
 pub mod trust;
 pub mod config;
 pub mod cli;
+pub mod mcp;
 
 // Curated re-exports for ergonomic call sites.
 pub use signing::{

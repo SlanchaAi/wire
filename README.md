@@ -85,11 +85,35 @@ The short version: no SaaS dependency, no OAuth, no central trust authority, no 
 
 `wire` is built to be picked up natively by any AI agent — Claude, GPT-4, local Llama, sandboxed evals — without bespoke glue. Three discovery paths:
 
-1. **MCP server**: add three lines to your MCP config, get `wire_send`, `wire_tail`, `wire_peers`, `wire_verify`, `wire_whoami` as native tools.
-2. **CLI subcommands**: every command supports `--json` for structured output. `wire --help` self-documents.
-3. **File-system contract**: read `~/.local/state/wire/inbox/<peer>.jsonl`, append `outbox/<peer>.jsonl`, daemon syncs.
+### Path 1 — MCP server (recommended)
 
-Pairing (`wire init`, `wire join`) is **human-only** — SAS confirmation is the trust moment and agents don't get to short-circuit it. Messaging is fully agent-safe.
+Add to your MCP config (`~/.config/claude/mcp.json` for Claude Desktop / Code; equivalent for Cursor / Cline / Zed):
+
+```json
+{
+  "mcpServers": {
+    "wire": {"command": "wire", "args": ["mcp"]}
+  }
+}
+```
+
+After restart you have these tools natively: `wire_whoami`, `wire_peers`, `wire_send`, `wire_tail`, `wire_verify`. Pairing tools (`wire_init`, `wire_join`) are **deliberately not exposed** — SAS confirmation requires a human, and a malicious upstream input must not be able to talk an agent into autonomous trust establishment.
+
+### Path 2 — CLI with `--json` everywhere
+
+Every command emits structured output on demand:
+
+```bash
+$ wire whoami --json
+{"did":"did:wire:paul","handle":"paul","fingerprint":"b2e5aae7","capabilities":["wire/v3.1"]}
+
+$ wire send willard decision "ship the v0.1 demo" --json
+{"event_id":"7cf276dc...","status":"queued","peer":"willard","outbox":"..."}
+```
+
+### Path 3 — File-system contract (sandboxed agents)
+
+Agents that can't spawn processes still participate by reading `~/.local/state/wire/inbox/<peer>.jsonl` and appending to `outbox/<peer>.jsonl`. A daemon (lands iter 6+) signs and flushes.
 
 See [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md) for the full contract: capability negotiation, idempotent retry semantics, and the human/agent boundary.
 

@@ -198,10 +198,137 @@ fn join_subcommand_is_stub_and_exits_nonzero() {
 }
 
 #[test]
-fn mcp_subcommand_is_stub_and_exits_nonzero() {
+fn mcp_initialize_then_tools_list_round_trip() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
     let home = fresh_home();
-    let out = run(&home, &["mcp"]);
-    assert!(!out.status.success());
+    let _ = run(&home, &["init", "paul"]);
+
+    let mut child = Command::new(wire_bin())
+        .arg("mcp")
+        .env("WIRE_HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn wire mcp");
+
+    let initialize =
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#;
+    let initialized = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+    let tools_list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        writeln!(stdin, "{initialize}").unwrap();
+        writeln!(stdin, "{initialized}").unwrap();
+        writeln!(stdin, "{tools_list}").unwrap();
+    } // drops stdin → server reads EOF → exits
+
+    let out = child.wait_with_output().expect("server didn't exit");
+    assert!(out.status.success(), "mcp server crashed: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "expected 2 responses (initialize + tools/list), got {}: {stdout}", lines.len());
+
+    let init_resp: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(init_resp["result"]["protocolVersion"], "2025-06-18");
+
+    let list_resp: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    let names: Vec<&str> = list_resp["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(names.contains(&"wire_whoami"));
+    assert!(names.contains(&"wire_send"));
+    assert!(!names.contains(&"wire_init"), "wire_init MUST NOT be exposed via MCP");
+    assert!(!names.contains(&"wire_join"), "wire_join MUST NOT be exposed via MCP");
+}
+
+#[test]
+fn mcp_tools_call_wire_whoami() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul"]);
+
+    let mut child = Command::new(wire_bin())
+        .arg("mcp")
+        .env("WIRE_HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn wire mcp");
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"initialize"}}"#).unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"wire_whoami","arguments":{{}}}}}}"#
+        )
+        .unwrap();
+    }
+
+    let out = child.wait_with_output().expect("server didn't exit");
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let last_line = stdout.lines().last().unwrap();
+    let resp: serde_json::Value = serde_json::from_str(last_line).unwrap();
+    assert_eq!(resp["result"]["isError"], false);
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["did"], "did:wire:paul");
+    assert_eq!(parsed["handle"], "paul");
+}
+
+#[test]
+fn mcp_tools_call_wire_init_is_refused() {
+    // Even if a malicious agent tries to call wire_init via MCP, the server
+    // returns isError: true with a security explanation.
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let home = fresh_home();
+
+    let mut child = Command::new(wire_bin())
+        .arg("mcp")
+        .env("WIRE_HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn wire mcp");
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"initialize"}}"#).unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"wire_init","arguments":{{"handle":"attacker"}}}}}}"#
+        )
+        .unwrap();
+    }
+
+    let out = child.wait_with_output().expect("server didn't exit");
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let last = stdout.lines().last().unwrap();
+    let resp: serde_json::Value = serde_json::from_str(last).unwrap();
+    assert_eq!(resp["result"]["isError"], true);
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("not exposed via MCP"), "unexpected refusal: {text}");
+    assert!(text.contains("human-in-loop"), "missing security explanation: {text}");
+
+    // Critical: verify no config files were created — the server refused at the
+    // protocol layer, so init's side effects must not have happened.
+    assert!(!home.join("config/wire/private.key").exists());
+    assert!(!home.join("config/wire/agent-card.json").exists());
 }
 
 #[test]
