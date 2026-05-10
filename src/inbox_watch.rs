@@ -90,9 +90,6 @@ impl InboxEvent {
 pub struct InboxWatcher {
     cursors: HashMap<String, u64>,
     inbox_dir: PathBuf,
-    /// If true, fresh peer files (no prior cursor) start from the END (only
-    /// new events are surfaced). If false, fresh files emit from byte 0.
-    skip_existing_on_new_peer: bool,
 }
 
 impl InboxWatcher {
@@ -108,15 +105,13 @@ impl InboxWatcher {
         } else {
             HashMap::new()
         };
-        Ok(Self {
-            cursors,
-            inbox_dir,
-            skip_existing_on_new_peer: false,
-        })
+        Ok(Self { cursors, inbox_dir })
     }
 
     /// Watcher with explicit inbox dir, starting from EOF on every peer
-    /// file. Used by MCP — agents that want history call wire_tail.
+    /// file that exists at construction time. Used by MCP — agents that want
+    /// history call wire_tail. Peer files created AFTER construction emit
+    /// from byte 0 (they represent new conversations starting).
     pub fn from_dir_head(inbox_dir: PathBuf) -> Result<Self> {
         let mut cursors = HashMap::new();
         if inbox_dir.exists() {
@@ -131,11 +126,7 @@ impl InboxWatcher {
                 }
             }
         }
-        Ok(Self {
-            cursors,
-            inbox_dir,
-            skip_existing_on_new_peer: true,
-        })
+        Ok(Self { cursors, inbox_dir })
     }
 
     /// Convenience: use the configured wire inbox dir + cursor at the given
@@ -187,12 +178,7 @@ impl InboxWatcher {
                 Err(_) => continue,
             };
             let cur_len = meta.len();
-            let is_new_peer = !self.cursors.contains_key(&peer);
-            let start_at = if is_new_peer && self.skip_existing_on_new_peer {
-                cur_len
-            } else {
-                *self.cursors.get(&peer).unwrap_or(&0)
-            };
+            let start_at = *self.cursors.get(&peer).unwrap_or(&0);
 
             if cur_len <= start_at {
                 self.cursors.insert(peer.clone(), start_at);

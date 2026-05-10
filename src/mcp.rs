@@ -47,25 +47,143 @@
 
 use anyhow::Result;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
+use std::sync::{Arc, Mutex};
+
+/// Shared MCP-session state. Today: subscribed resource URIs only. Future
+/// (per-session inbox cursors, etc.) goes here.
+#[derive(Clone, Default)]
+pub struct McpState {
+    /// Resource URIs the client has subscribed to. Wildcard support is
+    /// intentionally NOT done — clients subscribe to specific URIs and
+    /// receive `notifications/resources/updated` only for those URIs.
+    pub subscribed: Arc<Mutex<HashSet<String>>>,
+}
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "wire";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Run the MCP server until stdin closes.
+///
+/// Threading model (Goal 2.1):
+///
+/// - **Main thread**: reads stdin line-by-line, parses JSON-RPC, calls
+///   `handle_request` to compute a response, hands it to the writer via the
+///   mpsc channel.
+/// - **Writer thread**: single owner of stdout. Drains responses + push
+///   notifications from the channel, writes each as one line + flush. Single
+///   writer = no interleaving between responses and notifications.
+/// - **Watcher thread**: holds an `InboxWatcher::from_head` (starts at EOF —
+///   each MCP session only sees fresh events). Polls every 2s. For each new
+///   inbox event, checks the shared subscription set; if any matching
+///   `wire://inbox/<peer>` or `wire://inbox/all` URI is subscribed, pushes
+///   a `notifications/resources/updated` message into the channel.
 pub fn run() -> Result<()> {
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let mut reader = BufReader::new(stdin.lock());
-    let mut writer = stdout.lock();
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
+    let state = McpState::default();
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    let (tx, rx) = mpsc::channel::<String>();
+
+    // Writer thread — single owner of stdout. Exits when all senders drop.
+    let writer_handle = std::thread::spawn(move || {
+        let stdout = std::io::stdout();
+        let mut w = stdout.lock();
+        while let Ok(line) = rx.recv() {
+            if writeln!(w, "{line}").is_err() {
+                break;
+            }
+            if w.flush().is_err() {
+                break;
+            }
+        }
+    });
+
+    // Watcher thread — polls inbox every 2s and emits
+    // notifications/resources/updated on grow. Observes `shutdown` so we
+    // can exit cleanly on stdin EOF (otherwise its tx_w clone keeps the
+    // writer thread blocked on rx.recv forever).
+    let subs_w = state.subscribed.clone();
+    let tx_w = tx.clone();
+    let shutdown_w = shutdown.clone();
+    let watcher_handle = std::thread::spawn(move || {
+        let mut watcher = match crate::inbox_watch::InboxWatcher::from_head() {
+            Ok(w) => w,
+            Err(_) => return,
+        };
+        // Tighter inner sleep so shutdown is observed within ~100ms instead
+        // of waiting a full 2s poll cycle. Aggregate poll cadence is still
+        // ~2s — we just check shutdown more often.
+        let poll_interval = Duration::from_secs(2);
+        let mut next_poll = Instant::now() + poll_interval;
+        loop {
+            if shutdown_w.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            if Instant::now() < next_poll {
+                continue;
+            }
+            next_poll = Instant::now() + poll_interval;
+            let subs_snapshot = match subs_w.lock() {
+                Ok(g) => g.clone(),
+                Err(_) => return,
+            };
+            if subs_snapshot.is_empty() {
+                continue;
+            }
+            let events = match watcher.poll() {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if events.is_empty() {
+                continue;
+            }
+            // Per-URI dedup — emit at most one `updated` per URI per poll,
+            // regardless of how many events arrived for that URI.
+            let mut affected: HashSet<String> = HashSet::new();
+            for ev in &events {
+                if subs_snapshot.contains("wire://inbox/all") {
+                    affected.insert("wire://inbox/all".to_string());
+                }
+                let peer_uri = format!("wire://inbox/{}", ev.peer);
+                if subs_snapshot.contains(&peer_uri) {
+                    affected.insert(peer_uri);
+                }
+            }
+            for uri in affected {
+                let notif = json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/resources/updated",
+                    "params": {"uri": uri}
+                });
+                if tx_w.send(notif.to_string()).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    let stdin = std::io::stdin();
+    let mut reader = BufReader::new(stdin.lock());
     let mut line = String::new();
     loop {
         line.clear();
         let n = reader.read_line(&mut line)?;
         if n == 0 {
-            return Ok(()); // EOF
+            // EOF — signal watcher to exit, drop main tx, wait for both
+            // worker threads. Writer's rx.recv() returns Err once all
+            // senders (main tx + watcher tx_w) drop.
+            shutdown.store(true, Ordering::SeqCst);
+            drop(tx);
+            let _ = watcher_handle.join();
+            let _ = writer_handle.join();
+            return Ok(());
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -74,29 +192,20 @@ pub fn run() -> Result<()> {
         let request: Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
             Err(e) => {
-                write_response(
-                    &mut writer,
-                    &error_response(&Value::Null, -32700, &format!("parse error: {e}")),
-                )?;
+                let err = error_response(&Value::Null, -32700, &format!("parse error: {e}"));
+                let _ = tx.send(err.to_string());
                 continue;
             }
         };
-        let response = handle_request(&request);
+        let response = handle_request(&request, &state);
         // Notifications (no `id`) get no response.
         if response.get("id").is_some() || response.get("error").is_some() {
-            write_response(&mut writer, &response)?;
+            let _ = tx.send(response.to_string());
         }
     }
 }
 
-fn write_response(w: &mut impl Write, response: &Value) -> Result<()> {
-    let body = serde_json::to_string(response)?;
-    writeln!(w, "{body}")?;
-    w.flush()?;
-    Ok(())
-}
-
-fn handle_request(req: &Value) -> Value {
+fn handle_request(req: &Value, state: &McpState) -> Value {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let method = match req.get("method").and_then(Value::as_str) {
         Some(m) => m,
@@ -109,6 +218,12 @@ fn handle_request(req: &Value) -> Value {
         "tools/call" => handle_tools_call(&id, req.get("params").unwrap_or(&Value::Null)),
         "resources/list" => handle_resources_list(&id),
         "resources/read" => handle_resources_read(&id, req.get("params").unwrap_or(&Value::Null)),
+        "resources/subscribe" => {
+            handle_resources_subscribe(&id, req.get("params").unwrap_or(&Value::Null), state)
+        }
+        "resources/unsubscribe" => {
+            handle_resources_unsubscribe(&id, req.get("params").unwrap_or(&Value::Null), state)
+        }
         "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
         other => error_response(&id, -32601, &format!("method not found: {other}")),
     }
@@ -167,6 +282,40 @@ fn handle_resources_list(id: &Value) -> Value {
             "resources": resources
         }
     })
+}
+
+fn handle_resources_subscribe(id: &Value, params: &Value, state: &McpState) -> Value {
+    let uri = match params.get("uri").and_then(Value::as_str) {
+        Some(u) => u.to_string(),
+        None => return error_response(id, -32602, "missing 'uri'"),
+    };
+    // Validate the URI shape — silently accepting bogus URIs would let agents
+    // build up a sub set we'd never fire for. Reject early.
+    let peer_opt = parse_inbox_uri(&uri);
+    if let Some(ref p) = peer_opt {
+        if p.starts_with("__invalid__") {
+            return error_response(
+                id,
+                -32602,
+                "subscribe URI must be wire://inbox/<peer> or wire://inbox/all",
+            );
+        }
+    }
+    if let Ok(mut g) = state.subscribed.lock() {
+        g.insert(uri);
+    }
+    json!({"jsonrpc": "2.0", "id": id, "result": {}})
+}
+
+fn handle_resources_unsubscribe(id: &Value, params: &Value, state: &McpState) -> Value {
+    let uri = match params.get("uri").and_then(Value::as_str) {
+        Some(u) => u.to_string(),
+        None => return error_response(id, -32602, "missing 'uri'"),
+    };
+    if let Ok(mut g) = state.subscribed.lock() {
+        g.remove(&uri);
+    }
+    json!({"jsonrpc": "2.0", "id": id, "result": {}})
 }
 
 fn handle_resources_read(id: &Value, params: &Value) -> Value {
@@ -280,11 +429,11 @@ fn handle_initialize(id: &Value) -> Value {
                 "tools": {"listChanged": false},
                 "resources": {
                     "listChanged": false,
-                    // Subscribe support is v0.2.1 — the current MCP server is a
-                    // synchronous stdin loop, and pushing notifications/resources/updated
-                    // requires a background watcher thread + async stdout writer. Read
-                    // (poll-driven) is shipped now.
-                    "subscribe": false
+                    // Goal 2.1 (v0.2.1): subscribe shipped. A background watcher
+                    // thread polls the inbox every 2s and pushes
+                    // notifications/resources/updated via a writer-thread channel
+                    // for any subscribed URI.
+                    "subscribe": true
                 }
             },
             "serverInfo": {
@@ -923,14 +1072,14 @@ mod tests {
     #[test]
     fn unknown_method_returns_jsonrpc_error() {
         let req = json!({"jsonrpc": "2.0", "id": 1, "method": "nonsense"});
-        let resp = handle_request(&req);
+        let resp = handle_request(&req, &McpState::default());
         assert_eq!(resp["error"]["code"], -32601);
     }
 
     #[test]
     fn initialize_advertises_tools_capability() {
         let req = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
-        let resp = handle_request(&req);
+        let resp = handle_request(&req, &McpState::default());
         assert_eq!(resp["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert!(resp["result"]["capabilities"]["tools"].is_object());
         assert_eq!(resp["result"]["serverInfo"]["name"], SERVER_NAME);
@@ -939,7 +1088,7 @@ mod tests {
     #[test]
     fn tools_list_includes_pairing_and_messaging() {
         let req = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
-        let resp = handle_request(&req);
+        let resp = handle_request(&req, &McpState::default());
         let names: Vec<&str> = resp["result"]["tools"]
             .as_array()
             .unwrap()
@@ -980,7 +1129,7 @@ mod tests {
             "method": "tools/call",
             "params": {"name": "wire_join", "arguments": {}}
         });
-        let resp = handle_request(&req);
+        let resp = handle_request(&req, &McpState::default());
         assert_eq!(resp["result"]["isError"], true);
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(
@@ -997,7 +1146,7 @@ mod tests {
             "method": "tools/call",
             "params": {"name": "wire_pair_confirm", "arguments": {"user_typed_digits": "111111"}}
         });
-        let resp = handle_request(&req);
+        let resp = handle_request(&req, &McpState::default());
         assert_eq!(resp["result"]["isError"], true);
     }
 
@@ -1012,7 +1161,7 @@ mod tests {
                 "arguments": {"session_id": "definitely-not-real", "user_typed_digits": "111111"}
             }
         });
-        let resp = handle_request(&req);
+        let resp = handle_request(&req, &McpState::default());
         assert_eq!(resp["result"]["isError"], true);
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("no such session_id"), "got: {text}");
@@ -1021,15 +1170,15 @@ mod tests {
     #[test]
     fn initialize_advertises_resources_capability() {
         let req = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
-        let resp = handle_request(&req);
+        let resp = handle_request(&req, &McpState::default());
         let caps = &resp["result"]["capabilities"];
         assert!(
             caps["resources"].is_object(),
             "resources capability must be present, got {resp}"
         );
         assert_eq!(
-            caps["resources"]["subscribe"], false,
-            "subscribe is v0.2.1; v0.2 advertises subscribe=false"
+            caps["resources"]["subscribe"], true,
+            "subscribe shipped in v0.2.1"
         );
     }
 
@@ -1041,7 +1190,7 @@ mod tests {
             "method": "resources/read",
             "params": {"uri": "http://example.com/not-a-wire-uri"}
         });
-        let resp = handle_request(&req);
+        let resp = handle_request(&req, &McpState::default());
         assert!(resp.get("error").is_some(), "expected error, got {resp}");
     }
 
@@ -1066,7 +1215,7 @@ mod tests {
     #[test]
     fn ping_returns_empty_result() {
         let req = json!({"jsonrpc": "2.0", "id": 7, "method": "ping"});
-        let resp = handle_request(&req);
+        let resp = handle_request(&req, &McpState::default());
         assert_eq!(resp["id"], 7);
         assert!(resp["result"].is_object());
     }
@@ -1074,7 +1223,7 @@ mod tests {
     #[test]
     fn notification_returns_null_no_reply() {
         let req = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-        let resp = handle_request(&req);
+        let resp = handle_request(&req, &McpState::default());
         assert_eq!(resp, Value::Null);
     }
 }

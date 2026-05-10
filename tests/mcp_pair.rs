@@ -593,6 +593,131 @@ async fn mcp_resources_list_includes_inbox_per_peer_after_pairing() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mcp_subscribe_emits_updated_notification_on_inbox_grow() {
+    // Verifies Goal 2.1: client subscribes to wire://inbox/<peer>, then a
+    // fresh JSONL event landing in that peer's inbox triggers a
+    // notifications/resources/updated message within ~3 poll cycles.
+    let home = fresh_dir("subscribe");
+    let inbox = home.join("state/wire/inbox");
+    std::fs::create_dir_all(&inbox).unwrap();
+
+    let mut mcp = McpProc::spawn(&home);
+    // Init via CLI so the watcher's read_trust succeeds (verified will be
+    // false for our synthetic event — that's fine; updated notifications
+    // are independent of verification).
+    mcp.tool_call(
+        1,
+        "wire_init",
+        json!({"handle": "alice"}),
+        Duration::from_secs(5),
+    )
+    .expect("init");
+
+    // Subscribe to a specific peer URI.
+    let sub_resp = mcp.rpc(
+        2,
+        "resources/subscribe",
+        json!({"uri": "wire://inbox/willard"}),
+        Duration::from_secs(5),
+    );
+    assert!(
+        sub_resp.get("result").is_some(),
+        "subscribe must succeed, got: {sub_resp}"
+    );
+
+    // Write a synthetic event to willard's inbox.
+    let event = json!({
+        "event_id": "evt-001",
+        "from": "did:wire:willard",
+        "to": "did:wire:alice",
+        "type": "decision",
+        "kind": 1,
+        "timestamp": "2026-05-10T12:00:00Z",
+        "body": "subscribe-test event",
+        "sig": "fake"
+    });
+    let path = inbox.join("willard.jsonl");
+    let line = serde_json::to_string(&event).unwrap() + "\n";
+    std::fs::write(&path, line).unwrap();
+
+    // Watcher poll is 2s; allow up to ~6s for the notification to arrive.
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut got_notification = false;
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO);
+        match mcp.out_rx.recv_timeout(remaining) {
+            Ok(line) => {
+                let v: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("method").and_then(Value::as_str)
+                    == Some("notifications/resources/updated")
+                    && v["params"]["uri"] == "wire://inbox/willard"
+                {
+                    got_notification = true;
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(
+        got_notification,
+        "expected notifications/resources/updated for wire://inbox/willard within 6s"
+    );
+
+    // Unsubscribe; subsequent events should NOT generate notifications.
+    let _ = mcp.rpc(
+        3,
+        "resources/unsubscribe",
+        json!({"uri": "wire://inbox/willard"}),
+        Duration::from_secs(5),
+    );
+    // Add a second event.
+    let event2 = json!({
+        "event_id": "evt-002",
+        "from": "did:wire:willard",
+        "to": "did:wire:alice",
+        "type": "claim",
+        "kind": 2,
+        "timestamp": "2026-05-10T12:01:00Z",
+        "body": "after unsubscribe",
+        "sig": "fake"
+    });
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    use std::io::Write;
+    writeln!(f, "{}", serde_json::to_string(&event2).unwrap()).unwrap();
+
+    // Wait ~5s and verify no further updated notifications.
+    let cutoff = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < cutoff {
+        let remaining = cutoff
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO);
+        match mcp.out_rx.recv_timeout(remaining) {
+            Ok(line) => {
+                let v: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("method").and_then(Value::as_str)
+                    == Some("notifications/resources/updated")
+                {
+                    panic!("unexpected notification after unsubscribe: {}", line);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
 #[test]
 fn concurrent_outbox_appends_do_not_corrupt_lines() {
     use wire::config::append_outbox_record;
