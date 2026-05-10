@@ -43,7 +43,7 @@ Strategic thesis: wire wins by living *inside* whichever agent runtime wins. Eac
 
 - [x] **openclaw-channel-wire** — TypeScript plugin for OpenClaw (100k★ self-host personal-agent gateway, 20+ channels). Adds wire as channel #21 — "the channel that doesn't go through Apple/Meta/Telegram." ~200 LOC TS shelling out to `wire send` / `wire tail --json` / `wire peers --json`. Distribution win: instant exposure to OpenClaw user base. **Scaffolded at `~/Source/openclaw-channel-wire/`** (separate repo, MIT, ready for npm publish when wire goes public).
 - [ ] **claude-flow-plugin-wire** — wire as a transport option in claude-flow (48k★, already independently chose Ed25519 + mTLS — primitive validated). Plugin lets claude-flow agents speak wire to non-claude-flow peers. ~250 LOC.
-- [ ] **langgraph-tool-wire** — wire as a tool node in LangChain LangGraph workflows. Agents call `wire_send` / `wire_tail` from within graph state. ~200 LOC Python.
+- [x] **langgraph-tool-wire** — wire as a tool node in LangChain LangGraph workflows. Agents call `wire_send` / `wire_tail` from within graph state. ~200 LOC Python. **Scaffolded at `~/Source/wire-langgraph/`** (separate repo, MIT, ready for PyPI publish when wire goes public). Five agent-safe tools, security boundary preserved.
 - [ ] **crewai-channel-wire** — wire as agent-to-agent channel in CrewAI. Same shape as LangGraph adapter. ~200 LOC Python.
 - [ ] **photon-spectrum-channel-wire** — Spectrum is OSS multi-channel TS SDK (April 2026 launch); add wire as channel option. Pre-empts Spectrum building bilateral A2A natively.
 - [ ] **smol-agents wire transport** — Hugging Face's smol-agents framework. ~150 LOC Python plugin.
