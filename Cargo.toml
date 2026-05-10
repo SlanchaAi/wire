@@ -2,7 +2,7 @@
 name = "wire"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Magic-wormhole for AI agents — bilateral signed-message bus over a mailbox relay"
 license = "AGPL-3.0-or-later AND Apache-2.0 AND MIT"
 readme = "README.md"

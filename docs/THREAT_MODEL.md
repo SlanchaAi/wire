@@ -137,6 +137,49 @@ The integration test `mcp_tools_call_wire_init_is_refused` verifies this and add
 
 **Status:** strong for trust establishment. Once paired, the MCP host can send anything — same as Threat T9. Operators should treat MCP servers as agents (which they are) and not pair with peers they wouldn't authorize a malicious agent to message.
 
+## Threat T13 — relay process compromise leaks to other host workloads
+
+**Threat:** the wire relay process (or any wire process) is exploited via a memory-safety bug in a Rust dependency, an axum/hyper HTTP CVE, or a malicious crate in the supply chain. Attacker now has code execution as the user that owns the wire process. On a shared host running wire alongside other workloads (a Spark box running forge / slancha-api / training pipelines / SSH keys / Anthropic API keys / etc.), this is a *lateral movement* problem distinct from the wire protocol's threat model.
+
+**Memory-safety baseline:**
+- wire is pure Rust. ed25519-dalek, chacha20poly1305, spake2, sha2, hkdf, axum, tokio, hyper, reqwest are all RustCrypto-grade or production-grade with active audit history. **No C in the critical path.**
+- `cargo audit` is part of the build pipeline (CI YAML + recommended pre-release check). v0.1.0 audited clean as of 2026-05-10 after patching `time` 0.3.45 → 0.3.47 (RUSTSEC-2026-0009 stack-exhaustion DoS).
+- Worst-realistic case: a panic in axum or tokio request handling crashes the relay process. systemd `Restart=on-failure` brings it back. A panic does NOT escalate to RCE in safe Rust.
+
+**Lateral-movement mitigations available today:**
+- **systemd `NoNewPrivileges=true` + `PrivateTmp=true`** — applied to `wire-public-relay.service` and `wire-public-landing.service` on the test deployment. Process cannot acquire new privileges via setuid binaries; tmp files are isolated.
+- **Resource caps:** `MemoryMax=1G`, `CPUQuota=50%`, `TasksMax=200` — bound damage from runaway / DoS / abusive bearer flooding (T11). A wire process can't OOM-kill the host or starve forge.
+- **Listen-on-loopback:** relay binds `127.0.0.1:8770`; only Cloudflare Tunnel reaches it from outside. No direct internet exposure of the Rust process.
+- **Operator runs as non-root user:** wire uses user-mode systemd. Process does not have CAP_SYS_ADMIN, cannot mount filesystems, cannot reboot the host.
+
+**Mitigations available but not applied to user-mode systemd on Spark:**
+The example unit at `examples/systemd/wire-relay-server.service` includes `ProtectSystem=strict`, `ProtectHome=read-only`, `ProtectKernelTunables=true`, `LockPersonality=true`, `RestrictNamespaces=true`, `SystemCallFilter=@system-service`, etc. These directives require root-mode systemd to apply capability-bounding sets and fail with status `218/CAPABILITIES` in user mode. **Operators running wire as a system-mode unit (`/etc/systemd/system/`) get the full hardening set; user-mode deployments get the minimal subset.** The example file documents both.
+
+**What an attacker WOULD have, even with full host compromise:**
+- Read access to `~/.config/wire/private.key` (Ed25519 seed) → can sign as the operator's DID → game over for that DID, but recoverable by `wire init` with a new handle and re-pairing
+- Read access to `~/.config/wire/relay.json` (slot tokens) → can read operator's mailbox + forge events as that operator → mitigated by `wire rotate-slot` (T11)
+- Read access to anything else under `~/.config/` and `~/.local/state/` that's owned by the same user — INCLUDING other workloads' state if they share the user account
+  - Recommendation: run wire as a dedicated service user, not as the operator's daily-driver account. v0.2 release notes will document this; for v0.1 test deployment on Spark we accept the shared-`admin` posture.
+
+**What an attacker WOULD NOT have:**
+- Root on the host (no `sudo` access; `NoNewPrivileges` blocks setuid escalation)
+- Access to other users' homes (`ProtectHome=read-only` would block, but not currently applied in user mode — operator's other workloads under `/home/admin/` are technically reachable; see "shared user account" caveat above)
+- Direct kernel tampering (would need CAP_SYS_ADMIN; wire never has this)
+- Permanence beyond process lifetime (no persistence beyond what the operator's user can already write — restart from clean source recovers)
+
+**Supply chain:**
+- 294 transitive Rust dependencies (per `cargo audit` output)
+- All locked via `Cargo.lock` checked into the repo — reproducible builds
+- `--locked` flag should be passed to `cargo build` / `cargo install` in CI to enforce
+- Future hardening: sigstore-rooted release artifact attestation (BACKLOG)
+
+**Operational hygiene:**
+- `cargo audit` should run on every CI build (`.github/workflows/ci.yml` covers this implicitly via Swatinem cache; explicit `cargo audit` step is a v0.2 ask)
+- Subscribe to RustSec advisories for the dep tree
+- Keep deps updated; `cargo update` regularly + retest
+
+**Status:** **principled mitigations in place; full system-mode hardening available but unused on Spark's user-mode test deployment.** Operators with stronger isolation needs (multi-tenant, regulated, etc.) should: (1) run wire as a dedicated service user, (2) use system-mode systemd with the full hardening directive set, (3) optionally run wire inside a container or VM for additional isolation.
+
 ## Out-of-scope threats
 
 - **Quantum adversaries** — Ed25519 is not post-quantum. v0.2+ may add hybrid signatures.
