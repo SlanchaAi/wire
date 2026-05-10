@@ -348,3 +348,38 @@ fn handle_validation_rejects_special_chars() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("ASCII alphanumeric"), "stderr: {stderr}");
 }
+
+#[test]
+fn status_before_init_says_not_initialized() {
+    let home = fresh_home();
+    let out = run(&home, &["status"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("not initialized"), "stdout: {stdout}");
+}
+
+#[test]
+fn status_after_init_shows_did_and_zero_peers() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul"]);
+    let out = run(&home, &["status", "--json"]);
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(parsed["initialized"], true);
+    assert_eq!(parsed["did"], "did:wire:paul");
+    assert_eq!(parsed["peers"].as_array().unwrap().len(), 0);
+    assert_eq!(parsed["self_relay"], serde_json::Value::Null);
+    assert_eq!(parsed["outbox"]["events"], 0);
+}
+
+#[test]
+fn status_after_send_shows_outbox_depth() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["send", "willard", "decision", "hello"]);
+    let _ = run(&home, &["send", "willard", "decision", "world"]);
+    let out = run(&home, &["status", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(parsed["outbox"]["files"], 1);
+    assert_eq!(parsed["outbox"]["events"], 2);
+}

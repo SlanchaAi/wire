@@ -44,6 +44,75 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn daemon_once_drives_full_sync_after_pairing() {
+    let relay_dir = fresh_dir("relay-daemon");
+    let relay = wire::relay_server::Relay::new(relay_dir).await.unwrap();
+    let app = relay.router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let relay_url = format!("http://{addr}");
+
+    let paul = fresh_dir("paul-daemon");
+    let willard = fresh_dir("willard-daemon");
+    assert!(wire(&paul, &["init", "paul"]).status.success());
+    assert!(wire(&willard, &["init", "willard"]).status.success());
+
+    // Pair
+    let mut host = std::process::Command::new(wire_bin())
+        .args(["pair-host", "--relay", &relay_url, "--yes", "--timeout", "30"])
+        .env("WIRE_HOME", &paul)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr_pipe = host.stderr.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader};
+        let reader = BufReader::new(stderr_pipe);
+        let mut found = false;
+        for line in reader.lines().map_while(Result::ok) {
+            let trimmed = line.trim();
+            if !found && trimmed.len() == 9 && trimmed.chars().nth(2) == Some('-') {
+                tx.send(trimmed.to_string()).ok();
+                found = true;
+            }
+        }
+    });
+    let code = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let join_handle = std::thread::spawn({
+        let willard = willard.clone();
+        let relay_url = relay_url.clone();
+        move || wire(&willard, &["pair-join", &code, "--relay", &relay_url, "--yes", "--timeout", "30"])
+    });
+    let join_out = join_handle.join().unwrap();
+    assert!(join_out.status.success());
+    host.wait().unwrap();
+
+    // Send + run daemon --once on each side
+    assert!(wire(&paul, &["send", "willard", "decision", "via daemon"]).status.success());
+    let paul_daemon = wire(&paul, &["daemon", "--once", "--json"]);
+    assert!(paul_daemon.status.success());
+    let willard_daemon = wire(&willard, &["daemon", "--once", "--json"]);
+    assert!(willard_daemon.status.success());
+
+    let pj: serde_json::Value = serde_json::from_slice(&paul_daemon.stdout).unwrap();
+    assert_eq!(pj["push"]["pushed"].as_array().unwrap().len(), 1);
+    let wj: serde_json::Value = serde_json::from_slice(&willard_daemon.stdout).unwrap();
+    assert_eq!(wj["pull"]["written"].as_array().unwrap().len(), 1);
+    assert_eq!(wj["pull"]["rejected"].as_array().unwrap().len(), 0);
+
+    // Confirm willard's tail sees the verified event
+    let tail = wire(&willard, &["tail", "paul", "--json"]);
+    let event: serde_json::Value =
+        serde_json::from_str(String::from_utf8(tail.stdout).unwrap().lines().next().unwrap()).unwrap();
+    assert_eq!(event["body"], "via daemon");
+    assert_eq!(event["verified"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn paul_pair_hosts_willard_joins_then_send_round_trips() {
     // ---- 1. boot relay ----
     let relay_dir = fresh_dir("relay");
