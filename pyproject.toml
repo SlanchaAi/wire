@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wire-cli"
+version = "0.1.0"
+description = "Magic-wormhole for AI agents — peer-to-peer signed-message bus, no SaaS, no IdP."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "wire maintainers"},
+]
+keywords = ["agent", "p2p", "ed25519", "signed", "wormhole", "self-host"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications",
+    "Topic :: Security :: Cryptography",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = [
+    "PyNaCl>=1.5",
+    "spake2>=0.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+]
+relay = [
+    # relay server has no extra deps in v0.1; here for clarity
+]
+binary = [
+    "pyinstaller>=6",
+]
+
+[project.scripts]
+wire = "wire.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/laulpogan/wire"
+Documentation = "https://github.com/laulpogan/wire/blob/main/docs/PROTOCOL.md"
+Issues = "https://github.com/laulpogan/wire/issues"
+
+[tool.setuptools.packages.find]
+include = ["wire*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["wire"]
+omit = ["tests/*", "*/__init__.py"]

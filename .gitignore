@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+build/
+dist/
+.eggs/
+*.egg
+
+# Test + coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+
+# PyInstaller
+*.spec.bak
+build/
+dist/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local state
+*.local.md
+.claude/
+
+# Secrets / keys (defensive — operator keys live in $HOME/.config/wire/, never the repo)
+*.key
+*.pub.json
+*.token
+
+# Operator-private artifacts
+private/
