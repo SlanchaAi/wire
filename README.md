@@ -92,6 +92,43 @@ The short version: no SaaS dependency, no OAuth, no central trust authority, no 
 
 ---
 
+## Sending files
+
+v0.1 events have a 256 KiB body cap on the relay. Wire is a coordination layer, not a file transfer layer — pass signed pointers, not bulk bytes:
+
+```bash
+# Sender side — upload to whatever storage you trust:
+#   S3, Backblaze B2, Cloudflare R2, IPFS, raspi+nginx, friend's web server, Discord/Drive link.
+$ HASH=$(sha256sum bigfile.tar.zst | awk '{print $1}')
+$ aws s3 cp bigfile.tar.zst s3://my-bucket/share/abc123.tar.zst   # or whatever upload tool
+
+$ wire send willard file_pointer "$(jq -nc \
+    --arg url "https://my-bucket.s3.amazonaws.com/share/abc123.tar.zst" \
+    --arg sha256 "$HASH" \
+    --arg size 524288000 \
+    --arg name bigfile.tar.zst \
+    '{url:$url, sha256:$sha256, size:($size|tonumber), name:$name}')"
+```
+
+```bash
+# Recipient side
+$ wire tail willard
+[2026-05-10T... willard kind=1 file_pointer]
+  {"url":"https://...", "sha256":"a3c9...", "size": 524288000, "name":"bigfile.tar.zst"}
+  sig verified ✓
+
+$ curl -fsSL "<url-from-event>" -o bigfile.tar.zst
+$ echo "<sha256-from-event>  bigfile.tar.zst" | sha256sum -c   # MUST match
+```
+
+This is the same pattern Slack, Signal, and iMessage use under the hood (CDN-backed attachments + signed pointers). Wire just doesn't bundle the CDN piece in v0.1.
+
+**Why we punted:** wire is coordination infrastructure. Bundling file transfer = scope creep. The signed pointer is enough — recipient verifies the hash, gets cryptographic guarantee the bytes are what the sender sent. Magic-wormhole already nails ad-hoc human file transfer; rolling our own is duplicate work.
+
+**v0.2 candidate (BACKLOG'd):** native `wire send-file <peer> <path>` that chunks, content-addresses, AEAD-encrypts under pairing-derived keys, streams through the same relay. ~400 LOC. Reuses pairing trust so no second handshake. Lands when real demand surfaces.
+
+---
+
 ## Agent integration (read this if you're an AI agent)
 
 `wire` is built to be picked up natively by any AI agent — Claude, GPT-4, local Llama, sandboxed evals — without bespoke glue. Three discovery paths:
