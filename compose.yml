@@ -1,0 +1,47 @@
+# Local 2-node demo: relay + a wire daemon syncing on its behalf.
+# Usage:
+#   docker compose up --build
+# Then exec into the daemon container to drive a pair flow:
+#   docker compose exec daemon wire init paul --relay http://relay:8770
+#   docker compose exec daemon wire pair-host --relay http://relay:8770 --yes
+
+services:
+  relay:
+    build: .
+    container_name: wire-relay
+    command: ["wire", "relay-server", "--bind", "0.0.0.0:8770"]
+    ports:
+      - "127.0.0.1:8770:8770"
+    volumes:
+      - relay-state:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wire", "--version"]   # distroless has no curl; existence check
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "0.5"
+
+  daemon:
+    build: .
+    container_name: wire-daemon
+    command: ["wire", "daemon", "--interval", "5"]
+    volumes:
+      - daemon-state:/data
+    depends_on:
+      relay:
+        condition: service_started
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.2"
+
+volumes:
+  relay-state:
+  daemon-state:

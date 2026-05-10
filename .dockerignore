@@ -1,0 +1,20 @@
+target/
+.git/
+.github/
+.cargo/
+*.log
+.DS_Store
+.idea/
+.vscode/
+node_modules/
+__pycache__/
+*.pyc
+# State that should never go in an image
+config/
+state/
+relay-state/
+.claude/
+SESSION_LOG_*.md
+DEPLOY_TEST.md
+PENTEST.md
+scripts/pentest.sh
