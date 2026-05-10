@@ -260,6 +260,16 @@ pub enum Command {
         /// Don't actually spawn — print one JSONL line per event for smoke-testing.
         #[arg(long)]
         dry_run: bool,
+        /// Hard rate-limit: max events handler is fired for per peer per minute.
+        /// 0 = unlimited. Default 6 — covers normal conversational tempo, kills
+        /// LLM-vs-LLM feedback loops (which fire 10+/sec).
+        #[arg(long, default_value_t = 6)]
+        max_per_minute: u32,
+        /// Anti-loop chain depth. Track event_ids this reactor emitted; if an
+        /// incoming event body contains `(re:X)` where X is in our emitted log,
+        /// skip — that's a reply-to-our-reply, depth ≥ 2. Disable with 0.
+        #[arg(long, default_value_t = 1)]
+        max_chain_depth: u32,
     },
     /// Watch the inbox for new verified events and fire an OS notification per
     /// event. Long-running; background under systemd / `&` / tmux. Cursor is
@@ -348,6 +358,8 @@ pub fn run() -> Result<()> {
             interval,
             once,
             dry_run,
+            max_per_minute,
+            max_chain_depth,
         } => cmd_reactor(
             &on_event,
             peer.as_deref(),
@@ -356,6 +368,8 @@ pub fn run() -> Result<()> {
             interval,
             once,
             dry_run,
+            max_per_minute,
+            max_chain_depth,
         ),
         Command::Notify {
             interval,
@@ -1844,12 +1858,42 @@ fn cmd_reactor(
     interval_secs: u64,
     once: bool,
     dry_run: bool,
+    max_per_minute: u32,
+    max_chain_depth: u32,
 ) -> Result<()> {
     use crate::inbox_watch::{InboxEvent, InboxWatcher};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::io::Write;
     use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     let cursor_path = config::state_dir()?.join("reactor.cursor");
+    // event_ids THIS reactor's handler has caused to be sent (via wire send).
+    // Used by chain-depth check — an incoming `(re:X)` where X is in this set
+    // means peer is replying to something we just said → don't reply back.
+    //
+    // Persisted across restarts so a reactor that crashes mid-conversation
+    // doesn't re-enter the loop. Reads on startup, writes after each
+    // outbox-grow detection. Capped at 500 entries (LRU-ish — old entries
+    // dropped from front of file).
+    let emitted_path = config::state_dir()?.join("reactor-emitted.log");
+    let mut emitted_ids: HashSet<String> = HashSet::new();
+    if emitted_path.exists()
+        && let Ok(body) = std::fs::read_to_string(&emitted_path)
+    {
+        for line in body.lines() {
+            let t = line.trim();
+            if !t.is_empty() {
+                emitted_ids.insert(t.to_string());
+            }
+        }
+    }
+    // Outbox file paths the reactor watches for new sent-event_ids.
+    let outbox_dir = config::outbox_dir()?;
+    // (peer → file size we've already scanned). Lets us notice new outbox
+    // appends without re-reading the whole file each sweep.
+    let mut outbox_cursors: HashMap<String, u64> = HashMap::new();
+
     let mut watcher = InboxWatcher::from_cursor_file(&cursor_path)?;
 
     let kind_num: Option<u32> = match kind_filter {
@@ -1857,28 +1901,79 @@ fn cmd_reactor(
         None => None,
     };
 
-    let dispatch = |ev: &InboxEvent| -> Result<()> {
+    // Per-peer sliding window of dispatch instants for rate-limit check.
+    let mut peer_dispatch_log: HashMap<String, VecDeque<Instant>> = HashMap::new();
+
+    let dispatch = |ev: &InboxEvent,
+                    peer_dispatch_log: &mut HashMap<String, VecDeque<Instant>>,
+                    emitted_ids: &HashSet<String>|
+     -> Result<bool> {
         if let Some(p) = peer_filter
             && ev.peer != p
         {
-            return Ok(());
+            return Ok(false);
         }
         if verified_only && !ev.verified {
-            return Ok(());
+            return Ok(false);
         }
         if let Some(want) = kind_num {
             let ev_kind = ev.raw.get("kind").and_then(Value::as_u64).map(|n| n as u32);
             if ev_kind != Some(want) {
-                return Ok(());
+                return Ok(false);
             }
         }
-        if dry_run {
-            println!("{}", serde_json::to_string(&ev.raw)?);
-            return Ok(());
+
+        // Chain-depth check: if the body contains `(re:<event_id>)` and that
+        // event_id is in our emitted set, this is a reply to one of our
+        // replies → loop suspected, skip.
+        if max_chain_depth > 0 {
+            let body_str = match &ev.raw["body"] {
+                Value::String(s) => s.clone(),
+                other => serde_json::to_string(other).unwrap_or_default(),
+            };
+            if let Some(referenced) = parse_re_marker(&body_str) {
+                // Handler scripts usually truncate event_id (e.g. ${ID:0:12}).
+                // Match emitted set by prefix to catch both full + truncated.
+                let matched = emitted_ids.contains(&referenced)
+                    || emitted_ids.iter().any(|full| full.starts_with(&referenced));
+                if matched {
+                    eprintln!(
+                        "wire reactor: skip {} from {} — chain-depth (reply to our re:{})",
+                        ev.event_id, ev.peer, referenced
+                    );
+                    return Ok(false);
+                }
+            }
         }
 
-        // Spawn shell command. Event JSON on stdin; reactor handler may write
-        // anything to stdout/stderr (passed through to operator's terminal).
+        // Per-peer rate-limit check (sliding 60s window).
+        if max_per_minute > 0 {
+            let now = Instant::now();
+            let win = peer_dispatch_log
+                .entry(ev.peer.clone())
+                .or_insert_with(VecDeque::new);
+            while let Some(&front) = win.front() {
+                if now.duration_since(front) > Duration::from_secs(60) {
+                    win.pop_front();
+                } else {
+                    break;
+                }
+            }
+            if win.len() as u32 >= max_per_minute {
+                eprintln!(
+                    "wire reactor: skip {} from {} — rate-limit ({}/min reached)",
+                    ev.event_id, ev.peer, max_per_minute
+                );
+                return Ok(false);
+            }
+            win.push_back(now);
+        }
+
+        if dry_run {
+            println!("{}", serde_json::to_string(&ev.raw)?);
+            return Ok(true);
+        }
+
         let mut child = Command::new("sh")
             .arg("-c")
             .arg(on_event)
@@ -1892,26 +1987,80 @@ fn cmd_reactor(
             .with_context(|| format!("spawning reactor handler: {on_event}"))?;
         if let Some(mut stdin) = child.stdin.take() {
             let body = serde_json::to_vec(&ev.raw)?;
-            // Best-effort write — handler may close stdin early.
             let _ = stdin.write_all(&body);
             let _ = stdin.write_all(b"\n");
         }
-        // Don't block on child exit by default — handler may be long-running
-        // (e.g. claude -p). Detach. Operator gets to see its stdout/stderr.
-        // If you want serial dispatch, wait here; but parallel is the default
-        // because LLM-backed handlers take seconds and serial would starve.
         std::mem::drop(child);
-        Ok(())
+        Ok(true)
     };
 
-    let sweep = |watcher: &mut InboxWatcher| -> Result<usize> {
+    // Scan outbox files for newly-appended event_ids and add to emitted set.
+    let scan_outbox = |emitted_ids: &mut HashSet<String>,
+                       outbox_cursors: &mut HashMap<String, u64>|
+     -> Result<usize> {
+        if !outbox_dir.exists() {
+            return Ok(0);
+        }
+        let mut added = 0;
+        let mut new_ids: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&outbox_dir)?.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let peer = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let cur_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let start = *outbox_cursors.get(&peer).unwrap_or(&0);
+            if cur_len <= start {
+                outbox_cursors.insert(peer, start);
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).unwrap_or_default();
+            let tail = &body[start as usize..];
+            for line in tail.lines() {
+                if let Ok(v) = serde_json::from_str::<Value>(line)
+                    && let Some(eid) = v.get("event_id").and_then(Value::as_str)
+                    && emitted_ids.insert(eid.to_string())
+                {
+                    new_ids.push(eid.to_string());
+                    added += 1;
+                }
+            }
+            outbox_cursors.insert(peer, cur_len);
+        }
+        if !new_ids.is_empty() {
+            // Append new ids to disk, cap on-disk file at 500 entries.
+            let mut all: Vec<String> = emitted_ids.iter().cloned().collect();
+            if all.len() > 500 {
+                all.sort();
+                let drop_n = all.len() - 500;
+                let dropped: HashSet<String> = all.iter().take(drop_n).cloned().collect();
+                emitted_ids.retain(|x| !dropped.contains(x));
+                all = emitted_ids.iter().cloned().collect();
+            }
+            let _ = std::fs::write(&emitted_path, all.join("\n") + "\n");
+        }
+        Ok(added)
+    };
+
+    let sweep = |watcher: &mut InboxWatcher,
+                 emitted_ids: &mut HashSet<String>,
+                 outbox_cursors: &mut HashMap<String, u64>,
+                 peer_dispatch_log: &mut HashMap<String, VecDeque<Instant>>|
+     -> Result<usize> {
+        // Pick up any event_ids we sent since last sweep.
+        let _ = scan_outbox(emitted_ids, outbox_cursors);
+
         let events = watcher.poll()?;
         let mut fired = 0usize;
         for ev in &events {
-            if let Err(e) = dispatch(ev) {
-                eprintln!("wire reactor: handler error for {}: {e}", ev.event_id);
-            } else {
-                fired += 1;
+            match dispatch(ev, peer_dispatch_log, emitted_ids) {
+                Ok(true) => fired += 1,
+                Ok(false) => {}
+                Err(e) => eprintln!("wire reactor: handler error for {}: {e}", ev.event_id),
             }
         }
         watcher.save_cursors(&cursor_path)?;
@@ -1919,16 +2068,40 @@ fn cmd_reactor(
     };
 
     if once {
-        sweep(&mut watcher)?;
+        sweep(
+            &mut watcher,
+            &mut emitted_ids,
+            &mut outbox_cursors,
+            &mut peer_dispatch_log,
+        )?;
         return Ok(());
     }
     let interval = std::time::Duration::from_secs(interval_secs.max(1));
     loop {
-        if let Err(e) = sweep(&mut watcher) {
+        if let Err(e) = sweep(
+            &mut watcher,
+            &mut emitted_ids,
+            &mut outbox_cursors,
+            &mut peer_dispatch_log,
+        ) {
             eprintln!("wire reactor: sweep error: {e}");
         }
         std::thread::sleep(interval);
     }
+}
+
+/// Parse `(re:<event_id>)` marker out of an event body. Returns the
+/// referenced event_id (full or prefix) if present. Tolerates spaces.
+fn parse_re_marker(body: &str) -> Option<String> {
+    let needle = "(re:";
+    let i = body.find(needle)?;
+    let rest = &body[i + needle.len()..];
+    let end = rest.find(')')?;
+    let id = rest[..end].trim().to_string();
+    if id.is_empty() {
+        return None;
+    }
+    Some(id)
 }
 
 // ---------- notify (Goal 2) ----------
