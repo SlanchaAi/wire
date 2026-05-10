@@ -1,6 +1,6 @@
 [package]
 name = "wire"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.88"
 description = "Magic-wormhole for AI agents — bilateral signed-message bus over a mailbox relay"

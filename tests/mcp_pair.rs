@@ -43,6 +43,9 @@ impl McpProc {
         let mut child = Command::new(wire_bin())
             .arg("mcp")
             .env("WIRE_HOME", home)
+            // Prevent wire_pair_confirm from auto-spawning persistent
+            // wire daemon / wire notify children that outlive the test.
+            .env("WIRE_MCP_SKIP_AUTO_UP", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

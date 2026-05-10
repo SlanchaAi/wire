@@ -51,14 +51,19 @@ use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::{Arc, Mutex};
 
-/// Shared MCP-session state. Today: subscribed resource URIs only. Future
-/// (per-session inbox cursors, etc.) goes here.
+/// Shared MCP-session state. Today: subscribed resource URIs + a writer
+/// channel for unsolicited notifications (push). Future per-session cursors,
+/// etc. go here.
 #[derive(Clone, Default)]
 pub struct McpState {
     /// Resource URIs the client has subscribed to. Wildcard support is
     /// intentionally NOT done — clients subscribe to specific URIs and
     /// receive `notifications/resources/updated` only for those URIs.
     pub subscribed: Arc<Mutex<HashSet<String>>>,
+    /// Writer-channel sender for emitting unsolicited notifications
+    /// (notifications/resources/list_changed, etc.). Populated by `run()`
+    /// before tools are dispatched; None in unit tests.
+    pub notif_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<String>>>>,
 }
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -89,6 +94,12 @@ pub fn run() -> Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
 
     let (tx, rx) = mpsc::channel::<String>();
+
+    // Expose the tx clone via state so tool handlers can push unsolicited
+    // notifications (notifications/resources/list_changed after a pair pin).
+    if let Ok(mut g) = state.notif_tx.lock() {
+        *g = Some(tx.clone());
+    }
 
     // Writer thread — single owner of stdout. Exits when all senders drop.
     let writer_handle = std::thread::spawn(move || {
@@ -176,10 +187,13 @@ pub fn run() -> Result<()> {
         line.clear();
         let n = reader.read_line(&mut line)?;
         if n == 0 {
-            // EOF — signal watcher to exit, drop main tx, wait for both
-            // worker threads. Writer's rx.recv() returns Err once all
-            // senders (main tx + watcher tx_w) drop.
+            // EOF — signal watcher to exit; clear the notif_tx Sender clone
+            // that state holds (otherwise writer's rx.recv() never sees
+            // all-senders-dropped); drop main tx; wait for worker threads.
             shutdown.store(true, Ordering::SeqCst);
+            if let Ok(mut g) = state.notif_tx.lock() {
+                *g = None;
+            }
             drop(tx);
             let _ = watcher_handle.join();
             let _ = writer_handle.join();
@@ -215,7 +229,7 @@ fn handle_request(req: &Value, state: &McpState) -> Value {
         "initialize" => handle_initialize(&id),
         "notifications/initialized" => Value::Null, // notification — no reply
         "tools/list" => handle_tools_list(&id),
-        "tools/call" => handle_tools_call(&id, req.get("params").unwrap_or(&Value::Null)),
+        "tools/call" => handle_tools_call(&id, req.get("params").unwrap_or(&Value::Null), state),
         "resources/list" => handle_resources_list(&id),
         "resources/read" => handle_resources_read(&id, req.get("params").unwrap_or(&Value::Null)),
         "resources/subscribe" => {
@@ -518,23 +532,25 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "wire_pair_initiate",
-            "description": "Open a host-side pair-slot. Returns a code phrase the agent shows to the user out-of-band (voice, side text channel) for the peer to type into their wire_pair_join. Blocks up to max_wait_secs (default 8) for the peer to join, returning SAS digits inline if so; otherwise returns waiting-state and the agent should poll wire_pair_check. SUPPORTS multiple concurrent sessions (each call returns a distinct session_id).",
+            "description": "Open a host-side pair-slot. AUTO-INITS the local identity if `handle` is provided and not yet inited (idempotent). Returns a code phrase the agent shows to the user out-of-band (voice / separate text channel) for the peer to paste into their wire_pair_join. Blocks up to max_wait_secs (default 30) for the peer to join, returning SAS inline if so — wire_pair_check is only needed when the host's 30s window closes before the peer joins. Multiple concurrent sessions supported (each call returns a distinct session_id).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "handle": {"type": "string", "description": "Auto-init this handle if local identity not yet created. Skipped if already inited."},
                     "relay_url": {"type": "string", "description": "Relay base URL. Defaults to the relay this agent's identity is already bound to."},
-                    "max_wait_secs": {"type": "integer", "minimum": 0, "maximum": 60, "default": 8, "description": "How long to block waiting for peer to join before returning waiting-state. 0 = return immediately with code phrase only."}
+                    "max_wait_secs": {"type": "integer", "minimum": 0, "maximum": 60, "default": 30, "description": "How long to block waiting for peer to join before returning waiting-state. 0 = return immediately with code phrase only."}
                 },
                 "required": []
             }
         }),
         json!({
             "name": "wire_pair_join",
-            "description": "Accept a code phrase from the host (typed by the user). Returns SAS digits inline once SPAKE2 completes (typically <1s since host is already on the line). The user MUST then type the SAS digits back into chat — pass them to wire_pair_confirm with the returned session_id.",
+            "description": "Accept a code phrase from the host (the user types it in after the host shares it out-of-band). AUTO-INITS the local identity if `handle` is provided and not yet inited (idempotent). Returns SAS digits inline once SPAKE2 completes (typically <1s — host is already waiting). The user MUST then type the 6 SAS digits back into chat — pass them to wire_pair_confirm with the returned session_id.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "code_phrase": {"type": "string", "description": "Code phrase from the host (e.g. '73-2QXC4P')."},
+                    "handle": {"type": "string", "description": "Auto-init this handle if local identity not yet created. Skipped if already inited."},
                     "relay_url": {"type": "string", "description": "Relay base URL. Defaults to the relay this agent's identity is already bound to."},
                     "max_wait_secs": {"type": "integer", "minimum": 0, "maximum": 60, "default": 30, "description": "How long to block waiting for SPAKE2 exchange to complete."}
                 },
@@ -543,19 +559,19 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "wire_pair_check",
-            "description": "Poll a pending pair session. Returns {state: 'waiting'|'sas_ready'|'finalized'|'aborted', sas?, peer_handle?}. Used after wire_pair_initiate returns waiting-state.",
+            "description": "Poll a pending pair session. Returns {state: 'waiting'|'sas_ready'|'finalized'|'aborted', sas?, peer_handle?}. Rarely needed — wire_pair_initiate now blocks 30s by default, covering most cases.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "session_id": {"type": "string"},
-                    "max_wait_secs": {"type": "integer", "minimum": 0, "maximum": 60, "default": 4}
+                    "max_wait_secs": {"type": "integer", "minimum": 0, "maximum": 60, "default": 8}
                 },
                 "required": ["session_id"]
             }
         }),
         json!({
             "name": "wire_pair_confirm",
-            "description": "Verify the user typed the correct SAS digits, then finalize pairing (AEAD bootstrap exchange + pin peer). The 6-digit SAS comes from the user via the agent's chat — the user reads digits from their peer (out-of-band side channel), then types them back into chat. Mismatch ABORTS this session permanently — start a fresh wire_pair_initiate. Accepts dashes/spaces ('384-217' or '384217' or '384 217').",
+            "description": "Verify the user typed the correct SAS digits, then finalize pairing (AEAD bootstrap exchange + pin peer). AUTO-SUBSCRIBES to wire://inbox/<peer> so the agent gets push notifications/resources/updated as new events arrive. The 6-digit SAS comes from the user via the agent's chat — the user reads digits from their peer (out-of-band side channel), then types them back into chat. Mismatch ABORTS this session permanently — start a fresh wire_pair_initiate. Accepts dashes/spaces ('384-217' or '384217' or '384 217').",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -568,7 +584,7 @@ fn tool_defs() -> Vec<Value> {
     ]
 }
 
-fn handle_tools_call(id: &Value, params: &Value) -> Value {
+fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
     let name = match params.get("name").and_then(Value::as_str) {
         Some(n) => n,
         None => return error_response(id, -32602, "missing tool name"),
@@ -588,7 +604,7 @@ fn handle_tools_call(id: &Value, params: &Value) -> Value {
         "wire_pair_initiate" => tool_pair_initiate(&args),
         "wire_pair_join" => tool_pair_join(&args),
         "wire_pair_check" => tool_pair_check(&args),
-        "wire_pair_confirm" => tool_pair_confirm(&args),
+        "wire_pair_confirm" => tool_pair_confirm(&args, state),
         // Legacy alias kept for older agent prompts that reference `wire_join`.
         // Surfaces the operator-friendly error pointing to wire_pair_join.
         "wire_join" => Err(
@@ -853,17 +869,39 @@ fn resolve_relay_url(args: &Value) -> Result<String, String> {
         .ok_or_else(|| "no relay_url provided and no relay bound (call wire_init with relay_url, or pass relay_url here)".into())
 }
 
+/// If `handle` is provided and identity isn't yet initialized, call
+/// `init_self_idempotent` so a single MCP call can do both. If handle is
+/// missing and not initialized, surface a clear error pointing the agent at
+/// wire_init. If already initialized under a different handle, the
+/// idempotent init errors clearly (same as direct wire_init).
+fn auto_init_if_needed(args: &Value) -> Result<(), String> {
+    let initialized = crate::config::is_initialized().map_err(|e| e.to_string())?;
+    if initialized {
+        return Ok(());
+    }
+    let handle = args.get("handle").and_then(Value::as_str).ok_or(
+        "not initialized — pass `handle` to auto-init, or call wire_init explicitly first",
+    )?;
+    let relay = args.get("relay_url").and_then(Value::as_str);
+    crate::pair_session::init_self_idempotent(handle, None, relay)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 fn tool_pair_initiate(args: &Value) -> Result<Value, String> {
     use crate::pair_session::{
         pair_session_open, pair_session_wait_for_sas, store_insert, store_sweep_expired,
     };
 
     store_sweep_expired();
+    // Auto-init if `handle` arg provided and not yet inited (idempotent).
+    auto_init_if_needed(args)?;
+
     let relay_url = resolve_relay_url(args)?;
     let max_wait = args
         .get("max_wait_secs")
         .and_then(Value::as_u64)
-        .unwrap_or(8)
+        .unwrap_or(30)
         .min(60);
 
     let mut s = pair_session_open("host", &relay_url, None).map_err(|e| e.to_string())?;
@@ -909,6 +947,8 @@ fn tool_pair_join(args: &Value) -> Result<Value, String> {
     };
 
     store_sweep_expired();
+    auto_init_if_needed(args)?;
+
     let code = args
         .get("code_phrase")
         .and_then(Value::as_str)
@@ -960,7 +1000,7 @@ fn tool_pair_check(args: &Value) -> Result<Value, String> {
     let max_wait = args
         .get("max_wait_secs")
         .and_then(Value::as_u64)
-        .unwrap_or(4)
+        .unwrap_or(8)
         .min(60);
 
     let arc = store_get(session_id)
@@ -1000,7 +1040,7 @@ fn tool_pair_check(args: &Value) -> Result<Value, String> {
     })
 }
 
-fn tool_pair_confirm(args: &Value) -> Result<Value, String> {
+fn tool_pair_confirm(args: &Value, state: &McpState) -> Result<Value, String> {
     use crate::pair_session::{
         pair_session_confirm_sas, pair_session_finalize, store_get, store_remove,
     };
@@ -1018,8 +1058,6 @@ fn tool_pair_confirm(args: &Value) -> Result<Value, String> {
 
     let arc = store_get(session_id).ok_or_else(|| format!("no such session_id: {session_id}"))?;
 
-    // Confirm phase — borrow the guard, capture abort flag, release before
-    // touching the store to avoid double-locking the store mutex on abort.
     let confirm_err = {
         let mut s = arc.lock().map_err(|e| e.to_string())?;
         match pair_session_confirm_sas(&mut s, typed) {
@@ -1034,12 +1072,64 @@ fn tool_pair_confirm(args: &Value) -> Result<Value, String> {
         return Err(msg);
     }
 
-    // Finalize phase — re-acquire the guard for the bootstrap exchange.
-    let result = {
+    let mut result = {
         let mut s = arc.lock().map_err(|e| e.to_string())?;
         pair_session_finalize(&mut s, 30).map_err(|e| e.to_string())?
     };
     store_remove(session_id);
+
+    // ---- Post-pair auto-setup (Goal: zero friction after SAS) ----
+    // 1. Auto-subscribe to wire://inbox/<peer> so clients that support
+    //    resources/subscribe get push notifications/resources/updated.
+    // 2. Spawn `wire daemon` if not already running so push/pull is automatic.
+    // 3. Spawn `wire notify` if not already running so OS toasts fire on
+    //    inbox grow (covers MCP hosts that lack resources/subscribe).
+    // 4. Emit notifications/resources/list_changed via the writer channel so
+    //    a client that called resources/list before pairing refreshes its view.
+    let peer_handle = result["peer_handle"].as_str().unwrap_or("").to_string();
+    let peer_uri = format!("wire://inbox/{peer_handle}");
+
+    let mut auto = json!({
+        "subscribed": false,
+        "daemon": "unknown",
+        "notify": "unknown",
+        "resources_list_changed_emitted": false,
+    });
+
+    if !peer_handle.is_empty()
+        && let Ok(mut g) = state.subscribed.lock()
+    {
+        g.insert(peer_uri.clone());
+        auto["subscribed"] = json!(true);
+    }
+
+    auto["daemon"] = match crate::ensure_up::ensure_daemon_running() {
+        Ok(true) => json!("spawned"),
+        Ok(false) => json!("already_running"),
+        Err(e) => json!(format!("spawn_error: {e}")),
+    };
+    auto["notify"] = match crate::ensure_up::ensure_notify_running() {
+        Ok(true) => json!("spawned"),
+        Ok(false) => json!("already_running"),
+        Err(e) => json!(format!("spawn_error: {e}")),
+    };
+
+    if let Some(tx) = state.notif_tx.lock().ok().and_then(|g| g.clone()) {
+        let notif = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/resources/list_changed",
+        });
+        if tx.send(notif.to_string()).is_ok() {
+            auto["resources_list_changed_emitted"] = json!(true);
+        }
+    }
+
+    result["auto"] = auto;
+    result["next"] = json!(
+        "Done. Daemon + notify running, subscribed to peer inbox. Use wire_send/wire_tail \
+         freely; new events arrive via notifications/resources/updated (where supported) and \
+         OS toasts (always)."
+    );
     Ok(result)
 }
 

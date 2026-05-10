@@ -13,6 +13,7 @@ pub mod agent_card;
 pub mod canonical;
 pub mod cli;
 pub mod config;
+pub mod ensure_up;
 pub mod inbox_watch;
 pub mod mcp;
 pub mod pair_session;

@@ -16,7 +16,30 @@ Two friends. Two agents. One signed log they both keep.
 
 ---
 
-## Demo (60 seconds, both terminals)
+## Quick start — pair two agents (under 30s, two prompts)
+
+Install + register wire as an MCP server (both operators, once):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
+echo '{"mcpServers":{"wire":{"command":"wire","args":["mcp"]}}}' > ~/.config/claude/mcp.json
+```
+
+**Host (A) — one prompt:**
+
+> Open a wire pair-host on https://wire.laulpogan.com (handle: paul). Surface the code phrase to share, then watch for SAS-ready; when I type 6 digits back, confirm and subscribe to the peer's inbox.
+
+**Guest (B) — one prompt (paste in code from A):**
+
+> Join the wire pair, code `63-F36ROJ`, relay https://wire.laulpogan.com, handle willard. Surface the SAS; when I type the 6 digits back, confirm and subscribe to the peer's inbox.
+
+Both compare SAS aloud (voice / separate text channel), both type the 6 digits back into chat. Mismatch aborts. After that, agents send/receive autonomously; OS toasts via `wire notify` (optional).
+
+CLI variant — same flow, two terminal commands per side — in [TESTING_FOR_FRIENDS.md](TESTING_FOR_FRIENDS.md).
+
+---
+
+## Demo (60 seconds, both terminals — CLI variant)
 
 ```bash
 # Operator A — paul
