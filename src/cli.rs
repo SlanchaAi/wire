@@ -233,6 +233,34 @@ pub enum Command {
         #[arg(long)]
         apply: bool,
     },
+    /// Long-running event dispatcher. Watches inbox for new verified events
+    /// and spawns the given shell command per event, passing the event JSON
+    /// on stdin. Use to wire up autonomous reply loops:
+    ///   wire reactor --on-event 'claude -p "respond via wire send"'
+    /// Cursor persisted to `$WIRE_HOME/state/wire/reactor.cursor`.
+    Reactor {
+        /// Shell command to spawn per event. Event JSON written to its stdin.
+        #[arg(long)]
+        on_event: String,
+        /// Only fire for events from this peer.
+        #[arg(long)]
+        peer: Option<String>,
+        /// Only fire for events of this kind (numeric or name, e.g. 1 / decision).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Skip events whose verified flag is false (default true).
+        #[arg(long, default_value_t = true)]
+        verified_only: bool,
+        /// Poll interval in seconds.
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
+        /// Process one sweep and exit.
+        #[arg(long)]
+        once: bool,
+        /// Don't actually spawn — print one JSONL line per event for smoke-testing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Watch the inbox for new verified events and fire an OS notification per
     /// event. Long-running; background under systemd / `&` / tmux. Cursor is
     /// persisted to `$WIRE_HOME/state/wire/notify.cursor` so restarts don't
@@ -312,6 +340,23 @@ pub fn run() -> Result<()> {
             timeout,
         } => cmd_pair_join(&code_phrase, &relay, yes, timeout),
         Command::Setup { apply } => cmd_setup(apply),
+        Command::Reactor {
+            on_event,
+            peer,
+            kind,
+            verified_only,
+            interval,
+            once,
+            dry_run,
+        } => cmd_reactor(
+            &on_event,
+            peer.as_deref(),
+            kind.as_deref(),
+            verified_only,
+            interval,
+            once,
+            dry_run,
+        ),
         Command::Notify {
             interval,
             peer,
@@ -1787,6 +1832,103 @@ fn upsert_mcp_entry(path: &std::path::Path, server_name: &str, entry: &Value) ->
     let out = serde_json::to_string_pretty(&cfg)? + "\n";
     std::fs::write(path, out).context("writing config")?;
     Ok(true)
+}
+
+// ---------- reactor — event-handler dispatch loop ----------
+
+fn cmd_reactor(
+    on_event: &str,
+    peer_filter: Option<&str>,
+    kind_filter: Option<&str>,
+    verified_only: bool,
+    interval_secs: u64,
+    once: bool,
+    dry_run: bool,
+) -> Result<()> {
+    use crate::inbox_watch::{InboxEvent, InboxWatcher};
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let cursor_path = config::state_dir()?.join("reactor.cursor");
+    let mut watcher = InboxWatcher::from_cursor_file(&cursor_path)?;
+
+    let kind_num: Option<u32> = match kind_filter {
+        Some(k) => Some(parse_kind(k)?),
+        None => None,
+    };
+
+    let dispatch = |ev: &InboxEvent| -> Result<()> {
+        if let Some(p) = peer_filter
+            && ev.peer != p
+        {
+            return Ok(());
+        }
+        if verified_only && !ev.verified {
+            return Ok(());
+        }
+        if let Some(want) = kind_num {
+            let ev_kind = ev.raw.get("kind").and_then(Value::as_u64).map(|n| n as u32);
+            if ev_kind != Some(want) {
+                return Ok(());
+            }
+        }
+        if dry_run {
+            println!("{}", serde_json::to_string(&ev.raw)?);
+            return Ok(());
+        }
+
+        // Spawn shell command. Event JSON on stdin; reactor handler may write
+        // anything to stdout/stderr (passed through to operator's terminal).
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(on_event)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .env("WIRE_EVENT_PEER", &ev.peer)
+            .env("WIRE_EVENT_ID", &ev.event_id)
+            .env("WIRE_EVENT_KIND", &ev.kind)
+            .spawn()
+            .with_context(|| format!("spawning reactor handler: {on_event}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let body = serde_json::to_vec(&ev.raw)?;
+            // Best-effort write — handler may close stdin early.
+            let _ = stdin.write_all(&body);
+            let _ = stdin.write_all(b"\n");
+        }
+        // Don't block on child exit by default — handler may be long-running
+        // (e.g. claude -p). Detach. Operator gets to see its stdout/stderr.
+        // If you want serial dispatch, wait here; but parallel is the default
+        // because LLM-backed handlers take seconds and serial would starve.
+        std::mem::drop(child);
+        Ok(())
+    };
+
+    let sweep = |watcher: &mut InboxWatcher| -> Result<usize> {
+        let events = watcher.poll()?;
+        let mut fired = 0usize;
+        for ev in &events {
+            if let Err(e) = dispatch(ev) {
+                eprintln!("wire reactor: handler error for {}: {e}", ev.event_id);
+            } else {
+                fired += 1;
+            }
+        }
+        watcher.save_cursors(&cursor_path)?;
+        Ok(fired)
+    };
+
+    if once {
+        sweep(&mut watcher)?;
+        return Ok(());
+    }
+    let interval = std::time::Duration::from_secs(interval_secs.max(1));
+    loop {
+        if let Err(e) = sweep(&mut watcher) {
+            eprintln!("wire reactor: sweep error: {e}");
+        }
+        std::thread::sleep(interval);
+    }
 }
 
 // ---------- notify (Goal 2) ----------
