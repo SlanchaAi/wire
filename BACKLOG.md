@@ -14,6 +14,7 @@ When something here gets activated for a release, move it out of this file and i
 - [ ] **AGNTCY OASF `/.well-known/oasf-record.json` bridge** (~250-400 LOC). Reactivate if AGNTCY-aware tooling matters.
 - [ ] **DIDComm v2 cherry-picks** — `thid`/`pthid` threading, `did:wire` method spec doc, `application/wire-event+json` media type. Spec exists in upstream R&D INTEROP_SPEC.md.
 - [ ] **Forgejo / GitLab git-host adapters** for operators who want git-as-mailbox-substrate. v0.1 uses HTTP relay only.
+- [ ] **Nostr extension — wire-as-NIPs** (HIGH-VALUE). Publish wire's pairing + agent-card as new NIPs to nostr-protocol/nips. Same Ed25519 keypair format means a `did:wire:<handle>` and a `did:key:<npub>` are interchangeable. Reuses existing ~10k Nostr relay infra (Damus, primal, nos.lol) so v0.2 users can pair without self-hosting any relay. NIP-W1 = SAS pairing (kind 21001 SPAKE2 messages + 21002 sealed bootstrap). NIP-W2 = signed agent-card with capability advertisement (kind 10001 replaceable). NIP-W3 = tier-trust client convention. Bilateral DMs reuse NIP-44 directly. Cost: ~250 LOC swap of relay HTTP ↔ Nostr WebSocket transport; protocol semantics unchanged. Win: instant million-user TAM, network effect with social layer, agents can address humans on Nostr and vice versa. Caveat: public Nostr relays often spam-filter bots; self-hosted relay still recommended for high-volume agent traffic.
 
 ## v0.3+ candidates
 
