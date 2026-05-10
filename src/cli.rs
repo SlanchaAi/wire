@@ -147,6 +147,18 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Remove a peer from trust + relay state. Inbox/outbox files for that
+    /// peer are NOT deleted (operator can grep history); pass --purge to
+    /// also wipe the JSONL files.
+    ForgetPeer {
+        /// Peer handle to forget.
+        handle: String,
+        /// Also delete inbox/<handle>.jsonl and outbox/<handle>.jsonl.
+        #[arg(long)]
+        purge: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Run a long-lived sync loop: every <interval> seconds, push outbox to
     /// peers' relay slots and pull inbox from our own slot. Foreground process;
     /// background it with systemd / `&` / tmux as you prefer.
@@ -216,6 +228,7 @@ pub fn run() -> Result<()> {
         Command::Push { peer, json } => cmd_push(peer.as_deref(), json),
         Command::Pull { json } => cmd_pull(json),
         Command::Pin { card_file, json } => cmd_pin(&card_file, json),
+        Command::ForgetPeer { handle, purge, json } => cmd_forget_peer(&handle, purge, json),
         Command::Daemon { interval, once, json } => cmd_daemon(interval, once, json),
         Command::PairHost { relay, yes, timeout } => cmd_pair_host(&relay, yes, timeout),
         Command::PairJoin { code_phrase, relay, yes, timeout } => {
@@ -949,6 +962,70 @@ fn cmd_pull(as_json: bool) -> Result<()> {
     } else {
         println!("pulled {} event(s); wrote {}; rejected {} (bad signature)",
             events.len(), written.len(), rejected.len());
+    }
+    Ok(())
+}
+
+// ---------- forget-peer ----------
+
+fn cmd_forget_peer(handle: &str, purge: bool, as_json: bool) -> Result<()> {
+    let mut trust = config::read_trust()?;
+    let mut removed_from_trust = false;
+    if let Some(agents) = trust.get_mut("agents").and_then(Value::as_object_mut) {
+        if agents.remove(handle).is_some() {
+            removed_from_trust = true;
+        }
+    }
+    config::write_trust(&trust)?;
+
+    let mut state = config::read_relay_state()?;
+    let mut removed_from_relay = false;
+    if let Some(peers) = state.get_mut("peers").and_then(Value::as_object_mut) {
+        if peers.remove(handle).is_some() {
+            removed_from_relay = true;
+        }
+    }
+    config::write_relay_state(&state)?;
+
+    let mut purged: Vec<String> = Vec::new();
+    if purge {
+        for dir in [config::inbox_dir()?, config::outbox_dir()?] {
+            let path = dir.join(format!("{handle}.jsonl"));
+            if path.exists() {
+                std::fs::remove_file(&path).with_context(|| format!("removing {path:?}"))?;
+                purged.push(path.to_string_lossy().into());
+            }
+        }
+    }
+
+    if !removed_from_trust && !removed_from_relay {
+        if as_json {
+            println!("{}", serde_json::to_string(&json!({
+                "removed": false,
+                "reason": format!("peer {handle:?} not pinned"),
+            }))?);
+        } else {
+            eprintln!("peer {handle:?} not found in trust or relay state — nothing to forget");
+        }
+        return Ok(());
+    }
+
+    if as_json {
+        println!("{}", serde_json::to_string(&json!({
+            "handle": handle,
+            "removed_from_trust": removed_from_trust,
+            "removed_from_relay_state": removed_from_relay,
+            "purged_files": purged,
+        }))?);
+    } else {
+        println!("forgot peer {handle:?}");
+        if removed_from_trust { println!("  - removed from trust.json"); }
+        if removed_from_relay { println!("  - removed from relay.json"); }
+        if !purged.is_empty() {
+            for p in &purged { println!("  - deleted {p}"); }
+        } else if !purge {
+            println!("  (inbox/outbox files preserved; pass --purge to delete them)");
+        }
     }
     Ok(())
 }

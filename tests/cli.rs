@@ -373,6 +373,64 @@ fn status_after_init_shows_did_and_zero_peers() {
 }
 
 #[test]
+fn forget_peer_removes_pinned_record() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul"]);
+    // Manually write a peer pin into trust (simulating a prior pair) without
+    // running the full SAS flow.
+    let trust_path = home.join("config/wire/trust.json");
+    let mut trust: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&trust_path).unwrap()).unwrap();
+    trust["agents"]["willard"] = serde_json::json!({"tier": "VERIFIED", "did": "did:wire:willard"});
+    std::fs::write(&trust_path, serde_json::to_string(&trust).unwrap()).unwrap();
+
+    let out = run(&home, &["forget-peer", "willard", "--json"]);
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(parsed["removed_from_trust"], true);
+    assert_eq!(parsed["handle"], "willard");
+
+    // Confirm trust.json no longer has willard
+    let trust_after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&trust_path).unwrap()).unwrap();
+    assert!(trust_after["agents"]["willard"].is_null());
+}
+
+#[test]
+fn forget_peer_unknown_returns_removed_false() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul"]);
+    let out = run(&home, &["forget-peer", "ghost", "--json"]);
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(parsed["removed"], false);
+}
+
+#[test]
+fn forget_peer_purge_deletes_jsonl_files() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul"]);
+    // send to peer to materialize outbox file
+    let _ = run(&home, &["send", "willard", "decision", "stuff"]);
+    let outbox_path = home.join("state/wire/outbox/willard.jsonl");
+    assert!(outbox_path.exists());
+
+    // Force willard into trust so forget-peer sees something to remove (test
+    // happens to also exercise --purge regardless of trust state).
+    let trust_path = home.join("config/wire/trust.json");
+    let mut trust: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&trust_path).unwrap()).unwrap();
+    trust["agents"]["willard"] = serde_json::json!({"tier": "VERIFIED"});
+    std::fs::write(&trust_path, serde_json::to_string(&trust).unwrap()).unwrap();
+
+    let out = run(&home, &["forget-peer", "willard", "--purge", "--json"]);
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(!parsed["purged_files"].as_array().unwrap().is_empty());
+    assert!(!outbox_path.exists(), "outbox file should be deleted with --purge");
+}
+
+#[test]
 fn status_after_send_shows_outbox_depth() {
     let home = fresh_home();
     let _ = run(&home, &["init", "paul"]);
