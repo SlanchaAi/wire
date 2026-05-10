@@ -54,7 +54,14 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
 /// emit matching SAS digits.
 fn drive_pairing(host_home: &PathBuf, guest_home: &PathBuf, relay_url: &str) {
     let mut host_proc = Command::new(wire_bin())
-        .args(["pair-host", "--relay", relay_url, "--yes", "--timeout", "30"])
+        .args([
+            "pair-host",
+            "--relay",
+            relay_url,
+            "--yes",
+            "--timeout",
+            "30",
+        ])
         .env("WIRE_HOME", host_home)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -160,8 +167,10 @@ async fn three_party_mesh_of_bilateral_round_trips() {
         (&willard, vec!["paul", "carol"]),
         (&carol, vec!["paul", "willard"]),
     ] {
-        let trust: Value =
-            serde_json::from_str(&std::fs::read_to_string(home.join("config/wire/trust.json")).unwrap()).unwrap();
+        let trust: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join("config/wire/trust.json")).unwrap(),
+        )
+        .unwrap();
         for peer in &expected_peers {
             assert_eq!(
                 trust["agents"][peer]["tier"], "VERIFIED",
@@ -169,8 +178,10 @@ async fn three_party_mesh_of_bilateral_round_trips() {
             );
         }
         // Also validate relay state has both peers' slot coords.
-        let relay_state: Value =
-            serde_json::from_str(&std::fs::read_to_string(home.join("config/wire/relay.json")).unwrap()).unwrap();
+        let relay_state: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join("config/wire/relay.json")).unwrap(),
+        )
+        .unwrap();
         for peer in &expected_peers {
             assert!(
                 relay_state["peers"][peer].is_object(),
@@ -181,14 +192,38 @@ async fn three_party_mesh_of_bilateral_round_trips() {
 
     // ---- 5. criss-cross sends: each agent fires one event to each peer ----
     // paul -> willard, paul -> carol
-    assert!(wire(&paul, &["send", "willard", "decision", "P->W"]).status.success());
-    assert!(wire(&paul, &["send", "carol", "decision", "P->C"]).status.success());
+    assert!(
+        wire(&paul, &["send", "willard", "decision", "P->W"])
+            .status
+            .success()
+    );
+    assert!(
+        wire(&paul, &["send", "carol", "decision", "P->C"])
+            .status
+            .success()
+    );
     // willard -> paul, willard -> carol
-    assert!(wire(&willard, &["send", "paul", "decision", "W->P"]).status.success());
-    assert!(wire(&willard, &["send", "carol", "decision", "W->C"]).status.success());
+    assert!(
+        wire(&willard, &["send", "paul", "decision", "W->P"])
+            .status
+            .success()
+    );
+    assert!(
+        wire(&willard, &["send", "carol", "decision", "W->C"])
+            .status
+            .success()
+    );
     // carol -> paul, carol -> willard
-    assert!(wire(&carol, &["send", "paul", "decision", "C->P"]).status.success());
-    assert!(wire(&carol, &["send", "willard", "decision", "C->W"]).status.success());
+    assert!(
+        wire(&carol, &["send", "paul", "decision", "C->P"])
+            .status
+            .success()
+    );
+    assert!(
+        wire(&carol, &["send", "willard", "decision", "C->W"])
+            .status
+            .success()
+    );
 
     // ---- 6. all three push ----
     for home in [&paul, &willard, &carol] {

@@ -4,7 +4,7 @@
 //! it with a plain `reqwest` client. State is persisted to a temp dir so
 //! restart-recovery is exercised end-to-end.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -58,7 +58,11 @@ async fn allocate_slot_returns_id_and_token() {
     let slot_id = body["slot_id"].as_str().unwrap();
     let slot_token = body["slot_token"].as_str().unwrap();
     assert_eq!(slot_id.len(), 32, "slot_id should be 16 random bytes hex");
-    assert_eq!(slot_token.len(), 64, "slot_token should be 32 random bytes hex");
+    assert_eq!(
+        slot_token.len(),
+        64,
+        "slot_token should be 32 random bytes hex"
+    );
     assert!(slot_id.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
@@ -107,7 +111,8 @@ async fn post_event_then_get_round_trip() {
     assert_eq!(events[0]["event_id"], "abc123");
 
     // Persisted on disk?
-    let jsonl = std::fs::read_to_string(dir.join("slots").join(format!("{slot_id}.jsonl"))).unwrap();
+    let jsonl =
+        std::fs::read_to_string(dir.join("slots").join(format!("{slot_id}.jsonl"))).unwrap();
     assert!(jsonl.contains("abc123"));
 }
 

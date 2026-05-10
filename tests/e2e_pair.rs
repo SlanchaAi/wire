@@ -61,7 +61,14 @@ async fn daemon_once_drives_full_sync_after_pairing() {
 
     // Pair
     let mut host = std::process::Command::new(wire_bin())
-        .args(["pair-host", "--relay", &relay_url, "--yes", "--timeout", "30"])
+        .args([
+            "pair-host",
+            "--relay",
+            &relay_url,
+            "--yes",
+            "--timeout",
+            "30",
+        ])
         .env("WIRE_HOME", &paul)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -85,14 +92,31 @@ async fn daemon_once_drives_full_sync_after_pairing() {
     let join_handle = std::thread::spawn({
         let willard = willard.clone();
         let relay_url = relay_url.clone();
-        move || wire(&willard, &["pair-join", &code, "--relay", &relay_url, "--yes", "--timeout", "30"])
+        move || {
+            wire(
+                &willard,
+                &[
+                    "pair-join",
+                    &code,
+                    "--relay",
+                    &relay_url,
+                    "--yes",
+                    "--timeout",
+                    "30",
+                ],
+            )
+        }
     });
     let join_out = join_handle.join().unwrap();
     assert!(join_out.status.success());
     host.wait().unwrap();
 
     // Send + run daemon --once on each side
-    assert!(wire(&paul, &["send", "willard", "decision", "via daemon"]).status.success());
+    assert!(
+        wire(&paul, &["send", "willard", "decision", "via daemon"])
+            .status
+            .success()
+    );
     let paul_daemon = wire(&paul, &["daemon", "--once", "--json"]);
     assert!(paul_daemon.status.success());
     let willard_daemon = wire(&willard, &["daemon", "--once", "--json"]);
@@ -106,8 +130,14 @@ async fn daemon_once_drives_full_sync_after_pairing() {
 
     // Confirm willard's tail sees the verified event
     let tail = wire(&willard, &["tail", "paul", "--json"]);
-    let event: serde_json::Value =
-        serde_json::from_str(String::from_utf8(tail.stdout).unwrap().lines().next().unwrap()).unwrap();
+    let event: serde_json::Value = serde_json::from_str(
+        String::from_utf8(tail.stdout)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(event["body"], "via daemon");
     assert_eq!(event["verified"], true);
 }
@@ -130,7 +160,14 @@ async fn rotate_slot_after_pairing_orphans_old_slot() {
 
     // Pair via existing helper logic (inlined from other tests).
     let mut host = std::process::Command::new(wire_bin())
-        .args(["pair-host", "--relay", &relay_url, "--yes", "--timeout", "30"])
+        .args([
+            "pair-host",
+            "--relay",
+            &relay_url,
+            "--yes",
+            "--timeout",
+            "30",
+        ])
         .env("WIRE_HOME", &paul)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -154,19 +191,38 @@ async fn rotate_slot_after_pairing_orphans_old_slot() {
     let join_handle = std::thread::spawn({
         let willard = willard.clone();
         let relay_url = relay_url.clone();
-        move || wire(&willard, &["pair-join", &code, "--relay", &relay_url, "--yes", "--timeout", "30"])
+        move || {
+            wire(
+                &willard,
+                &[
+                    "pair-join",
+                    &code,
+                    "--relay",
+                    &relay_url,
+                    "--yes",
+                    "--timeout",
+                    "30",
+                ],
+            )
+        }
     });
     join_handle.join().unwrap();
     host.wait().unwrap();
 
     // Capture paul's pre-rotation slot_id.
-    let pre: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(paul.join("config/wire/relay.json")).unwrap()).unwrap();
+    let pre: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(paul.join("config/wire/relay.json")).unwrap(),
+    )
+    .unwrap();
     let old_slot = pre["self"]["slot_id"].as_str().unwrap().to_string();
 
     // Rotate.
     let rotate_out = wire(&paul, &["rotate-slot", "--json"]);
-    assert!(rotate_out.status.success(), "rotate failed: {:?}", rotate_out);
+    assert!(
+        rotate_out.status.success(),
+        "rotate failed: {:?}",
+        rotate_out
+    );
     let rj: serde_json::Value = serde_json::from_slice(&rotate_out.stdout).unwrap();
     assert_eq!(rj["rotated"], true);
     assert_eq!(rj["old_slot_id"], old_slot);
@@ -176,8 +232,10 @@ async fn rotate_slot_after_pairing_orphans_old_slot() {
     assert_eq!(rj["announced_to"][0], "willard");
 
     // Confirm relay.json now has the new slot.
-    let post: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(paul.join("config/wire/relay.json")).unwrap()).unwrap();
+    let post: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(paul.join("config/wire/relay.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(post["self"]["slot_id"], new_slot);
 
     // Confirm willard sees the wire_close event when pulling.
@@ -216,7 +274,14 @@ async fn paul_pair_hosts_willard_joins_then_send_round_trips() {
 
     // ---- 3. start pair-host in background; capture stderr to learn the code ----
     let mut host_proc = Command::new(wire_bin())
-        .args(["pair-host", "--relay", &relay_url, "--yes", "--timeout", "30"])
+        .args([
+            "pair-host",
+            "--relay",
+            &relay_url,
+            "--yes",
+            "--timeout",
+            "30",
+        ])
         .env("WIRE_HOME", &paul_home)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -290,28 +355,40 @@ async fn paul_pair_hosts_willard_joins_then_send_round_trips() {
 
     // Both sides print a final JSON line on stdout.
     let host_stdout = String::from_utf8(host_out.stdout).unwrap();
-    let host_final: Value = serde_json::from_str(host_stdout.trim().lines().last().unwrap()).unwrap();
+    let host_final: Value =
+        serde_json::from_str(host_stdout.trim().lines().last().unwrap()).unwrap();
     assert_eq!(host_final["paired_with"], "did:wire:willard");
 
     let join_stdout = String::from_utf8(join_out.stdout).unwrap();
-    let join_final: Value = serde_json::from_str(join_stdout.trim().lines().last().unwrap()).unwrap();
+    let join_final: Value =
+        serde_json::from_str(join_stdout.trim().lines().last().unwrap()).unwrap();
     assert_eq!(join_final["paired_with"], "did:wire:paul");
 
     // SAS digits should match across both sides.
     assert_eq!(host_final["sas"], join_final["sas"]);
 
     // ---- 6. trust + relay state populated on both sides ----
-    let paul_trust: Value =
-        serde_json::from_str(&std::fs::read_to_string(paul_home.join("config/wire/trust.json")).unwrap()).unwrap();
+    let paul_trust: Value = serde_json::from_str(
+        &std::fs::read_to_string(paul_home.join("config/wire/trust.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(paul_trust["agents"]["willard"]["tier"], "VERIFIED");
-    let willard_trust: Value =
-        serde_json::from_str(&std::fs::read_to_string(willard_home.join("config/wire/trust.json")).unwrap()).unwrap();
+    let willard_trust: Value = serde_json::from_str(
+        &std::fs::read_to_string(willard_home.join("config/wire/trust.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(willard_trust["agents"]["paul"]["tier"], "VERIFIED");
 
     // ---- 7. send → push → pull → tail without any manual setup ----
     let send_out = wire(
         &paul_home,
-        &["send", "willard", "decision", "ship the v0.1 demo", "--json"],
+        &[
+            "send",
+            "willard",
+            "decision",
+            "ship the v0.1 demo",
+            "--json",
+        ],
     );
     assert!(send_out.status.success());
     assert!(wire(&paul_home, &["push", "--json"]).status.success());

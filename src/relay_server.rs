@@ -40,11 +40,13 @@ use axum::{
 use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder, key_extractor::GlobalKeyExtractor};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tower_governor::{
+    GovernorLayer, governor::GovernorConfigBuilder, key_extractor::GlobalKeyExtractor,
+};
 
 const MAX_EVENT_BYTES: usize = 256 * 1024;
 /// Total bytes a single slot can hold before further POSTs are rejected (413).
@@ -185,7 +187,9 @@ impl Relay {
                 .finish()
                 .expect("valid governor config"),
         );
-        let governor_layer = GovernorLayer { config: governor_conf };
+        let governor_layer = GovernorLayer {
+            config: governor_conf,
+        };
 
         // Hot writes group — rate limited.
         let hot_writes = Router::new()
@@ -255,7 +259,10 @@ impl Relay {
         if !is_valid_slot_id(slot_id) {
             return Err(anyhow::anyhow!("invalid slot_id format: {slot_id:?}"));
         }
-        let path = self.state_dir.join("slots").join(format!("{slot_id}.jsonl"));
+        let path = self
+            .state_dir
+            .join("slots")
+            .join(format!("{slot_id}.jsonl"));
         let mut line = serde_json::to_vec(event)?;
         line.push(b'\n');
         use tokio::io::AsyncWriteExt;
@@ -411,7 +418,11 @@ async fn pair_open(
     Json(req): Json<PairOpenRequest>,
 ) -> impl IntoResponse {
     if req.role != "host" && req.role != "guest" {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": "role must be 'host' or 'guest'"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "role must be 'host' or 'guest'"})),
+        )
+            .into_response();
     }
     relay.evict_expired_pair_slots().await;
     let mut inner = relay.inner.lock().await;
@@ -419,7 +430,9 @@ async fn pair_open(
         Some(id) => id,
         None => {
             let new_id = random_hex(16);
-            inner.pair_lookup.insert(req.code_hash.clone(), new_id.clone());
+            inner
+                .pair_lookup
+                .insert(req.code_hash.clone(), new_id.clone());
             inner.pair_slots.insert(new_id.clone(), PairSlot::default());
             new_id
         }
@@ -428,12 +441,20 @@ async fn pair_open(
     slot.last_touched = std::time::Instant::now();
     if req.role == "host" {
         if slot.host_msg.is_some() {
-            return (StatusCode::CONFLICT, Json(json!({"error": "host already registered for this code"}))).into_response();
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "host already registered for this code"})),
+            )
+                .into_response();
         }
         slot.host_msg = Some(req.msg);
     } else {
         if slot.guest_msg.is_some() {
-            return (StatusCode::CONFLICT, Json(json!({"error": "guest already registered for this code"}))).into_response();
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "guest already registered for this code"})),
+            )
+                .into_response();
         }
         slot.guest_msg = Some(req.msg);
     }
@@ -458,13 +479,23 @@ async fn pair_get(
             s.last_touched = std::time::Instant::now();
             s.clone()
         }
-        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown pair_id"}))).into_response(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "unknown pair_id"})),
+            )
+                .into_response();
+        }
     };
     let (peer_msg, peer_bootstrap) = match q.as_role.as_str() {
         "host" => (slot.guest_msg, slot.guest_bootstrap),
         "guest" => (slot.host_msg, slot.host_bootstrap),
         _ => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": "as_role must be 'host' or 'guest'"}))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "as_role must be 'host' or 'guest'"})),
+            )
+                .into_response();
         }
     };
     (
@@ -483,14 +514,24 @@ async fn pair_bootstrap(
     let mut inner = relay.inner.lock().await;
     let slot = match inner.pair_slots.get_mut(&pair_id) {
         Some(s) => s,
-        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown pair_id"}))).into_response(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "unknown pair_id"})),
+            )
+                .into_response();
+        }
     };
     slot.last_touched = std::time::Instant::now();
     match req.role.as_str() {
         "host" => slot.host_bootstrap = Some(req.sealed),
         "guest" => slot.guest_bootstrap = Some(req.sealed),
         _ => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": "role must be 'host' or 'guest'"}))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "role must be 'host' or 'guest'"})),
+            )
+                .into_response();
         }
     }
     (StatusCode::CREATED, Json(json!({"ok": true}))).into_response()
@@ -554,11 +595,7 @@ async fn check_token(
     };
     drop(inner);
     if !constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "bad token"})),
-        )
-            .into_response());
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "bad token"}))).into_response());
     }
     Ok(())
 }
@@ -575,7 +612,9 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 fn is_valid_slot_id(s: &str) -> bool {
-    s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    s.len() == 32
+        && s.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 fn random_hex(n_bytes: usize) -> String {
@@ -629,7 +668,9 @@ mod tests {
         // Seed a pair-slot manually with a past last_touched.
         {
             let mut inner = relay.inner.lock().await;
-            inner.pair_lookup.insert("hash-A".to_string(), "id-A".to_string());
+            inner
+                .pair_lookup
+                .insert("hash-A".to_string(), "id-A".to_string());
             inner.pair_slots.insert(
                 "id-A".to_string(),
                 PairSlot {
@@ -640,8 +681,12 @@ mod tests {
             );
 
             // And a fresh one — should survive.
-            inner.pair_lookup.insert("hash-B".to_string(), "id-B".to_string());
-            inner.pair_slots.insert("id-B".to_string(), PairSlot::default());
+            inner
+                .pair_lookup
+                .insert("hash-B".to_string(), "id-B".to_string());
+            inner
+                .pair_slots
+                .insert("id-B".to_string(), PairSlot::default());
 
             assert_eq!(inner.pair_slots.len(), 2);
             assert_eq!(inner.pair_lookup.len(), 2);
@@ -650,7 +695,11 @@ mod tests {
         relay.evict_expired_pair_slots().await;
 
         let inner = relay.inner.lock().await;
-        assert_eq!(inner.pair_slots.len(), 1, "expired slot should have been evicted");
+        assert_eq!(
+            inner.pair_slots.len(),
+            1,
+            "expired slot should have been evicted"
+        );
         assert!(inner.pair_slots.contains_key("id-B"));
         assert_eq!(inner.pair_lookup.len(), 1);
         assert!(inner.pair_lookup.contains_key("hash-B"));
@@ -663,7 +712,7 @@ mod tests {
         assert!(is_valid_slot_id(&random_hex(16)));
         // wrong length
         assert!(!is_valid_slot_id("abc"));
-        assert!(!is_valid_slot_id("0123456789abcdef0123456789abcde"));   // 31
+        assert!(!is_valid_slot_id("0123456789abcdef0123456789abcde")); // 31
         assert!(!is_valid_slot_id("0123456789abcdef0123456789abcdef0")); // 33
         // uppercase
         assert!(!is_valid_slot_id("0123456789ABCDEF0123456789abcdef"));

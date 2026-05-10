@@ -77,37 +77,61 @@ async fn paul_sends_to_willard_via_relay_and_willard_verifies() {
 
     // ---------- 4. operators exchange (a) agent-cards and (b) slot info ----------
     // Paul reads willard's relay state file (out-of-band copy) and adds his slot.
-    let willard_relay: Value =
-        serde_json::from_str(&std::fs::read_to_string(willard_home.join("config/wire/relay.json")).unwrap()).unwrap();
+    let willard_relay: Value = serde_json::from_str(
+        &std::fs::read_to_string(willard_home.join("config/wire/relay.json")).unwrap(),
+    )
+    .unwrap();
     let w_slot_id = willard_relay["self"]["slot_id"].as_str().unwrap();
     let w_slot_token = willard_relay["self"]["slot_token"].as_str().unwrap();
-    assert!(wire(
-        &paul_home,
-        &["add-peer-slot", "willard", &relay_url, w_slot_id, w_slot_token]
-    )
-    .status
-    .success());
+    assert!(
+        wire(
+            &paul_home,
+            &[
+                "add-peer-slot",
+                "willard",
+                &relay_url,
+                w_slot_id,
+                w_slot_token
+            ]
+        )
+        .status
+        .success()
+    );
 
     // Willard does the symmetric thing for paul (so he can post replies).
-    let paul_relay: Value =
-        serde_json::from_str(&std::fs::read_to_string(paul_home.join("config/wire/relay.json")).unwrap()).unwrap();
+    let paul_relay: Value = serde_json::from_str(
+        &std::fs::read_to_string(paul_home.join("config/wire/relay.json")).unwrap(),
+    )
+    .unwrap();
     let p_slot_id = paul_relay["self"]["slot_id"].as_str().unwrap();
     let p_slot_token = paul_relay["self"]["slot_token"].as_str().unwrap();
-    assert!(wire(
-        &willard_home,
-        &["add-peer-slot", "paul", &relay_url, p_slot_id, p_slot_token]
-    )
-    .status
-    .success());
+    assert!(
+        wire(
+            &willard_home,
+            &["add-peer-slot", "paul", &relay_url, p_slot_id, p_slot_token]
+        )
+        .status
+        .success()
+    );
 
     // ---------- 5. willard pins paul's signed card (manual out-of-band pairing) ----------
     let paul_card_path = paul_home.join("config/wire/agent-card.json");
-    assert!(wire(&willard_home, &["pin", paul_card_path.to_str().unwrap()]).status.success());
+    assert!(
+        wire(&willard_home, &["pin", paul_card_path.to_str().unwrap()])
+            .status
+            .success()
+    );
 
     // ---------- 6. paul sends a decision to willard ----------
     let send_out = wire(
         &paul_home,
-        &["send", "willard", "decision", "ship the v0.1 demo", "--json"],
+        &[
+            "send",
+            "willard",
+            "decision",
+            "ship the v0.1 demo",
+            "--json",
+        ],
     );
     assert!(send_out.status.success());
     let send_json: Value = serde_json::from_slice(&send_out.stdout).unwrap();
@@ -167,23 +191,48 @@ async fn pull_rejects_event_with_unknown_signer() {
     // willard inits + binds, but does NOT pin paul's card.
     let willard_home = fresh_dir("willard-unknown");
     assert!(wire(&willard_home, &["init", "willard"]).status.success());
-    assert!(wire(&willard_home, &["bind-relay", &relay_url]).status.success());
+    assert!(
+        wire(&willard_home, &["bind-relay", &relay_url])
+            .status
+            .success()
+    );
 
     // Paul (separate) sends a real signed event into willard's slot via add-peer-slot.
     let paul_home = fresh_dir("paul-unknown");
     assert!(wire(&paul_home, &["init", "paul"]).status.success());
-    assert!(wire(&paul_home, &["bind-relay", &relay_url]).status.success());
-    let willard_relay: Value =
-        serde_json::from_str(&std::fs::read_to_string(willard_home.join("config/wire/relay.json")).unwrap()).unwrap();
+    assert!(
+        wire(&paul_home, &["bind-relay", &relay_url])
+            .status
+            .success()
+    );
+    let willard_relay: Value = serde_json::from_str(
+        &std::fs::read_to_string(willard_home.join("config/wire/relay.json")).unwrap(),
+    )
+    .unwrap();
     let w_slot_id = willard_relay["self"]["slot_id"].as_str().unwrap();
     let w_slot_token = willard_relay["self"]["slot_token"].as_str().unwrap();
-    assert!(wire(
-        &paul_home,
-        &["add-peer-slot", "willard", &relay_url, w_slot_id, w_slot_token]
-    )
-    .status
-    .success());
-    assert!(wire(&paul_home, &["send", "willard", "decision", "from a stranger", "--json"]).status.success());
+    assert!(
+        wire(
+            &paul_home,
+            &[
+                "add-peer-slot",
+                "willard",
+                &relay_url,
+                w_slot_id,
+                w_slot_token
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        wire(
+            &paul_home,
+            &["send", "willard", "decision", "from a stranger", "--json"]
+        )
+        .status
+        .success()
+    );
     assert!(wire(&paul_home, &["push", "--json"]).status.success());
 
     // Willard pulls — paul is NOT pinned, so verify_message_v31 returns
@@ -194,5 +243,8 @@ async fn pull_rejects_event_with_unknown_signer() {
     assert_eq!(pull_json["written"].as_array().unwrap().len(), 0);
     assert_eq!(pull_json["rejected"].as_array().unwrap().len(), 1);
     let reason = pull_json["rejected"][0]["reason"].as_str().unwrap();
-    assert!(reason.contains("not in trust"), "expected 'not in trust' rejection, got: {reason}");
+    assert!(
+        reason.contains("not in trust"),
+        "expected 'not in trust' rejection, got: {reason}"
+    );
 }

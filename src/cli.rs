@@ -9,16 +9,14 @@
 //!   - **human-only**: `init`, `join` — these establish trust via SAS and
 //!     must NOT be exposed to MCP / agent automation.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{
     agent_card::{build_agent_card, sign_agent_card},
     config,
-    signing::{
-        fingerprint, generate_keypair, make_key_id, sign_message_v31, verify_message_v31,
-    },
+    signing::{fingerprint, generate_keypair, make_key_id, sign_message_v31, verify_message_v31},
     trust::{add_self_to_trust, empty_trust, get_tier},
 };
 
@@ -228,38 +226,68 @@ pub enum Command {
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { handle, name, relay, json } => {
-            cmd_init(&handle, name.as_deref(), relay.as_deref(), json)
-        }
+        Command::Init {
+            handle,
+            name,
+            relay,
+            json,
+        } => cmd_init(&handle, name.as_deref(), relay.as_deref(), json),
         Command::Status { json } => cmd_status(json),
         Command::Whoami { json } => cmd_whoami(json),
         Command::Peers { json } => cmd_peers(json),
-        Command::Send { peer, kind, body, json } => cmd_send(&peer, &kind, &body, json),
+        Command::Send {
+            peer,
+            kind,
+            body,
+            json,
+        } => cmd_send(&peer, &kind, &body, json),
         Command::Tail { peer, json, limit } => cmd_tail(peer.as_deref(), json, limit),
         Command::Verify { path, json } => cmd_verify(&path, json),
         Command::Mcp => cmd_mcp(),
         Command::RelayServer { bind } => cmd_relay_server(&bind),
         Command::BindRelay { url, json } => cmd_bind_relay(&url, json),
-        Command::AddPeerSlot { handle, url, slot_id, slot_token, json } => {
-            cmd_add_peer_slot(&handle, &url, &slot_id, &slot_token, json)
-        }
+        Command::AddPeerSlot {
+            handle,
+            url,
+            slot_id,
+            slot_token,
+            json,
+        } => cmd_add_peer_slot(&handle, &url, &slot_id, &slot_token, json),
         Command::Push { peer, json } => cmd_push(peer.as_deref(), json),
         Command::Pull { json } => cmd_pull(json),
         Command::Pin { card_file, json } => cmd_pin(&card_file, json),
         Command::RotateSlot { no_announce, json } => cmd_rotate_slot(no_announce, json),
-        Command::ForgetPeer { handle, purge, json } => cmd_forget_peer(&handle, purge, json),
-        Command::Daemon { interval, once, json } => cmd_daemon(interval, once, json),
-        Command::PairHost { relay, yes, timeout } => cmd_pair_host(&relay, yes, timeout),
-        Command::PairJoin { code_phrase, relay, yes, timeout } => {
-            cmd_pair_join(&code_phrase, &relay, yes, timeout)
-        }
+        Command::ForgetPeer {
+            handle,
+            purge,
+            json,
+        } => cmd_forget_peer(&handle, purge, json),
+        Command::Daemon {
+            interval,
+            once,
+            json,
+        } => cmd_daemon(interval, once, json),
+        Command::PairHost {
+            relay,
+            yes,
+            timeout,
+        } => cmd_pair_host(&relay, yes, timeout),
+        Command::PairJoin {
+            code_phrase,
+            relay,
+            yes,
+            timeout,
+        } => cmd_pair_join(&code_phrase, &relay, yes, timeout),
     }
 }
 
 // ---------- init ----------
 
 fn cmd_init(handle: &str, name: Option<&str>, relay: Option<&str>, as_json: bool) -> Result<()> {
-    if !handle.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !handle
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         bail!("handle must be ASCII alphanumeric / '-' / '_' (got {handle:?})");
     }
     if config::is_initialized()? {
@@ -316,14 +344,21 @@ fn cmd_init(handle: &str, name: Option<&str>, relay: Option<&str>, as_json: bool
         println!("{}", serde_json::to_string(&out)?);
     } else {
         println!("generated did:wire:{handle} (ed25519:{key_id})");
-        println!("config written to {}", config::config_dir()?.to_string_lossy());
+        println!(
+            "config written to {}",
+            config::config_dir()?.to_string_lossy()
+        );
         if let Some((url, slot_id)) = &relay_info {
             println!("bound to relay {url} (slot {slot_id})");
             println!();
-            println!("next step: `wire pair-host --relay {url}` to print a code phrase for a peer.");
+            println!(
+                "next step: `wire pair-host --relay {url}` to print a code phrase for a peer."
+            );
         } else {
             println!();
-            println!("next step: `wire pair-host --relay <url>` to bind a relay + open a pair-slot.");
+            println!(
+                "next step: `wire pair-host --relay <url>` to bind a relay + open a pair-slot."
+            );
         }
     }
     Ok(())
@@ -340,7 +375,11 @@ fn cmd_status(as_json: bool) -> Result<()> {
 
     if initialized {
         let card = config::read_agent_card()?;
-        let did = card.get("did").and_then(Value::as_str).unwrap_or("").to_string();
+        let did = card
+            .get("did")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
         let pk_b64 = card
             .get("verify_keys")
@@ -353,7 +392,10 @@ fn cmd_status(as_json: bool) -> Result<()> {
         summary["did"] = json!(did);
         summary["handle"] = json!(handle);
         summary["fingerprint"] = json!(fingerprint(&pk_bytes));
-        summary["capabilities"] = card.get("capabilities").cloned().unwrap_or_else(|| json!([]));
+        summary["capabilities"] = card
+            .get("capabilities")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
 
         let trust = config::read_trust()?;
         let mut peers = Vec::new();
@@ -399,7 +441,10 @@ fn cmd_status(as_json: bool) -> Result<()> {
         println!("not initialized — run `wire init <handle>` first");
     } else {
         println!("did:           {}", summary["did"].as_str().unwrap_or("?"));
-        println!("fingerprint:   {}", summary["fingerprint"].as_str().unwrap_or("?"));
+        println!(
+            "fingerprint:   {}",
+            summary["fingerprint"].as_str().unwrap_or("?")
+        );
         println!("capabilities:  {}", summary["capabilities"]);
         if !summary["self_relay"].is_null() {
             println!(
@@ -410,7 +455,10 @@ fn cmd_status(as_json: bool) -> Result<()> {
         } else {
             println!("self relay:    (not bound — run `wire pair-host --relay <url>` to bind)");
         }
-        println!("peers:         {}", summary["peers"].as_array().map(|a| a.len()).unwrap_or(0));
+        println!(
+            "peers:         {}",
+            summary["peers"].as_array().map(|a| a.len()).unwrap_or(0)
+        );
         for p in summary["peers"].as_array().unwrap_or(&Vec::new()) {
             println!(
                 "  - {:<20} tier={}",
@@ -459,7 +507,11 @@ fn cmd_whoami(as_json: bool) -> Result<()> {
         bail!("not initialized — run `wire init <handle>` first");
     }
     let card = config::read_agent_card()?;
-    let did = card.get("did").and_then(Value::as_str).unwrap_or("").to_string();
+    let did = card
+        .get("did")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
     let pk_b64 = card
         .get("verify_keys")
@@ -514,7 +566,11 @@ fn cmd_peers(as_json: bool) -> Result<()> {
 
     let mut peers = Vec::new();
     for (handle, agent) in agents.iter() {
-        let did = agent.get("did").and_then(Value::as_str).unwrap_or("").to_string();
+        let did = agent
+            .get("did")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         if Some(did.as_str()) == self_did.as_deref() {
             continue; // skip self-attestation
         }
@@ -570,8 +626,8 @@ fn cmd_send(peer: &str, kind: &str, body_arg: &str, as_json: bool) -> Result<()>
 
     // Body: literal string, or @/path/to/body.json
     let body_value: Value = if let Some(path) = body_arg.strip_prefix('@') {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading body file {path:?}"))?;
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading body file {path:?}"))?;
         serde_json::from_str(&raw).unwrap_or(Value::String(raw))
     } else {
         Value::String(body_arg.to_string())
@@ -619,7 +675,10 @@ fn cmd_send(peer: &str, kind: &str, body_arg: &str, as_json: bool) -> Result<()>
             }))?
         );
     } else {
-        println!("queued event {event_id} → {peer} (outbox: {})", outbox.display());
+        println!(
+            "queued event {event_id} → {peer} (outbox: {})",
+            outbox.display()
+        );
     }
     Ok(())
 }
@@ -656,9 +715,7 @@ fn cmd_tail(peer: Option<&str>, as_json: bool, limit: usize) -> Result<()> {
         .filter(|p| {
             p.extension().map(|x| x == "jsonl").unwrap_or(false)
                 && match peer {
-                    Some(want) => {
-                        p.file_stem().and_then(|s| s.to_str()) == Some(want)
-                    }
+                    Some(want) => p.file_stem().and_then(|s| s.to_str()) == Some(want),
                     None => true,
                 }
         })
@@ -679,7 +736,10 @@ fn cmd_tail(peer: Option<&str>, as_json: bool, limit: usize) -> Result<()> {
                 }
                 println!("{}", serde_json::to_string(&event_with_meta)?);
             } else {
-                let ts = event.get("timestamp").and_then(Value::as_str).unwrap_or("?");
+                let ts = event
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
                 let from = event.get("from").and_then(Value::as_str).unwrap_or("?");
                 let kind = event.get("kind").and_then(Value::as_u64).unwrap_or(0);
                 let kind_name = event.get("type").and_then(Value::as_str).unwrap_or("?");
@@ -750,7 +810,9 @@ fn cmd_relay_server(bind: &str) -> Result<()> {
     // (or `dirs::state_dir()/wire-relay`). Distinct from the CLI's state dir
     // so a single user can run both client and server on one machine.
     let state_dir = if let Ok(home) = std::env::var("WIRE_HOME") {
-        std::path::PathBuf::from(home).join("state").join("wire-relay")
+        std::path::PathBuf::from(home)
+            .join("state")
+            .join("wire-relay")
     } else {
         dirs::state_dir()
             .or_else(dirs::data_local_dir)
@@ -798,7 +860,10 @@ fn cmd_bind_relay(url: &str, as_json: bool) -> Result<()> {
     } else {
         println!("bound to relay {url}");
         println!("slot_id: {}", alloc.slot_id);
-        println!("(slot_token written to {} mode 0600)", config::relay_state_path()?.display());
+        println!(
+            "(slot_token written to {} mode 0600)",
+            config::relay_state_path()?.display()
+        );
     }
     Ok(())
 }
@@ -845,17 +910,19 @@ fn cmd_add_peer_slot(
 
 fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
     let state = config::read_relay_state()?;
-    let peers = state["peers"]
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
+    let peers = state["peers"].as_object().cloned().unwrap_or_default();
     if peers.is_empty() {
-        bail!("no peer slots pinned — run `wire add-peer-slot <handle> <url> <slot_id> <token>` first");
+        bail!(
+            "no peer slots pinned — run `wire add-peer-slot <handle> <url> <slot_id> <token>` first"
+        );
     }
     let outbox_dir = config::outbox_dir()?;
     if !outbox_dir.exists() {
         if as_json {
-            println!("{}", serde_json::to_string(&json!({"pushed": [], "skipped": []}))?);
+            println!(
+                "{}",
+                serde_json::to_string(&json!({"pushed": [], "skipped": []}))?
+            );
         } else {
             println!("outbox empty — nothing to push");
         }
@@ -875,9 +942,15 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
         if !outbox.exists() {
             continue;
         }
-        let url = slot_info["relay_url"].as_str().ok_or_else(|| anyhow!("peer {peer_handle} missing relay_url"))?;
-        let slot_id = slot_info["slot_id"].as_str().ok_or_else(|| anyhow!("peer {peer_handle} missing slot_id"))?;
-        let slot_token = slot_info["slot_token"].as_str().ok_or_else(|| anyhow!("peer {peer_handle} missing slot_token"))?;
+        let url = slot_info["relay_url"]
+            .as_str()
+            .ok_or_else(|| anyhow!("peer {peer_handle} missing relay_url"))?;
+        let slot_id = slot_info["slot_id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("peer {peer_handle} missing slot_id"))?;
+        let slot_token = slot_info["slot_token"]
+            .as_str()
+            .ok_or_else(|| anyhow!("peer {peer_handle} missing slot_token"))?;
         let client = crate::relay_client::RelayClient::new(url);
         let body = std::fs::read_to_string(&outbox)?;
         for line in body.lines() {
@@ -885,7 +958,11 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            let event_id = event.get("event_id").and_then(Value::as_str).unwrap_or("").to_string();
+            let event_id = event
+                .get("event_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             match client.post_event(slot_id, slot_token, &event) {
                 Ok(resp) => {
                     if resp.status == "duplicate" {
@@ -895,19 +972,30 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    skipped.push(json!({"peer": peer_handle, "event_id": event_id, "reason": e.to_string()}));
+                    skipped.push(
+                        json!({"peer": peer_handle, "event_id": event_id, "reason": e.to_string()}),
+                    );
                 }
             }
         }
     }
 
     if as_json {
-        println!("{}", serde_json::to_string(&json!({"pushed": pushed, "skipped": skipped}))?);
+        println!(
+            "{}",
+            serde_json::to_string(&json!({"pushed": pushed, "skipped": skipped}))?
+        );
     } else {
-        println!("pushed {} event(s); skipped {} ({})",
+        println!(
+            "pushed {} event(s); skipped {} ({})",
             pushed.len(),
             skipped.len(),
-            if skipped.is_empty() { "none" } else { "see --json for detail" });
+            if skipped.is_empty() {
+                "none"
+            } else {
+                "see --json for detail"
+            }
+        );
     }
     Ok(())
 }
@@ -920,10 +1008,19 @@ fn cmd_pull(as_json: bool) -> Result<()> {
     if self_state.is_null() {
         bail!("self slot not bound — run `wire bind-relay <url>` first");
     }
-    let url = self_state["relay_url"].as_str().ok_or_else(|| anyhow!("self.relay_url missing"))?;
-    let slot_id = self_state["slot_id"].as_str().ok_or_else(|| anyhow!("self.slot_id missing"))?;
-    let slot_token = self_state["slot_token"].as_str().ok_or_else(|| anyhow!("self.slot_token missing"))?;
-    let last_event_id = self_state.get("last_pulled_event_id").and_then(Value::as_str).map(str::to_string);
+    let url = self_state["relay_url"]
+        .as_str()
+        .ok_or_else(|| anyhow!("self.relay_url missing"))?;
+    let slot_id = self_state["slot_id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("self.slot_id missing"))?;
+    let slot_token = self_state["slot_token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("self.slot_token missing"))?;
+    let last_event_id = self_state
+        .get("last_pulled_event_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
 
     let client = crate::relay_client::RelayClient::new(url);
     let events = client.list_events(slot_id, slot_token, last_event_id.as_deref(), Some(1000))?;
@@ -937,7 +1034,11 @@ fn cmd_pull(as_json: bool) -> Result<()> {
     let mut last_seen: Option<String> = last_event_id.clone();
 
     for event in &events {
-        let event_id = event.get("event_id").and_then(Value::as_str).unwrap_or("").to_string();
+        let event_id = event
+            .get("event_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         last_seen = Some(event_id.clone());
         match crate::signing::verify_message_v31(event, &trust) {
             Ok(()) => {
@@ -973,14 +1074,21 @@ fn cmd_pull(as_json: bool) -> Result<()> {
     }
 
     if as_json {
-        println!("{}", serde_json::to_string(&json!({
-            "written": written,
-            "rejected": rejected,
-            "total_seen": events.len(),
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "written": written,
+                "rejected": rejected,
+                "total_seen": events.len(),
+            }))?
+        );
     } else {
-        println!("pulled {} event(s); wrote {}; rejected {} (bad signature)",
-            events.len(), written.len(), rejected.len());
+        println!(
+            "pulled {} event(s); wrote {}; rejected {} (bad signature)",
+            events.len(),
+            written.len(),
+            rejected.len()
+        );
     }
     Ok(())
 }
@@ -1011,7 +1119,11 @@ fn cmd_rotate_slot(no_announce: bool, as_json: bool) -> Result<()> {
 
     // Read identity to sign the announcement.
     let card = config::read_agent_card()?;
-    let did = card.get("did").and_then(Value::as_str).unwrap_or("").to_string();
+    let did = card
+        .get("did")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
     let pk_b64 = card
         .get("verify_keys")
@@ -1116,15 +1228,22 @@ fn cmd_rotate_slot(no_announce: bool, as_json: bool) -> Result<()> {
         );
     } else {
         println!("rotated slot on {url}");
-        println!("  old slot_id: {old_slot_id} (orphaned — abusive bearer-holders lose their leverage)");
+        println!(
+            "  old slot_id: {old_slot_id} (orphaned — abusive bearer-holders lose their leverage)"
+        );
         println!("  new slot_id: {new_slot_id}");
         if !announced.is_empty() {
-            println!("  announced wire_close (kind=1201) to: {}", announced.join(", "));
+            println!(
+                "  announced wire_close (kind=1201) to: {}",
+                announced.join(", ")
+            );
         }
         println!();
         println!("next steps:");
         println!("  - peers see the wire_close event in their next `wire pull`");
-        println!("  - paired peers must re-issue: tell them to run `wire add-peer-slot {handle} {url} {new_slot_id} <new-token>`");
+        println!(
+            "  - paired peers must re-issue: tell them to run `wire add-peer-slot {handle} {url} {new_slot_id} <new-token>`"
+        );
         println!("    (or full re-pair via `wire pair-host`/`wire join`)");
         println!("  - until they do, you'll receive but they won't be able to reach you");
         // Suppress unused warning
@@ -1167,10 +1286,13 @@ fn cmd_forget_peer(handle: &str, purge: bool, as_json: bool) -> Result<()> {
 
     if !removed_from_trust && !removed_from_relay {
         if as_json {
-            println!("{}", serde_json::to_string(&json!({
-                "removed": false,
-                "reason": format!("peer {handle:?} not pinned"),
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "removed": false,
+                    "reason": format!("peer {handle:?} not pinned"),
+                }))?
+            );
         } else {
             eprintln!("peer {handle:?} not found in trust or relay state — nothing to forget");
         }
@@ -1178,18 +1300,27 @@ fn cmd_forget_peer(handle: &str, purge: bool, as_json: bool) -> Result<()> {
     }
 
     if as_json {
-        println!("{}", serde_json::to_string(&json!({
-            "handle": handle,
-            "removed_from_trust": removed_from_trust,
-            "removed_from_relay_state": removed_from_relay,
-            "purged_files": purged,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "handle": handle,
+                "removed_from_trust": removed_from_trust,
+                "removed_from_relay_state": removed_from_relay,
+                "purged_files": purged,
+            }))?
+        );
     } else {
         println!("forgot peer {handle:?}");
-        if removed_from_trust { println!("  - removed from trust.json"); }
-        if removed_from_relay { println!("  - removed from relay.json"); }
+        if removed_from_trust {
+            println!("  - removed from trust.json");
+        }
+        if removed_from_relay {
+            println!("  - removed from relay.json");
+        }
         if !purged.is_empty() {
-            for p in &purged { println!("  - deleted {p}"); }
+            for p in &purged {
+                println!("  - deleted {p}");
+            }
         } else if !purge {
             println!("  (inbox/outbox files preserved; pass --purge to delete them)");
         }
@@ -1282,7 +1413,11 @@ fn run_sync_push() -> Result<Value> {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            let event_id = event.get("event_id").and_then(Value::as_str).unwrap_or("").to_string();
+            let event_id = event
+                .get("event_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             match client.post_event(slot_id, slot_token, &event) {
                 Ok(resp) => {
                     if resp.status == "duplicate" {
@@ -1292,7 +1427,9 @@ fn run_sync_push() -> Result<Value> {
                     }
                 }
                 Err(e) => {
-                    skipped.push(json!({"peer": peer_handle, "event_id": event_id, "reason": e.to_string()}));
+                    skipped.push(
+                        json!({"peer": peer_handle, "event_id": event_id, "reason": e.to_string()}),
+                    );
                 }
             }
         }
@@ -1310,7 +1447,10 @@ fn run_sync_pull() -> Result<Value> {
     let url = self_state["relay_url"].as_str().unwrap_or("");
     let slot_id = self_state["slot_id"].as_str().unwrap_or("");
     let slot_token = self_state["slot_token"].as_str().unwrap_or("");
-    let last_event_id = self_state.get("last_pulled_event_id").and_then(Value::as_str).map(str::to_string);
+    let last_event_id = self_state
+        .get("last_pulled_event_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     if url.is_empty() {
         return Ok(json!({"written": [], "rejected": [], "total_seen": 0}));
     }
@@ -1325,7 +1465,11 @@ fn run_sync_pull() -> Result<Value> {
     let mut last_seen = last_event_id;
 
     for event in &events {
-        let event_id = event.get("event_id").and_then(Value::as_str).unwrap_or("").to_string();
+        let event_id = event
+            .get("event_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         last_seen = Some(event_id.clone());
         match crate::signing::verify_message_v31(event, &trust) {
             Ok(()) => {
@@ -1365,8 +1509,10 @@ fn run_sync_pull() -> Result<Value> {
 // ---------- pin (manual out-of-band peer pairing) ----------
 
 fn cmd_pin(card_file: &str, as_json: bool) -> Result<()> {
-    let body = std::fs::read_to_string(card_file).with_context(|| format!("reading {card_file}"))?;
-    let card: Value = serde_json::from_str(&body).with_context(|| format!("parsing {card_file}"))?;
+    let body =
+        std::fs::read_to_string(card_file).with_context(|| format!("reading {card_file}"))?;
+    let card: Value =
+        serde_json::from_str(&body).with_context(|| format!("parsing {card_file}"))?;
     crate::agent_card::verify_agent_card(&card)
         .map_err(|e| anyhow!("peer card signature invalid: {e}"))?;
 
@@ -1378,12 +1524,15 @@ fn cmd_pin(card_file: &str, as_json: bool) -> Result<()> {
     config::write_trust(&trust)?;
 
     if as_json {
-        println!("{}", serde_json::to_string(&json!({
-            "handle": handle,
-            "did": did,
-            "tier": "VERIFIED",
-            "pinned": true,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "handle": handle,
+                "did": did,
+                "tier": "VERIFIED",
+                "pinned": true,
+            }))?
+        );
     } else {
         println!("pinned {handle} ({did}) at tier VERIFIED");
     }
@@ -1396,8 +1545,19 @@ fn cmd_pair_host(relay_url: &str, auto_yes: bool, timeout_secs: u64) -> Result<(
     pair_orchestrate(relay_url, None, "host", auto_yes, timeout_secs)
 }
 
-fn cmd_pair_join(code_phrase: &str, relay_url: &str, auto_yes: bool, timeout_secs: u64) -> Result<()> {
-    pair_orchestrate(relay_url, Some(code_phrase), "guest", auto_yes, timeout_secs)
+fn cmd_pair_join(
+    code_phrase: &str,
+    relay_url: &str,
+    auto_yes: bool,
+    timeout_secs: u64,
+) -> Result<()> {
+    pair_orchestrate(
+        relay_url,
+        Some(code_phrase),
+        "guest",
+        auto_yes,
+        timeout_secs,
+    )
 }
 
 /// Shared orchestration for both sides of the SAS pairing.
@@ -1433,7 +1593,11 @@ fn pair_orchestrate(
         bail!("not initialized — run `wire init <handle>` first");
     }
     let card = config::read_agent_card()?;
-    let did = card.get("did").and_then(Value::as_str).unwrap_or("").to_string();
+    let did = card
+        .get("did")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
     let pk_b64 = card
         .get("verify_keys")
@@ -1463,7 +1627,10 @@ fn pair_orchestrate(
         config::write_relay_state(&relay_state)?;
     }
     let our_slot_id = relay_state["self"]["slot_id"].as_str().unwrap().to_string();
-    let our_slot_token = relay_state["self"]["slot_token"].as_str().unwrap().to_string();
+    let our_slot_token = relay_state["self"]["slot_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 2. code phrase
     let code = match code_in {
@@ -1564,7 +1731,10 @@ fn pair_orchestrate(
     let peer_plain = open_bootstrap(&aead_key, &peer_sealed)
         .map_err(|e| anyhow!("AEAD open failed — wrong code, MITM, or peer aborted: {e}"))?;
     let peer_payload: Value = serde_json::from_slice(&peer_plain)?;
-    let peer_card = peer_payload.get("card").cloned().ok_or_else(|| anyhow!("peer bootstrap missing card"))?;
+    let peer_card = peer_payload
+        .get("card")
+        .cloned()
+        .ok_or_else(|| anyhow!("peer bootstrap missing card"))?;
     crate::agent_card::verify_agent_card(&peer_card)
         .map_err(|e| anyhow!("peer card signature invalid: {e}"))?;
 
@@ -1573,10 +1743,25 @@ fn pair_orchestrate(
     config::write_trust(&trust)?;
 
     let peer_did = peer_card.get("did").and_then(Value::as_str).unwrap_or("");
-    let peer_handle = peer_did.strip_prefix("did:wire:").unwrap_or(peer_did).to_string();
-    let peer_relay_url = peer_payload.get("relay_url").and_then(Value::as_str).unwrap_or("").to_string();
-    let peer_slot_id = peer_payload.get("slot_id").and_then(Value::as_str).unwrap_or("").to_string();
-    let peer_slot_token = peer_payload.get("slot_token").and_then(Value::as_str).unwrap_or("").to_string();
+    let peer_handle = peer_did
+        .strip_prefix("did:wire:")
+        .unwrap_or(peer_did)
+        .to_string();
+    let peer_relay_url = peer_payload
+        .get("relay_url")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let peer_slot_id = peer_payload
+        .get("slot_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let peer_slot_token = peer_payload
+        .get("slot_token")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
 
     let mut relay_state = config::read_relay_state()?;
     relay_state["peers"][&peer_handle] = json!({
@@ -1589,7 +1774,10 @@ fn pair_orchestrate(
     // Suppress unused-var warning for peer_role; used in human-readable log only.
     eprintln!("paired with {peer_did} (peer role: {peer_role})");
     eprintln!("peer card pinned at tier VERIFIED");
-    eprintln!("peer relay slot saved to {}", config::relay_state_path()?.display());
+    eprintln!(
+        "peer relay slot saved to {}",
+        config::relay_state_path()?.display()
+    );
 
     // Print a final success line on stdout that tests can parse.
     println!(

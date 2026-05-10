@@ -117,7 +117,10 @@ impl RelayClient {
     }
 
     pub fn healthz(&self) -> Result<bool> {
-        let resp = self.client.get(format!("{}/healthz", self.base_url)).send()?;
+        let resp = self
+            .client
+            .get(format!("{}/healthz", self.base_url))
+            .send()?;
         Ok(resp.status().is_success())
     }
 
@@ -151,7 +154,10 @@ impl RelayClient {
     ) -> Result<(Option<String>, Option<String>)> {
         let resp = self
             .client
-            .get(format!("{}/v1/pair/{pair_id}?as_role={as_role}", self.base_url))
+            .get(format!(
+                "{}/v1/pair/{pair_id}?as_role={as_role}",
+                self.base_url
+            ))
             .send()?;
         let status = resp.status();
         if !status.is_success() {
@@ -159,8 +165,14 @@ impl RelayClient {
             return Err(anyhow!("pair_get failed: {status}: {detail}"));
         }
         let v: Value = resp.json()?;
-        let peer_msg = v.get("peer_msg").and_then(Value::as_str).map(str::to_string);
-        let peer_bootstrap = v.get("peer_bootstrap").and_then(Value::as_str).map(str::to_string);
+        let peer_msg = v
+            .get("peer_msg")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let peer_bootstrap = v
+            .get("peer_bootstrap")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         Ok((peer_msg, peer_bootstrap))
     }
 

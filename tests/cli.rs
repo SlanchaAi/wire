@@ -47,7 +47,9 @@ fn help_flag_lists_subcommands() {
     let out = run(&home, &["--help"]);
     assert!(out.status.success(), "help failed: {:?}", out);
     let s = String::from_utf8(out.stdout).unwrap();
-    for cmd in ["init", "join", "whoami", "peers", "send", "tail", "verify", "mcp"] {
+    for cmd in [
+        "init", "join", "whoami", "peers", "send", "tail", "verify", "mcp",
+    ] {
         assert!(s.contains(cmd), "missing subcommand {cmd} in help: {s}");
     }
 }
@@ -117,7 +119,16 @@ fn peers_empty_after_init_is_self_filtered() {
 fn send_writes_to_outbox() {
     let home = fresh_home();
     let _ = run(&home, &["init", "paul"]);
-    let out = run(&home, &["send", "willard", "decision", "ship the v0.1 demo", "--json"]);
+    let out = run(
+        &home,
+        &[
+            "send",
+            "willard",
+            "decision",
+            "ship the v0.1 demo",
+            "--json",
+        ],
+    );
     assert!(out.status.success(), "send failed: {:?}", out);
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -143,14 +154,23 @@ fn send_idempotent_under_identical_body() {
     // The same body produces the same event_id (content-addressed).
     let home = fresh_home();
     let _ = run(&home, &["init", "paul"]);
-    let out1 = run(&home, &["send", "willard", "decision", "fixed-body", "--json"]);
-    let out2 = run(&home, &["send", "willard", "decision", "fixed-body", "--json"]);
+    let out1 = run(
+        &home,
+        &["send", "willard", "decision", "fixed-body", "--json"],
+    );
+    let out2 = run(
+        &home,
+        &["send", "willard", "decision", "fixed-body", "--json"],
+    );
     let p1: serde_json::Value = serde_json::from_slice(&out1.stdout).unwrap();
     let p2: serde_json::Value = serde_json::from_slice(&out2.stdout).unwrap();
     // Note: timestamps differ, so event_ids differ. The dedupe-on-content
     // property requires the daemon (not yet built). This test pins the
     // current behavior so iter 6's dedupe lands as a deliberate change.
-    assert_ne!(p1["event_id"], p2["event_id"], "iter 6 should make these equal");
+    assert_ne!(
+        p1["event_id"], p2["event_id"],
+        "iter 6 should make these equal"
+    );
 }
 
 #[test]
@@ -164,7 +184,11 @@ fn verify_round_trips_a_send() {
     let event_path = home.join("event.json");
     std::fs::write(&event_path, line.trim_end()).unwrap();
     let out = run(&home, &["verify", event_path.to_str().unwrap(), "--json"]);
-    assert!(out.status.success(), "verify failed: stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "verify failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
     assert_eq!(parsed["verified"], true);
@@ -195,7 +219,10 @@ fn join_alias_resolves_to_pair_join() {
     // home), but the failure must come from pair-join's logic, not from clap
     // saying "unknown subcommand".
     let home = fresh_home();
-    let out = run(&home, &["join", "12-ABCDEF", "--relay", "http://127.0.0.1:1"]);
+    let out = run(
+        &home,
+        &["join", "12-ABCDEF", "--relay", "http://127.0.0.1:1"],
+    );
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     // Either "not initialized" (uninited home) or relay healthz failure —
@@ -223,8 +250,7 @@ fn mcp_initialize_then_tools_list_round_trip() {
         .spawn()
         .expect("failed to spawn wire mcp");
 
-    let initialize =
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#;
+    let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#;
     let initialized = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
     let tools_list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
 
@@ -239,7 +265,12 @@ fn mcp_initialize_then_tools_list_round_trip() {
     assert!(out.status.success(), "mcp server crashed: {:?}", out);
     let stdout = String::from_utf8(out.stdout).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 2, "expected 2 responses (initialize + tools/list), got {}: {stdout}", lines.len());
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected 2 responses (initialize + tools/list), got {}: {stdout}",
+        lines.len()
+    );
 
     let init_resp: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(init_resp["result"]["protocolVersion"], "2025-06-18");
@@ -253,8 +284,14 @@ fn mcp_initialize_then_tools_list_round_trip() {
         .collect();
     assert!(names.contains(&"wire_whoami"));
     assert!(names.contains(&"wire_send"));
-    assert!(!names.contains(&"wire_init"), "wire_init MUST NOT be exposed via MCP");
-    assert!(!names.contains(&"wire_join"), "wire_join MUST NOT be exposed via MCP");
+    assert!(
+        !names.contains(&"wire_init"),
+        "wire_init MUST NOT be exposed via MCP"
+    );
+    assert!(
+        !names.contains(&"wire_join"),
+        "wire_join MUST NOT be exposed via MCP"
+    );
 }
 
 #[test]
@@ -331,8 +368,14 @@ fn mcp_tools_call_wire_init_is_refused() {
     let resp: serde_json::Value = serde_json::from_str(last).unwrap();
     assert_eq!(resp["result"]["isError"], true);
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("not exposed via MCP"), "unexpected refusal: {text}");
-    assert!(text.contains("human-in-loop"), "missing security explanation: {text}");
+    assert!(
+        text.contains("not exposed via MCP"),
+        "unexpected refusal: {text}"
+    );
+    assert!(
+        text.contains("human-in-loop"),
+        "missing security explanation: {text}"
+    );
 
     // Critical: verify no config files were created — the server refused at the
     // protocol layer, so init's side effects must not have happened.
@@ -427,7 +470,10 @@ fn forget_peer_purge_deletes_jsonl_files() {
     assert!(out.status.success());
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(!parsed["purged_files"].as_array().unwrap().is_empty());
-    assert!(!outbox_path.exists(), "outbox file should be deleted with --purge");
+    assert!(
+        !outbox_path.exists(),
+        "outbox file should be deleted with --purge"
+    );
 }
 
 #[test]

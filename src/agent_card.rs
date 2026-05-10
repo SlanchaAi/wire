@@ -12,7 +12,7 @@
 //! them aloud out-of-band (the magic-wormhole flow) to confirm.
 
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -114,7 +114,10 @@ pub fn sign_agent_card(card: &AgentCard, private_key: &[u8]) -> AgentCard {
     let sk = SigningKey::from_bytes(&sk_bytes);
     let sig = sk.sign(&card_canonical(card));
     let mut out = card.as_object().cloned().unwrap_or_default();
-    out.insert("signature".into(), Value::String(b64encode(&sig.to_bytes())));
+    out.insert(
+        "signature".into(),
+        Value::String(b64encode(&sig.to_bytes())),
+    );
     Value::Object(out)
 }
 
@@ -229,8 +232,16 @@ mod tests {
         let (_, pk) = generate_keypair();
         let card = build_agent_card("paul", &pk, None, None, None);
         let obj = card.as_object().unwrap();
-        for v02 in ["registries", "onboard_endpoint", "wire_raw_url_template", "revoked_at"] {
-            assert!(!obj.contains_key(v02), "v0.2+ field {v02} leaked into v0.1 card");
+        for v02 in [
+            "registries",
+            "onboard_endpoint",
+            "wire_raw_url_template",
+            "revoked_at",
+        ] {
+            assert!(
+                !obj.contains_key(v02),
+                "v0.2+ field {v02} leaked into v0.1 card"
+            );
         }
     }
 

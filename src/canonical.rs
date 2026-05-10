@@ -67,8 +67,16 @@ mod tests {
     #[test]
     fn strict_excludes_event_id() {
         let v = json!({"a": 1, "event_id": "deadbeef"});
-        assert!(!std::str::from_utf8(&canonical(&v, true)).unwrap().contains("event_id"));
-        assert!(std::str::from_utf8(&canonical(&v, false)).unwrap().contains("event_id"));
+        assert!(
+            !std::str::from_utf8(&canonical(&v, true))
+                .unwrap()
+                .contains("event_id")
+        );
+        assert!(
+            std::str::from_utf8(&canonical(&v, false))
+                .unwrap()
+                .contains("event_id")
+        );
     }
 
     #[test]

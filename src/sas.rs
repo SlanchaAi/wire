@@ -72,7 +72,10 @@ pub fn parse_code_phrase(s: &str) -> Result<&str> {
         bail!("code phrase digits must be {CODE_DIGIT_LEN} ASCII digits, got {digits:?}");
     }
     if rest.len() != CODE_TOKEN_LEN {
-        bail!("code phrase token must be {CODE_TOKEN_LEN} chars, got {} ({rest:?})", rest.len());
+        bail!(
+            "code phrase token must be {CODE_TOKEN_LEN} chars, got {} ({rest:?})",
+            rest.len()
+        );
     }
     if !rest.bytes().all(|b| BASE32_ALPHABET.contains(&b)) {
         bail!("code phrase token has non-base32 char: {rest:?}");
@@ -243,7 +246,10 @@ mod tests {
             (Ok(a), Ok(b)) => a != b,
             _ => true, // either side erroring is also a mismatch
         };
-        assert!(mismatch, "wrong code phrase should not produce matching secrets");
+        assert!(
+            mismatch,
+            "wrong code phrase should not produce matching secrets"
+        );
     }
 
     #[test]

@@ -22,7 +22,7 @@
 //! CLI subcommand. This is the trust model wire is built to provide.
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -172,7 +172,10 @@ fn handle_tools_call(id: &Value, params: &Value) -> Value {
         Some(n) => n,
         None => return error_response(id, -32602, "missing tool name"),
     };
-    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
 
     let result = match name {
         "wire_whoami" => tool_whoami(),
@@ -222,7 +225,11 @@ fn tool_whoami() -> Result<Value, String> {
         return Err("not initialized — operator must run `wire init <handle>` first".into());
     }
     let card = config::read_agent_card().map_err(|e| e.to_string())?;
-    let did = card.get("did").and_then(Value::as_str).unwrap_or("").to_string();
+    let did = card
+        .get("did")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
     let pk_b64 = card
         .get("verify_keys")
@@ -264,7 +271,11 @@ fn tool_peers() -> Result<Value, String> {
     }
     let mut peers = Vec::new();
     for (handle, agent) in agents.iter() {
-        let did = agent.get("did").and_then(Value::as_str).unwrap_or("").to_string();
+        let did = agent
+            .get("did")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         if Some(did.as_str()) == self_did.as_deref() {
             continue;
         }
@@ -282,16 +293,29 @@ fn tool_send(args: &Value) -> Result<Value, String> {
     use crate::config;
     use crate::signing::{b64decode, sign_message_v31};
 
-    let peer = args.get("peer").and_then(Value::as_str).ok_or("missing 'peer'")?;
-    let kind = args.get("kind").and_then(Value::as_str).ok_or("missing 'kind'")?;
-    let body = args.get("body").and_then(Value::as_str).ok_or("missing 'body'")?;
+    let peer = args
+        .get("peer")
+        .and_then(Value::as_str)
+        .ok_or("missing 'peer'")?;
+    let kind = args
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or("missing 'kind'")?;
+    let body = args
+        .get("body")
+        .and_then(Value::as_str)
+        .ok_or("missing 'body'")?;
 
     if !config::is_initialized().map_err(|e| e.to_string())? {
         return Err("not initialized — operator must run `wire init <handle>` first".into());
     }
     let sk_seed = config::read_private_key().map_err(|e| e.to_string())?;
     let card = config::read_agent_card().map_err(|e| e.to_string())?;
-    let did = card.get("did").and_then(Value::as_str).unwrap_or("").to_string();
+    let did = card
+        .get("did")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
     let pk_b64 = card
         .get("verify_keys")
@@ -303,7 +327,8 @@ fn tool_send(args: &Value) -> Result<Value, String> {
     let pk_bytes = b64decode(pk_b64).map_err(|e| e.to_string())?;
 
     // Body parses as JSON if possible, else stays a string.
-    let body_value: Value = serde_json::from_str(body).unwrap_or_else(|_| Value::String(body.to_string()));
+    let body_value: Value =
+        serde_json::from_str(body).unwrap_or_else(|_| Value::String(body.to_string()));
     let kind_id = parse_kind(kind);
 
     let now = time::OffsetDateTime::now_utc()
@@ -318,11 +343,14 @@ fn tool_send(args: &Value) -> Result<Value, String> {
         "kind": kind_id,
         "body": body_value,
     });
-    let signed = sign_message_v31(&event, &sk_seed, &pk_bytes, &handle).map_err(|e| e.to_string())?;
+    let signed =
+        sign_message_v31(&event, &sk_seed, &pk_bytes, &handle).map_err(|e| e.to_string())?;
     let event_id = signed["event_id"].as_str().unwrap_or("").to_string();
 
     config::ensure_dirs().map_err(|e| e.to_string())?;
-    let outbox = config::outbox_dir().map_err(|e| e.to_string())?.join(format!("{peer}.jsonl"));
+    let outbox = config::outbox_dir()
+        .map_err(|e| e.to_string())?
+        .join(format!("{peer}.jsonl"));
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -389,8 +417,12 @@ fn tool_verify(args: &Value) -> Result<Value, String> {
     use crate::config;
     use crate::signing::verify_message_v31;
 
-    let event_str = args.get("event").and_then(Value::as_str).ok_or("missing 'event'")?;
-    let event: Value = serde_json::from_str(event_str).map_err(|e| format!("invalid event JSON: {e}"))?;
+    let event_str = args
+        .get("event")
+        .and_then(Value::as_str)
+        .ok_or("missing 'event'")?;
+    let event: Value =
+        serde_json::from_str(event_str).map_err(|e| format!("invalid event JSON: {e}"))?;
     let trust = config::read_trust().map_err(|e| e.to_string())?;
     match verify_message_v31(&event, &trust) {
         Ok(()) => Ok(json!({"verified": true})),
@@ -449,10 +481,22 @@ mod tests {
             .filter_map(|t| t["name"].as_str())
             .collect();
         for forbidden in ["wire_init", "wire_join"] {
-            assert!(!names.contains(&forbidden), "{forbidden} should NOT be exposed via MCP");
+            assert!(
+                !names.contains(&forbidden),
+                "{forbidden} should NOT be exposed via MCP"
+            );
         }
-        for required in ["wire_whoami", "wire_peers", "wire_send", "wire_tail", "wire_verify"] {
-            assert!(names.contains(&required), "missing required tool {required}");
+        for required in [
+            "wire_whoami",
+            "wire_peers",
+            "wire_send",
+            "wire_tail",
+            "wire_verify",
+        ] {
+            assert!(
+                names.contains(&required),
+                "missing required tool {required}"
+            );
         }
     }
 

@@ -10,8 +10,8 @@
 //! Why sign the id and not the body: lets relays/index layers cite events by
 //! id without re-canonicalizing every body. Same property Nostr exploits.
 
-use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde_json::Value;
@@ -38,8 +38,8 @@ pub static KIND_RANGES: &[(KindClass, Range<u32>)] = &[
 /// v0.1 named kinds. Anything not here is unknown to this version.
 pub fn kinds() -> &'static [(u32, &'static str)] {
     &[
-        (1, "decision"),     // Nostr-compat short text — special-cased to Regular
-        (100, "heartbeat"),  // ephemeral liveness ping — special-cased to Ephemeral
+        (1, "decision"),    // Nostr-compat short text — special-cased to Regular
+        (100, "heartbeat"), // ephemeral liveness ping — special-cased to Ephemeral
         (1000, "decision"),
         (1001, "claim"),
         (1002, "ack"),
@@ -192,8 +192,14 @@ pub fn sign_message_v31(
 
     let mut out = msg.as_object().cloned().unwrap_or_default();
     out.insert("event_id".into(), Value::String(event_id));
-    out.insert("public_key_id".into(), Value::String(make_key_id(agent, public_key)));
-    out.insert("signature".into(), Value::String(b64encode(&sig.to_bytes())));
+    out.insert(
+        "public_key_id".into(),
+        Value::String(make_key_id(agent, public_key)),
+    );
+    out.insert(
+        "signature".into(),
+        Value::String(b64encode(&sig.to_bytes())),
+    );
     Ok(Value::Object(out))
 }
 
@@ -243,7 +249,10 @@ pub fn verify_message_v31(msg: &Value, trust: &Value) -> Result<(), VerifyError>
         .find(|k| k.get("key_id").and_then(Value::as_str) == Some(public_key_id))
         .ok_or_else(|| VerifyError::UnknownKey(public_key_id.to_string(), handle.to_string()))?;
 
-    let active = key_record.get("active").and_then(Value::as_bool).unwrap_or(true);
+    let active = key_record
+        .get("active")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     if !active {
         return Err(VerifyError::DeactivatedKey(
             public_key_id.to_string(),
@@ -272,7 +281,8 @@ pub fn verify_message_v31(msg: &Value, trust: &Value) -> Result<(), VerifyError>
     let sig = Signature::from_bytes(&sig_arr);
 
     let raw = hex::decode(event_id).map_err(|_| VerifyError::BadSignature)?;
-    vk.verify(&raw, &sig).map_err(|_| VerifyError::SignatureRejected)
+    vk.verify(&raw, &sig)
+        .map_err(|_| VerifyError::SignatureRejected)
 }
 
 fn strip_did_wire(s: &str) -> &str {
@@ -334,7 +344,10 @@ mod tests {
     fn v01_does_not_ship_v02_kinds() {
         let names = kinds_map();
         for deferred in [1900, 1901, 10500] {
-            assert!(!names.contains_key(&deferred), "v0.2+ kind {deferred} leaked into v0.1");
+            assert!(
+                !names.contains_key(&deferred),
+                "v0.2+ kind {deferred} leaked into v0.1"
+            );
         }
     }
 

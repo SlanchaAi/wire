@@ -9,16 +9,16 @@
 //! v0.2+ (NOT in this crate yet, see `BACKLOG.md`):
 //!   - relay client/server, SPAKE2 handshake, CLI, file_share/file_revoke kinds.
 
-pub mod canonical;
-pub mod signing;
 pub mod agent_card;
-pub mod trust;
-pub mod config;
+pub mod canonical;
 pub mod cli;
+pub mod config;
 pub mod mcp;
-pub mod relay_server;
 pub mod relay_client;
+pub mod relay_server;
 pub mod sas;
+pub mod signing;
+pub mod trust;
 
 // Curated re-exports for ergonomic call sites.
 pub use signing::{
@@ -33,6 +33,5 @@ pub use agent_card::{
 };
 
 pub use trust::{
-    Tier, Trust, add_agent_card_pin, add_self_to_trust, empty_trust, get_tier,
-    promote_to_verified,
+    Tier, Trust, add_agent_card_pin, add_self_to_trust, empty_trust, get_tier, promote_to_verified,
 };

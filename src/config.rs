@@ -16,7 +16,7 @@
 //! `$WIRE_HOME/{config,state}/`). Used by the test harness to keep tests
 //! isolated from the operator's real config.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -47,12 +47,24 @@ pub fn state_dir() -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("could not resolve XDG_STATE_HOME — set WIRE_HOME"))
 }
 
-pub fn private_key_path() -> Result<PathBuf> { Ok(config_dir()?.join("private.key")) }
-pub fn agent_card_path() -> Result<PathBuf> { Ok(config_dir()?.join("agent-card.json")) }
-pub fn trust_path() -> Result<PathBuf> { Ok(config_dir()?.join("trust.json")) }
-pub fn config_toml_path() -> Result<PathBuf> { Ok(config_dir()?.join("config.toml")) }
-pub fn inbox_dir() -> Result<PathBuf> { Ok(state_dir()?.join("inbox")) }
-pub fn outbox_dir() -> Result<PathBuf> { Ok(state_dir()?.join("outbox")) }
+pub fn private_key_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("private.key"))
+}
+pub fn agent_card_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("agent-card.json"))
+}
+pub fn trust_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("trust.json"))
+}
+pub fn config_toml_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("config.toml"))
+}
+pub fn inbox_dir() -> Result<PathBuf> {
+    Ok(state_dir()?.join("inbox"))
+}
+pub fn outbox_dir() -> Result<PathBuf> {
+    Ok(state_dir()?.join("outbox"))
+}
 
 /// Whether `wire init` has already been run (private key + card both present).
 pub fn is_initialized() -> Result<bool> {
@@ -80,7 +92,9 @@ fn set_dir_mode_0700(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn set_dir_mode_0700(_: &Path) -> Result<()> { Ok(()) }
+fn set_dir_mode_0700(_: &Path) -> Result<()> {
+    Ok(())
+}
 
 /// Write a private key file with mode 0600.
 pub fn write_private_key(seed: &[u8; 32]) -> Result<()> {
@@ -100,14 +114,19 @@ fn set_file_mode_0600(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn set_file_mode_0600(_: &Path) -> Result<()> { Ok(()) }
+fn set_file_mode_0600(_: &Path) -> Result<()> {
+    Ok(())
+}
 
 /// Read the saved private key seed (32 bytes).
 pub fn read_private_key() -> Result<[u8; 32]> {
     let path = private_key_path()?;
     let bytes = fs::read(&path).with_context(|| format!("reading {path:?}"))?;
     if bytes.len() != 32 {
-        return Err(anyhow!("private key file has wrong length ({} != 32)", bytes.len()));
+        return Err(anyhow!(
+            "private key file has wrong length ({} != 32)",
+            bytes.len()
+        ));
     }
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&bytes);
@@ -263,7 +282,10 @@ mod tests {
         with_temp_home(|| {
             ensure_dirs().unwrap();
             write_private_key(&[1u8; 32]).unwrap();
-            let mode = fs::metadata(private_key_path().unwrap()).unwrap().permissions().mode();
+            let mode = fs::metadata(private_key_path().unwrap())
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600, "got {:o}", mode & 0o777);
         });
     }

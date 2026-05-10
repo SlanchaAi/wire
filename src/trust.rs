@@ -9,7 +9,7 @@
 //! Promotion is one-way (UNTRUSTED → VERIFIED). Demotion would be
 //! ambiguous in a bilateral setting and is deliberately not modeled.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -158,7 +158,8 @@ pub fn add_self_to_trust(trust: &mut Trust, handle: &str, public_key: &[u8]) {
 
 fn now_iso() -> String {
     let now = OffsetDateTime::now_utc();
-    now.format(&Rfc3339).unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+    now.format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 #[cfg(test)]
@@ -196,7 +197,9 @@ mod tests {
         let card = sign_agent_card(&build_agent_card("paul", &pk, None, None, None), &sk);
         let mut t = empty_trust();
         add_agent_card_pin(&mut t, &card, None);
-        let kid = t["agents"]["paul"]["public_keys"][0]["key_id"].as_str().unwrap();
+        let kid = t["agents"]["paul"]["public_keys"][0]["key_id"]
+            .as_str()
+            .unwrap();
         assert!(kid.contains(':'));
         assert!(!kid.starts_with("ed25519:"));
     }
