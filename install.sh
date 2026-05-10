@@ -23,7 +23,9 @@
 set -eu
 
 REPO_URL="${WIRE_REPO_URL:-https://github.com/laulpogan/wire}"
-DIST_URL="${WIRE_DIST_URL:-https://wire.example.com/dist}"
+# Default release-asset URL — points at GitHub Releases produced by .github/workflows/release.yml.
+# Override via WIRE_DIST_URL for testing or alternate hosts.
+DIST_URL="${WIRE_DIST_URL:-${REPO_URL}/releases/latest/download}"
 PREFIX="${PREFIX:-}"
 
 while [ $# -gt 0 ]; do
@@ -40,17 +42,25 @@ done
 
 uname_s="$(uname -s)"
 uname_m="$(uname -m)"
+# Resolve target triple for a release asset matching .github/workflows/release.yml.
 case "$uname_s" in
-    Linux)  os="linux" ;;
-    Darwin) os="darwin" ;;
+    Linux)
+        # Prefer musl static for max-portability if available; fall back to gnu otherwise.
+        case "$uname_m" in
+            x86_64|amd64)  triple="x86_64-unknown-linux-musl" ;;
+            aarch64|arm64) triple="aarch64-unknown-linux-musl" ;;
+            *) echo "unsupported Linux arch: $uname_m" >&2; exit 1 ;;
+        esac
+        ;;
+    Darwin)
+        case "$uname_m" in
+            x86_64|amd64)  triple="x86_64-apple-darwin" ;;
+            aarch64|arm64) triple="aarch64-apple-darwin" ;;
+            *) echo "unsupported Darwin arch: $uname_m" >&2; exit 1 ;;
+        esac
+        ;;
     *) echo "unsupported OS: $uname_s" >&2; exit 1 ;;
 esac
-case "$uname_m" in
-    x86_64|amd64)  arch="x86_64" ;;
-    aarch64|arm64) arch="arm64" ;;
-    *) echo "unsupported arch: $uname_m" >&2; exit 1 ;;
-esac
-platform="${os}-${arch}"
 
 # Choose install dir.
 if [ -z "$PREFIX" ]; then
@@ -63,7 +73,7 @@ fi
 mkdir -p "$PREFIX"
 target="$PREFIX/wire"
 
-binary_url="$DIST_URL/$platform/wire"
+binary_url="$DIST_URL/wire-${triple}"
 echo "fetching $binary_url ..."
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT

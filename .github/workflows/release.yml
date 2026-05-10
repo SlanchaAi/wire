@@ -1,0 +1,101 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write   # for creating releases
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: wire
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: wire
+            cross: true
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: wire
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: wire
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            artifact: wire
+          - target: aarch64-apple-darwin
+            os: macos-14
+            artifact: wire
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: wire.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross (for non-host Linux builds)
+        if: matrix.cross == true
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+
+      - name: Build (cross)
+        if: matrix.cross == true
+        run: cross build --release --target ${{ matrix.target }} --bin wire
+
+      - name: Build (cargo)
+        if: matrix.cross != true
+        run: cargo build --release --target ${{ matrix.target }} --bin wire
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact }} dist/wire-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            powershell -Command "(Get-FileHash wire-${{ matrix.target }}.exe -Algorithm SHA256).Hash.ToLower() + '  wire-${{ matrix.target }}.exe' | Out-File -Encoding ascii wire-${{ matrix.target }}.exe.sha256"
+          else
+            shasum -a 256 wire-${{ matrix.target }} > wire-${{ matrix.target }}.sha256
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wire-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: github release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          draft: false
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
+          generate_release_notes: true
