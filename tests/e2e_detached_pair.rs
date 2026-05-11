@@ -254,3 +254,140 @@ async fn detached_pair_full_e2e_with_real_daemons() {
         "willard tail must contain the sent event, got: {tail_str}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_pair_two_concurrent_hosts_against_two_guests() {
+    // Stress: paul detach-hosts TWO concurrent pairs (codes A + B); two
+    // separate guest daemons (alice + bob) each detach-join one. The
+    // single paul daemon must drive BOTH pending files independently
+    // through the state machine. Verifies the per-code HashMap LIVE_SESSIONS
+    // doesn't cross-contaminate state across simultaneous pairs.
+    let relay_dir = fresh_dir("relay-multi");
+    let relay = wire::relay_server::Relay::new(relay_dir).await.unwrap();
+    let app = relay.router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let relay_url = format!("http://{addr}");
+
+    let paul = fresh_dir("paul-multi");
+    let alice = fresh_dir("alice-multi");
+    let bob = fresh_dir("bob-multi");
+    for (h, dir) in [("paul", &paul), ("alice", &alice), ("bob", &bob)] {
+        assert!(wire(dir, &["init", h, "--relay", &relay_url]).status.success());
+    }
+
+    let _paul_d = spawn_daemon(&paul);
+    let _alice_d = spawn_daemon(&alice);
+    let _bob_d = spawn_daemon(&bob);
+
+    // paul opens two concurrent detach-hosts.
+    let host_a = wire(
+        &paul,
+        &["pair-host", "--detach", "--json", "--relay", &relay_url],
+    );
+    let host_b = wire(
+        &paul,
+        &["pair-host", "--detach", "--json", "--relay", &relay_url],
+    );
+    assert!(host_a.status.success() && host_b.status.success());
+    let code_a: String = serde_json::from_slice::<Value>(&host_a.stdout)
+        .unwrap()["code_phrase"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let code_b: String = serde_json::from_slice::<Value>(&host_b.stdout)
+        .unwrap()["code_phrase"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(code_a, code_b, "concurrent hosts must produce distinct codes");
+
+    // alice joins A, bob joins B.
+    assert!(wire(
+        &alice,
+        &["pair-join", &code_a, "--detach", "--json", "--relay", &relay_url],
+    )
+    .status
+    .success());
+    assert!(wire(
+        &bob,
+        &["pair-join", &code_b, "--detach", "--json", "--relay", &relay_url],
+    )
+    .status
+    .success());
+
+    let deadline = Instant::now() + Duration::from_secs(25);
+    // Both paul-side pairs reach sas_ready with their own digits.
+    let paul_a_sas = wait_for(&paul, deadline, |items| {
+        items
+            .iter()
+            .find(|p| p["code"] == code_a && p["status"] == "sas_ready")
+            .and_then(|p| p["sas"].as_str())
+            .map(str::to_string)
+    })
+    .expect("paul/A never reached sas_ready");
+    let paul_b_sas = wait_for(&paul, deadline, |items| {
+        items
+            .iter()
+            .find(|p| p["code"] == code_b && p["status"] == "sas_ready")
+            .and_then(|p| p["sas"].as_str())
+            .map(str::to_string)
+    })
+    .expect("paul/B never reached sas_ready");
+    assert_ne!(
+        paul_a_sas, paul_b_sas,
+        "two distinct pairs must produce distinct SAS digits"
+    );
+
+    // Guest sides see the same digits as the corresponding host.
+    let alice_sas = wait_for(&alice, deadline, |items| {
+        items
+            .iter()
+            .find(|p| p["code"] == code_a && p["status"] == "sas_ready")
+            .and_then(|p| p["sas"].as_str())
+            .map(str::to_string)
+    })
+    .expect("alice never reached sas_ready");
+    let bob_sas = wait_for(&bob, deadline, |items| {
+        items
+            .iter()
+            .find(|p| p["code"] == code_b && p["status"] == "sas_ready")
+            .and_then(|p| p["sas"].as_str())
+            .map(str::to_string)
+    })
+    .expect("bob never reached sas_ready");
+    assert_eq!(paul_a_sas, alice_sas, "paul/A and alice must agree on SAS");
+    assert_eq!(paul_b_sas, bob_sas, "paul/B and bob must agree on SAS");
+
+    // Confirm everyone.
+    assert!(wire(&paul, &["pair-confirm", &code_a, &paul_a_sas]).status.success());
+    assert!(wire(&paul, &["pair-confirm", &code_b, &paul_b_sas]).status.success());
+    assert!(wire(&alice, &["pair-confirm", &code_a, &alice_sas]).status.success());
+    assert!(wire(&bob, &["pair-confirm", &code_b, &bob_sas]).status.success());
+
+    // Both pending lists should drain on paul.
+    let drained = wait_for(&paul, Instant::now() + Duration::from_secs(15), |items| {
+        if items.is_empty() {
+            Some(true)
+        } else {
+            None
+        }
+    });
+    assert_eq!(drained, Some(true), "paul pair-list must drain to empty");
+
+    // paul should now have BOTH alice + bob pinned VERIFIED.
+    let peers_out = wire(&paul, &["peers", "--json"]);
+    let peers: Value = serde_json::from_slice(&peers_out.stdout).unwrap_or_default();
+    let handles: Vec<String> = peers
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| p.get("handle").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(handles.contains(&"alice".to_string()), "paul missing alice: {handles:?}");
+    assert!(handles.contains(&"bob".to_string()), "paul missing bob: {handles:?}");
+}
