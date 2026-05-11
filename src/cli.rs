@@ -257,6 +257,14 @@ pub enum Command {
         /// Emit JSON instead of the table.
         #[arg(long)]
         json: bool,
+        /// Stream mode: never exit; print one JSON line per status transition
+        /// (creation, status change, deletion) across all pending pairs.
+        /// Compose with bash `while read` to react in shell. Implies --json.
+        #[arg(long)]
+        watch: bool,
+        /// Poll interval in seconds for --watch.
+        #[arg(long, default_value_t = 1)]
+        watch_interval: u64,
     },
     /// Cancel a pending pair. Releases the relay slot and removes the pending file.
     PairCancel {
@@ -479,7 +487,11 @@ pub fn run() -> Result<()> {
             digits,
             json,
         } => cmd_pair_confirm(&code_phrase, &digits, json),
-        Command::PairList { json } => cmd_pair_list(json),
+        Command::PairList {
+            json,
+            watch,
+            watch_interval,
+        } => cmd_pair_list(json, watch, watch_interval),
         Command::PairCancel { code_phrase, json } => cmd_pair_cancel(&code_phrase, json),
         Command::PairWatch {
             code_phrase,
@@ -2263,7 +2275,10 @@ fn cmd_pair_confirm(code_phrase: &str, typed_digits: &str, as_json: bool) -> Res
     Ok(())
 }
 
-fn cmd_pair_list(as_json: bool) -> Result<()> {
+fn cmd_pair_list(as_json: bool, watch: bool, watch_interval_secs: u64) -> Result<()> {
+    if watch {
+        return cmd_pair_list_watch(watch_interval_secs);
+    }
     let items = crate::pending_pair::list_pending()?;
     if as_json {
         println!("{}", serde_json::to_string(&items)?);
@@ -2294,6 +2309,73 @@ fn cmd_pair_list(as_json: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Stream-mode pair-list: never exits. Diffs per-code state every
+/// `interval_secs` and prints one JSON line per transition (creation,
+/// status flip, deletion). Useful for shell pipelines:
+///
+/// ```text
+/// wire pair-list --watch | while read line; do
+///     CODE=$(echo "$line" | jq -r .code)
+///     STATUS=$(echo "$line" | jq -r .status)
+///     ...
+/// done
+/// ```
+fn cmd_pair_list_watch(interval_secs: u64) -> Result<()> {
+    use std::collections::HashMap;
+    use std::io::Write;
+    let interval = std::time::Duration::from_secs(interval_secs.max(1));
+    // Emit a snapshot synthetic event for every currently-pending pair on
+    // startup so a consumer that arrives mid-flight sees the current state.
+    let mut prev: HashMap<String, String> = HashMap::new();
+    {
+        let items = crate::pending_pair::list_pending()?;
+        for p in &items {
+            println!("{}", serde_json::to_string(&p)?);
+            prev.insert(p.code.clone(), p.status.clone());
+        }
+        // Flush so the consumer's `while read` gets the snapshot promptly.
+        let _ = std::io::stdout().flush();
+    }
+    loop {
+        std::thread::sleep(interval);
+        let items = match crate::pending_pair::list_pending() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let mut cur: HashMap<String, String> = HashMap::new();
+        for p in &items {
+            cur.insert(p.code.clone(), p.status.clone());
+            match prev.get(&p.code) {
+                None => {
+                    // New code appeared.
+                    println!("{}", serde_json::to_string(&p)?);
+                }
+                Some(prev_status) if prev_status != &p.status => {
+                    // Status flipped.
+                    println!("{}", serde_json::to_string(&p)?);
+                }
+                _ => {}
+            }
+        }
+        for code in prev.keys() {
+            if !cur.contains_key(code) {
+                // File disappeared → finalized or cancelled. Emit a synthetic
+                // "removed" marker so the consumer sees the terminal event.
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "code": code,
+                        "status": "removed",
+                        "_synthetic": true,
+                    }))?
+                );
+            }
+        }
+        let _ = std::io::stdout().flush();
+        prev = cur;
+    }
 }
 
 /// Block until a pending pair reaches `target_status` or terminates. Process
