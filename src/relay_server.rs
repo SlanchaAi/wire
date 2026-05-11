@@ -236,6 +236,7 @@ impl Relay {
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
             .route("/v1/pair/:pair_id", get(pair_get))
             .route("/v1/handle/claim", post(handle_claim))
+            .route("/v1/handle/intro/:nick", post(handle_intro))
             .route("/.well-known/wire/agent", get(well_known_agent))
             .merge(hot_writes)
             .with_state(self)
@@ -729,6 +730,154 @@ async fn handle_claim(
 #[derive(Deserialize)]
 pub struct WellKnownAgentQuery {
     pub handle: String,
+}
+
+/// `POST /v1/handle/intro/:nick` — drop a signed pair-introduction event
+/// into a known nick's slot WITHOUT needing that slot's bearer token.
+///
+/// Why this exists: `.well-known/wire/agent` returns a nick's `slot_id` for
+/// reachability, but NEVER its `slot_token` (that would leak read+write
+/// authority to any handle-resolver). To zero-paste-pair, we need a way for
+/// a stranger to deliver their signed agent-card to the nick's owner. This
+/// endpoint provides exactly that, and ONLY that: the event must be `kind=1100`
+/// (pair_drop / agent_card), self-signed, and the carrying agent-card embedded
+/// in the body must verify-OK on its own.
+///
+/// Rate-limiting is the same governor that gates the other write endpoints.
+/// Slot quota still applies — a flood of intros hits the standard 64MB cap.
+async fn handle_intro(
+    State(relay): State<Relay>,
+    Path(nick): Path<String>,
+    Json(req): Json<PostEventRequest>,
+) -> impl IntoResponse {
+    // Look up the nick. Must already be claimed.
+    let slot_id = {
+        let inner = relay.inner.lock().await;
+        match inner.handles.get(&nick) {
+            Some(rec) => rec.slot_id.clone(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": format!("nick {nick:?} not claimed on this relay")})),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    // Only allow kind=1100 pair_drop / agent_card here. Anything else routes
+    // to the standard /v1/events/:slot_id with bearer auth.
+    let kind = req.event.get("kind").and_then(Value::as_u64).unwrap_or(0);
+    let type_str = req.event.get("type").and_then(Value::as_str).unwrap_or("");
+    if kind != 1100 && type_str != "pair_drop" && type_str != "agent_card" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "intro endpoint only accepts kind=1100 pair_drop / agent_card events",
+                "got_kind": kind,
+                "got_type": type_str,
+            })),
+        )
+            .into_response();
+    }
+
+    // Body must embed a signed agent-card (so the receiver can pin from it).
+    let embedded_card = match req.event.get("body").and_then(|b| b.get("card")) {
+        Some(c) => c.clone(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "intro event body must embed 'card' field"})),
+            )
+                .into_response();
+        }
+    };
+    if let Err(e) = crate::agent_card::verify_agent_card(&embedded_card) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("embedded card signature invalid: {e}")})),
+        )
+            .into_response();
+    }
+
+    // Size + quota checks (same as post_event).
+    let body_bytes = match serde_json::to_vec(&req.event) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("event not serializable: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    if body_bytes.len() > MAX_EVENT_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({"error": "intro event exceeds 256 KiB", "max_bytes": MAX_EVENT_BYTES})),
+        )
+            .into_response();
+    }
+    {
+        let inner = relay.inner.lock().await;
+        let used = inner.slot_bytes.get(&slot_id).copied().unwrap_or(0);
+        if used + body_bytes.len() > MAX_SLOT_BYTES {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({
+                    "error": "target slot quota exceeded",
+                    "slot_bytes_used": used,
+                    "slot_bytes_max": MAX_SLOT_BYTES,
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    let event_id = req
+        .event
+        .get("event_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    // Dedupe by event_id if present.
+    let dup = {
+        let inner = relay.inner.lock().await;
+        let slot = inner.slots.get(&slot_id);
+        if let (Some(eid), Some(slot)) = (&event_id, slot) {
+            slot.iter()
+                .any(|e| e.get("event_id").and_then(Value::as_str) == Some(eid))
+        } else {
+            false
+        }
+    };
+    if dup {
+        return (
+            StatusCode::OK,
+            Json(json!({"event_id": event_id, "status": "duplicate"})),
+        )
+            .into_response();
+    }
+
+    {
+        let mut inner = relay.inner.lock().await;
+        let event_size = body_bytes.len();
+        let slot = inner.slots.entry(slot_id.clone()).or_default();
+        slot.push(req.event.clone());
+        *inner.slot_bytes.entry(slot_id.clone()).or_insert(0) += event_size;
+    }
+    if let Err(e) = relay.append_event_to_disk(&slot_id, &req.event).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("persist failed: {e}")})),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::CREATED,
+        Json(json!({"event_id": event_id, "status": "dropped", "to_nick": nick})),
+    )
+        .into_response()
 }
 
 /// `GET /.well-known/wire/agent?handle=<nick>` — WebFinger-style resolver

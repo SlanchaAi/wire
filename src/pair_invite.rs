@@ -67,6 +67,27 @@ pub struct PendingInvite {
     pub created_at: String,
 }
 
+/// Default-on policy: accept signed pair_drops from unknown peers (v0.5
+/// zero-paste discovery). Operator can opt out by writing
+/// `$WIRE_HOME/config/wire/policy.json` containing `{"accept_unknown_pair_drops": false}`.
+fn open_mode_enabled() -> bool {
+    let path = match config::config_dir() {
+        Ok(p) => p.join("policy.json"),
+        Err(_) => return true,
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return true,
+    };
+    let v: Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    v.get("accept_unknown_pair_drops")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
 pub fn pending_invites_dir() -> Result<PathBuf> {
     Ok(config::state_dir()?.join("pending-invites"))
 }
@@ -377,20 +398,39 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
         Some(b) => b,
         None => return Ok(None),
     };
-    let nonce = match body.get("pair_nonce").and_then(Value::as_str) {
-        Some(n) => n.to_string(),
-        None => return Ok(None),
-    };
 
-    let dir = pending_invites_dir()?;
-    let invite_path = dir.join(format!("{nonce}.json"));
-    if !invite_path.exists() {
-        return Ok(None);
-    }
-    let pending: PendingInvite = serde_json::from_slice(&std::fs::read(&invite_path)?)
-        .with_context(|| format!("reading pending invite {invite_path:?}"))?;
-    if now_unix() > pending.exp {
-        let _ = std::fs::remove_file(&invite_path);
+    // v0.5: accept handle-initiated pair_drops too (no pair_nonce). These
+    // come via `wire add <handle>` → POST /v1/handle/intro. Anchored only
+    // by the embedded signed card. Gated by config `accept_unknown_pair_drops`
+    // (default true). For nonce-bearing drops the existing v0.4 invite-URL
+    // path stays in force.
+    let nonce_opt = body
+        .get("pair_nonce")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let mut pending: Option<PendingInvite> = None;
+    let mut invite_path: Option<std::path::PathBuf> = None;
+    if let Some(nonce) = nonce_opt.as_deref() {
+        let dir = pending_invites_dir()?;
+        let path = dir.join(format!("{nonce}.json"));
+        if path.exists() {
+            let p: PendingInvite = serde_json::from_slice(&std::fs::read(&path)?)
+                .with_context(|| format!("reading pending invite {path:?}"))?;
+            if now_unix() > p.exp {
+                let _ = std::fs::remove_file(&path);
+                return Ok(None);
+            }
+            pending = Some(p);
+            invite_path = Some(path);
+        } else if !open_mode_enabled() {
+            // Nonce present but unknown locally, and open mode disabled →
+            // refuse silently (the event will fall through to the normal
+            // verify path which won't trust the sender yet).
+            return Ok(None);
+        }
+    } else if !open_mode_enabled() {
+        // No nonce + open mode disabled → ignore. Operator must opt in to
+        // be discoverable via zero-paste `wire add`.
         return Ok(None);
     }
 
@@ -434,13 +474,16 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
     config::write_relay_state(&relay_state)?;
 
     // Consume invite (single-use default; decrement uses for multi-use).
-    if pending.uses_remaining <= 1 {
-        let _ = std::fs::remove_file(&invite_path);
-    } else {
-        let mut updated = pending.clone();
-        updated.uses_remaining -= 1;
-        updated.accepted_by.push(peer_did.clone());
-        std::fs::write(&invite_path, serde_json::to_vec_pretty(&updated)?)?;
+    // Skipped entirely for handle-initiated pair_drops (no pending record).
+    if let (Some(pending), Some(invite_path)) = (pending, invite_path) {
+        if pending.uses_remaining <= 1 {
+            let _ = std::fs::remove_file(&invite_path);
+        } else {
+            let mut updated = pending.clone();
+            updated.uses_remaining -= 1;
+            updated.accepted_by.push(peer_did.clone());
+            std::fs::write(&invite_path, serde_json::to_vec_pretty(&updated)?)?;
+        }
     }
 
     crate::os_notify::toast(
@@ -448,7 +491,131 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
         "Invite accepted. Ready to send + receive.",
     );
 
+    // v0.5: if this was a handle-initiated drop (no nonce), the sender doesn't
+    // know OUR slot_token yet — they can post to our `/v1/handle/intro/<nick>`
+    // but they can't `wire send` back through the normal slot endpoint until
+    // they have it. Send a `pair_drop_ack` event back carrying our slot_token.
+    // Best-effort; if it fails we log + continue (the sender will retry, or
+    // the operator can rerun `wire add` on the other side).
+    if nonce_opt.is_none() {
+        let _ = send_pair_drop_ack(&peer_handle, peer_relay, peer_slot_id, peer_slot_token);
+    }
+
     Ok(Some(peer_did))
+}
+
+/// Send a `pair_drop_ack` event (kind=1101) carrying OUR slot_token to a peer
+/// who just intro'd to us via `/v1/handle/intro/<nick>`. Completes the
+/// zero-paste bidirectional pin. Best-effort: errors are logged but don't
+/// propagate, since the inbound pair_drop pin already succeeded and the
+/// operator can retry from either side.
+fn send_pair_drop_ack(
+    peer_handle: &str,
+    peer_relay: &str,
+    peer_slot_id: &str,
+    peer_slot_token: &str,
+) -> Result<()> {
+    // Load our own card + relay coords.
+    let our_card = config::read_agent_card()?;
+    let our_did = our_card
+        .get("did")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("our card missing did"))?
+        .to_string();
+    let our_handle = our_did
+        .strip_prefix("did:wire:")
+        .unwrap_or(&our_did)
+        .to_string();
+    let relay_state = config::read_relay_state()?;
+    let self_state = relay_state.get("self").cloned().unwrap_or(Value::Null);
+    let our_relay = self_state
+        .get("relay_url")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let our_slot_id = self_state
+        .get("slot_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let our_slot_token = self_state
+        .get("slot_token")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if our_relay.is_empty() || our_slot_id.is_empty() || our_slot_token.is_empty() {
+        bail!("self relay state incomplete; cannot emit pair_drop_ack");
+    }
+
+    let sk_seed = config::read_private_key()?;
+    let pk_b64 = our_card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("our card missing verify_keys[*].key"))?;
+    let pk_bytes = crate::signing::b64decode(pk_b64)?;
+
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let event = json!({
+        "timestamp": now,
+        "from": our_did,
+        "to": format!("did:wire:{peer_handle}"),
+        "type": "pair_drop_ack",
+        "kind": 1101u32,
+        "body": {
+            "relay_url": our_relay,
+            "slot_id": our_slot_id,
+            "slot_token": our_slot_token,
+        },
+    });
+    let signed = crate::signing::sign_message_v31(&event, &sk_seed, &pk_bytes, &our_handle)?;
+    let client = crate::relay_client::RelayClient::new(peer_relay);
+    client
+        .post_event(peer_slot_id, peer_slot_token, &signed)
+        .with_context(|| format!("POST pair_drop_ack to {peer_relay} slot {peer_slot_id}"))?;
+    Ok(())
+}
+
+/// Consume a `pair_drop_ack` event during daemon pull. Updates
+/// relay-state.peers[<peer>] with the ack's slot_token so we can `wire send`
+/// to the peer. Returns `Ok(true)` if applied. Idempotent.
+pub fn maybe_consume_pair_drop_ack(event: &Value) -> Result<bool> {
+    let kind = event.get("kind").and_then(Value::as_u64).unwrap_or(0);
+    let type_str = event.get("type").and_then(Value::as_str).unwrap_or("");
+    if kind != 1101 || type_str != "pair_drop_ack" {
+        return Ok(false);
+    }
+    let body = match event.get("body") {
+        Some(b) => b,
+        None => return Ok(false),
+    };
+    let from = event
+        .get("from")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("ack missing 'from'"))?;
+    let peer_handle = from.strip_prefix("did:wire:").unwrap_or(from).to_string();
+    let peer_relay = body.get("relay_url").and_then(Value::as_str).unwrap_or("");
+    let peer_slot_id = body.get("slot_id").and_then(Value::as_str).unwrap_or("");
+    let peer_slot_token = body.get("slot_token").and_then(Value::as_str).unwrap_or("");
+    if peer_relay.is_empty() || peer_slot_id.is_empty() || peer_slot_token.is_empty() {
+        bail!("pair_drop_ack body missing relay_url/slot_id/slot_token");
+    }
+    let mut relay_state = config::read_relay_state()?;
+    relay_state["peers"][&peer_handle] = json!({
+        "relay_url": peer_relay,
+        "slot_id": peer_slot_id,
+        "slot_token": peer_slot_token,
+    });
+    config::write_relay_state(&relay_state)?;
+    crate::os_notify::toast(
+        &format!("wire — pair complete with {peer_handle}"),
+        "Both sides bound. Ready to send + receive.",
+    );
+    Ok(true)
 }
 
 // Unit tests removed — they mutate WIRE_HOME and race with other env-mutating

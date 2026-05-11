@@ -363,6 +363,20 @@ pub enum Command {
         #[arg(long)]
         relay: Option<String>,
     },
+    /// Zero-paste pair with a known handle. Resolves `nick@domain` via that
+    /// domain's `.well-known/wire/agent`, then delivers a signed pair-intro
+    /// to the peer's slot via `/v1/handle/intro`. Peer's daemon completes
+    /// the bilateral pin on its next pull (sends back pair_drop_ack carrying
+    /// their slot_token so we can `wire send` to them).
+    Add {
+        /// Peer handle (`nick@domain`).
+        handle: String,
+        /// Override the relay base URL used for resolution.
+        #[arg(long)]
+        relay: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Claim a nick on a relay's handle directory. Anyone can then reach
     /// this agent by `<nick>@<relay-domain>` via the relay's
     /// `.well-known/wire/agent` endpoint. FCFS; same-DID re-claims allowed.
@@ -618,6 +632,11 @@ pub fn run() -> Result<()> {
             json,
             relay,
         } => cmd_whois(handle.as_deref(), json, relay.as_deref()),
+        Command::Add {
+            handle,
+            relay,
+            json,
+        } => cmd_add(&handle, relay.as_deref(), json),
         Command::Claim {
             nick,
             relay,
@@ -1479,6 +1498,11 @@ fn cmd_pull(as_json: bool) -> Result<()> {
             crate::pair_invite::maybe_consume_pair_drop(event),
             Ok(Some(_))
         );
+        // v0.5: handle pair_drop_ack — peer (paired via wire add) returning
+        // their slot_token so we can `wire send` to them. Updates relay-state
+        // in place; the event itself is from a now-trusted peer so the
+        // normal verify path still fires it into the inbox.
+        let _ack_consumed = crate::pair_invite::maybe_consume_pair_drop_ack(event).ok();
         let active_trust = if drop_paired {
             config::read_trust()?
         } else {
@@ -1967,6 +1991,11 @@ fn run_sync_pull() -> Result<Value> {
             crate::pair_invite::maybe_consume_pair_drop(event),
             Ok(Some(_))
         );
+        // v0.5: handle pair_drop_ack — peer (paired via wire add) returning
+        // their slot_token so we can `wire send` to them. Updates relay-state
+        // in place; the event itself is from a now-trusted peer so the
+        // normal verify path still fires it into the inbox.
+        let _ack_consumed = crate::pair_invite::maybe_consume_pair_drop_ack(event).ok();
         let active_trust = if drop_paired {
             config::read_trust()?
         } else {
@@ -2782,6 +2811,131 @@ fn print_resolved_profile(resolved: &Value) {
     if let Some(s) = pick("pronouns") {
         println!("  pronouns:     {s}");
     }
+}
+
+/// `wire add <nick@domain>` — zero-paste pair. Resolve handle, build a
+/// signed pair_drop event with our card + slot coords, deliver via the
+/// peer relay's `/v1/handle/intro/<nick>` endpoint (no slot_token needed).
+/// Peer's daemon completes the bilateral pin on its next pull and emits a
+/// pair_drop_ack carrying their slot_token so we can send back.
+fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Result<()> {
+    let parsed = crate::pair_profile::parse_handle(handle_arg)?;
+
+    // 1. Auto-init self if needed + ensure a relay slot.
+    let (our_did, our_relay, our_slot_id, our_slot_token) =
+        crate::pair_invite::ensure_self_with_relay(relay_override)?;
+    if our_did == format!("did:wire:{}", parsed.nick) {
+        // Lazy guard — actual self-add would also be caught by FCFS later.
+        bail!("refusing to add self (handle matches own DID)");
+    }
+
+    // 2. Resolve peer via .well-known on their relay.
+    let resolved = crate::pair_profile::resolve_handle(&parsed, relay_override)?;
+    let peer_card = resolved
+        .get("card")
+        .cloned()
+        .ok_or_else(|| anyhow!("resolved missing card"))?;
+    let peer_did = resolved
+        .get("did")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("resolved missing did"))?
+        .to_string();
+    let peer_handle = peer_did
+        .strip_prefix("did:wire:")
+        .unwrap_or(&peer_did)
+        .to_string();
+    let peer_slot_id = resolved
+        .get("slot_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("resolved missing slot_id"))?
+        .to_string();
+    let peer_relay = resolved
+        .get("relay_url")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| relay_override.map(str::to_string))
+        .unwrap_or_else(|| format!("https://{}", parsed.domain));
+
+    // 3. Pin peer in trust + relay-state. slot_token will arrive via ack.
+    let mut trust = config::read_trust()?;
+    crate::trust::add_agent_card_pin(&mut trust, &peer_card, Some("VERIFIED"));
+    config::write_trust(&trust)?;
+    let mut relay_state = config::read_relay_state()?;
+    let existing_token = relay_state
+        .get("peers")
+        .and_then(|p| p.get(&peer_handle))
+        .and_then(|p| p.get("slot_token"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_default();
+    relay_state["peers"][&peer_handle] = json!({
+        "relay_url": peer_relay,
+        "slot_id": peer_slot_id,
+        "slot_token": existing_token, // empty until pair_drop_ack lands
+    });
+    config::write_relay_state(&relay_state)?;
+
+    // 4. Build signed pair_drop with our card + coords (no pair_nonce — this
+    // is the v0.5 zero-paste open-mode path).
+    let our_card = config::read_agent_card()?;
+    let sk_seed = config::read_private_key()?;
+    let our_handle = our_did
+        .strip_prefix("did:wire:")
+        .unwrap_or(&our_did)
+        .to_string();
+    let pk_b64 = our_card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("our card missing verify_keys[*].key"))?;
+    let pk_bytes = crate::signing::b64decode(pk_b64)?;
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let event = json!({
+        "timestamp": now,
+        "from": our_did,
+        "to": peer_did,
+        "type": "pair_drop",
+        "kind": 1100u32,
+        "body": {
+            "card": our_card,
+            "relay_url": our_relay,
+            "slot_id": our_slot_id,
+            "slot_token": our_slot_token,
+        },
+    });
+    let signed = crate::signing::sign_message_v31(&event, &sk_seed, &pk_bytes, &our_handle)?;
+
+    // 5. Deliver via /v1/handle/intro/<nick> (auth-free; relay validates kind).
+    let client = crate::relay_client::RelayClient::new(&peer_relay);
+    let resp = client.handle_intro(&parsed.nick, &signed)?;
+    let event_id = signed
+        .get("event_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "handle": handle_arg,
+                "paired_with": peer_did,
+                "peer_handle": peer_handle,
+                "event_id": event_id,
+                "drop_response": resp,
+                "status": "drop_sent",
+            }))?
+        );
+    } else {
+        println!(
+            "→ resolved {handle_arg} (did={peer_did})\n→ pinned peer locally\n→ intro dropped to {peer_relay}\nawaiting pair_drop_ack from {peer_handle} to complete bilateral pin."
+        );
+    }
+    Ok(())
 }
 
 fn cmd_claim(

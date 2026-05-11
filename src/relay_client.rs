@@ -242,6 +242,25 @@ impl RelayClient {
         Ok(resp.json()?)
     }
 
+    /// POST an intro (zero-paste pair-drop) event to a known nick's slot
+    /// without holding that slot's bearer token. Relay validates the event
+    /// is kind=1100 with an embedded signed agent-card; otherwise refuses.
+    pub fn handle_intro(&self, nick: &str, event: &Value) -> Result<Value> {
+        let body = serde_json::json!({"event": event});
+        let resp = self
+            .client
+            .post(format!("{}/v1/handle/intro/{nick}", self.base_url))
+            .json(&body)
+            .send()
+            .with_context(|| format!("POST {}/v1/handle/intro/{nick}", self.base_url))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().unwrap_or_default();
+            return Err(anyhow!("handle_intro failed: {status}: {detail}"));
+        }
+        Ok(resp.json()?)
+    }
+
     /// Resolve a handle on this relay via `.well-known/wire/agent?handle=<nick>`.
     /// Caller passes either the full `nick@domain` or just `<nick>` — the
     /// server only uses the local part.
