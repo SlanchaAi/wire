@@ -721,6 +721,125 @@ async fn mcp_subscribe_emits_updated_notification_on_inbox_grow() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mcp_subscribe_pending_pair_emits_updated_on_status_change() {
+    // Verifies v0.3.2: subscribing to wire://pending-pair/all gets push
+    // notifications when a detached pair-host writes / mutates its file.
+    let home = fresh_dir("pending-pair-push");
+    std::fs::create_dir_all(home.join("state/wire")).unwrap();
+
+    let mut mcp = McpProc::spawn(&home);
+    mcp.tool_call(
+        1,
+        "wire_init",
+        json!({"handle": "alice"}),
+        Duration::from_secs(5),
+    )
+    .expect("init");
+
+    let sub_resp = mcp.rpc(
+        2,
+        "resources/subscribe",
+        json!({"uri": "wire://pending-pair/all"}),
+        Duration::from_secs(5),
+    );
+    assert!(
+        sub_resp.get("result").is_some(),
+        "subscribe must succeed, got: {sub_resp}"
+    );
+
+    // Simulate what `wire pair-host --detach` writes: a pending-pair file in
+    // request_host state. The MCP watcher should detect the file appearing
+    // and emit notifications/resources/updated within ~3 poll cycles (2s
+    // each, so allow ~6s).
+    let pending_dir = home.join("state/wire/pending-pair");
+    std::fs::create_dir_all(&pending_dir).unwrap();
+    let pending_path = pending_dir.join("99-TESTCD.json");
+    let pending = json!({
+        "code": "99-TESTCD",
+        "code_hash": "deadbeefdeadbeef",
+        "role": "host",
+        "relay_url": "http://unused",
+        "status": "request_host",
+        "created_at": "2026-05-11T00:00:00Z"
+    });
+    std::fs::write(&pending_path, serde_json::to_string(&pending).unwrap()).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut got = false;
+    while Instant::now() < deadline {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO);
+        if let Ok(line) = mcp.out_rx.recv_timeout(remaining) {
+            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                if v.get("method").and_then(Value::as_str)
+                    == Some("notifications/resources/updated")
+                    && v["params"]["uri"] == "wire://pending-pair/all"
+                {
+                    got = true;
+                    break;
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    assert!(
+        got,
+        "expected notifications/resources/updated for wire://pending-pair/all within 6s"
+    );
+
+    // Status transition (e.g. polling → sas_ready) should ALSO fire a fresh
+    // notification — verifies per-status-change emission, not just per-file-
+    // creation.
+    let mut pending2 = pending.as_object().unwrap().clone();
+    pending2.insert("status".to_string(), json!("sas_ready"));
+    pending2.insert("sas".to_string(), json!("123456"));
+    std::fs::write(&pending_path, serde_json::to_string(&pending2).unwrap()).unwrap();
+
+    let deadline2 = Instant::now() + Duration::from_secs(6);
+    let mut got_transition = false;
+    while Instant::now() < deadline2 {
+        let remaining = deadline2
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO);
+        if let Ok(line) = mcp.out_rx.recv_timeout(remaining) {
+            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                if v.get("method").and_then(Value::as_str)
+                    == Some("notifications/resources/updated")
+                    && v["params"]["uri"] == "wire://pending-pair/all"
+                {
+                    got_transition = true;
+                    break;
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    assert!(
+        got_transition,
+        "expected a second notification on status transition (request_host → sas_ready)"
+    );
+
+    // resources/read should return the pending list with our entry.
+    let read_resp = mcp.rpc(
+        10,
+        "resources/read",
+        json!({"uri": "wire://pending-pair/all"}),
+        Duration::from_secs(5),
+    );
+    let contents = &read_resp["result"]["contents"][0]["text"];
+    let body = contents.as_str().expect("text field");
+    let items: Value = serde_json::from_str(body).expect("valid json");
+    let arr = items.as_array().expect("array");
+    assert_eq!(arr.len(), 1, "expected one pending entry, got: {body}");
+    assert_eq!(arr[0]["code"], "99-TESTCD");
+    assert_eq!(arr[0]["status"], "sas_ready");
+    assert_eq!(arr[0]["sas"], "123456");
+}
+
 #[test]
 fn concurrent_outbox_appends_do_not_corrupt_lines() {
     use wire::config::append_outbox_record;

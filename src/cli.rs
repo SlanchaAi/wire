@@ -278,6 +278,12 @@ pub enum Command {
         /// an MCP server in detected client configs).
         #[arg(long)]
         no_setup: bool,
+        /// Run via the daemon-orchestrated detached path (auto-starts daemon,
+        /// exits immediately, daemon does the handshake). Confirm via
+        /// `wire pair-confirm <code> <digits>` from any terminal. See
+        /// `pair-host --detach` for details.
+        #[arg(long)]
+        detach: bool,
     },
     /// Forget a half-finished pair-slot on the relay. Use this if `pair-host`
     /// or `pair-join` crashed (process killed, network blip, OOM) before SAS
@@ -443,7 +449,14 @@ pub fn run() -> Result<()> {
             yes,
             timeout,
             no_setup,
-        } => cmd_pair(&handle, code.as_deref(), &relay, yes, timeout, no_setup),
+            detach,
+        } => {
+            if detach {
+                cmd_pair_detach(&handle, code.as_deref(), &relay)
+            } else {
+                cmd_pair(&handle, code.as_deref(), &relay, yes, timeout, no_setup)
+            }
+        }
         Command::PairAbandon {
             code_phrase,
             relay,
@@ -1942,9 +1955,42 @@ fn cmd_pair(
 
 // ---------- detached pair (daemon-orchestrated) ----------
 
+/// `wire pair <handle> [--code <phrase>] --detach` — wraps init + detach
+/// pair-host/-join into a single command. The non-detached variant lives in
+/// `cmd_pair`; this one short-circuits to the daemon-orchestrated path.
+fn cmd_pair_detach(handle: &str, code: Option<&str>, relay: &str) -> Result<()> {
+    let init_result = crate::pair_session::init_self_idempotent(handle, None, None)?;
+    let did = init_result
+        .get("did")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(unknown)")
+        .to_string();
+    let already = init_result
+        .get("already_initialized")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if already {
+        println!("(identity {did} already initialized — reusing)");
+    } else {
+        println!("initialized {did}");
+    }
+    println!();
+    match code {
+        None => cmd_pair_host_detach(relay),
+        Some(c) => cmd_pair_join_detach(c, relay),
+    }
+}
+
+
 fn cmd_pair_host_detach(relay_url: &str) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
+    }
+    // Make sure the daemon is alive so the handshake actually proceeds.
+    match crate::ensure_up::ensure_daemon_running() {
+        Ok(true) => println!("(started wire daemon in background)"),
+        Ok(false) => {}
+        Err(e) => eprintln!("warn: could not auto-start daemon: {e}; pair will queue but not advance"),
     }
     // Generate the code phrase up front (operator needs it immediately).
     let code = crate::sas::generate_code_phrase();
@@ -1978,6 +2024,11 @@ fn cmd_pair_host_detach(relay_url: &str) -> Result<()> {
 fn cmd_pair_join_detach(code_phrase: &str, relay_url: &str) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
+    }
+    match crate::ensure_up::ensure_daemon_running() {
+        Ok(true) => println!("(started wire daemon in background)"),
+        Ok(false) => {}
+        Err(e) => eprintln!("warn: could not auto-start daemon: {e}; pair will queue but not advance"),
     }
     let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
     let code_hash = crate::pair_session::derive_code_hash(&code);
