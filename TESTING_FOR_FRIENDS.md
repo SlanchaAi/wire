@@ -1,6 +1,6 @@
 # wire — testing instructions for human operators
 
-You + a friend, two terminals, ~5 minutes. By the end you'll have a real signed-message channel between your machines that goes through neither Apple, Meta, Telegram, Discord, nor Slack.
+You + a friend, two terminals, ~60 seconds. By the end you'll have a real signed-message channel between your machines that goes through neither Apple, Meta, Telegram, Discord, nor Slack.
 
 **Public-good test relay:** `https://wire.laulpogan.com` (operated by Slancha; ~$0/mo Hetzner-class infra; 64 MiB per slot, 256 KiB per event, no SLA).
 
@@ -14,7 +14,7 @@ Recommended — pre-built binary:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
-wire --version   # expect: wire 0.2.0
+wire --version   # expect: wire 0.4.0 or later
 ```
 
 Or from source (Rust 1.88+):
@@ -26,14 +26,73 @@ cd wire
 cargo build --release
 sudo cp target/release/wire /usr/local/bin/
 
-wire --version   # expect: wire 0.2.0
+wire --version   # expect: wire 0.4.0 or later
 ```
-
-If you see `wire 0.2.0`, you're ready.
 
 ---
 
-## The 60-second pair flow
+## v0.4.0 — one-paste pair (default, ~10 seconds)
+
+This is the path you want unless you have a specific reason to use SPAKE2 + SAS (see below).
+
+### A: mint an invite URL
+
+```bash
+wire invite
+```
+
+Output:
+
+```
+# Share this URL with one peer. Pasting it = pair complete on their side.
+# TTL: 86400s. Uses: 1.
+wire://pair?v=1&inv=eyJ2IjoxLCJkaWQiOiJkaWQ6d2lyZTpwYXVsLi4u...
+```
+
+`wire invite` auto-inits your wire identity if you haven't run `wire init`, and auto-allocates a relay slot on `wire.laulpogan.com`. Idempotent — re-running is safe.
+
+Copy the URL. Paste it into Discord, SMS, voice-read, email, anywhere that reaches your peer.
+
+### B: accept the URL
+
+```bash
+wire accept 'wire://pair?v=1&inv=eyJ2IjoxLCJkaWQiOiJkaWQ6d2lyZTpwYXVsLi4u...'
+```
+
+Output:
+
+```
+paired with did:wire:paul
+you can now: wire send paul <kind> <body>
+```
+
+Same auto-init + auto-relay-allocate. Done. Both sides pinned.
+
+### Send a test message
+
+A:
+```bash
+wire send willard decision "hello from my machine"
+wire push
+```
+
+B:
+```bash
+wire pull
+wire tail
+```
+
+That's the whole flow.
+
+### Trust model (one paragraph)
+
+Pasting the URL is the authentication ceremony. Same as a Discord invite link, Zoom join URL, or Signal group invite — possession of the URL = authorization to pair. Single-use by default (multi-use opt-in via `--uses N`), 24h TTL. If the URL leaks before B accepts, anyone holding it can pair as B, but they show up in `wire peers` immediately and can be revoked. For threat models where the URL channel is hostile (suspect Slack, public paste site), opt into SPAKE2 + SAS below.
+
+---
+
+## SPAKE2 + SAS (opt-in, MITM-resistant)
+
+Use this if your invite-URL channel is untrusted. Same crypto as magic-wormhole: a code phrase derives a shared key via SPAKE2, then both sides display 6 SAS digits that you compare aloud over a separate channel.
 
 This works on **two different machines** — you on yours, your friend on theirs. (Same machine pairing also works but pick distinct handles.)
 
