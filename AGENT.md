@@ -42,6 +42,24 @@ wire daemon start     # background sync of inbox/outbox vs relay
 wire send <peer> claim "hello from $(whoami)"
 ```
 
+## Detached pair (terminal can close)
+
+If you want the pair to survive your terminal closing, run a daemon first, then use `--detach` flow:
+
+```bash
+wire daemon          # in another terminal / tmux / systemd unit
+wire pair-host --detach --relay https://wire.laulpogan.com
+# prints code phrase, exits in ~10ms; daemon does the handshake
+
+wire pair-list                           # watch state: request → polling → sas_ready
+wire pair-confirm <code> <digits>        # when sas_ready shows the digits
+wire pair-cancel  <code>                 # to abort
+```
+
+Guest side mirror: `wire pair-join <code> --detach --relay <url>`.
+
+The same SAS rule applies — surface digits to the operator, wait for type-back, never auto-confirm. `pair-list` returns raw digits; `pair-confirm` accepts them with or without the dash.
+
 To receive:
 
 ```bash

@@ -208,6 +208,13 @@ pub enum Command {
         /// How long (seconds) to wait for the peer to join before timing out.
         #[arg(long, default_value_t = 300)]
         timeout: u64,
+        /// Detach: write a pending-pair file, print the code phrase, and exit
+        /// immediately. The running `wire daemon` does the handshake in the
+        /// background; confirm SAS later via `wire pair-confirm <code> <digits>`.
+        /// `wire pair-list` shows pending sessions. Default is foreground
+        /// blocking behavior for backward compat.
+        #[arg(long)]
+        detach: bool,
     },
     /// Join a pair-slot using a code phrase from the host. (HUMAN-ONLY.)
     ///
@@ -223,6 +230,24 @@ pub enum Command {
         yes: bool,
         #[arg(long, default_value_t = 300)]
         timeout: u64,
+        /// Detach: see `pair-host --detach`.
+        #[arg(long)]
+        detach: bool,
+    },
+    /// Confirm SAS digits for a detached pending pair. The daemon must be
+    /// running for this to do anything — it picks up the confirmation on its
+    /// next tick. Mismatch aborts the pair.
+    PairConfirm {
+        /// The code phrase the original `wire pair-host --detach` printed.
+        code_phrase: String,
+        /// 6 digits as displayed by `wire pair-list` (dashes/spaces stripped).
+        digits: String,
+    },
+    /// List all pending detached pair sessions and their state.
+    PairList,
+    /// Cancel a pending pair. Releases the relay slot and removes the pending file.
+    PairCancel {
+        code_phrase: String,
     },
     /// One-shot bootstrap: init identity (idempotent) + pair-host or pair-join
     /// + register wire as MCP server. Use this when you want a single command
@@ -384,13 +409,33 @@ pub fn run() -> Result<()> {
             relay,
             yes,
             timeout,
-        } => cmd_pair_host(&relay, yes, timeout),
+            detach,
+        } => {
+            if detach {
+                cmd_pair_host_detach(&relay)
+            } else {
+                cmd_pair_host(&relay, yes, timeout)
+            }
+        }
         Command::PairJoin {
             code_phrase,
             relay,
             yes,
             timeout,
-        } => cmd_pair_join(&code_phrase, &relay, yes, timeout),
+            detach,
+        } => {
+            if detach {
+                cmd_pair_join_detach(&code_phrase, &relay)
+            } else {
+                cmd_pair_join(&code_phrase, &relay, yes, timeout)
+            }
+        }
+        Command::PairConfirm {
+            code_phrase,
+            digits,
+        } => cmd_pair_confirm(&code_phrase, &digits),
+        Command::PairList => cmd_pair_list(),
+        Command::PairCancel { code_phrase } => cmd_pair_cancel(&code_phrase),
         Command::Pair {
             handle,
             code,
@@ -1490,6 +1535,13 @@ fn cmd_daemon(interval_secs: u64, once: bool, as_json: bool) -> Result<()> {
         }
     }
 
+    // Recover from prior crash: any pending pair in transient state had its
+    // in-memory SPAKE2 secret lost when the previous daemon exited. Release
+    // the relay slots and mark the files so the operator can re-issue.
+    if let Err(e) = crate::pending_pair::cleanup_on_startup() {
+        eprintln!("daemon: pending-pair cleanup_on_startup error: {e:#}");
+    }
+
     loop {
         let pushed = run_sync_push().unwrap_or_else(|e| {
             eprintln!("daemon: push error: {e:#}");
@@ -1498,6 +1550,10 @@ fn cmd_daemon(interval_secs: u64, once: bool, as_json: bool) -> Result<()> {
         let pulled = run_sync_pull().unwrap_or_else(|e| {
             eprintln!("daemon: pull error: {e:#}");
             json!({"written": [], "rejected": [], "total_seen": 0, "error": e.to_string()})
+        });
+        let pairs = crate::pending_pair::tick().unwrap_or_else(|e| {
+            eprintln!("daemon: pending-pair tick error: {e:#}");
+            json!({"transitions": []})
         });
 
         if as_json {
@@ -1509,14 +1565,35 @@ fn cmd_daemon(interval_secs: u64, once: bool, as_json: bool) -> Result<()> {
                         .unwrap_or_default(),
                     "push": pushed,
                     "pull": pulled,
+                    "pairs": pairs,
                 }))?
             );
         } else {
             let pushed_n = pushed["pushed"].as_array().map(|a| a.len()).unwrap_or(0);
             let written_n = pulled["written"].as_array().map(|a| a.len()).unwrap_or(0);
             let rejected_n = pulled["rejected"].as_array().map(|a| a.len()).unwrap_or(0);
-            if pushed_n > 0 || written_n > 0 || rejected_n > 0 {
-                eprintln!("daemon: pushed={pushed_n} pulled={written_n} rejected={rejected_n}");
+            let pair_transitions = pairs["transitions"].as_array().map(|a| a.len()).unwrap_or(0);
+            if pushed_n > 0 || written_n > 0 || rejected_n > 0 || pair_transitions > 0 {
+                eprintln!(
+                    "daemon: pushed={pushed_n} pulled={written_n} rejected={rejected_n} pair-transitions={pair_transitions}"
+                );
+            }
+            // Loud per-transition logging so operator sees pair progress live.
+            if let Some(arr) = pairs["transitions"].as_array() {
+                for t in arr {
+                    eprintln!("  pair {} : {} → {}",
+                        t.get("code").and_then(Value::as_str).unwrap_or("?"),
+                        t.get("from").and_then(Value::as_str).unwrap_or("?"),
+                        t.get("to").and_then(Value::as_str).unwrap_or("?"));
+                    if let Some(sas) = t.get("sas").and_then(Value::as_str) {
+                        if t.get("to").and_then(Value::as_str) == Some("sas_ready") {
+                            eprintln!("    SAS digits: {}-{}", &sas[..3], &sas[3..]);
+                            eprintln!("    Run: wire pair-confirm {} {}",
+                                t.get("code").and_then(Value::as_str).unwrap_or("?"),
+                                sas);
+                        }
+                    }
+                }
             }
         }
 
@@ -1860,6 +1937,150 @@ fn cmd_pair(
     println!("  wire daemon start              # background sync of inbox/outbox vs relay");
     println!("  wire send <peer> claim <msg>   # send your peer something");
     println!("  wire tail                      # watch incoming events");
+    Ok(())
+}
+
+// ---------- detached pair (daemon-orchestrated) ----------
+
+fn cmd_pair_host_detach(relay_url: &str) -> Result<()> {
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire init <handle>` first");
+    }
+    // Generate the code phrase up front (operator needs it immediately).
+    let code = crate::sas::generate_code_phrase();
+    let code_hash = crate::pair_session::derive_code_hash(&code);
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let p = crate::pending_pair::PendingPair {
+        code: code.clone(),
+        code_hash,
+        role: "host".to_string(),
+        relay_url: relay_url.to_string(),
+        status: "request_host".to_string(),
+        sas: None,
+        peer_did: None,
+        created_at: now,
+        last_error: None,
+    };
+    crate::pending_pair::write_pending(&p)?;
+    println!("detached pair-host queued. Share this code with your peer:\n");
+    println!("    {code}\n");
+    println!("Next steps:");
+    println!("  wire pair-list                                # check status");
+    println!("  wire pair-confirm {code} <digits>   # when SAS shows up");
+    println!("  wire pair-cancel  {code}            # to abort");
+    println!();
+    println!("Requires `wire daemon` to be running on this machine.");
+    Ok(())
+}
+
+fn cmd_pair_join_detach(code_phrase: &str, relay_url: &str) -> Result<()> {
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire init <handle>` first");
+    }
+    let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
+    let code_hash = crate::pair_session::derive_code_hash(&code);
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let p = crate::pending_pair::PendingPair {
+        code: code.clone(),
+        code_hash,
+        role: "guest".to_string(),
+        relay_url: relay_url.to_string(),
+        status: "request_guest".to_string(),
+        sas: None,
+        peer_did: None,
+        created_at: now,
+        last_error: None,
+    };
+    crate::pending_pair::write_pending(&p)?;
+    println!("detached pair-join queued for code {code}.");
+    println!("Run `wire pair-list` to watch for SAS, then `wire pair-confirm {code} <digits>`.");
+    println!();
+    println!("Requires `wire daemon` to be running on this machine.");
+    Ok(())
+}
+
+fn cmd_pair_confirm(code_phrase: &str, typed_digits: &str) -> Result<()> {
+    let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
+    let typed: String = typed_digits.chars().filter(|c| c.is_ascii_digit()).collect();
+    if typed.len() != 6 {
+        bail!(
+            "expected 6 digits (got {} after stripping non-digits)",
+            typed.len()
+        );
+    }
+    let mut p = crate::pending_pair::read_pending(&code)?
+        .ok_or_else(|| anyhow!("no pending pair found for code {code}"))?;
+    if p.status != "sas_ready" {
+        bail!(
+            "pair {code} not in sas_ready state (current: {}). Run `wire pair-list` to see what's going on.",
+            p.status
+        );
+    }
+    let stored = p
+        .sas
+        .as_ref()
+        .ok_or_else(|| anyhow!("pending file has status=sas_ready but no sas field"))?
+        .clone();
+    if stored == typed {
+        p.status = "confirmed".to_string();
+        crate::pending_pair::write_pending(&p)?;
+        println!("digits match. Daemon will finalize the handshake on its next tick.");
+        println!("Run `wire peers` after a few seconds to confirm.");
+    } else {
+        p.status = "aborted".to_string();
+        p.last_error = Some(format!(
+            "SAS digit mismatch (typed {typed}, expected {stored})"
+        ));
+        // Release relay slot.
+        let client = crate::relay_client::RelayClient::new(&p.relay_url);
+        let _ = client.pair_abandon(&p.code_hash);
+        crate::pending_pair::write_pending(&p)?;
+        bail!("digits mismatch — pair aborted. Re-issue with a fresh `wire pair-host --detach`.");
+    }
+    Ok(())
+}
+
+fn cmd_pair_list() -> Result<()> {
+    let items = crate::pending_pair::list_pending()?;
+    if items.is_empty() {
+        println!("no pending pair sessions.");
+        return Ok(());
+    }
+    println!(
+        "{:<15} {:<8} {:<18} {:<10} {}",
+        "CODE", "ROLE", "STATUS", "SAS", "NOTE"
+    );
+    for p in items {
+        let sas = p
+            .sas
+            .as_ref()
+            .map(|d| format!("{}-{}", &d[..3], &d[3..]))
+            .unwrap_or_else(|| "—".to_string());
+        let note = p
+            .last_error
+            .as_deref()
+            .or(p.peer_did.as_deref())
+            .unwrap_or("");
+        println!(
+            "{:<15} {:<8} {:<18} {:<10} {}",
+            p.code, p.role, p.status, sas, note
+        );
+    }
+    Ok(())
+}
+
+fn cmd_pair_cancel(code_phrase: &str) -> Result<()> {
+    let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
+    let p = crate::pending_pair::read_pending(&code)?
+        .ok_or_else(|| anyhow!("no pending pair for code {code}"))?;
+    let client = crate::relay_client::RelayClient::new(&p.relay_url);
+    let _ = client.pair_abandon(&p.code_hash);
+    crate::pending_pair::delete_pending(&code)?;
+    println!("cancelled pending pair {code} (relay slot released, file removed).");
     Ok(())
 }
 

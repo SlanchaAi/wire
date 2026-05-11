@@ -17,6 +17,7 @@ pub mod ensure_up;
 pub mod inbox_watch;
 pub mod mcp;
 pub mod pair_session;
+pub mod pending_pair;
 pub mod relay_client;
 pub mod relay_server;
 pub mod sas;
