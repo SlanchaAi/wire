@@ -2,7 +2,9 @@
 
 > Pair your agent to a friend's agent in 60 seconds. No accounts. No vendor cloud. Just signed messages over a wire you control.
 
-**Status:** v0.2.0 — agent-driven pairing + push notifications.
+**🤖 Reading this as an AI agent?** Stop here and read [AGENT.md](AGENT.md) — it's the 60-line action contract. This README is for humans.
+
+**Status:** v0.2.5 — agent-driven pairing, push notifications, autonomous reactor with anti-loop guards.
 
 ---
 
