@@ -42,23 +42,44 @@ wire daemon start     # background sync of inbox/outbox vs relay
 wire send <peer> claim "hello from $(whoami)"
 ```
 
-## Detached pair (terminal can close)
+## Detached pair (terminal can close, push notifications fire)
 
-If you want the pair to survive your terminal closing, run a daemon first, then use `--detach` flow:
+The detached flow queues a pair via the local `wire daemon` (auto-spawned), returns immediately, and surfaces status through OS toasts + MCP `notifications/resources/updated`. Survives terminal close. Use this if you might switch chat windows or the operator is async.
+
+### CLI
 
 ```bash
-wire daemon          # in another terminal / tmux / systemd unit
 wire pair-host --detach --relay https://wire.laulpogan.com
-# prints code phrase, exits in ~10ms; daemon does the handshake
+# prints code, exits ~10ms; daemon auto-spawned if needed
 
-wire pair-list                           # watch state: request → polling → sas_ready
-wire pair-confirm <code> <digits>        # when sas_ready shows the digits
+wire pair-list --json                    # programmatic status; or `wire pair-list` for table
+wire pair-confirm <code> <digits>        # operator types these in once SAS surfaces
 wire pair-cancel  <code>                 # to abort
 ```
 
-Guest side mirror: `wire pair-join <code> --detach --relay <url>`.
+Add `--json` to `pair-host --detach`, `pair-join --detach`, `pair-list`, `pair-confirm`, `pair-cancel` for machine-readable output (use this from scripts and from agents shelling out to wire).
 
-The same SAS rule applies — surface digits to the operator, wait for type-back, never auto-confirm. `pair-list` returns raw digits; `pair-confirm` accepts them with or without the dash.
+### MCP (preferred for agents in chat)
+
+Subscribe once at session start:
+
+```
+resources/subscribe { "uri": "wire://pending-pair/all" }
+```
+
+Then call tools:
+
+| Tool | When |
+|---|---|
+| `wire_pair_initiate_detached({handle, relay_url})` | operator says "pair me with X" |
+| `wire_pair_join_detached({handle, code_phrase, relay_url})` | operator pastes a peer's code |
+| `wire_pair_list_pending()` | inspect current state |
+| `wire_pair_confirm_detached({code_phrase, user_typed_digits})` | once SAS surfaces and operator types digits |
+| `wire_pair_cancel_pending({code_phrase})` | to abort |
+
+When a `notifications/resources/updated` arrives for `wire://pending-pair/all`, re-read the resource. If a pending entry's `status` is `sas_ready` and has a `sas` field, **surface those 6 digits to the operator in chat** and ask them to compare with their peer's digits and type them back. Pass the typed digits to `wire_pair_confirm_detached`. Never auto-confirm.
+
+The same SAS rule applies — surface, wait for type-back, never auto-confirm. Mismatch ABORTS the session; restart with a fresh `_detached` call.
 
 To receive:
 

@@ -215,6 +215,9 @@ pub enum Command {
         /// blocking behavior for backward compat.
         #[arg(long)]
         detach: bool,
+        /// Emit JSON instead of text. Currently only meaningful with --detach.
+        #[arg(long)]
+        json: bool,
     },
     /// Join a pair-slot using a code phrase from the host. (HUMAN-ONLY.)
     ///
@@ -233,6 +236,9 @@ pub enum Command {
         /// Detach: see `pair-host --detach`.
         #[arg(long)]
         detach: bool,
+        /// Emit JSON instead of text. Currently only meaningful with --detach.
+        #[arg(long)]
+        json: bool,
     },
     /// Confirm SAS digits for a detached pending pair. The daemon must be
     /// running for this to do anything — it picks up the confirmation on its
@@ -242,12 +248,21 @@ pub enum Command {
         code_phrase: String,
         /// 6 digits as displayed by `wire pair-list` (dashes/spaces stripped).
         digits: String,
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
     /// List all pending detached pair sessions and their state.
-    PairList,
+    PairList {
+        /// Emit JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Cancel a pending pair. Releases the relay slot and removes the pending file.
     PairCancel {
         code_phrase: String,
+        #[arg(long)]
+        json: bool,
     },
     /// One-shot bootstrap: init identity (idempotent) + pair-host or pair-join
     /// + register wire as MCP server. Use this when you want a single command
@@ -416,9 +431,10 @@ pub fn run() -> Result<()> {
             yes,
             timeout,
             detach,
+            json,
         } => {
             if detach {
-                cmd_pair_host_detach(&relay)
+                cmd_pair_host_detach(&relay, json)
             } else {
                 cmd_pair_host(&relay, yes, timeout)
             }
@@ -429,9 +445,10 @@ pub fn run() -> Result<()> {
             yes,
             timeout,
             detach,
+            json,
         } => {
             if detach {
-                cmd_pair_join_detach(&code_phrase, &relay)
+                cmd_pair_join_detach(&code_phrase, &relay, json)
             } else {
                 cmd_pair_join(&code_phrase, &relay, yes, timeout)
             }
@@ -439,9 +456,10 @@ pub fn run() -> Result<()> {
         Command::PairConfirm {
             code_phrase,
             digits,
-        } => cmd_pair_confirm(&code_phrase, &digits),
-        Command::PairList => cmd_pair_list(),
-        Command::PairCancel { code_phrase } => cmd_pair_cancel(&code_phrase),
+            json,
+        } => cmd_pair_confirm(&code_phrase, &digits, json),
+        Command::PairList { json } => cmd_pair_list(json),
+        Command::PairCancel { code_phrase, json } => cmd_pair_cancel(&code_phrase, json),
         Command::Pair {
             handle,
             code,
@@ -1976,23 +1994,27 @@ fn cmd_pair_detach(handle: &str, code: Option<&str>, relay: &str) -> Result<()> 
     }
     println!();
     match code {
-        None => cmd_pair_host_detach(relay),
-        Some(c) => cmd_pair_join_detach(c, relay),
+        None => cmd_pair_host_detach(relay, false),
+        Some(c) => cmd_pair_join_detach(c, relay, false),
     }
 }
 
 
-fn cmd_pair_host_detach(relay_url: &str) -> Result<()> {
+fn cmd_pair_host_detach(relay_url: &str, as_json: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
     }
-    // Make sure the daemon is alive so the handshake actually proceeds.
-    match crate::ensure_up::ensure_daemon_running() {
-        Ok(true) => println!("(started wire daemon in background)"),
-        Ok(false) => {}
-        Err(e) => eprintln!("warn: could not auto-start daemon: {e}; pair will queue but not advance"),
-    }
-    // Generate the code phrase up front (operator needs it immediately).
+    let daemon_spawned = match crate::ensure_up::ensure_daemon_running() {
+        Ok(b) => b,
+        Err(e) => {
+            if !as_json {
+                eprintln!(
+                    "warn: could not auto-start daemon: {e}; pair will queue but not advance"
+                );
+            }
+            false
+        }
+    };
     let code = crate::sas::generate_code_phrase();
     let code_hash = crate::pair_session::derive_code_hash(&code);
     let now = time::OffsetDateTime::now_utc()
@@ -2010,26 +2032,46 @@ fn cmd_pair_host_detach(relay_url: &str) -> Result<()> {
         last_error: None,
     };
     crate::pending_pair::write_pending(&p)?;
-    println!("detached pair-host queued. Share this code with your peer:\n");
-    println!("    {code}\n");
-    println!("Next steps:");
-    println!("  wire pair-list                                # check status");
-    println!("  wire pair-confirm {code} <digits>   # when SAS shows up");
-    println!("  wire pair-cancel  {code}            # to abort");
-    println!();
-    println!("Requires `wire daemon` to be running on this machine.");
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "state": "queued",
+                "code_phrase": code,
+                "relay_url": relay_url,
+                "role": "host",
+                "daemon_spawned": daemon_spawned,
+            }))?
+        );
+    } else {
+        if daemon_spawned {
+            println!("(started wire daemon in background)");
+        }
+        println!("detached pair-host queued. Share this code with your peer:\n");
+        println!("    {code}\n");
+        println!("Next steps:");
+        println!("  wire pair-list                                # check status");
+        println!("  wire pair-confirm {code} <digits>   # when SAS shows up");
+        println!("  wire pair-cancel  {code}            # to abort");
+    }
     Ok(())
 }
 
-fn cmd_pair_join_detach(code_phrase: &str, relay_url: &str) -> Result<()> {
+fn cmd_pair_join_detach(code_phrase: &str, relay_url: &str, as_json: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
     }
-    match crate::ensure_up::ensure_daemon_running() {
-        Ok(true) => println!("(started wire daemon in background)"),
-        Ok(false) => {}
-        Err(e) => eprintln!("warn: could not auto-start daemon: {e}; pair will queue but not advance"),
-    }
+    let daemon_spawned = match crate::ensure_up::ensure_daemon_running() {
+        Ok(b) => b,
+        Err(e) => {
+            if !as_json {
+                eprintln!(
+                    "warn: could not auto-start daemon: {e}; pair will queue but not advance"
+                );
+            }
+            false
+        }
+    };
     let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
     let code_hash = crate::pair_session::derive_code_hash(&code);
     let now = time::OffsetDateTime::now_utc()
@@ -2047,14 +2089,28 @@ fn cmd_pair_join_detach(code_phrase: &str, relay_url: &str) -> Result<()> {
         last_error: None,
     };
     crate::pending_pair::write_pending(&p)?;
-    println!("detached pair-join queued for code {code}.");
-    println!("Run `wire pair-list` to watch for SAS, then `wire pair-confirm {code} <digits>`.");
-    println!();
-    println!("Requires `wire daemon` to be running on this machine.");
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "state": "queued",
+                "code_phrase": code,
+                "relay_url": relay_url,
+                "role": "guest",
+                "daemon_spawned": daemon_spawned,
+            }))?
+        );
+    } else {
+        if daemon_spawned {
+            println!("(started wire daemon in background)");
+        }
+        println!("detached pair-join queued for code {code}.");
+        println!("Run `wire pair-list` to watch for SAS, then `wire pair-confirm {code} <digits>`.");
+    }
     Ok(())
 }
 
-fn cmd_pair_confirm(code_phrase: &str, typed_digits: &str) -> Result<()> {
+fn cmd_pair_confirm(code_phrase: &str, typed_digits: &str, as_json: bool) -> Result<()> {
     let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
     let typed: String = typed_digits.chars().filter(|c| c.is_ascii_digit()).collect();
     if typed.len() != 6 {
@@ -2079,31 +2135,51 @@ fn cmd_pair_confirm(code_phrase: &str, typed_digits: &str) -> Result<()> {
     if stored == typed {
         p.status = "confirmed".to_string();
         crate::pending_pair::write_pending(&p)?;
-        println!("digits match. Daemon will finalize the handshake on its next tick.");
-        println!("Run `wire peers` after a few seconds to confirm.");
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "state": "confirmed",
+                    "code_phrase": code,
+                }))?
+            );
+        } else {
+            println!("digits match. Daemon will finalize the handshake on its next tick.");
+            println!("Run `wire peers` after a few seconds to confirm.");
+        }
     } else {
         p.status = "aborted".to_string();
         p.last_error = Some(format!(
             "SAS digit mismatch (typed {typed}, expected {stored})"
         ));
-        // Release relay slot.
         let client = crate::relay_client::RelayClient::new(&p.relay_url);
         let _ = client.pair_abandon(&p.code_hash);
         crate::pending_pair::write_pending(&p)?;
-        // Push: also surface mismatch to desktop so operator knows from a
-        // glance that the digits they typed were wrong (not just a CLI exit
-        // code in some terminal they might already have closed).
         crate::os_notify::toast(
             &format!("wire — pair aborted ({})", p.code),
             p.last_error.as_deref().unwrap_or("digits mismatch"),
         );
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "state": "aborted",
+                    "code_phrase": code,
+                    "error": "digits mismatch",
+                }))?
+            );
+        }
         bail!("digits mismatch — pair aborted. Re-issue with a fresh `wire pair-host --detach`.");
     }
     Ok(())
 }
 
-fn cmd_pair_list() -> Result<()> {
+fn cmd_pair_list(as_json: bool) -> Result<()> {
     let items = crate::pending_pair::list_pending()?;
+    if as_json {
+        println!("{}", serde_json::to_string(&items)?);
+        return Ok(());
+    }
     if items.is_empty() {
         println!("no pending pair sessions.");
         return Ok(());
@@ -2131,14 +2207,24 @@ fn cmd_pair_list() -> Result<()> {
     Ok(())
 }
 
-fn cmd_pair_cancel(code_phrase: &str) -> Result<()> {
+fn cmd_pair_cancel(code_phrase: &str, as_json: bool) -> Result<()> {
     let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
     let p = crate::pending_pair::read_pending(&code)?
         .ok_or_else(|| anyhow!("no pending pair for code {code}"))?;
     let client = crate::relay_client::RelayClient::new(&p.relay_url);
     let _ = client.pair_abandon(&p.code_hash);
     crate::pending_pair::delete_pending(&code)?;
-    println!("cancelled pending pair {code} (relay slot released, file removed).");
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "state": "cancelled",
+                "code_phrase": code,
+            }))?
+        );
+    } else {
+        println!("cancelled pending pair {code} (relay slot released, file removed).");
+    }
     Ok(())
 }
 
