@@ -1718,9 +1718,7 @@ fn pair_orchestrate(
     auto_yes: bool,
     timeout_secs: u64,
 ) -> Result<()> {
-    use crate::pair_session::{
-        pair_session_finalize, pair_session_open, pair_session_wait_for_sas,
-    };
+    use crate::pair_session::{pair_session_finalize, pair_session_open, pair_session_try_sas};
 
     let mut s = pair_session_open(role, relay_url, code_in)?;
 
@@ -1734,14 +1732,36 @@ fn pair_orchestrate(
             "waiting for peer to run `wire pair-join {} --relay {relay_url}` ...",
             s.code
         );
+    } else {
+        eprintln!();
+        eprintln!("joined pair-slot on {relay_url} — waiting for host's SPAKE2 message ...");
     }
 
-    // Stage 2 — wait for SAS-ready (full timeout in CLI; users may take a while).
-    let formatted =
-        pair_session_wait_for_sas(&mut s, timeout_secs, std::time::Duration::from_millis(250))?
-            .ok_or_else(|| {
-                anyhow!("timeout after {timeout_secs}s waiting for peer's SPAKE2 message")
-            })?;
+    // Stage 2 — poll for SAS-ready with periodic progress heartbeat. The bare
+    // pair_session_wait_for_sas helper is silent; the CLI wraps it in a loop
+    // that emits a "waiting (Ns / Ts)" line every HEARTBEAT_SECS so operators
+    // see the process is alive while the other side connects.
+    const HEARTBEAT_SECS: u64 = 10;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let started = std::time::Instant::now();
+    let mut last_heartbeat = started;
+    let formatted = loop {
+        if let Some(sas) = pair_session_try_sas(&mut s)? {
+            break sas;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(anyhow!(
+                "timeout after {timeout_secs}s waiting for peer's SPAKE2 message"
+            ));
+        }
+        if now.duration_since(last_heartbeat).as_secs() >= HEARTBEAT_SECS {
+            let elapsed = now.duration_since(started).as_secs();
+            eprintln!("  ... still waiting ({elapsed}s / {timeout_secs}s)");
+            last_heartbeat = now;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    };
 
     eprintln!();
     eprintln!("SAS digits (must match peer's terminal):");
