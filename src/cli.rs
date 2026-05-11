@@ -350,6 +350,28 @@ pub enum Command {
         #[arg(long)]
         apply: bool,
     },
+    /// Show the local agent's profile (DID + handle + personality fields).
+    /// In a future v0.5 iter this will also accept a remote `nick@domain`
+    /// handle and resolve via `.well-known/wire/agent` (zero-paste discovery).
+    Whois {
+        /// Optional handle (`nick@domain`). Omit to show self.
+        handle: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Edit profile fields (display_name, emoji, motto, vibe, pronouns,
+    /// avatar_url, handle, now). Re-signs the agent-card atomically.
+    ///
+    /// Examples:
+    ///   wire profile set motto "compiles or dies trying"
+    ///   wire profile set emoji "🦀"
+    ///   wire profile set vibe '["rust","late-night","no-async-please"]'
+    ///   wire profile set handle "coffee-ghost@anthropic.dev"
+    ///   wire profile get
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
     /// Mint a one-paste invite URL. Anyone with this URL can pair to us in a
     /// single step (no SAS digits, no code typing). Auto-inits + auto-allocates
     /// a relay slot on first use. Default TTL 24h, single-use.
@@ -432,6 +454,30 @@ pub enum Command {
         /// Suppress the OS notification call; print one JSON line per event to
         /// stdout instead (for piping into other tooling or smoke-testing
         /// without a desktop session).
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProfileAction {
+    /// Set a profile field. Field names: display_name, emoji, motto, vibe,
+    /// pronouns, avatar_url, handle, now. Values are strings except `vibe`
+    /// (JSON array) and `now` (JSON object).
+    Set {
+        field: String,
+        value: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show all profile fields. Equivalent to `wire whois`.
+    Get {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Clear a profile field.
+    Clear {
+        field: String,
         #[arg(long)]
         json: bool,
     },
@@ -549,6 +595,8 @@ pub fn run() -> Result<()> {
             json,
         } => cmd_invite(&relay, ttl, uses, json),
         Command::Accept { url, json } => cmd_accept(&url, json),
+        Command::Whois { handle, json } => cmd_whois(handle.as_deref(), json),
+        Command::Profile { action } => cmd_profile(action),
         Command::Setup { apply } => cmd_setup(apply),
         Command::Reactor {
             on_event,
@@ -2614,6 +2662,89 @@ fn cmd_accept(url: &str, as_json: bool) -> Result<()> {
             "you can now: wire send {} <kind> <body>",
             did.strip_prefix("did:wire:").unwrap_or(did)
         );
+    }
+    Ok(())
+}
+
+// ---------- whois / profile (v0.5) ----------
+
+fn cmd_whois(handle: Option<&str>, as_json: bool) -> Result<()> {
+    if let Some(h) = handle {
+        // v0.5 will resolve nick@domain via .well-known/wire/agent. Not yet
+        // wired — error out with a clear todo so operator sees the scope.
+        // For now, only support the special case where the handle's domain
+        // is "self" or matches our own handle: show local profile.
+        let parsed = crate::pair_profile::parse_handle(h)?;
+        let card = config::read_agent_card()?;
+        let local_handle = card
+            .get("profile")
+            .and_then(|p| p.get("handle"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if local_handle.as_deref() == Some(h) {
+            // Self-lookup by full handle.
+            return cmd_whois(None, as_json);
+        }
+        bail!(
+            "remote whois for {h} not yet implemented — needs v0.5 \
+             .well-known/wire/agent resolver. (Parsed OK: nick={}, domain={}.)",
+            parsed.nick,
+            parsed.domain
+        );
+    }
+    let card = config::read_agent_card()?;
+    if as_json {
+        let profile = card.get("profile").cloned().unwrap_or(Value::Null);
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "did": card.get("did").cloned().unwrap_or(Value::Null),
+                "profile": profile,
+            }))?
+        );
+    } else {
+        print!("{}", crate::pair_profile::render_self_summary()?);
+    }
+    Ok(())
+}
+
+fn cmd_profile(action: ProfileAction) -> Result<()> {
+    match action {
+        ProfileAction::Set { field, value, json } => {
+            // Try parsing the value as JSON; if that fails, treat it as a
+            // bare string. Lets operators pass either `42` or `"hello"` or
+            // `["rust","late-night"]` without quoting hell.
+            let parsed: Value =
+                serde_json::from_str(&value).unwrap_or(Value::String(value.clone()));
+            let new_profile = crate::pair_profile::write_profile_field(&field, parsed)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "field": field,
+                        "profile": new_profile,
+                    }))?
+                );
+            } else {
+                println!("profile.{field} set");
+            }
+        }
+        ProfileAction::Get { json } => return cmd_whois(None, json),
+        ProfileAction::Clear { field, json } => {
+            let new_profile = crate::pair_profile::write_profile_field(&field, Value::Null)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "field": field,
+                        "cleared": true,
+                        "profile": new_profile,
+                    }))?
+                );
+            } else {
+                println!("profile.{field} cleared");
+            }
+        }
     }
     Ok(())
 }
