@@ -15,11 +15,12 @@ The operator gave you ONE of these:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
-wire init "$USER"                        # or whatever handle the operator gave you
-wire pair-host --relay https://wire.laulpogan.com
+wire pair "$USER"          # or whatever handle the operator gave you
 ```
 
-The host command prints a **code phrase** (e.g. `58-NMTY7A`). **Surface it to the operator** — they will send it to the peer.
+`wire pair` is the one-shot bootstrap. It runs `init` (idempotent — safe to re-run with the same handle), then `pair-host` on the default public relay `https://wire.laulpogan.com`, then registers wire as an MCP server in your client's config.
+
+The command prints a **code phrase** (e.g. `58-NMTY7A`). **Surface it to the operator** — they will send it to the peer.
 
 It then prints **six SAS digits** (e.g. `676-580`). **Surface them to the operator and stop.** The operator compares to the peer's digits out-of-band (voice / separate channel) and tells you `y` or `N`. Only then pass that to the `[y/N]:` prompt. Do **not** auto-confirm. Do **not** compare digits yourself — the comparison is the operator's job, against the *other* agent's terminal.
 
@@ -29,18 +30,14 @@ Once paired, the peer's handle is in `wire peers`.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
-wire init "$USER"
-wire pair-join <CODE-PHRASE> --relay https://wire.laulpogan.com
+wire pair "$USER" --code <CODE-PHRASE>
 ```
 
 It prints **six SAS digits**. **Surface them to the operator and stop.** Operator compares to host's digits out-of-band, then tells you `y` or `N`. Do not auto-confirm.
 
 ## After pairing
 
-Both sides:
-
 ```bash
-wire setup --apply    # registers wire as MCP server in Claude Code / Cursor configs (idempotent)
 wire daemon start     # background sync of inbox/outbox vs relay
 wire send <peer> claim "hello from $(whoami)"
 ```

@@ -224,6 +224,36 @@ pub enum Command {
         #[arg(long, default_value_t = 300)]
         timeout: u64,
     },
+    /// One-shot bootstrap: init identity (idempotent) + pair-host or pair-join
+    /// + register wire as MCP server. Use this when you want a single command
+    /// to take you from nothing to "paired and ready" — no separate init / pair-host
+    /// / setup steps needed. Operator still must confirm SAS digits.
+    ///
+    /// Examples:
+    ///   wire pair paul                          # host a new pair on default relay
+    ///   wire pair willard --code 58-NMTY7A      # join paul's pair
+    Pair {
+        /// Short handle for this agent (becomes did:wire:<handle>). Used by init
+        /// step if no identity exists; ignored if already initialized.
+        handle: String,
+        /// Code phrase from peer's pair-host output. Omit to be the host
+        /// (this command will print one for you to share).
+        #[arg(long)]
+        code: Option<String>,
+        /// Relay base URL. Defaults to the laulpogan public-good relay.
+        #[arg(long, default_value = "https://wire.laulpogan.com")]
+        relay: String,
+        /// Skip SAS prompt. Test-only.
+        #[arg(long)]
+        yes: bool,
+        /// Pair-step timeout in seconds.
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+        /// Skip the post-pair `setup --apply` step (don't register wire as
+        /// an MCP server in detected client configs).
+        #[arg(long)]
+        no_setup: bool,
+    },
     /// Detect known MCP host config locations (Claude Desktop, Claude Code,
     /// Cursor, project-local) and either print or auto-merge the wire MCP
     /// server entry. Default prints; pass `--apply` to actually modify config
@@ -349,6 +379,14 @@ pub fn run() -> Result<()> {
             yes,
             timeout,
         } => cmd_pair_join(&code_phrase, &relay, yes, timeout),
+        Command::Pair {
+            handle,
+            code,
+            relay,
+            yes,
+            timeout,
+            no_setup,
+        } => cmd_pair(&handle, code.as_deref(), &relay, yes, timeout, no_setup),
         Command::Setup { apply } => cmd_setup(apply),
         Command::Reactor {
             on_event,
@@ -1728,6 +1766,66 @@ fn pair_orchestrate(
 
 // (poll_until helper removed — pair flow now uses pair_session::pair_session_wait_for_sas
 // and pair_session_finalize, both of which inline their own deadline loops.)
+
+// ---------- pair — single-shot init + pair-* + setup ----------
+
+fn cmd_pair(
+    handle: &str,
+    code: Option<&str>,
+    relay: &str,
+    auto_yes: bool,
+    timeout_secs: u64,
+    no_setup: bool,
+) -> Result<()> {
+    // Step 1 — idempotent identity. Safe if already initialized with the SAME handle;
+    // bails loudly if a different handle is already set (operator must explicitly delete).
+    let init_result = crate::pair_session::init_self_idempotent(handle, None, None)?;
+    let did = init_result
+        .get("did")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(unknown)")
+        .to_string();
+    let already = init_result
+        .get("already_initialized")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if already {
+        println!("(identity {did} already initialized — reusing)");
+    } else {
+        println!("initialized {did}");
+    }
+    println!();
+
+    // Step 2 — pair-host or pair-join based on code presence.
+    match code {
+        None => {
+            println!("hosting pair on {relay} (no code = host) ...");
+            cmd_pair_host(relay, auto_yes, timeout_secs)?;
+        }
+        Some(c) => {
+            println!("joining pair with code {c} on {relay} ...");
+            cmd_pair_join(c, relay, auto_yes, timeout_secs)?;
+        }
+    }
+
+    // Step 3 — register wire as MCP server in detected client configs (idempotent).
+    if !no_setup {
+        println!();
+        println!("registering wire as MCP server in detected client configs ...");
+        if let Err(e) = cmd_setup(true) {
+            // Non-fatal — pair succeeded, just print the warning.
+            eprintln!("warn: setup --apply failed: {e}");
+            eprintln!("      pair succeeded; you can re-run `wire setup --apply` manually.");
+        }
+    }
+
+    println!();
+    println!("pair complete. Next steps:");
+    println!("  wire daemon start              # background sync of inbox/outbox vs relay");
+    println!("  wire send <peer> claim <msg>   # send your peer something");
+    println!("  wire tail                      # watch incoming events");
+    Ok(())
+}
 
 // ---------- setup — one-shot MCP host registration ----------
 
