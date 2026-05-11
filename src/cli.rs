@@ -662,6 +662,42 @@ fn cmd_status(as_json: bool) -> Result<()> {
         let inbox = config::inbox_dir()?;
         summary["outbox"] = json!(scan_jsonl_dir(&outbox)?);
         summary["inbox"] = json!(scan_jsonl_dir(&inbox)?);
+
+        // Daemon liveness — check daemon.pid (written by pending_pair::cleanup_on_startup).
+        let daemon_pid_path = config::state_dir()?.join("daemon.pid");
+        let mut daemon = json!({"running": false, "pid": Value::Null});
+        if daemon_pid_path.exists()
+            && let Ok(s) = std::fs::read_to_string(&daemon_pid_path)
+            && let Ok(pid) = s.trim().parse::<u32>()
+        {
+            let alive = {
+                #[cfg(target_os = "linux")]
+                {
+                    std::path::Path::new(&format!("/proc/{pid}")).exists()
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    std::process::Command::new("kill")
+                        .args(["-0", &pid.to_string()])
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false)
+                }
+            };
+            daemon = json!({"running": alive, "pid": pid});
+        }
+        summary["daemon"] = daemon;
+
+        // Pending pair sessions — counts by status.
+        let pending = crate::pending_pair::list_pending().unwrap_or_default();
+        let mut counts: std::collections::BTreeMap<String, u32> = Default::default();
+        for p in &pending {
+            *counts.entry(p.status.clone()).or_default() += 1;
+        }
+        summary["pending_pairs"] = json!({
+            "total": pending.len(),
+            "by_status": counts,
+        });
     }
 
     if as_json {
@@ -705,6 +741,32 @@ fn cmd_status(as_json: bool) -> Result<()> {
             summary["inbox"]["files"].as_u64().unwrap_or(0),
             summary["inbox"]["events"].as_u64().unwrap_or(0)
         );
+        let daemon_running = summary["daemon"]["running"].as_bool().unwrap_or(false);
+        let daemon_pid = summary["daemon"]["pid"]
+            .as_u64()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        println!(
+            "daemon:        {} (pid {})",
+            if daemon_running { "running" } else { "DOWN" },
+            daemon_pid
+        );
+        let pending_total = summary["pending_pairs"]["total"].as_u64().unwrap_or(0);
+        if pending_total > 0 {
+            print!("pending pairs: {pending_total}");
+            if let Some(obj) = summary["pending_pairs"]["by_status"].as_object() {
+                let parts: Vec<String> = obj
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v.as_u64().unwrap_or(0)))
+                    .collect();
+                if !parts.is_empty() {
+                    print!(" ({})", parts.join(", "));
+                }
+            }
+            println!();
+        } else {
+            println!("pending pairs: none");
+        }
     }
     Ok(())
 }
