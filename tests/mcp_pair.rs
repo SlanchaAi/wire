@@ -840,6 +840,110 @@ async fn mcp_subscribe_pending_pair_emits_updated_on_status_change() {
     assert_eq!(arr[0]["sas"], "123456");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_pair_mcp_tools_round_trip() {
+    // Agent flow: wire_pair_initiate_detached writes a pending file;
+    // wire_pair_list_pending returns it; wire_pair_confirm_detached with
+    // wrong digits aborts; with right digits flips to confirmed;
+    // wire_pair_cancel_pending removes a pending entry.
+    let home = fresh_dir("detached-mcp");
+    let mut mcp = McpProc::spawn(&home);
+
+    mcp.tool_call(
+        1,
+        "wire_init",
+        json!({"handle": "alice"}),
+        Duration::from_secs(5),
+    )
+    .expect("init");
+
+    // Initiate detached. Should write a pending file and return code_phrase.
+    let resp = mcp
+        .tool_call(
+            2,
+            "wire_pair_initiate_detached",
+            json!({"relay_url": "http://unused"}),
+            Duration::from_secs(5),
+        )
+        .expect("initiate_detached");
+    let code = resp["code_phrase"]
+        .as_str()
+        .expect("code_phrase string")
+        .to_string();
+    assert!(!code.is_empty());
+    assert_eq!(resp["state"], "queued");
+
+    // List should show one entry in request_host.
+    let listed = mcp
+        .tool_call(
+            3,
+            "wire_pair_list_pending",
+            json!({}),
+            Duration::from_secs(5),
+        )
+        .expect("list_pending");
+    let pending = listed["pending"].as_array().expect("array");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["code"], code);
+    assert_eq!(pending[0]["status"], "request_host");
+
+    // Simulate the daemon advancing the session to sas_ready. (Real daemon
+    // would do this; we shortcut by editing the file directly so the test
+    // doesn't require a long-lived daemon process.)
+    let pending_path = home
+        .join("state/wire/pending-pair")
+        .join(format!("{code}.json"));
+    let mut p: Value =
+        serde_json::from_str(&std::fs::read_to_string(&pending_path).unwrap()).unwrap();
+    p["status"] = json!("sas_ready");
+    p["sas"] = json!("123456");
+    std::fs::write(&pending_path, serde_json::to_string_pretty(&p).unwrap()).unwrap();
+
+    // Wrong digits → error, file flips to aborted.
+    let wrong = mcp.tool_call(
+        4,
+        "wire_pair_confirm_detached",
+        json!({"code_phrase": code, "user_typed_digits": "999999"}),
+        Duration::from_secs(5),
+    );
+    assert!(wrong.is_err(), "wrong digits must return tool error");
+    let after_wrong: Value =
+        serde_json::from_str(&std::fs::read_to_string(&pending_path).unwrap()).unwrap();
+    assert_eq!(after_wrong["status"], "aborted");
+
+    // Reset to sas_ready for the happy-path check.
+    let mut p2 = after_wrong.as_object().unwrap().clone();
+    p2.insert("status".to_string(), json!("sas_ready"));
+    p2.insert("last_error".to_string(), Value::Null);
+    std::fs::write(&pending_path, serde_json::to_string_pretty(&p2).unwrap()).unwrap();
+
+    // Right digits → state=confirmed; file's status flips so the (hypothetical)
+    // daemon would finalize on next tick.
+    let ok = mcp
+        .tool_call(
+            5,
+            "wire_pair_confirm_detached",
+            json!({"code_phrase": code, "user_typed_digits": "123-456"}),
+            Duration::from_secs(5),
+        )
+        .expect("confirm_detached ok");
+    assert_eq!(ok["state"], "confirmed");
+    let after_ok: Value =
+        serde_json::from_str(&std::fs::read_to_string(&pending_path).unwrap()).unwrap();
+    assert_eq!(after_ok["status"], "confirmed");
+
+    // Cancel removes the file regardless of state.
+    let _ = mcp
+        .tool_call(
+            6,
+            "wire_pair_cancel_pending",
+            json!({"code_phrase": code}),
+            Duration::from_secs(5),
+        )
+        .expect("cancel");
+    assert!(!pending_path.exists(), "cancel must remove pending file");
+}
+
 #[test]
 fn concurrent_outbox_appends_do_not_corrupt_lines() {
     use wire::config::append_outbox_record;

@@ -628,6 +628,56 @@ fn tool_defs() -> Vec<Value> {
                 "required": ["session_id", "user_typed_digits"]
             }
         }),
+        json!({
+            "name": "wire_pair_initiate_detached",
+            "description": "Detached variant of wire_pair_initiate: queues a host-side pair via the local `wire daemon` (auto-spawned if not running) and returns IMMEDIATELY with the code phrase. The daemon drives the handshake in the background. Subscribe to wire://pending-pair/all to get notifications/resources/updated when status → sas_ready, then call wire_pair_confirm_detached(code, digits). Use this if your agent prompt expects to surface the code first and confirm later (across multiple chat turns) rather than block 30s.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "handle": {"type": "string", "description": "Optional handle for auto-init (idempotent)."},
+                    "relay_url": {"type": "string"}
+                }
+            }
+        }),
+        json!({
+            "name": "wire_pair_join_detached",
+            "description": "Detached variant of wire_pair_join. Same flow as wire_pair_initiate_detached but as guest: queues a pair-join on the local daemon. Returns immediately. Subscribe to wire://pending-pair/all for the eventual sas_ready notification.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "handle": {"type": "string"},
+                    "code_phrase": {"type": "string"},
+                    "relay_url": {"type": "string"}
+                },
+                "required": ["code_phrase"]
+            }
+        }),
+        json!({
+            "name": "wire_pair_list_pending",
+            "description": "Return the local daemon's pending detached pair sessions (all states). Same shape as `wire pair-list` JSON. Cheap call — agent can poll, but prefer subscribing to wire://pending-pair/all for push notifications.",
+            "inputSchema": {"type": "object", "properties": {}}
+        }),
+        json!({
+            "name": "wire_pair_confirm_detached",
+            "description": "Confirm a detached pair after SAS surfaces (status=sas_ready). The user must read the SAS digits aloud to their peer over a side channel; if they match the peer's digits, the user types digits back into chat — pass those to this tool. Mismatch ABORTS. The daemon picks up the confirmation on its next tick and finalizes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "code_phrase": {"type": "string"},
+                    "user_typed_digits": {"type": "string"}
+                },
+                "required": ["code_phrase", "user_typed_digits"]
+            }
+        }),
+        json!({
+            "name": "wire_pair_cancel_pending",
+            "description": "Cancel a pending detached pair. Releases the relay slot and removes the local pending file. Safe to call regardless of current status (idempotent).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"code_phrase": {"type": "string"}},
+                "required": ["code_phrase"]
+            }
+        }),
     ]
 }
 
@@ -652,6 +702,11 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
         "wire_pair_join" => tool_pair_join(&args),
         "wire_pair_check" => tool_pair_check(&args),
         "wire_pair_confirm" => tool_pair_confirm(&args, state),
+        "wire_pair_initiate_detached" => tool_pair_initiate_detached(&args),
+        "wire_pair_join_detached" => tool_pair_join_detached(&args),
+        "wire_pair_list_pending" => tool_pair_list_pending(),
+        "wire_pair_confirm_detached" => tool_pair_confirm_detached(&args),
+        "wire_pair_cancel_pending" => tool_pair_cancel_pending(&args),
         // Legacy alias kept for older agent prompts that reference `wire_join`.
         // Surfaces the operator-friendly error pointing to wire_pair_join.
         "wire_join" => Err(
@@ -1178,6 +1233,156 @@ fn tool_pair_confirm(args: &Value, state: &McpState) -> Result<Value, String> {
          OS toasts (always)."
     );
     Ok(result)
+}
+
+// ---------- detached pair tools (daemon-orchestrated) ----------
+
+fn tool_pair_initiate_detached(args: &Value) -> Result<Value, String> {
+    auto_init_if_needed(args)?;
+    let relay_url = resolve_relay_url(args)?;
+    if std::env::var("WIRE_MCP_SKIP_AUTO_UP").is_err() {
+        let _ = crate::ensure_up::ensure_daemon_running();
+    }
+    let code = crate::sas::generate_code_phrase();
+    let code_hash = crate::pair_session::derive_code_hash(&code);
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let p = crate::pending_pair::PendingPair {
+        code: code.clone(),
+        code_hash,
+        role: "host".to_string(),
+        relay_url: relay_url.clone(),
+        status: "request_host".to_string(),
+        sas: None,
+        peer_did: None,
+        created_at: now,
+        last_error: None,
+    };
+    crate::pending_pair::write_pending(&p).map_err(|e| e.to_string())?;
+    Ok(json!({
+        "code_phrase": code,
+        "relay_url": relay_url,
+        "state": "queued",
+        "next": "Share code_phrase with the user. Subscribe to wire://pending-pair/all; when notifications/resources/updated arrives, read the resource and surface the SAS digits to the user once status=sas_ready. Then call wire_pair_confirm_detached with code_phrase + user_typed_digits."
+    }))
+}
+
+fn tool_pair_join_detached(args: &Value) -> Result<Value, String> {
+    auto_init_if_needed(args)?;
+    let relay_url = resolve_relay_url(args)?;
+    let code_phrase = args
+        .get("code_phrase")
+        .and_then(Value::as_str)
+        .ok_or("missing 'code_phrase'")?;
+    let code = crate::sas::parse_code_phrase(code_phrase)
+        .map_err(|e| e.to_string())?
+        .to_string();
+    let code_hash = crate::pair_session::derive_code_hash(&code);
+    if std::env::var("WIRE_MCP_SKIP_AUTO_UP").is_err() {
+        let _ = crate::ensure_up::ensure_daemon_running();
+    }
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let p = crate::pending_pair::PendingPair {
+        code: code.clone(),
+        code_hash,
+        role: "guest".to_string(),
+        relay_url: relay_url.clone(),
+        status: "request_guest".to_string(),
+        sas: None,
+        peer_did: None,
+        created_at: now,
+        last_error: None,
+    };
+    crate::pending_pair::write_pending(&p).map_err(|e| e.to_string())?;
+    Ok(json!({
+        "code_phrase": code,
+        "relay_url": relay_url,
+        "state": "queued",
+        "next": "Subscribe to wire://pending-pair/all; on sas_ready notification, surface digits to user and call wire_pair_confirm_detached."
+    }))
+}
+
+fn tool_pair_list_pending() -> Result<Value, String> {
+    let items = crate::pending_pair::list_pending().map_err(|e| e.to_string())?;
+    Ok(json!({"pending": items}))
+}
+
+fn tool_pair_confirm_detached(args: &Value) -> Result<Value, String> {
+    let code_phrase = args
+        .get("code_phrase")
+        .and_then(Value::as_str)
+        .ok_or("missing 'code_phrase'")?;
+    let typed = args
+        .get("user_typed_digits")
+        .and_then(Value::as_str)
+        .ok_or("missing 'user_typed_digits'")?;
+    let code = crate::sas::parse_code_phrase(code_phrase)
+        .map_err(|e| e.to_string())?
+        .to_string();
+    let typed: String = typed.chars().filter(|c| c.is_ascii_digit()).collect();
+    if typed.len() != 6 {
+        return Err(format!(
+            "expected 6 digits (got {} after stripping non-digits)",
+            typed.len()
+        ));
+    }
+    let mut p = crate::pending_pair::read_pending(&code)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no pending pair for code {code}"))?;
+    if p.status != "sas_ready" {
+        return Err(format!(
+            "pair {code} not in sas_ready state (current: {})",
+            p.status
+        ));
+    }
+    let stored = p
+        .sas
+        .as_ref()
+        .ok_or("pending file has status=sas_ready but no sas field")?
+        .clone();
+    if stored == typed {
+        p.status = "confirmed".to_string();
+        crate::pending_pair::write_pending(&p).map_err(|e| e.to_string())?;
+        Ok(json!({
+            "state": "confirmed",
+            "code_phrase": code,
+            "next": "Daemon will finalize on its next tick (~1s). Poll wire_peers or watch wire://pending-pair/all for the entry to disappear."
+        }))
+    } else {
+        p.status = "aborted".to_string();
+        p.last_error = Some(format!(
+            "SAS digit mismatch (typed {typed}, expected {stored})"
+        ));
+        let client = crate::relay_client::RelayClient::new(&p.relay_url);
+        let _ = client.pair_abandon(&p.code_hash);
+        let _ = crate::pending_pair::write_pending(&p);
+        crate::os_notify::toast(
+            &format!("wire — pair aborted ({code})"),
+            p.last_error.as_deref().unwrap_or("digits mismatch"),
+        );
+        Err(format!(
+            "digits mismatch — pair aborted. Re-issue with wire_pair_initiate_detached."
+        ))
+    }
+}
+
+fn tool_pair_cancel_pending(args: &Value) -> Result<Value, String> {
+    let code_phrase = args
+        .get("code_phrase")
+        .and_then(Value::as_str)
+        .ok_or("missing 'code_phrase'")?;
+    let code = crate::sas::parse_code_phrase(code_phrase)
+        .map_err(|e| e.to_string())?
+        .to_string();
+    if let Some(p) = crate::pending_pair::read_pending(&code).map_err(|e| e.to_string())? {
+        let client = crate::relay_client::RelayClient::new(&p.relay_url);
+        let _ = client.pair_abandon(&p.code_hash);
+    }
+    crate::pending_pair::delete_pending(&code).map_err(|e| e.to_string())?;
+    Ok(json!({"state": "cancelled", "code_phrase": code}))
 }
 
 // ---------- helpers ----------
