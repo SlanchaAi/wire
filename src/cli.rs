@@ -2090,6 +2090,13 @@ fn cmd_pair_confirm(code_phrase: &str, typed_digits: &str) -> Result<()> {
         let client = crate::relay_client::RelayClient::new(&p.relay_url);
         let _ = client.pair_abandon(&p.code_hash);
         crate::pending_pair::write_pending(&p)?;
+        // Push: also surface mismatch to desktop so operator knows from a
+        // glance that the digits they typed were wrong (not just a CLI exit
+        // code in some terminal they might already have closed).
+        crate::os_notify::toast(
+            &format!("wire — pair aborted ({})", p.code),
+            p.last_error.as_deref().unwrap_or("digits mismatch"),
+        );
         bail!("digits mismatch — pair aborted. Re-issue with a fresh `wire pair-host --detach`.");
     }
     Ok(())

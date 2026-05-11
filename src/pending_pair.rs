@@ -208,6 +208,11 @@ pub fn cleanup_on_startup() -> Result<()> {
                     "daemon restarted while session was mid-handshake; in-memory SPAKE2 state lost. Re-issue with a fresh code phrase.".to_string(),
                 );
                 write_pending(&p)?;
+                // Push so operator knows a session got wiped on restart.
+                crate::os_notify::toast(
+                    &format!("wire — pair aborted on restart ({})", p.code),
+                    "Daemon restarted mid-handshake. Re-issue: wire pair-host --detach",
+                );
             }
         }
     }
@@ -219,13 +224,32 @@ pub fn cleanup_on_startup() -> Result<()> {
     Ok(())
 }
 
+/// Terminal-state TTL: aborted / aborted_restart files older than this get
+/// silently deleted in `tick()`. Keeps `pair-list` output tidy without losing
+/// short-term diagnostic value.
+const TERMINAL_TTL_SECS: i64 = 3600;
+
 /// One daemon tick. Walks every pending file and advances it one step in the
 /// state machine. Each file's failures are isolated — a single broken file
-/// doesn't stop processing of the rest.
+/// doesn't stop processing of the rest. Also GCs old terminal-state files.
 pub fn tick() -> Result<Value> {
     let mut transitions: Vec<Value> = Vec::new();
+    let now = time::OffsetDateTime::now_utc();
     for mut p in list_pending()? {
         let prev_status = p.status.clone();
+
+        // GC long-dead terminal files.
+        if (p.status == "aborted" || p.status == "aborted_restart")
+            && let Ok(created) = time::OffsetDateTime::parse(
+                &p.created_at,
+                &time::format_description::well_known::Rfc3339,
+            )
+            && (now - created).whole_seconds() > TERMINAL_TTL_SECS
+        {
+            let _ = delete_pending(&p.code);
+            continue;
+        }
+
         if let Err(e) = process_one(&mut p) {
             p.last_error = Some(format!("{e:#}"));
             p.status = "aborted".to_string();
@@ -234,6 +258,13 @@ pub fn tick() -> Result<Value> {
             let _ = client.pair_abandon(&p.code_hash);
             let _ = write_pending(&p);
             live().lock().unwrap().remove(&p.code);
+            // Push: operator should know without checking pair-list.
+            let title = format!("wire — pair aborted ({})", p.code);
+            let body = p
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "(no detail)".to_string());
+            crate::os_notify::toast(&title, &body);
         }
         if p.status != prev_status {
             transitions.push(json!({
