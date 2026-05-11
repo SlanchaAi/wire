@@ -43,6 +43,8 @@ done
 uname_s="$(uname -s)"
 uname_m="$(uname -m)"
 # Resolve target triple for a release asset matching .github/workflows/release.yml.
+# Binary suffix is `.exe` on Windows shells (Git Bash / MSYS / Cygwin), empty elsewhere.
+binsuffix=""
 case "$uname_s" in
     Linux)
         # Prefer musl static for max-portability if available; fall back to gnu otherwise.
@@ -59,6 +61,13 @@ case "$uname_s" in
             *) echo "unsupported Darwin arch: $uname_m" >&2; exit 1 ;;
         esac
         ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+        # Git Bash / MSYS2 / Cygwin on Windows. uname -m returns "x86_64" or "i686".
+        case "$uname_m" in
+            x86_64|amd64) triple="x86_64-pc-windows-msvc"; binsuffix=".exe" ;;
+            *) echo "unsupported Windows arch: $uname_m (need x86_64)" >&2; exit 1 ;;
+        esac
+        ;;
     *) echo "unsupported OS: $uname_s" >&2; exit 1 ;;
 esac
 
@@ -71,9 +80,9 @@ if [ -z "$PREFIX" ]; then
     fi
 fi
 mkdir -p "$PREFIX"
-target="$PREFIX/wire"
+target="$PREFIX/wire${binsuffix}"
 
-binary_url="$DIST_URL/wire-${triple}"
+binary_url="$DIST_URL/wire-${triple}${binsuffix}"
 echo "fetching $binary_url ..."
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT

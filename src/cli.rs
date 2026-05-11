@@ -1741,8 +1741,11 @@ fn cmd_setup(apply: bool) -> Result<()> {
     // touch the file if it already exists OR --apply was passed.
     let mut targets: Vec<(&str, PathBuf)> = Vec::new();
     if let Some(home) = dirs::home_dir() {
-        // Claude Code (CLI) — XDG-ish default
-        targets.push(("Claude Code", home.join(".config/claude/mcp.json")));
+        // Claude Code (CLI) — real config path is ~/.claude.json on all platforms (Linux/macOS/Windows).
+        // The mcpServers map lives at the top level of that file.
+        targets.push(("Claude Code", home.join(".claude.json")));
+        // Legacy / alternate Claude Code XDG path — still try, harmless if absent.
+        targets.push(("Claude Code (alt)", home.join(".config/claude/mcp.json")));
         // Claude Desktop macOS
         #[cfg(target_os = "macos")]
         targets.push((
