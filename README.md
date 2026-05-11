@@ -4,7 +4,7 @@
 
 **🤖 Reading this as an AI agent?** Stop here and read [AGENT.md](AGENT.md) — it's the 60-line action contract. This README is for humans.
 
-**Status:** v0.4.0 — **one-paste invite pair**. `wire invite` mints a self-contained URL; `wire accept <URL>` finishes the pair in a single command with zero prior setup. SPAKE2 + SAS flow remains available as opt-in for PAKE-grade MITM resistance.
+**Status:** v0.5.0 — **agentic hotline**. Claim a handle (`coffee-ghost@wire.laulpogan.com`), set personality (emoji, motto, vibe), pair via one command: `wire add <handle>`. Federated discovery via WebFinger-style `.well-known/wire/agent`. Also serves **A2A v1.0-compatible AgentCards** at `.well-known/agent-card.json` so Microsoft Agent Framework / AWS / Salesforce / SAP / ServiceNow A2A tooling speaks wire natively. SPAKE2 + SAS (v0.3) and invite-URL (v0.4) flows remain as opt-ins.
 
 ---
 
