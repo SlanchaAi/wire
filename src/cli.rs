@@ -264,6 +264,27 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Block until a pending pair reaches a target status (default sas_ready),
+    /// or terminates (finalized = file removed, aborted, aborted_restart), or
+    /// the timeout expires. Useful for shell scripts that want to drive the
+    /// detached flow without polling pair-list themselves.
+    ///
+    /// Exit codes:
+    ///   0 — reached target status (or finalized, if target was sas_ready)
+    ///   1 — terminated abnormally (aborted, aborted_restart, no such code)
+    ///   2 — timeout
+    PairWatch {
+        code_phrase: String,
+        /// Target status to wait for. Default: sas_ready.
+        #[arg(long, default_value = "sas_ready")]
+        status: String,
+        /// Max seconds to wait.
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
+        /// Emit JSON on each status change (one per line) instead of just on exit.
+        #[arg(long)]
+        json: bool,
+    },
     /// One-shot bootstrap: init identity (idempotent) + pair-host or pair-join
     /// + register wire as MCP server. Use this when you want a single command
     /// to take you from nothing to "paired and ready" — no separate init / pair-host
@@ -460,6 +481,12 @@ pub fn run() -> Result<()> {
         } => cmd_pair_confirm(&code_phrase, &digits, json),
         Command::PairList { json } => cmd_pair_list(json),
         Command::PairCancel { code_phrase, json } => cmd_pair_cancel(&code_phrase, json),
+        Command::PairWatch {
+            code_phrase,
+            status,
+            timeout,
+            json,
+        } => cmd_pair_watch(&code_phrase, &status, timeout, json),
         Command::Pair {
             handle,
             code,
@@ -2267,6 +2294,81 @@ fn cmd_pair_list(as_json: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Block until a pending pair reaches `target_status` or terminates. Process
+/// exit code carries the outcome (0 success, 1 terminated abnormally, 2
+/// timeout) so shell scripts can branch directly.
+fn cmd_pair_watch(
+    code_phrase: &str,
+    target_status: &str,
+    timeout_secs: u64,
+    as_json: bool,
+) -> Result<()> {
+    let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut last_seen_status: Option<String> = None;
+    loop {
+        let p_opt = crate::pending_pair::read_pending(&code)?;
+        let now = std::time::Instant::now();
+        match p_opt {
+            None => {
+                // File gone — either finalized (success if target=sas_ready
+                // since finalization implies it passed sas_ready) or never
+                // existed. Distinguish by whether we ever saw it.
+                if last_seen_status.is_some() {
+                    if as_json {
+                        println!("{}", serde_json::to_string(&json!({"state": "finalized", "code": code}))?);
+                    } else {
+                        println!("pair {code} finalized (file removed)");
+                    }
+                    return Ok(());
+                } else {
+                    if as_json {
+                        println!("{}", serde_json::to_string(&json!({"error": "no such pair", "code": code}))?);
+                    }
+                    std::process::exit(1);
+                }
+            }
+            Some(p) => {
+                let cur = p.status.clone();
+                if Some(cur.clone()) != last_seen_status {
+                    if as_json {
+                        // Emit per-transition line so scripts can stream.
+                        println!("{}", serde_json::to_string(&p)?);
+                    }
+                    last_seen_status = Some(cur.clone());
+                }
+                if cur == target_status {
+                    if !as_json {
+                        let sas_str = p
+                            .sas
+                            .as_ref()
+                            .map(|s| format!("{}-{}", &s[..3], &s[3..]))
+                            .unwrap_or_else(|| "—".to_string());
+                        println!("pair {code} reached {target_status} (SAS: {sas_str})");
+                    }
+                    return Ok(());
+                }
+                if cur == "aborted" || cur == "aborted_restart" {
+                    if !as_json {
+                        let err = p.last_error.as_deref().unwrap_or("(no detail)");
+                        eprintln!("pair {code} {cur}: {err}");
+                    }
+                    std::process::exit(1);
+                }
+            }
+        }
+        if now >= deadline {
+            if !as_json {
+                eprintln!(
+                    "timeout after {timeout_secs}s waiting for pair {code} to reach {target_status}"
+                );
+            }
+            std::process::exit(2);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
 }
 
 fn cmd_pair_cancel(code_phrase: &str, as_json: bool) -> Result<()> {
