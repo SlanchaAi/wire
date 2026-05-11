@@ -745,6 +745,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostname"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link",
+]
+
+[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2577,7 +2588,7 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "wire"
-version = "0.3.13"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2588,6 +2599,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "hkdf",
+ "hostname",
  "proptest",
  "rand 0.8.6",
  "rand_chacha 0.3.1",
@@ -2596,6 +2608,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "spake2",
+ "tempfile",
  "thiserror 1.0.69",
  "time",
  "tokio",

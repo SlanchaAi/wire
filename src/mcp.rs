@@ -679,6 +679,29 @@ fn tool_defs() -> Vec<Value> {
                 "required": ["code_phrase"]
             }
         }),
+        json!({
+            "name": "wire_invite_mint",
+            "description": "Mint a single-paste invite URL (v0.4.0). Auto-inits this agent + auto-allocates a relay slot if needed. Hand the URL string to ONE peer (Discord/SMS/voice); when they call wire_invite_accept on it, the daemon completes the pair end-to-end with no SAS digits. Single-use by default; --uses N for multi-accept. TTL 24h by default. Returns {invite_url, ttl_secs, uses}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "relay_url": {"type": "string", "description": "Override relay for first-time auto-allocate."},
+                    "ttl_secs": {"type": "integer", "description": "Invite lifetime in seconds (default 86400)."},
+                    "uses": {"type": "integer", "description": "Number of distinct peers that can accept before consumption (default 1)."}
+                }
+            }
+        }),
+        json!({
+            "name": "wire_invite_accept",
+            "description": "Accept a wire invite URL (v0.4.0). Auto-inits this agent + auto-allocates a relay slot if needed (zero prior setup OK). Pins issuer from URL contents, sends our signed agent-card to issuer's slot. Issuer's daemon completes the bilateral pin on next pull. Returns {paired_with, peer_handle, event_id, status}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Full wire://pair?v=1&inv=... URL."}
+                },
+                "required": ["url"]
+            }
+        }),
     ]
 }
 
@@ -708,6 +731,8 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
         "wire_pair_list_pending" => tool_pair_list_pending(),
         "wire_pair_confirm_detached" => tool_pair_confirm_detached(&args),
         "wire_pair_cancel_pending" => tool_pair_cancel_pending(&args),
+        "wire_invite_mint" => tool_invite_mint(&args),
+        "wire_invite_accept" => tool_invite_accept(&args),
         // Legacy alias kept for older agent prompts that reference `wire_join`.
         // Surfaces the operator-friendly error pointing to wire_pair_join.
         "wire_join" => Err(
@@ -1393,6 +1418,34 @@ fn tool_pair_cancel_pending(args: &Value) -> Result<Value, String> {
     }
     crate::pending_pair::delete_pending(&code).map_err(|e| e.to_string())?;
     Ok(json!({"state": "cancelled", "code_phrase": code}))
+}
+
+// ---------- invite-URL one-paste pair (v0.4.0) ----------
+
+fn tool_invite_mint(args: &Value) -> Result<Value, String> {
+    let relay_url = args.get("relay_url").and_then(Value::as_str);
+    let ttl_secs = args.get("ttl_secs").and_then(Value::as_u64);
+    let uses = args
+        .get("uses")
+        .and_then(Value::as_u64)
+        .map(|u| u as u32)
+        .unwrap_or(1);
+    let url =
+        crate::pair_invite::mint_invite(ttl_secs, uses, relay_url).map_err(|e| format!("{e:#}"))?;
+    let ttl_resolved = ttl_secs.unwrap_or(crate::pair_invite::DEFAULT_TTL_SECS);
+    Ok(json!({
+        "invite_url": url,
+        "ttl_secs": ttl_resolved,
+        "uses": uses,
+    }))
+}
+
+fn tool_invite_accept(args: &Value) -> Result<Value, String> {
+    let url = args
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or("missing 'url'")?;
+    crate::pair_invite::accept_invite(url).map_err(|e| format!("{e:#}"))
 }
 
 // ---------- helpers ----------

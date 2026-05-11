@@ -350,6 +350,33 @@ pub enum Command {
         #[arg(long)]
         apply: bool,
     },
+    /// Mint a one-paste invite URL. Anyone with this URL can pair to us in a
+    /// single step (no SAS digits, no code typing). Auto-inits + auto-allocates
+    /// a relay slot on first use. Default TTL 24h, single-use.
+    Invite {
+        /// Override the relay URL for first-time auto-allocation.
+        #[arg(long, default_value = "https://wire.laulpogan.com")]
+        relay: String,
+        /// Invite lifetime in seconds (default 86400 = 24h).
+        #[arg(long, default_value_t = 86_400)]
+        ttl: u64,
+        /// Number of distinct peers that can accept this invite before it's
+        /// consumed (default 1).
+        #[arg(long, default_value_t = 1)]
+        uses: u32,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Accept a wire invite URL. Single-step pair — pins issuer, sends our
+    /// signed card to issuer's slot. Auto-inits + auto-allocates if needed.
+    Accept {
+        /// The full invite URL (starts with `wire://pair?v=1&inv=...`).
+        url: String,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Long-running event dispatcher. Watches inbox for new verified events
     /// and spawns the given shell command per event, passing the event JSON
     /// on stdin. Use to wire up autonomous reply loops:
@@ -515,6 +542,13 @@ pub fn run() -> Result<()> {
             }
         }
         Command::PairAbandon { code_phrase, relay } => cmd_pair_abandon(&code_phrase, &relay),
+        Command::Invite {
+            relay,
+            ttl,
+            uses,
+            json,
+        } => cmd_invite(&relay, ttl, uses, json),
+        Command::Accept { url, json } => cmd_accept(&url, json),
         Command::Setup { apply } => cmd_setup(apply),
         Command::Reactor {
             on_event,
@@ -1360,7 +1394,22 @@ fn cmd_pull(as_json: bool) -> Result<()> {
             .unwrap_or("")
             .to_string();
         last_seen = Some(event_id.clone());
-        match crate::signing::verify_message_v31(event, &trust) {
+
+        // v0.4.0 invite-pair: detect + consume pair_drop events BEFORE the
+        // trust check (sender isn't pinned yet by definition). Successful
+        // consumption pins the sender; we then re-read trust so the event
+        // passes verify and lands in the inbox normally.
+        let drop_paired = matches!(
+            crate::pair_invite::maybe_consume_pair_drop(event),
+            Ok(Some(_))
+        );
+        let active_trust = if drop_paired {
+            config::read_trust()?
+        } else {
+            trust.clone()
+        };
+
+        match crate::signing::verify_message_v31(event, &active_trust) {
             Ok(()) => {
                 let from = event
                     .get("from")
@@ -1384,13 +1433,16 @@ fn cmd_pull(as_json: bool) -> Result<()> {
         }
     }
 
-    // Persist cursor.
+    // Persist cursor. RE-READ relay state from disk: maybe_consume_pair_drop
+    // (and any other in-loop side effect) may have added new peer pins during
+    // the iteration. Using the stale snapshot from the loop's start would
+    // silently wipe those out.
     if let Some(eid) = last_seen {
-        let mut state = state.clone();
-        if let Some(self_obj) = state.get_mut("self").and_then(Value::as_object_mut) {
+        let mut fresh = config::read_relay_state()?;
+        if let Some(self_obj) = fresh.get_mut("self").and_then(Value::as_object_mut) {
             self_obj.insert("last_pulled_event_id".into(), Value::String(eid));
         }
-        config::write_relay_state(&state)?;
+        config::write_relay_state(&fresh)?;
     }
 
     if as_json {
@@ -1830,7 +1882,22 @@ fn run_sync_pull() -> Result<Value> {
             .unwrap_or("")
             .to_string();
         last_seen = Some(event_id.clone());
-        match crate::signing::verify_message_v31(event, &trust) {
+
+        // v0.4.0 invite-pair: detect + consume pair_drop events BEFORE the
+        // trust check (sender isn't pinned yet by definition). Successful
+        // consumption pins the sender; we then re-read trust so the event
+        // passes verify and lands in the inbox normally.
+        let drop_paired = matches!(
+            crate::pair_invite::maybe_consume_pair_drop(event),
+            Ok(Some(_))
+        );
+        let active_trust = if drop_paired {
+            config::read_trust()?
+        } else {
+            trust.clone()
+        };
+
+        match crate::signing::verify_message_v31(event, &active_trust) {
             Ok(()) => {
                 let from = event
                     .get("from")
@@ -1855,11 +1922,12 @@ fn run_sync_pull() -> Result<Value> {
     }
 
     if let Some(eid) = last_seen {
-        let mut state = state.clone();
-        if let Some(self_obj) = state.get_mut("self").and_then(Value::as_object_mut) {
+        // Re-read: maybe_consume_pair_drop may have added a peer pin mid-loop.
+        let mut fresh = config::read_relay_state()?;
+        if let Some(self_obj) = fresh.get_mut("self").and_then(Value::as_object_mut) {
             self_obj.insert("last_pulled_event_id".into(), Value::String(eid));
         }
-        config::write_relay_state(&state)?;
+        config::write_relay_state(&fresh)?;
     }
 
     Ok(json!({"written": written, "rejected": rejected, "total_seen": events.len()}))
@@ -2507,6 +2575,46 @@ fn cmd_pair_abandon(code_phrase: &str, relay_url: &str) -> Result<()> {
     client.pair_abandon(&code_hash)?;
     println!("abandoned pair-slot for code {code_phrase} on {relay_url}");
     println!("host can now issue a fresh code; guest can re-join.");
+    Ok(())
+}
+
+// ---------- invite / accept — one-paste pair (v0.4.0) ----------
+
+fn cmd_invite(relay: &str, ttl: u64, uses: u32, as_json: bool) -> Result<()> {
+    let url = crate::pair_invite::mint_invite(Some(ttl), uses, Some(relay))?;
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "invite_url": url,
+                "ttl_secs": ttl,
+                "uses": uses,
+                "relay": relay,
+            }))?
+        );
+    } else {
+        eprintln!("# Share this URL with one peer. Pasting it = pair complete on their side.");
+        eprintln!("# TTL: {ttl}s. Uses: {uses}.");
+        println!("{url}");
+    }
+    Ok(())
+}
+
+fn cmd_accept(url: &str, as_json: bool) -> Result<()> {
+    let result = crate::pair_invite::accept_invite(url)?;
+    if as_json {
+        println!("{}", serde_json::to_string(&result)?);
+    } else {
+        let did = result
+            .get("paired_with")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        println!("paired with {did}");
+        println!(
+            "you can now: wire send {} <kind> <body>",
+            did.strip_prefix("did:wire:").unwrap_or(did)
+        );
+    }
     Ok(())
 }
 

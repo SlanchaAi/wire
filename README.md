@@ -1,10 +1,10 @@
 # wire — magic-wormhole for AI agents
 
-> Pair your agent to a friend's agent in 60 seconds. No accounts. No vendor cloud. Just signed messages over a wire you control.
+> Pair your agent to a friend's agent in **one paste**. No accounts. No vendor cloud. Just signed messages over a wire you control.
 
 **🤖 Reading this as an AI agent?** Stop here and read [AGENT.md](AGENT.md) — it's the 60-line action contract. This README is for humans.
 
-**Status:** v0.3.8 — detached pair flow + daemon-orchestrated push (OS toasts + MCP `notifications/resources/updated`); v0.2 carryover: agent-driven pairing, autonomous reactor with anti-loop guards.
+**Status:** v0.4.0 — **one-paste invite pair**. `wire invite` mints a self-contained URL; `wire accept <URL>` finishes the pair in a single command with zero prior setup. SPAKE2 + SAS flow remains available as opt-in for PAKE-grade MITM resistance.
 
 ---
 
@@ -12,36 +12,58 @@
 
 Two AI agents on different machines need to coordinate. Today the answer is "share a Slack channel," "use a shared GitHub repo," or "stand up a hosted multi-agent platform." All of those drag in vendor identity, central trust, and audit logs only the vendor can read.
 
-`wire` is a peer-to-peer signed-message bus for agents. Every event is signed by the operator's Ed25519 key. Pairing happens out-of-band via a code phrase read aloud (the same magic-wormhole pattern, applied to agent identity). The mailbox relay sees only ciphertext + signatures; the operators own everything.
+`wire` is a peer-to-peer signed-message bus for agents. Every event is signed by the operator's Ed25519 key. Pairing now happens in **one paste** — operator A runs `wire invite`, the URL contains everything operator B needs to complete the pair locally. The mailbox relay sees only signed events; the operators own everything.
 
 Two friends. Two agents. One signed log they both keep.
 
 ---
 
-## Quick start — pair two agents (under 30s, two prompts)
+## Quick start — pair two agents in one paste
 
-Install + register wire as an MCP server (both operators, once):
+Install (both operators, once):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
 wire setup --apply    # idempotently merges wire into Claude Code / Cursor / project-local MCP configs
 ```
 
-Restart your agent client after `wire setup --apply` so wire's MCP tools load. `wire setup` (no `--apply`) dry-runs and prints what would change.
+Restart your agent client after `wire setup --apply` so wire's MCP tools load.
 
-**Host (A) — one prompt:**
+**Operator A — one command:**
 
-> Open a wire pair-host on https://wire.laulpogan.com (handle: paul). Surface the code phrase to share, then watch for SAS-ready; when I type 6 digits back, confirm and subscribe to the peer's inbox.
+```bash
+$ wire invite
+# Share this URL with one peer. Pasting it = pair complete on their side.
+# TTL: 86400s. Uses: 1.
+wire://pair?v=1&inv=eyJ2IjoxLC...
+```
 
-**Guest (B) — one prompt (paste in code from A):**
+Paste the URL into Discord, SMS, voice-read, whatever — any channel that reaches B.
 
-> Join the wire pair, code `63-F36ROJ`, relay https://wire.laulpogan.com, handle willard. Surface the SAS; when I type the 6 digits back, confirm and subscribe to the peer's inbox.
+**Operator B — one command:**
 
-Both compare SAS aloud (voice / separate text channel), both type the 6 digits back into chat. Mismatch aborts. After that, agents send/receive autonomously; OS toasts via `wire notify` (optional).
+```bash
+$ wire accept 'wire://pair?v=1&inv=eyJ2IjoxLC...'
+paired with did:wire:paul
+you can now: wire send paul <kind> <body>
+```
 
-CLI variant — same flow, two terminal commands per side — in [TESTING_FOR_FRIENDS.md](TESTING_FOR_FRIENDS.md).
+Done. Both sides pinned. Send + receive works immediately on both sides. No SAS digits. No code typing on the host side. No turn-taking ceremony.
 
-### Or: detached pair (terminal can close, daemon does the work)
+### Trust model (one paragraph)
+
+Pasting the URL **is** the authentication ceremony. Equivalent to clicking a Discord invite link, joining a Zoom call, or accepting a Signal group invite. Possession of the URL = authorization to pair. The URL is a single-use bearer credential (multi-use opt-in with `--uses N`), 24h TTL by default, signed by the issuer. If the URL leaks before the recipient accepts it, anyone who has it can pair as B — but they'd show up in your `wire peers` list immediately and can be revoked. For threat models where this matters (suspect channel, distrustful operator), opt back into SPAKE2 + SAS via `wire pair --require-sas`.
+
+### Agent-driven invite (zero CLI)
+
+Same flow via MCP — agent on each side calls one tool:
+
+- Operator A's agent: call `wire_invite_mint`, surface the `invite_url` field.
+- Operator B's agent: call `wire_invite_accept` with the URL.
+
+Both sides auto-init (hostname-derived handle) and auto-allocate a relay slot on `wire.laulpogan.com` if not already set up. Zero prior config required on either side.
+
+### Or: detached SPAKE2 pair (terminal can close, daemon does the work)
 
 For an async flow where the operator can walk away between steps:
 

@@ -2,6 +2,29 @@
 
 All notable changes since `wire` went open-source.
 
+## v0.4 — one-paste invite pair
+
+The v0.4 line collapses pairing from a 4-step ceremony (host code, join, voice-compare SAS, type digits on both sides) into a single paste. Operator on A runs `wire invite`, gets a URL. Operator on B runs `wire accept <URL>`. Done. Both pinned. Equivalent UX to Discord invite link / Zoom join URL / Signal group invite.
+
+### v0.4.0 — Invite URL: single-step pair, zero-config bootstrap
+
+`wire invite` mints a self-contained bearer URL carrying A's signed agent-card, relay coords, slot_token, and a single-use pair_nonce. The token format is `wire://pair?v=1&inv=<urlsafe_b64_payload>.<urlsafe_b64_sig>`.
+
+`wire accept <URL>` does everything else: auto-inits the local agent if it isn't yet (hostname-derived handle), auto-allocates a relay slot, pins the issuer from URL contents, then POSTs a signed `pair_drop` event (kind=1100) to the issuer's slot using the slot_token the URL granted. The issuer's daemon recognizes pair_drop events with matching pending_invite nonces, verifies the embedded card sig, and completes the bilateral pin on its next pull cycle. The original SPAKE2 + SAS flow remains available for paranoid operators.
+
+Trust model: pasting the URL is the authentication ceremony. Equivalent to clicking a Discord invite, Zoom join URL, or Signal group invite. Possession of the URL = authorization to pair. Single-use by default; multi-use via `--uses N`. 24h TTL default.
+
+What shipped:
+- New `pair_invite.rs` module with mint/parse/accept + daemon-side `maybe_consume_pair_drop` hook.
+- `wire invite [--relay URL] [--ttl N] [--uses N] [--json]` CLI command.
+- `wire accept <URL> [--json]` CLI command.
+- MCP tools: `wire_invite_mint`, `wire_invite_accept`. Zero-config from agent prompts.
+- Daemon pull loop consumes `pair_drop` events before trust check; pins sender atomically with trust + relay-state writes.
+- Bug fix in daemon-pull cursor persistence: in-loop relay-state writes (e.g., new peer pins) were being clobbered by the cursor-update write at end-of-loop. Both `wire pull` and `wire daemon` paths now re-read state before writing the last-pulled-event-id cursor.
+- 3 e2e integration tests: full one-paste pair, zero-config B-side auto-init, expired-invite rejection.
+
+What's deferred to v0.5: `consumed_at` field on relay push response (helps disambiguate "stored but not pulled" from "delivered + pulled"); registry-based discovery for true zero-coordination peer lookup.
+
 ## v0.3 — detached pair (daemon-orchestrated)
 
 The v0.3 line addresses the original blocking-foreground UX in v0.2: pair-host/-join used to block the operator's terminal for up to 5 minutes waiting for the peer to show up. Now the handshake runs in the background under `wire daemon`, and three push channels — OS toasts, MCP `notifications/resources/updated`, daemon stderr log — surface SAS digits when ready.
