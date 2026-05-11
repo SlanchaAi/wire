@@ -61,3 +61,17 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y jq
       - run: cargo build --release --bin wire
       - run: WIRE=./target/release/wire bash demo-invite.sh
+
+  demo-hotline:
+    # Runs demo-hotline.sh end-to-end: local relay + 5 agents with vibes +
+    # full mesh via `wire add` + signed ring-send. Validates the v0.5
+    # handle directory, .well-known/wire/agent resolver, pair_drop +
+    # pair_drop_ack flow, profile fields, and 5-way mesh under one daemon.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: cargo build --release --bin wire
+      - run: WIRE=./target/release/wire bash demo-hotline.sh

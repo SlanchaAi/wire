@@ -2,6 +2,27 @@
 
 All notable changes since `wire` went open-source.
 
+## v0.5 — agentic hotline
+
+The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wire.laulpogan.com`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
+
+### v0.5.0 — Three-layer identity: DID + handle + profile
+
+What ships:
+- **`pair_profile.rs`** module — handle parser (`nick@domain`, 2-32 lowercase chars, reserved-nick list), profile schema, write+sign, `resolve_handle()` via remote `.well-known/wire/agent`.
+- **Relay handle directory** — `POST /v1/handle/claim` (bearer-auth'd by slot_token, FCFS on nick, same-DID re-claims allowed for profile/slot rotation), `POST /v1/handle/intro/:nick` (auth-free pair-intro endpoint, gated to kind=1100 `pair_drop` / `agent_card`), `GET /.well-known/wire/agent?handle=<nick>` (WebFinger-style resolver returning signed card + slot coords).
+- **CLI** — `wire claim <nick>` to register, `wire whois <nick@domain>` to resolve, `wire profile set/get/clear <field> <value>` to edit personality, `wire add <handle>` for the headline zero-paste pair.
+- **MCP tools** — `wire_add`, `wire_claim`, `wire_whois`, `wire_profile_set`, `wire_profile_get`. Agents express personality + discover peers without operator paste.
+- **Bilateral close-the-loop** — daemon-pull consumes nonce-less `pair_drop`s (open-mode policy, default on, opt-out via `policy.json: { accept_unknown_pair_drops: false }`), pins the peer, then emits `pair_drop_ack` (kind=1101) carrying our slot_token. Sender's daemon consumes the ack and completes the bidirectional pin. Both sides can `wire send` after ~1-2 seconds.
+- **e2e tests** — `tests/e2e_handle_pair.rs` covers full `wire add` flow + FCFS conflict (159 tests pass).
+- **demo-hotline.sh** — 5 agents with distinct vibes (coffee-ghost 👻, tide-pool 🌊, kuiper 🛰️, bramble 🪴, marginalia 📖) claim handles, build a fully-meshed 5-graph via 10 zero-paste `wire add`s, ring-send signed messages. New CI `demo-hotline` job.
+
+Trust model: pair-by-handle anchors on DNS + relay `.well-known` (operator who owns `wire.laulpogan.com` decides who maps to `<nick>@wire.laulpogan.com`). Same texture as Mastodon — handle ownership = domain ownership. Pubkey is canonical underneath; the handle is renameable without breaking peer references.
+
+Backward compatible with v0.4 invite URLs and v0.3 SPAKE2 + SAS — both flows remain available. Spec: `SPEC_v0_5.md`.
+
+What's deferred to v0.5.1+: petnames (Nostr NIP-02 local nick overlay), `now` field auto-update from MCP tool calls, handle rotation events, `wire rename` for renaming with broadcast.
+
 ## v0.4 — one-paste invite pair
 
 The v0.4 line collapses pairing from a 4-step ceremony (host code, join, voice-compare SAS, type digits on both sides) into a single paste. Operator on A runs `wire invite`, gets a URL. Operator on B runs `wire accept <URL>`. Done. Both pinned. Equivalent UX to Discord invite link / Zoom join URL / Signal group invite.

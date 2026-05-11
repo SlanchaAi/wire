@@ -702,6 +702,60 @@ fn tool_defs() -> Vec<Value> {
                 "required": ["url"]
             }
         }),
+        // v0.5 — agentic hotline.
+        json!({
+            "name": "wire_add",
+            "description": "Zero-paste pair (v0.5). Resolve a peer handle (`nick@domain`) via the domain's `.well-known/wire/agent`, pin them locally, and deliver a signed pair-intro to their slot. Peer's daemon completes the bilateral pin on next pull. After ~1-2 sec both sides can `wire_send` to each other. Use this when the operator gives you a handle like `coffee-ghost@wire.laulpogan.com`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "handle": {"type": "string", "description": "Peer handle like `nick@domain`."},
+                    "relay_url": {"type": "string", "description": "Override resolver URL (default: `https://<domain>`)."}
+                },
+                "required": ["handle"]
+            }
+        }),
+        json!({
+            "name": "wire_claim",
+            "description": "Claim a nick on a relay's handle directory so other agents can reach this agent by `<nick>@<relay-domain>`. Auto-inits + auto-allocates a relay slot if needed. FCFS — same-DID re-claims allowed (used for profile/slot updates).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "nick": {"type": "string", "description": "2-32 chars, [a-z0-9_-], not in the reserved set."},
+                    "relay_url": {"type": "string", "description": "Relay to claim on. Default = our relay."},
+                    "public_url": {"type": "string", "description": "Public URL the relay should advertise to resolvers."}
+                },
+                "required": ["nick"]
+            }
+        }),
+        json!({
+            "name": "wire_whois",
+            "description": "Look up an agent profile. With no handle, returns the local agent's profile. With a `nick@domain` handle, resolves via that domain's `.well-known/wire/agent` and verifies the returned signed card.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "handle": {"type": "string", "description": "Optional `nick@domain`. Omit for self."},
+                    "relay_url": {"type": "string", "description": "Override resolver URL."}
+                }
+            }
+        }),
+        json!({
+            "name": "wire_profile_set",
+            "description": "Edit a profile field on the local agent's signed agent-card. Field names: display_name, emoji, motto, vibe (array of strings), pronouns, avatar_url, handle (`nick@domain`), now (object). The card is re-signed atomically; the new profile is visible to anyone who resolves us via wire_whois. Use this to let the agent EXPRESS PERSONALITY — choose a motto, an emoji, a vibe.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "field": {"type": "string", "description": "One of: display_name, emoji, motto, vibe, pronouns, avatar_url, handle, now."},
+                    "value": {"description": "String for most fields; array for vibe; object for now. Pass JSON null to clear a field."}
+                },
+                "required": ["field", "value"]
+            }
+        }),
+        json!({
+            "name": "wire_profile_get",
+            "description": "Return the local agent's full profile (DID + handle + emoji + motto + vibe + pronouns + now). Cheap; no network. Use this to surface 'who am I' to the operator or to compose self-introductions to new peers.",
+            "inputSchema": {"type": "object", "properties": {}}
+        }),
     ]
 }
 
@@ -733,6 +787,12 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
         "wire_pair_cancel_pending" => tool_pair_cancel_pending(&args),
         "wire_invite_mint" => tool_invite_mint(&args),
         "wire_invite_accept" => tool_invite_accept(&args),
+        // v0.5 — agentic hotline (handle + profile + zero-paste discovery).
+        "wire_add" => tool_add(&args),
+        "wire_claim" => tool_claim_handle(&args),
+        "wire_whois" => tool_whois(&args),
+        "wire_profile_set" => tool_profile_set(&args),
+        "wire_profile_get" => tool_profile_get(),
         // Legacy alias kept for older agent prompts that reference `wire_join`.
         // Surfaces the operator-friendly error pointing to wire_pair_join.
         "wire_join" => Err(
@@ -1446,6 +1506,190 @@ fn tool_invite_accept(args: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .ok_or("missing 'url'")?;
     crate::pair_invite::accept_invite(url).map_err(|e| format!("{e:#}"))
+}
+
+// ---------- v0.5 — agentic hotline tools ----------
+
+fn tool_add(args: &Value) -> Result<Value, String> {
+    let handle = args
+        .get("handle")
+        .and_then(Value::as_str)
+        .ok_or("missing 'handle'")?;
+    let relay_override = args.get("relay_url").and_then(Value::as_str);
+
+    let parsed = crate::pair_profile::parse_handle(handle).map_err(|e| format!("{e:#}"))?;
+
+    // Ensure self has identity + relay slot (auto-inits if needed).
+    let (our_did, our_relay, our_slot_id, our_slot_token) =
+        crate::pair_invite::ensure_self_with_relay(relay_override).map_err(|e| format!("{e:#}"))?;
+
+    // Resolve peer via .well-known.
+    let resolved = crate::pair_profile::resolve_handle(&parsed, relay_override)
+        .map_err(|e| format!("{e:#}"))?;
+    let peer_card = resolved
+        .get("card")
+        .cloned()
+        .ok_or("resolved missing card")?;
+    let peer_did = resolved
+        .get("did")
+        .and_then(Value::as_str)
+        .ok_or("resolved missing did")?
+        .to_string();
+    let peer_handle = peer_did
+        .strip_prefix("did:wire:")
+        .unwrap_or(&peer_did)
+        .to_string();
+    let peer_slot_id = resolved
+        .get("slot_id")
+        .and_then(Value::as_str)
+        .ok_or("resolved missing slot_id")?
+        .to_string();
+    let peer_relay = resolved
+        .get("relay_url")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| relay_override.map(str::to_string))
+        .unwrap_or_else(|| format!("https://{}", parsed.domain));
+
+    // Pin peer in trust + relay-state. slot_token arrives via ack later.
+    let mut trust = crate::config::read_trust().map_err(|e| format!("{e:#}"))?;
+    crate::trust::add_agent_card_pin(&mut trust, &peer_card, Some("VERIFIED"));
+    crate::config::write_trust(&trust).map_err(|e| format!("{e:#}"))?;
+    let mut relay_state = crate::config::read_relay_state().map_err(|e| format!("{e:#}"))?;
+    let existing_token = relay_state
+        .get("peers")
+        .and_then(|p| p.get(&peer_handle))
+        .and_then(|p| p.get("slot_token"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_default();
+    relay_state["peers"][&peer_handle] = json!({
+        "relay_url": peer_relay,
+        "slot_id": peer_slot_id,
+        "slot_token": existing_token,
+    });
+    crate::config::write_relay_state(&relay_state).map_err(|e| format!("{e:#}"))?;
+
+    // Build + sign pair_drop event (no nonce — open-mode handle pair).
+    let our_card = crate::config::read_agent_card().map_err(|e| format!("{e:#}"))?;
+    let sk_seed = crate::config::read_private_key().map_err(|e| format!("{e:#}"))?;
+    let our_handle_str = our_did
+        .strip_prefix("did:wire:")
+        .unwrap_or(&our_did)
+        .to_string();
+    let pk_b64 = our_card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .ok_or("our card missing verify_keys[*].key")?;
+    let pk_bytes = crate::signing::b64decode(pk_b64).map_err(|e| format!("{e:#}"))?;
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let event = json!({
+        "timestamp": now,
+        "from": our_did,
+        "to": peer_did,
+        "type": "pair_drop",
+        "kind": 1100u32,
+        "body": {
+            "card": our_card,
+            "relay_url": our_relay,
+            "slot_id": our_slot_id,
+            "slot_token": our_slot_token,
+        },
+    });
+    let signed = crate::signing::sign_message_v31(&event, &sk_seed, &pk_bytes, &our_handle_str)
+        .map_err(|e| format!("{e:#}"))?;
+
+    let client = crate::relay_client::RelayClient::new(&peer_relay);
+    let resp = client
+        .handle_intro(&parsed.nick, &signed)
+        .map_err(|e| format!("{e:#}"))?;
+    let event_id = signed
+        .get("event_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    Ok(json!({
+        "handle": handle,
+        "paired_with": peer_did,
+        "peer_handle": peer_handle,
+        "event_id": event_id,
+        "drop_response": resp,
+        "status": "drop_sent",
+    }))
+}
+
+fn tool_claim_handle(args: &Value) -> Result<Value, String> {
+    let nick = args
+        .get("nick")
+        .and_then(Value::as_str)
+        .ok_or("missing 'nick'")?;
+    let relay_override = args.get("relay_url").and_then(Value::as_str);
+    let public_url = args.get("public_url").and_then(Value::as_str);
+
+    // Auto-init + ensure slot.
+    let (_, our_relay, our_slot_id, our_slot_token) =
+        crate::pair_invite::ensure_self_with_relay(relay_override).map_err(|e| format!("{e:#}"))?;
+    let claim_relay = relay_override.unwrap_or(&our_relay);
+    let card = crate::config::read_agent_card().map_err(|e| format!("{e:#}"))?;
+    let client = crate::relay_client::RelayClient::new(claim_relay);
+    let resp = client
+        .handle_claim(nick, &our_slot_id, &our_slot_token, public_url, &card)
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(json!({
+        "nick": nick,
+        "relay": claim_relay,
+        "response": resp,
+    }))
+}
+
+fn tool_whois(args: &Value) -> Result<Value, String> {
+    if let Some(handle) = args.get("handle").and_then(Value::as_str) {
+        let parsed = crate::pair_profile::parse_handle(handle).map_err(|e| format!("{e:#}"))?;
+        let relay_override = args.get("relay_url").and_then(Value::as_str);
+        crate::pair_profile::resolve_handle(&parsed, relay_override).map_err(|e| format!("{e:#}"))
+    } else {
+        // Self.
+        let card = crate::config::read_agent_card().map_err(|e| format!("{e:#}"))?;
+        Ok(json!({
+            "did": card.get("did").cloned().unwrap_or(Value::Null),
+            "profile": card.get("profile").cloned().unwrap_or(Value::Null),
+        }))
+    }
+}
+
+fn tool_profile_set(args: &Value) -> Result<Value, String> {
+    let field = args
+        .get("field")
+        .and_then(Value::as_str)
+        .ok_or("missing 'field'")?;
+    let raw_value = args.get("value").cloned().ok_or("missing 'value'")?;
+    // If value is a string that itself parses as JSON (e.g. "[\"rust\"]"),
+    // unwrap it. Otherwise pass as-is. Lets agents send either typed values
+    // or stringified JSON.
+    let value = if let Some(s) = raw_value.as_str() {
+        serde_json::from_str(s).unwrap_or(Value::String(s.to_string()))
+    } else {
+        raw_value
+    };
+    let new_profile =
+        crate::pair_profile::write_profile_field(field, value).map_err(|e| format!("{e:#}"))?;
+    Ok(json!({
+        "field": field,
+        "profile": new_profile,
+    }))
+}
+
+fn tool_profile_get() -> Result<Value, String> {
+    let card = crate::config::read_agent_card().map_err(|e| format!("{e:#}"))?;
+    Ok(json!({
+        "did": card.get("did").cloned().unwrap_or(Value::Null),
+        "profile": card.get("profile").cloned().unwrap_or(Value::Null),
+    }))
 }
 
 // ---------- helpers ----------
