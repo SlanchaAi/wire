@@ -210,6 +210,60 @@ impl RelayClient {
         }
         Ok(())
     }
+
+    /// Claim a `nick@<this-relay-domain>` handle (v0.5). Caller must hold
+    /// the bearer token for `slot_id`. FCFS on nick; same-DID re-claims OK.
+    pub fn handle_claim(
+        &self,
+        nick: &str,
+        slot_id: &str,
+        slot_token: &str,
+        relay_url: Option<&str>,
+        card: &Value,
+    ) -> Result<Value> {
+        let body = serde_json::json!({
+            "nick": nick,
+            "slot_id": slot_id,
+            "relay_url": relay_url,
+            "card": card,
+        });
+        let resp = self
+            .client
+            .post(format!("{}/v1/handle/claim", self.base_url))
+            .bearer_auth(slot_token)
+            .json(&body)
+            .send()
+            .with_context(|| format!("POST {}/v1/handle/claim", self.base_url))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().unwrap_or_default();
+            return Err(anyhow!("handle_claim failed: {status}: {detail}"));
+        }
+        Ok(resp.json()?)
+    }
+
+    /// Resolve a handle on this relay via `.well-known/wire/agent?handle=<nick>`.
+    /// Caller passes either the full `nick@domain` or just `<nick>` — the
+    /// server only uses the local part.
+    pub fn well_known_agent(&self, handle: &str) -> Result<Value> {
+        let resp = self
+            .client
+            .get(format!("{}/.well-known/wire/agent", self.base_url))
+            .query(&[("handle", handle)])
+            .send()
+            .with_context(|| {
+                format!(
+                    "GET {}/.well-known/wire/agent?handle={handle}",
+                    self.base_url
+                )
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().unwrap_or_default();
+            return Err(anyhow!("well_known_agent failed: {status}: {detail}"));
+        }
+        Ok(resp.json()?)
+    }
 }
 
 #[cfg(test)]

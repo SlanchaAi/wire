@@ -174,6 +174,39 @@ pub fn write_profile_field(field: &str, value: Value) -> Result<Value> {
     Ok(resigned.get("profile").cloned().unwrap_or(Value::Null))
 }
 
+/// Resolve a `nick@domain` handle via the remote relay's
+/// `.well-known/wire/agent` endpoint. Returns the parsed JSON payload
+/// `{nick, did, card, slot_id, relay_url, claimed_at}` on success. Verifies
+/// the card signature; on tamper, returns `Err`.
+///
+/// The relay-URL hint helps: if `relay_url` is `Some`, that base is used.
+/// Otherwise we assume `https://<domain>` (matches operator's DNS-anchored
+/// setup, e.g. `wire.laulpogan.com`).
+pub fn resolve_handle(handle: &Handle, relay_url: Option<&str>) -> anyhow::Result<Value> {
+    let base = relay_url
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("https://{}", handle.domain));
+    let client = crate::relay_client::RelayClient::new(&base);
+    let resolved = client.well_known_agent(&handle.nick)?;
+    let card = resolved
+        .get("card")
+        .ok_or_else(|| anyhow!("resolved payload missing 'card' field"))?;
+    crate::agent_card::verify_agent_card(card)
+        .map_err(|e| anyhow!("resolved card signature invalid: {e}"))?;
+    let did_in_resp = resolved
+        .get("did")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("resolved payload missing 'did'"))?;
+    let did_in_card = card
+        .get("did")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("resolved card missing 'did'"))?;
+    if did_in_resp != did_in_card {
+        bail!("resolved DID mismatch: payload={did_in_resp} card={did_in_card}");
+    }
+    Ok(resolved)
+}
+
 /// Render the local agent's profile as a friendly multi-line string for
 /// `wire whois` with no argument (i.e., show self).
 pub fn render_self_summary() -> Result<String> {

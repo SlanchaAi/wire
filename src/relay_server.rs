@@ -72,6 +72,21 @@ struct Inner {
     pair_lookup: HashMap<String, String>,
     /// pair_id -> ephemeral pairing state.
     pair_slots: HashMap<String, PairSlot>,
+    /// nick -> registered handle directory entry (v0.5).
+    handles: HashMap<String, HandleRecord>,
+}
+
+/// One entry in the relay's handle directory (v0.5 — agentic hotline).
+/// FCFS on nick: first claimant binds the nick to their DID. Same-DID re-claims
+/// are allowed (used for profile updates + slot rotation).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct HandleRecord {
+    pub nick: String,
+    pub did: String,
+    pub card: Value,
+    pub slot_id: String,
+    pub relay_url: Option<String>,
+    pub claimed_at: String,
 }
 
 #[derive(Clone, Debug)]
@@ -127,12 +142,14 @@ pub struct ListEventsQuery {
 impl Relay {
     pub async fn new(state_dir: PathBuf) -> Result<Self> {
         tokio::fs::create_dir_all(state_dir.join("slots")).await?;
+        tokio::fs::create_dir_all(state_dir.join("handles")).await?;
         let mut inner = Inner {
             slots: HashMap::new(),
             tokens: HashMap::new(),
             slot_bytes: HashMap::new(),
             pair_lookup: HashMap::new(),
             pair_slots: HashMap::new(),
+            handles: HashMap::new(),
         };
         // Reload tokens
         let token_path = state_dir.join("tokens.json");
@@ -165,6 +182,21 @@ impl Relay {
                 .sum();
             inner.slot_bytes.insert(stem.clone(), bytes);
             inner.slots.insert(stem, events);
+        }
+        // Reload handle directory (v0.5).
+        let handles_dir = state_dir.join("handles");
+        if handles_dir.exists() {
+            let mut rd = tokio::fs::read_dir(&handles_dir).await?;
+            while let Some(entry) = rd.next_entry().await? {
+                let path = entry.path();
+                if path.extension().and_then(|x| x.to_str()) != Some("json") {
+                    continue;
+                }
+                let body = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+                if let Ok(rec) = serde_json::from_str::<HandleRecord>(&body) {
+                    inner.handles.insert(rec.nick.clone(), rec);
+                }
+            }
         }
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -203,6 +235,8 @@ impl Relay {
             .route("/healthz", get(healthz))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
             .route("/v1/pair/:pair_id", get(pair_get))
+            .route("/v1/handle/claim", post(handle_claim))
+            .route("/.well-known/wire/agent", get(well_known_agent))
             .merge(hot_writes)
             .with_state(self)
     }
@@ -559,6 +593,182 @@ async fn pair_bootstrap(
         }
     }
     (StatusCode::CREATED, Json(json!({"ok": true}))).into_response()
+}
+
+// ---------- handle directory (v0.5) ----------
+
+#[derive(Deserialize)]
+pub struct HandleClaimRequest {
+    /// Nick the claimant wants (case-folded). Domain part is implicit: the
+    /// domain the relay's `.well-known` is served from.
+    pub nick: String,
+    /// Slot id the claimant owns on this relay (proves they allocated here).
+    pub slot_id: String,
+    /// Optional public-facing relay URL the relay should advertise back in
+    /// `.well-known/wire/agent` responses. If omitted, callers will need to
+    /// know the relay URL out-of-band.
+    pub relay_url: Option<String>,
+    /// Claimant's full signed agent-card (includes DID + verify_keys +
+    /// optional profile).
+    pub card: Value,
+}
+
+/// `POST /v1/handle/claim` — claim or update a `nick@<relay-domain>` handle.
+///
+/// FCFS on nick. Same-DID re-claims allowed (used for profile updates +
+/// slot rotation). Different-DID claims on a taken nick return 409.
+/// Caller must (a) own the `slot_id` they reference (verified by token
+/// being present), and (b) submit a card with a valid self-signature.
+async fn handle_claim(
+    State(relay): State<Relay>,
+    headers: HeaderMap,
+    Json(req): Json<HandleClaimRequest>,
+) -> impl IntoResponse {
+    // Bearer auth: claimant must hold the slot_token for the slot they
+    // reference. Prevents nick-squatting from an unauthenticated POSTer.
+    if let Err(resp) = check_token(&relay, &headers, &req.slot_id).await {
+        return resp;
+    }
+    // Validate nick (same rules as the client-side parser).
+    if !crate::pair_profile::is_valid_nick(&req.nick) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "nick must be 2..=32 chars, [a-z0-9_-], not reserved",
+                "nick": req.nick,
+            })),
+        )
+            .into_response();
+    }
+    // Verify the card signature using the public verify_agent_card helper.
+    if let Err(e) = crate::agent_card::verify_agent_card(&req.card) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("card signature invalid: {e}")})),
+        )
+            .into_response();
+    }
+    let did = match req.card.get("did").and_then(Value::as_str) {
+        Some(d) => d.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "card missing 'did' field"})),
+            )
+                .into_response();
+        }
+    };
+
+    // FCFS check.
+    {
+        let inner = relay.inner.lock().await;
+        if let Some(existing) = inner.handles.get(&req.nick)
+            && existing.did != did
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "nick already claimed by a different DID",
+                    "nick": req.nick,
+                    "claimed_by": existing.did,
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let record = HandleRecord {
+        nick: req.nick.clone(),
+        did: did.clone(),
+        card: req.card.clone(),
+        slot_id: req.slot_id.clone(),
+        relay_url: req.relay_url.clone(),
+        claimed_at: now,
+    };
+
+    // Persist to disk first (durable), then update in-memory.
+    let path = relay
+        .state_dir
+        .join("handles")
+        .join(format!("{}.json", req.nick));
+    let body = match serde_json::to_vec_pretty(&record) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("serialize failed: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    if let Err(e) = tokio::fs::write(&path, &body).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("persist failed: {e}")})),
+        )
+            .into_response();
+    }
+    {
+        let mut inner = relay.inner.lock().await;
+        inner.handles.insert(req.nick.clone(), record);
+    }
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "nick": req.nick,
+            "did": did,
+            "status": "claimed",
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct WellKnownAgentQuery {
+    pub handle: String,
+}
+
+/// `GET /.well-known/wire/agent?handle=<nick>` — WebFinger-style resolver
+/// for `nick@<this-relay-domain>` handles. Returns the signed agent-card +
+/// slot coords if claimed; 404 if not.
+///
+/// The `handle` query parameter may be just `<nick>` or `<nick>@<domain>`.
+/// Domain part is ignored (the relay only serves nicks it has on file).
+async fn well_known_agent(
+    State(relay): State<Relay>,
+    Query(q): Query<WellKnownAgentQuery>,
+) -> impl IntoResponse {
+    let nick = q.handle.split('@').next().unwrap_or("").to_string();
+    if nick.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "handle missing nick"})),
+        )
+            .into_response();
+    }
+    let inner = relay.inner.lock().await;
+    match inner.handles.get(&nick) {
+        Some(rec) => (
+            StatusCode::OK,
+            Json(json!({
+                "nick": rec.nick,
+                "did": rec.did,
+                "card": rec.card,
+                "slot_id": rec.slot_id,
+                "relay_url": rec.relay_url,
+                "claimed_at": rec.claimed_at,
+            })),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("nick {nick:?} not claimed on this relay")})),
+        )
+            .into_response(),
+    }
 }
 
 async fn list_events(

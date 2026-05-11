@@ -350,12 +350,30 @@ pub enum Command {
         #[arg(long)]
         apply: bool,
     },
-    /// Show the local agent's profile (DID + handle + personality fields).
-    /// In a future v0.5 iter this will also accept a remote `nick@domain`
-    /// handle and resolve via `.well-known/wire/agent` (zero-paste discovery).
+    /// Show an agent's profile. With no arg, prints local self. With a
+    /// `nick@domain` arg, resolves via that domain's `.well-known/wire/agent`
+    /// endpoint and verifies the returned signed card before display.
     Whois {
         /// Optional handle (`nick@domain`). Omit to show self.
         handle: Option<String>,
+        #[arg(long)]
+        json: bool,
+        /// Override the relay base URL used for resolution (default:
+        /// `https://<domain>` from the handle).
+        #[arg(long)]
+        relay: Option<String>,
+    },
+    /// Claim a nick on a relay's handle directory. Anyone can then reach
+    /// this agent by `<nick>@<relay-domain>` via the relay's
+    /// `.well-known/wire/agent` endpoint. FCFS; same-DID re-claims allowed.
+    Claim {
+        nick: String,
+        /// Relay to claim the nick on. Default = relay our slot is on.
+        #[arg(long)]
+        relay: Option<String>,
+        /// Public URL the relay should advertise to resolvers (default = relay).
+        #[arg(long)]
+        public_url: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -595,7 +613,17 @@ pub fn run() -> Result<()> {
             json,
         } => cmd_invite(&relay, ttl, uses, json),
         Command::Accept { url, json } => cmd_accept(&url, json),
-        Command::Whois { handle, json } => cmd_whois(handle.as_deref(), json),
+        Command::Whois {
+            handle,
+            json,
+            relay,
+        } => cmd_whois(handle.as_deref(), json, relay.as_deref()),
+        Command::Claim {
+            nick,
+            relay,
+            public_url,
+            json,
+        } => cmd_claim(&nick, relay.as_deref(), public_url.as_deref(), json),
         Command::Profile { action } => cmd_profile(action),
         Command::Setup { apply } => cmd_setup(apply),
         Command::Reactor {
@@ -2668,29 +2696,30 @@ fn cmd_accept(url: &str, as_json: bool) -> Result<()> {
 
 // ---------- whois / profile (v0.5) ----------
 
-fn cmd_whois(handle: Option<&str>, as_json: bool) -> Result<()> {
+fn cmd_whois(handle: Option<&str>, as_json: bool, relay_override: Option<&str>) -> Result<()> {
     if let Some(h) = handle {
-        // v0.5 will resolve nick@domain via .well-known/wire/agent. Not yet
-        // wired — error out with a clear todo so operator sees the scope.
-        // For now, only support the special case where the handle's domain
-        // is "self" or matches our own handle: show local profile.
         let parsed = crate::pair_profile::parse_handle(h)?;
-        let card = config::read_agent_card()?;
-        let local_handle = card
-            .get("profile")
-            .and_then(|p| p.get("handle"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        if local_handle.as_deref() == Some(h) {
-            // Self-lookup by full handle.
-            return cmd_whois(None, as_json);
+        // Special-case: if the supplied handle matches our own, skip the
+        // network round-trip and print local.
+        if config::is_initialized()? {
+            let card = config::read_agent_card()?;
+            let local_handle = card
+                .get("profile")
+                .and_then(|p| p.get("handle"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if local_handle.as_deref() == Some(h) {
+                return cmd_whois(None, as_json, None);
+            }
         }
-        bail!(
-            "remote whois for {h} not yet implemented — needs v0.5 \
-             .well-known/wire/agent resolver. (Parsed OK: nick={}, domain={}.)",
-            parsed.nick,
-            parsed.domain
-        );
+        // Remote resolution via .well-known/wire/agent on the handle's domain.
+        let resolved = crate::pair_profile::resolve_handle(&parsed, relay_override)?;
+        if as_json {
+            println!("{}", serde_json::to_string(&resolved)?);
+        } else {
+            print_resolved_profile(&resolved);
+        }
+        return Ok(());
     }
     let card = config::read_agent_card()?;
     if as_json {
@@ -2704,6 +2733,108 @@ fn cmd_whois(handle: Option<&str>, as_json: bool) -> Result<()> {
         );
     } else {
         print!("{}", crate::pair_profile::render_self_summary()?);
+    }
+    Ok(())
+}
+
+fn print_resolved_profile(resolved: &Value) {
+    let did = resolved.get("did").and_then(Value::as_str).unwrap_or("?");
+    let nick = resolved.get("nick").and_then(Value::as_str).unwrap_or("?");
+    let relay = resolved
+        .get("relay_url")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let slot = resolved
+        .get("slot_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let profile = resolved
+        .get("card")
+        .and_then(|c| c.get("profile"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    println!("{did}");
+    println!("  nick:         {nick}");
+    if !relay.is_empty() {
+        println!("  relay_url:    {relay}");
+    }
+    if !slot.is_empty() {
+        println!("  slot_id:      {slot}");
+    }
+    let pick =
+        |k: &str| -> Option<String> { profile.get(k).and_then(Value::as_str).map(str::to_string) };
+    if let Some(s) = pick("display_name") {
+        println!("  display_name: {s}");
+    }
+    if let Some(s) = pick("emoji") {
+        println!("  emoji:        {s}");
+    }
+    if let Some(s) = pick("motto") {
+        println!("  motto:        {s}");
+    }
+    if let Some(arr) = profile.get("vibe").and_then(Value::as_array) {
+        let joined: Vec<String> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        println!("  vibe:         {}", joined.join(", "));
+    }
+    if let Some(s) = pick("pronouns") {
+        println!("  pronouns:     {s}");
+    }
+}
+
+fn cmd_claim(
+    nick: &str,
+    relay_override: Option<&str>,
+    public_url: Option<&str>,
+    as_json: bool,
+) -> Result<()> {
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire init <handle>` first");
+    }
+    if !crate::pair_profile::is_valid_nick(nick) {
+        bail!("nick {nick:?} invalid — must be 2..=32 chars, [a-z0-9_-], not reserved");
+    }
+    let relay_state = config::read_relay_state()?;
+    let self_state = relay_state.get("self").cloned().unwrap_or(Value::Null);
+    let default_relay = self_state
+        .get("relay_url")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let relay_url = relay_override
+        .map(str::to_string)
+        .or(default_relay)
+        .ok_or_else(|| anyhow!("no relay URL — pass --relay or run `wire bind-relay` first"))?;
+    let slot_id = self_state
+        .get("slot_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("no slot allocated; run `wire bind-relay <url>` first"))?
+        .to_string();
+    let slot_token = self_state
+        .get("slot_token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("no slot_token in relay-state"))?
+        .to_string();
+    let card = config::read_agent_card()?;
+
+    let client = crate::relay_client::RelayClient::new(&relay_url);
+    let resp = client.handle_claim(nick, &slot_id, &slot_token, public_url, &card)?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "nick": nick,
+                "relay": relay_url,
+                "response": resp,
+            }))?
+        );
+    } else {
+        println!(
+            "claimed {nick} on {relay_url} — others can reach you at: {nick}@<this-relay-domain>"
+        );
+        println!("verify with: wire whois {nick}@<this-relay-domain>");
     }
     Ok(())
 }
@@ -2729,7 +2860,7 @@ fn cmd_profile(action: ProfileAction) -> Result<()> {
                 println!("profile.{field} set");
             }
         }
-        ProfileAction::Get { json } => return cmd_whois(None, json),
+        ProfileAction::Get { json } => return cmd_whois(None, json, None),
         ProfileAction::Clear { field, json } => {
             let new_profile = crate::pair_profile::write_profile_field(&field, Value::Null)?;
             if json {
