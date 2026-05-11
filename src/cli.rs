@@ -2985,10 +2985,20 @@ fn cmd_claim(
             }))?
         );
     } else {
-        println!(
-            "claimed {nick} on {relay_url} — others can reach you at: {nick}@<this-relay-domain>"
-        );
-        println!("verify with: wire whois {nick}@<this-relay-domain>");
+        // Best-effort: derive the public domain from the relay URL. If
+        // operator passed --public-url that's the canonical address; else
+        // the relay URL itself. Falls back to a placeholder if both miss.
+        let domain = public_url
+            .unwrap_or(&relay_url)
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .split('/')
+            .next()
+            .unwrap_or("<this-relay-domain>")
+            .to_string();
+        println!("claimed {nick} on {relay_url} — others can reach you at: {nick}@{domain}");
+        println!("verify with: wire whois {nick}@{domain}");
     }
     Ok(())
 }
