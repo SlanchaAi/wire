@@ -162,7 +162,7 @@ impl InboxWatcher {
             return Ok(out);
         }
 
-        let trust = crate::config::read_trust().unwrap_or_else(|_| Value::Null);
+        let trust = crate::config::read_trust().unwrap_or(Value::Null);
 
         for entry in std::fs::read_dir(&self.inbox_dir)?.flatten() {
             let path = entry.path();

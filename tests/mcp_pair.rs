@@ -772,14 +772,13 @@ async fn mcp_subscribe_pending_pair_emits_updated_on_status_change() {
             .checked_duration_since(Instant::now())
             .unwrap_or(Duration::ZERO);
         if let Ok(line) = mcp.out_rx.recv_timeout(remaining) {
-            if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                if v.get("method").and_then(Value::as_str)
+            if let Ok(v) = serde_json::from_str::<Value>(&line)
+                && v.get("method").and_then(Value::as_str)
                     == Some("notifications/resources/updated")
-                    && v["params"]["uri"] == "wire://pending-pair/all"
-                {
-                    got = true;
-                    break;
-                }
+                && v["params"]["uri"] == "wire://pending-pair/all"
+            {
+                got = true;
+                break;
             }
         } else {
             break;
@@ -805,14 +804,13 @@ async fn mcp_subscribe_pending_pair_emits_updated_on_status_change() {
             .checked_duration_since(Instant::now())
             .unwrap_or(Duration::ZERO);
         if let Ok(line) = mcp.out_rx.recv_timeout(remaining) {
-            if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                if v.get("method").and_then(Value::as_str)
+            if let Ok(v) = serde_json::from_str::<Value>(&line)
+                && v.get("method").and_then(Value::as_str)
                     == Some("notifications/resources/updated")
-                    && v["params"]["uri"] == "wire://pending-pair/all"
-                {
-                    got_transition = true;
-                    break;
-                }
+                && v["params"]["uri"] == "wire://pending-pair/all"
+            {
+                got_transition = true;
+                break;
             }
         } else {
             break;
@@ -994,7 +992,7 @@ fn concurrent_outbox_appends_do_not_corrupt_lines() {
 
     let path = home.join("state/wire/outbox/peer1.jsonl");
     let content = std::fs::read_to_string(&path).unwrap();
-    let total = (n_threads * n_writes_each) as usize;
+    let total = n_threads * n_writes_each;
     let lines: Vec<&str> = content.lines().collect();
     assert_eq!(
         lines.len(),

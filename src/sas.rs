@@ -239,7 +239,10 @@ mod tests {
     fn seeded_pake_side_changes_with_seed() {
         let a = PakeSide::from_seed("12-ABCDEF", b"pair-id-x", [1u8; 32]);
         let b = PakeSide::from_seed("12-ABCDEF", b"pair-id-x", [2u8; 32]);
-        assert_ne!(a.msg_out, b.msg_out, "msg_out collides across distinct seeds");
+        assert_ne!(
+            a.msg_out, b.msg_out,
+            "msg_out collides across distinct seeds"
+        );
     }
 
     #[test]

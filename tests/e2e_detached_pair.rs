@@ -77,10 +77,10 @@ where
     while Instant::now() < deadline {
         let out = wire(home, &["pair-list", "--json"]);
         let body = String::from_utf8_lossy(&out.stdout);
-        if let Ok(items) = serde_json::from_str::<Vec<Value>>(&body) {
-            if let Some(v) = f(&items) {
-                return Some(v);
-            }
+        if let Ok(items) = serde_json::from_str::<Vec<Value>>(&body)
+            && let Some(v) = f(&items)
+        {
+            return Some(v);
         }
         std::thread::sleep(Duration::from_millis(300));
     }
@@ -102,12 +102,16 @@ async fn detached_pair_full_e2e_with_real_daemons() {
     // Two fresh wire homes; init each.
     let paul = fresh_dir("paul");
     let willard = fresh_dir("willard");
-    assert!(wire(&paul, &["init", "paul", "--relay", &relay_url])
-        .status
-        .success());
-    assert!(wire(&willard, &["init", "willard", "--relay", &relay_url])
-        .status
-        .success());
+    assert!(
+        wire(&paul, &["init", "paul", "--relay", &relay_url])
+            .status
+            .success()
+    );
+    assert!(
+        wire(&willard, &["init", "willard", "--relay", &relay_url])
+            .status
+            .success()
+    );
 
     // Long-running daemons on both sides. PID files written by
     // cleanup_on_startup; subsequent CLI calls inherit the same WIRE_HOME so
@@ -119,13 +123,7 @@ async fn detached_pair_full_e2e_with_real_daemons() {
     // already spawned one with the right PID file). JSON output.
     let host_out = wire(
         &paul,
-        &[
-            "pair-host",
-            "--detach",
-            "--json",
-            "--relay",
-            &relay_url,
-        ],
+        &["pair-host", "--detach", "--json", "--relay", &relay_url],
     );
     assert!(host_out.status.success(), "pair-host --detach failed");
     let host_json: Value =
@@ -183,11 +181,7 @@ async fn detached_pair_full_e2e_with_real_daemons() {
     // Wait for pair-list to drain (file deleted on finalize).
     let drain_deadline = Instant::now() + Duration::from_secs(15);
     let drained = wait_for(&paul, drain_deadline, |items| {
-        if items.is_empty() {
-            Some(true)
-        } else {
-            None
-        }
+        if items.is_empty() { Some(true) } else { None }
     });
     assert_eq!(
         drained,
@@ -195,11 +189,7 @@ async fn detached_pair_full_e2e_with_real_daemons() {
         "paul pair-list must drain after confirm"
     );
     let drained_w = wait_for(&willard, drain_deadline, |items| {
-        if items.is_empty() {
-            Some(true)
-        } else {
-            None
-        }
+        if items.is_empty() { Some(true) } else { None }
     });
     assert_eq!(
         drained_w,
@@ -226,12 +216,14 @@ async fn detached_pair_full_e2e_with_real_daemons() {
     assert!(has_peer(&wj, "paul"), "willard missing paul: {wj}");
 
     // Send + sync + tail round-trip — confirms the pair actually works.
-    assert!(wire(
-        &paul,
-        &["send", "willard", "claim", "hello from detached e2e"]
-    )
-    .status
-    .success());
+    assert!(
+        wire(
+            &paul,
+            &["send", "willard", "claim", "hello from detached e2e"]
+        )
+        .status
+        .success()
+    );
 
     // Push outbox + pull inbox via explicit cycles (daemon also does this on
     // its own ticks, but explicit cycles make the test deterministic without
@@ -272,8 +264,16 @@ async fn detached_pair_survives_daemon_restart_mid_handshake() {
 
     let paul = fresh_dir("paul-restart");
     let willard = fresh_dir("willard-restart");
-    assert!(wire(&paul, &["init", "paul", "--relay", &relay_url]).status.success());
-    assert!(wire(&willard, &["init", "willard", "--relay", &relay_url]).status.success());
+    assert!(
+        wire(&paul, &["init", "paul", "--relay", &relay_url])
+            .status
+            .success()
+    );
+    assert!(
+        wire(&willard, &["init", "willard", "--relay", &relay_url])
+            .status
+            .success()
+    );
 
     let mut paul_d = Some(spawn_daemon(&paul));
     let _will_d = spawn_daemon(&willard);
@@ -288,7 +288,14 @@ async fn detached_pair_survives_daemon_restart_mid_handshake() {
         .to_string();
     let join_out = wire(
         &willard,
-        &["pair-join", &code, "--detach", "--json", "--relay", &relay_url],
+        &[
+            "pair-join",
+            &code,
+            "--detach",
+            "--json",
+            "--relay",
+            &relay_url,
+        ],
     );
     assert!(join_out.status.success());
 
@@ -346,17 +353,25 @@ async fn detached_pair_survives_daemon_restart_mid_handshake() {
     );
 
     // Confirm + finalize.
-    assert!(wire(&paul, &["pair-confirm", &code, &paul_sas]).status.success());
-    assert!(wire(&willard, &["pair-confirm", &code, &will_sas]).status.success());
+    assert!(
+        wire(&paul, &["pair-confirm", &code, &paul_sas])
+            .status
+            .success()
+    );
+    assert!(
+        wire(&willard, &["pair-confirm", &code, &will_sas])
+            .status
+            .success()
+    );
 
     let drain = wait_for(&paul, Instant::now() + Duration::from_secs(15), |items| {
-        if items.is_empty() {
-            Some(true)
-        } else {
-            None
-        }
+        if items.is_empty() { Some(true) } else { None }
     });
-    assert_eq!(drain, Some(true), "paul pair-list did not drain after restart");
+    assert_eq!(
+        drain,
+        Some(true),
+        "paul pair-list did not drain after restart"
+    );
 
     // Peers VERIFIED on both sides.
     let peers_p: Value =
@@ -397,7 +412,11 @@ async fn detached_pair_two_concurrent_hosts_against_two_guests() {
     let alice = fresh_dir("alice-multi");
     let bob = fresh_dir("bob-multi");
     for (h, dir) in [("paul", &paul), ("alice", &alice), ("bob", &bob)] {
-        assert!(wire(dir, &["init", h, "--relay", &relay_url]).status.success());
+        assert!(
+            wire(dir, &["init", h, "--relay", &relay_url])
+                .status
+                .success()
+        );
     }
 
     let _paul_d = spawn_daemon(&paul);
@@ -414,31 +433,50 @@ async fn detached_pair_two_concurrent_hosts_against_two_guests() {
         &["pair-host", "--detach", "--json", "--relay", &relay_url],
     );
     assert!(host_a.status.success() && host_b.status.success());
-    let code_a: String = serde_json::from_slice::<Value>(&host_a.stdout)
-        .unwrap()["code_phrase"]
+    let code_a: String = serde_json::from_slice::<Value>(&host_a.stdout).unwrap()["code_phrase"]
         .as_str()
         .unwrap()
         .to_string();
-    let code_b: String = serde_json::from_slice::<Value>(&host_b.stdout)
-        .unwrap()["code_phrase"]
+    let code_b: String = serde_json::from_slice::<Value>(&host_b.stdout).unwrap()["code_phrase"]
         .as_str()
         .unwrap()
         .to_string();
-    assert_ne!(code_a, code_b, "concurrent hosts must produce distinct codes");
+    assert_ne!(
+        code_a, code_b,
+        "concurrent hosts must produce distinct codes"
+    );
 
     // alice joins A, bob joins B.
-    assert!(wire(
-        &alice,
-        &["pair-join", &code_a, "--detach", "--json", "--relay", &relay_url],
-    )
-    .status
-    .success());
-    assert!(wire(
-        &bob,
-        &["pair-join", &code_b, "--detach", "--json", "--relay", &relay_url],
-    )
-    .status
-    .success());
+    assert!(
+        wire(
+            &alice,
+            &[
+                "pair-join",
+                &code_a,
+                "--detach",
+                "--json",
+                "--relay",
+                &relay_url
+            ],
+        )
+        .status
+        .success()
+    );
+    assert!(
+        wire(
+            &bob,
+            &[
+                "pair-join",
+                &code_b,
+                "--detach",
+                "--json",
+                "--relay",
+                &relay_url
+            ],
+        )
+        .status
+        .success()
+    );
 
     let deadline = Instant::now() + Duration::from_secs(25);
     // Both paul-side pairs reach sas_ready with their own digits.
@@ -484,18 +522,30 @@ async fn detached_pair_two_concurrent_hosts_against_two_guests() {
     assert_eq!(paul_b_sas, bob_sas, "paul/B and bob must agree on SAS");
 
     // Confirm everyone.
-    assert!(wire(&paul, &["pair-confirm", &code_a, &paul_a_sas]).status.success());
-    assert!(wire(&paul, &["pair-confirm", &code_b, &paul_b_sas]).status.success());
-    assert!(wire(&alice, &["pair-confirm", &code_a, &alice_sas]).status.success());
-    assert!(wire(&bob, &["pair-confirm", &code_b, &bob_sas]).status.success());
+    assert!(
+        wire(&paul, &["pair-confirm", &code_a, &paul_a_sas])
+            .status
+            .success()
+    );
+    assert!(
+        wire(&paul, &["pair-confirm", &code_b, &paul_b_sas])
+            .status
+            .success()
+    );
+    assert!(
+        wire(&alice, &["pair-confirm", &code_a, &alice_sas])
+            .status
+            .success()
+    );
+    assert!(
+        wire(&bob, &["pair-confirm", &code_b, &bob_sas])
+            .status
+            .success()
+    );
 
     // Both pending lists should drain on paul.
     let drained = wait_for(&paul, Instant::now() + Duration::from_secs(15), |items| {
-        if items.is_empty() {
-            Some(true)
-        } else {
-            None
-        }
+        if items.is_empty() { Some(true) } else { None }
     });
     assert_eq!(drained, Some(true), "paul pair-list must drain to empty");
 
@@ -510,6 +560,12 @@ async fn detached_pair_two_concurrent_hosts_against_two_guests() {
                 .collect()
         })
         .unwrap_or_default();
-    assert!(handles.contains(&"alice".to_string()), "paul missing alice: {handles:?}");
-    assert!(handles.contains(&"bob".to_string()), "paul missing bob: {handles:?}");
+    assert!(
+        handles.contains(&"alice".to_string()),
+        "paul missing alice: {handles:?}"
+    );
+    assert!(
+        handles.contains(&"bob".to_string()),
+        "paul missing bob: {handles:?}"
+    );
 }

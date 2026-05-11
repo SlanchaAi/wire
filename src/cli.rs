@@ -293,10 +293,10 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// One-shot bootstrap: init identity (idempotent) + pair-host or pair-join
-    /// + register wire as MCP server. Use this when you want a single command
-    /// to take you from nothing to "paired and ready" — no separate init / pair-host
-    /// / setup steps needed. Operator still must confirm SAS digits.
+    /// One-shot bootstrap. Inits identity (idempotent), opens pair-host or
+    /// pair-join, then registers wire as an MCP server. Single command from
+    /// nothing to paired and ready — no separate init/pair-host/setup steps.
+    /// Operator still must confirm SAS digits.
     ///
     /// Examples:
     ///   wire pair paul                          # host a new pair on default relay
@@ -514,10 +514,7 @@ pub fn run() -> Result<()> {
                 cmd_pair(&handle, code.as_deref(), &relay, yes, timeout, no_setup)
             }
         }
-        Command::PairAbandon {
-            code_phrase,
-            relay,
-        } => cmd_pair_abandon(&code_phrase, &relay),
+        Command::PairAbandon { code_phrase, relay } => cmd_pair_abandon(&code_phrase, &relay),
         Command::Setup { apply } => cmd_setup(apply),
         Command::Reactor {
             on_event,
@@ -1256,10 +1253,10 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
     let mut skipped = Vec::new();
 
     for (peer_handle, slot_info) in peers.iter() {
-        if let Some(want) = peer_filter {
-            if peer_handle != want {
-                continue;
-            }
+        if let Some(want) = peer_filter
+            && peer_handle != want
+        {
+            continue;
         }
         let outbox = outbox_dir.join(format!("{peer_handle}.jsonl"));
         if !outbox.exists() {
@@ -1580,19 +1577,19 @@ fn cmd_rotate_slot(no_announce: bool, as_json: bool) -> Result<()> {
 fn cmd_forget_peer(handle: &str, purge: bool, as_json: bool) -> Result<()> {
     let mut trust = config::read_trust()?;
     let mut removed_from_trust = false;
-    if let Some(agents) = trust.get_mut("agents").and_then(Value::as_object_mut) {
-        if agents.remove(handle).is_some() {
-            removed_from_trust = true;
-        }
+    if let Some(agents) = trust.get_mut("agents").and_then(Value::as_object_mut)
+        && agents.remove(handle).is_some()
+    {
+        removed_from_trust = true;
     }
     config::write_trust(&trust)?;
 
     let mut state = config::read_relay_state()?;
     let mut removed_from_relay = false;
-    if let Some(peers) = state.get_mut("peers").and_then(Value::as_object_mut) {
-        if peers.remove(handle).is_some() {
-            removed_from_relay = true;
-        }
+    if let Some(peers) = state.get_mut("peers").and_then(Value::as_object_mut)
+        && peers.remove(handle).is_some()
+    {
+        removed_from_relay = true;
     }
     config::write_relay_state(&state)?;
 
@@ -1704,7 +1701,10 @@ fn cmd_daemon(interval_secs: u64, once: bool, as_json: bool) -> Result<()> {
             let pushed_n = pushed["pushed"].as_array().map(|a| a.len()).unwrap_or(0);
             let written_n = pulled["written"].as_array().map(|a| a.len()).unwrap_or(0);
             let rejected_n = pulled["rejected"].as_array().map(|a| a.len()).unwrap_or(0);
-            let pair_transitions = pairs["transitions"].as_array().map(|a| a.len()).unwrap_or(0);
+            let pair_transitions = pairs["transitions"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0);
             if pushed_n > 0 || written_n > 0 || rejected_n > 0 || pair_transitions > 0 {
                 eprintln!(
                     "daemon: pushed={pushed_n} pulled={written_n} rejected={rejected_n} pair-transitions={pair_transitions}"
@@ -1713,17 +1713,21 @@ fn cmd_daemon(interval_secs: u64, once: bool, as_json: bool) -> Result<()> {
             // Loud per-transition logging so operator sees pair progress live.
             if let Some(arr) = pairs["transitions"].as_array() {
                 for t in arr {
-                    eprintln!("  pair {} : {} → {}",
+                    eprintln!(
+                        "  pair {} : {} → {}",
                         t.get("code").and_then(Value::as_str).unwrap_or("?"),
                         t.get("from").and_then(Value::as_str).unwrap_or("?"),
-                        t.get("to").and_then(Value::as_str).unwrap_or("?"));
-                    if let Some(sas) = t.get("sas").and_then(Value::as_str) {
-                        if t.get("to").and_then(Value::as_str) == Some("sas_ready") {
-                            eprintln!("    SAS digits: {}-{}", &sas[..3], &sas[3..]);
-                            eprintln!("    Run: wire pair-confirm {} {}",
-                                t.get("code").and_then(Value::as_str).unwrap_or("?"),
-                                sas);
-                        }
+                        t.get("to").and_then(Value::as_str).unwrap_or("?")
+                    );
+                    if let Some(sas) = t.get("sas").and_then(Value::as_str)
+                        && t.get("to").and_then(Value::as_str) == Some("sas_ready")
+                    {
+                        eprintln!("    SAS digits: {}-{}", &sas[..3], &sas[3..]);
+                        eprintln!(
+                            "    Run: wire pair-confirm {} {}",
+                            t.get("code").and_then(Value::as_str).unwrap_or("?"),
+                            sas
+                        );
                     }
                 }
             }
@@ -2100,7 +2104,6 @@ fn cmd_pair_detach(handle: &str, code: Option<&str>, relay: &str) -> Result<()> 
     }
 }
 
-
 fn cmd_pair_host_detach(relay_url: &str, as_json: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
@@ -2214,14 +2217,19 @@ fn cmd_pair_join_detach(code_phrase: &str, relay_url: &str, as_json: bool) -> Re
             println!("(started wire daemon in background)");
         }
         println!("detached pair-join queued for code {code}.");
-        println!("Run `wire pair-list` to watch for SAS, then `wire pair-confirm {code} <digits>`.");
+        println!(
+            "Run `wire pair-list` to watch for SAS, then `wire pair-confirm {code} <digits>`."
+        );
     }
     Ok(())
 }
 
 fn cmd_pair_confirm(code_phrase: &str, typed_digits: &str, as_json: bool) -> Result<()> {
     let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
-    let typed: String = typed_digits.chars().filter(|c| c.is_ascii_digit()).collect();
+    let typed: String = typed_digits
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
     if typed.len() != 6 {
         bail!(
             "expected 6 digits (got {} after stripping non-digits)",
@@ -2297,8 +2305,8 @@ fn cmd_pair_list(as_json: bool, watch: bool, watch_interval_secs: u64) -> Result
         return Ok(());
     }
     println!(
-        "{:<15} {:<8} {:<18} {:<10} {}",
-        "CODE", "ROLE", "STATUS", "SAS", "NOTE"
+        "{:<15} {:<8} {:<18} {:<10} NOTE",
+        "CODE", "ROLE", "STATUS", "SAS"
     );
     for p in items {
         let sas = p
@@ -2408,14 +2416,20 @@ fn cmd_pair_watch(
                 // existed. Distinguish by whether we ever saw it.
                 if last_seen_status.is_some() {
                     if as_json {
-                        println!("{}", serde_json::to_string(&json!({"state": "finalized", "code": code}))?);
+                        println!(
+                            "{}",
+                            serde_json::to_string(&json!({"state": "finalized", "code": code}))?
+                        );
                     } else {
                         println!("pair {code} finalized (file removed)");
                     }
                     return Ok(());
                 } else {
                     if as_json {
-                        println!("{}", serde_json::to_string(&json!({"error": "no such pair", "code": code}))?);
+                        println!(
+                            "{}",
+                            serde_json::to_string(&json!({"error": "no such pair", "code": code}))?
+                        );
                     }
                     std::process::exit(1);
                 }
@@ -2620,6 +2634,7 @@ fn upsert_mcp_entry(path: &std::path::Path, server_name: &str, entry: &Value) ->
 
 // ---------- reactor — event-handler dispatch loop ----------
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_reactor(
     on_event: &str,
     peer_filter: Option<&str>,
@@ -2719,9 +2734,7 @@ fn cmd_reactor(
         // Per-peer rate-limit check (sliding 60s window).
         if max_per_minute > 0 {
             let now = Instant::now();
-            let win = peer_dispatch_log
-                .entry(ev.peer.clone())
-                .or_insert_with(VecDeque::new);
+            let win = peer_dispatch_log.entry(ev.peer.clone()).or_default();
             while let Some(&front) = win.front() {
                 if now.duration_since(front) > Duration::from_secs(60) {
                     win.pop_front();
@@ -2889,10 +2902,10 @@ fn cmd_notify(
     let sweep = |watcher: &mut InboxWatcher| -> Result<()> {
         let events = watcher.poll()?;
         for ev in events {
-            if let Some(p) = peer_filter {
-                if ev.peer != p {
-                    continue;
-                }
+            if let Some(p) = peer_filter
+                && ev.peer != p
+            {
+                continue;
             }
             if as_json {
                 println!("{}", serde_json::to_string(&ev)?);

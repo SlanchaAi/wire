@@ -234,9 +234,13 @@ pub fn cleanup_on_startup() -> Result<()> {
                 && p.spake2_seed_b64.is_some();
             if can_restore {
                 let restore_result = (|| -> Result<()> {
-                    let seed_bytes = crate::signing::b64decode(p.spake2_seed_b64.as_ref().unwrap())?;
+                    let seed_bytes =
+                        crate::signing::b64decode(p.spake2_seed_b64.as_ref().unwrap())?;
                     if seed_bytes.len() != 32 {
-                        bail!("spake2_seed_b64 decoded to {} bytes, want 32", seed_bytes.len());
+                        bail!(
+                            "spake2_seed_b64 decoded to {} bytes, want 32",
+                            seed_bytes.len()
+                        );
                     }
                     let mut seed = [0u8; 32];
                     seed.copy_from_slice(&seed_bytes);

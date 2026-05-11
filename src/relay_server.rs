@@ -745,6 +745,8 @@ mod tests {
         assert!(!is_valid_slot_id("..%2Fetc%2Fpasswd00000000000000000"));
         assert!(!is_valid_slot_id("/absolute/path/that/looks/like/key"));
         // null bytes
-        assert!(!is_valid_slot_id("0123456789abcdef\0123456789abcdef"));
+        assert!(!is_valid_slot_id(
+            "0123456789abcdef\0\x31\x32\x33456789abcdef"
+        ));
     }
 }

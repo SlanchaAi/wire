@@ -16,12 +16,12 @@
 //!
 //! **Pairing (agent drives, but the user types the SAS digits back)**
 //!   - `wire_init`           — idempotent identity creation; same handle = no-op,
-//!                             different handle = error (cannot re-key silently)
+//!     different handle = error (cannot re-key silently)
 //!   - `wire_pair_initiate`  — host opens a pair-slot; returns code phrase
-//!                             agent shows to user out-of-band
+//!     agent shows to user out-of-band
 //!   - `wire_pair_join`      — guest accepts a code phrase; both sides reach SAS-ready
 //!   - `wire_pair_check`     — poll a pending session_id (used when initiate
-//!                             returned before peer was on the line)
+//!     returned before peer was on the line)
 //!   - `wire_pair_confirm`   — user types the 6 SAS digits back; mismatch aborts
 //!
 //! ## Why pairing is now agent-callable (T10 update)
@@ -151,16 +151,16 @@ pub fn run() -> Result<()> {
             let mut affected: HashSet<String> = HashSet::new();
 
             // ---- inbox events ----
-            if !subs_snapshot.is_empty() {
-                if let Ok(events) = watcher.poll() {
-                    for ev in &events {
-                        if subs_snapshot.contains("wire://inbox/all") {
-                            affected.insert("wire://inbox/all".to_string());
-                        }
-                        let peer_uri = format!("wire://inbox/{}", ev.peer);
-                        if subs_snapshot.contains(&peer_uri) {
-                            affected.insert(peer_uri);
-                        }
+            if !subs_snapshot.is_empty()
+                && let Ok(events) = watcher.poll()
+            {
+                for ev in &events {
+                    if subs_snapshot.contains("wire://inbox/all") {
+                        affected.insert("wire://inbox/all".to_string());
+                    }
+                    let peer_uri = format!("wire://inbox/{}", ev.peer);
+                    if subs_snapshot.contains(&peer_uri) {
+                        affected.insert(peer_uri);
                     }
                 }
             }
@@ -333,14 +333,15 @@ fn handle_resources_subscribe(id: &Value, params: &Value, state: &McpState) -> V
     // dead subscriptions.
     let inbox_peer = parse_inbox_uri(&uri);
     let is_pending = uri == "wire://pending-pair/all";
-    if let Some(ref p) = inbox_peer {
-        if p.starts_with("__invalid__") && !is_pending {
-            return error_response(
-                id,
-                -32602,
-                "subscribe URI must be wire://inbox/<peer>, wire://inbox/all, or wire://pending-pair/all",
-            );
-        }
+    if let Some(ref p) = inbox_peer
+        && p.starts_with("__invalid__")
+        && !is_pending
+    {
+        return error_response(
+            id,
+            -32602,
+            "subscribe URI must be wire://inbox/<peer>, wire://inbox/all, or wire://pending-pair/all",
+        );
     }
     if let Ok(mut g) = state.subscribed.lock() {
         g.insert(uri);
@@ -419,12 +420,12 @@ fn read_inbox_resource(peer_opt: Option<String>) -> Result<String, String> {
     const LIMIT: usize = 50;
     // Validate URI shape FIRST — an invalid URI is an error regardless of
     // whether the inbox dir exists yet.
-    if let Some(ref p) = peer_opt {
-        if p.starts_with("__invalid__") {
-            return Err(
-                "unknown resource URI (must be wire://inbox/<peer> or wire://inbox/all)".into(),
-            );
-        }
+    if let Some(ref p) = peer_opt
+        && p.starts_with("__invalid__")
+    {
+        return Err(
+            "unknown resource URI (must be wire://inbox/<peer> or wire://inbox/all)".into(),
+        );
     }
     let inbox = crate::config::inbox_dir().map_err(|e| e.to_string())?;
     if !inbox.exists() {
@@ -1371,9 +1372,10 @@ fn tool_pair_confirm_detached(args: &Value) -> Result<Value, String> {
             &format!("wire — pair aborted ({code})"),
             p.last_error.as_deref().unwrap_or("digits mismatch"),
         );
-        Err(format!(
+        Err(
             "digits mismatch — pair aborted. Re-issue with wire_pair_initiate_detached."
-        ))
+                .to_string(),
+        )
     }
 }
 

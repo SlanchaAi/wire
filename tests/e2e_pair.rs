@@ -241,7 +241,7 @@ async fn rotate_slot_after_pairing_orphans_old_slot() {
     // Confirm willard sees the wire_close event when pulling.
     let pull = wire(&willard, &["pull", "--json"]);
     let pj: serde_json::Value = serde_json::from_slice(&pull.stdout).unwrap();
-    assert!(pj["written"].as_array().unwrap().len() >= 1);
+    assert!(!pj["written"].as_array().unwrap().is_empty());
     let tail = wire(&willard, &["tail", "paul", "--json"]);
     let tail_str = String::from_utf8(tail.stdout).unwrap();
     let close_event = tail_str
