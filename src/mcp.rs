@@ -127,9 +127,11 @@ pub fn run() -> Result<()> {
             Ok(w) => w,
             Err(_) => return,
         };
-        // Tighter inner sleep so shutdown is observed within ~100ms instead
-        // of waiting a full 2s poll cycle. Aggregate poll cadence is still
-        // ~2s — we just check shutdown more often.
+        // Per-code fingerprint (status string) of the last seen pending-pair
+        // snapshot. Used to detect transitions so we emit at most one
+        // notification per actual change (not per poll).
+        let mut prev_pending: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         let poll_interval = Duration::from_secs(2);
         let mut next_poll = Instant::now() + poll_interval;
         loop {
@@ -145,28 +147,43 @@ pub fn run() -> Result<()> {
                 Ok(g) => g.clone(),
                 Err(_) => return,
             };
-            if subs_snapshot.is_empty() {
-                continue;
-            }
-            let events = match watcher.poll() {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if events.is_empty() {
-                continue;
-            }
-            // Per-URI dedup — emit at most one `updated` per URI per poll,
-            // regardless of how many events arrived for that URI.
+
             let mut affected: HashSet<String> = HashSet::new();
-            for ev in &events {
-                if subs_snapshot.contains("wire://inbox/all") {
-                    affected.insert("wire://inbox/all".to_string());
-                }
-                let peer_uri = format!("wire://inbox/{}", ev.peer);
-                if subs_snapshot.contains(&peer_uri) {
-                    affected.insert(peer_uri);
+
+            // ---- inbox events ----
+            if !subs_snapshot.is_empty() {
+                if let Ok(events) = watcher.poll() {
+                    for ev in &events {
+                        if subs_snapshot.contains("wire://inbox/all") {
+                            affected.insert("wire://inbox/all".to_string());
+                        }
+                        let peer_uri = format!("wire://inbox/{}", ev.peer);
+                        if subs_snapshot.contains(&peer_uri) {
+                            affected.insert(peer_uri);
+                        }
+                    }
                 }
             }
+
+            // ---- pending-pair state changes ----
+            // Always poll (cheap dir read); only emit if subscribed.
+            if let Ok(items) = crate::pending_pair::list_pending() {
+                let mut cur: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
+                for p in &items {
+                    cur.insert(p.code.clone(), p.status.clone());
+                }
+                // Detect any change vs. prev_pending: new code, removed code,
+                // or status flip on existing code.
+                let changed = cur.len() != prev_pending.len()
+                    || cur.iter().any(|(k, v)| prev_pending.get(k) != Some(v))
+                    || prev_pending.keys().any(|k| !cur.contains_key(k));
+                if changed && subs_snapshot.contains("wire://pending-pair/all") {
+                    affected.insert("wire://pending-pair/all".to_string());
+                }
+                prev_pending = cur;
+            }
+
             for uri in affected {
                 let notif = json!({
                     "jsonrpc": "2.0",
@@ -255,12 +272,20 @@ fn handle_request(req: &Value, state: &McpState) -> Value {
 //   wire://inbox/all       last 50 events across all peers, newest first
 
 fn handle_resources_list(id: &Value) -> Value {
-    let mut resources = vec![json!({
-        "uri": "wire://inbox/all",
-        "name": "wire inbox (all peers)",
-        "description": "Most recent verified events from all pinned peers, JSONL.",
-        "mimeType": "application/x-ndjson"
-    })];
+    let mut resources = vec![
+        json!({
+            "uri": "wire://inbox/all",
+            "name": "wire inbox (all peers)",
+            "description": "Most recent verified events from all pinned peers, JSONL.",
+            "mimeType": "application/x-ndjson"
+        }),
+        json!({
+            "uri": "wire://pending-pair/all",
+            "name": "wire pending pair sessions",
+            "description": "All detached pair-host/pair-join sessions the local daemon is driving. Subscribe to receive notifications/resources/updated when status changes (notably polling → sas_ready: the agent should then surface the SAS digits to the user and call wire_pair_confirm with the typed-back digits).",
+            "mimeType": "application/json"
+        }),
+    ];
 
     if let Ok(trust) = crate::config::read_trust() {
         let agents = trust
@@ -303,15 +328,17 @@ fn handle_resources_subscribe(id: &Value, params: &Value, state: &McpState) -> V
         Some(u) => u.to_string(),
         None => return error_response(id, -32602, "missing 'uri'"),
     };
-    // Validate the URI shape — silently accepting bogus URIs would let agents
-    // build up a sub set we'd never fire for. Reject early.
-    let peer_opt = parse_inbox_uri(&uri);
-    if let Some(ref p) = peer_opt {
-        if p.starts_with("__invalid__") {
+    // Validate the URI shape. Accept wire://inbox/<peer>, wire://inbox/all,
+    // wire://pending-pair/all. Anything else is rejected so we don't pile up
+    // dead subscriptions.
+    let inbox_peer = parse_inbox_uri(&uri);
+    let is_pending = uri == "wire://pending-pair/all";
+    if let Some(ref p) = inbox_peer {
+        if p.starts_with("__invalid__") && !is_pending {
             return error_response(
                 id,
                 -32602,
-                "subscribe URI must be wire://inbox/<peer> or wire://inbox/all",
+                "subscribe URI must be wire://inbox/<peer>, wire://inbox/all, or wire://pending-pair/all",
             );
         }
     }
@@ -337,6 +364,26 @@ fn handle_resources_read(id: &Value, params: &Value) -> Value {
         Some(u) => u,
         None => return error_response(id, -32602, "missing 'uri'"),
     };
+    // pending-pair takes priority over inbox parsing.
+    if uri == "wire://pending-pair/all" {
+        return match crate::pending_pair::list_pending() {
+            Ok(items) => {
+                let body = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string());
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "contents": [{
+                            "uri": uri,
+                            "mimeType": "application/json",
+                            "text": body,
+                        }]
+                    }
+                })
+            }
+            Err(e) => error_response(id, -32603, &e.to_string()),
+        };
+    }
     let peer_opt = parse_inbox_uri(uri);
     match read_inbox_resource(peer_opt) {
         Ok(payload) => json!({
