@@ -2131,6 +2131,10 @@ fn cmd_pair_host_detach(relay_url: &str, as_json: bool) -> Result<()> {
         peer_did: None,
         created_at: now,
         last_error: None,
+        pair_id: None,
+        our_slot_id: None,
+        our_slot_token: None,
+        spake2_seed_b64: None,
     };
     crate::pending_pair::write_pending(&p)?;
     if as_json {
@@ -2188,6 +2192,10 @@ fn cmd_pair_join_detach(code_phrase: &str, relay_url: &str, as_json: bool) -> Re
         peer_did: None,
         created_at: now,
         last_error: None,
+        pair_id: None,
+        our_slot_id: None,
+        our_slot_token: None,
+        spake2_seed_b64: None,
     };
     crate::pending_pair::write_pending(&p)?;
     if as_json {

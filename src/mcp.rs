@@ -1258,6 +1258,10 @@ fn tool_pair_initiate_detached(args: &Value) -> Result<Value, String> {
         peer_did: None,
         created_at: now,
         last_error: None,
+        pair_id: None,
+        our_slot_id: None,
+        our_slot_token: None,
+        spake2_seed_b64: None,
     };
     crate::pending_pair::write_pending(&p).map_err(|e| e.to_string())?;
     Ok(json!({
@@ -1295,6 +1299,10 @@ fn tool_pair_join_detached(args: &Value) -> Result<Value, String> {
         peer_did: None,
         created_at: now,
         last_error: None,
+        pair_id: None,
+        our_slot_id: None,
+        our_slot_token: None,
+        spake2_seed_b64: None,
     };
     crate::pending_pair::write_pending(&p).map_err(|e| e.to_string())?;
     Ok(json!({

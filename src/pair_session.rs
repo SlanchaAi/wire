@@ -71,6 +71,11 @@ pub struct PairSessionState {
     pub finalized: bool,
     pub aborted: Option<String>,
     pub created_at: Instant,
+    /// Seed used to construct `pake` deterministically. Persisted by the
+    /// daemon's pending-pair file so a daemon restart can reconstruct the
+    /// same SPAKE2 state and continue the handshake instead of aborting.
+    /// SECURITY: keep in user-only-readable files.
+    pub spake2_seed: [u8; 32],
 }
 
 impl PairSessionState {
@@ -204,7 +209,13 @@ pub fn pair_session_open(
 
     let code_hash = derive_code_hash(&code);
 
-    let pake = PakeSide::new(&code, code_hash.as_bytes());
+    // Generate a fresh SPAKE2 seed; PakeSide derives deterministically from it.
+    // Persisting this seed lets the daemon reconstruct the handshake after a
+    // crash/restart instead of marking pending pairs aborted_restart.
+    let mut spake2_seed = [0u8; 32];
+    use rand::RngCore;
+    rand::rngs::OsRng.fill_bytes(&mut spake2_seed);
+    let pake = PakeSide::from_seed(&code, code_hash.as_bytes(), spake2_seed);
     let our_msg_b64 = crate::signing::b64encode(&pake.msg_out);
 
     let client = crate::relay_client::RelayClient::new(relay_url);
@@ -227,6 +238,53 @@ pub fn pair_session_open(
         finalized: false,
         aborted: None,
         created_at: Instant::now(),
+        spake2_seed,
+    })
+}
+
+/// Reconstruct a `PairSessionState` from persisted fields without any network
+/// I/O. The caller (typically the daemon's `cleanup_on_startup`) has already
+/// recovered `seed`, `code`, `code_hash`, `pair_id`, slot info, and `role` from
+/// the on-disk pending-pair file; this builds an in-memory state that can
+/// resume `pair_session_try_sas` from where the prior daemon left off.
+///
+/// Idempotent w.r.t. the relay — does not call pair_open. The relay already
+/// has our msg_out from the prior pair_open call; we just need a PakeSide
+/// that produces the same scalar to compute the SAS once the peer's msg
+/// arrives.
+#[allow(clippy::too_many_arguments)]
+pub fn restore_pair_session(
+    role: &str,
+    relay_url: &str,
+    pair_id: &str,
+    code: &str,
+    code_hash: &str,
+    our_slot_id: &str,
+    our_slot_token: &str,
+    seed: [u8; 32],
+) -> Result<PairSessionState> {
+    if role != "host" && role != "guest" {
+        bail!("role must be 'host' or 'guest' (got {role:?})");
+    }
+    let pake = PakeSide::from_seed(code, code_hash.as_bytes(), seed);
+    Ok(PairSessionState {
+        role: role.to_string(),
+        relay_url: relay_url.to_string(),
+        pair_id: pair_id.to_string(),
+        code: code.to_string(),
+        code_hash: code_hash.to_string(),
+        pake,
+        our_slot_id: our_slot_id.to_string(),
+        our_slot_token: our_slot_token.to_string(),
+        spake_key: None,
+        aead_key: None,
+        sas: None,
+        sas_confirmed: false,
+        bootstrap_sealed_sent: false,
+        finalized: false,
+        aborted: None,
+        created_at: Instant::now(),
+        spake2_seed: seed,
     })
 }
 
@@ -634,6 +692,7 @@ mod tests {
             finalized: false,
             aborted: None,
             created_at: Instant::now(),
+            spake2_seed: [0u8; 32],
         }
     }
 }

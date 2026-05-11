@@ -32,7 +32,7 @@
 //! Daemon restarts are rare; this is an acceptable tradeoff vs. forking the
 //! `spake2` crate to expose its internal scalar.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -67,6 +67,26 @@ pub struct PendingPair {
     /// Last error message if status=aborted or aborted_restart.
     #[serde(default)]
     pub last_error: Option<String>,
+    /// Relay pair_id, written by daemon after `pair_open` succeeds. Lets a
+    /// fresh daemon process restore the in-memory PairSessionState without
+    /// re-registering on the relay.
+    #[serde(default)]
+    pub pair_id: Option<String>,
+    /// Our slot_id on the relay (we own this slot; bootstrap exchange writes
+    /// to it). Same restore-purpose as pair_id.
+    #[serde(default)]
+    pub our_slot_id: Option<String>,
+    /// Our slot_token (auth for posting to our slot). Already lives in
+    /// relay_state; duplicated here so restore doesn't need a second file read.
+    #[serde(default)]
+    pub our_slot_token: Option<String>,
+    /// Base64 of the 32-byte SPAKE2 seed. Lets restore_pair_session
+    /// reconstruct an equivalent PakeSide. SECURITY: file is in
+    /// $WIRE_HOME/state/wire/pending-pair/ which is user-only by default
+    /// (inherits umask). Pending files live minutes; daemon GCs terminal
+    /// states after 1 hour.
+    #[serde(default)]
+    pub spake2_seed_b64: Option<String>,
 }
 
 pub fn pending_dir() -> Result<PathBuf> {
@@ -198,22 +218,72 @@ pub fn cleanup_on_startup() -> Result<()> {
     };
 
     if !prev_alive {
+        // For each non-terminal pending file, try to restore the in-memory
+        // PairSessionState from persisted fields. Falls back to abort if the
+        // file is from a pre-persistence release (no seed) OR restore fails.
         for mut p in list_pending()? {
-            if p.status == "polling" || p.status == "request_host" || p.status == "request_guest"
-            {
-                let client = crate::relay_client::RelayClient::new(&p.relay_url);
-                let _ = client.pair_abandon(&p.code_hash);
-                p.status = "aborted_restart".to_string();
+            let transient =
+                p.status == "polling" || p.status == "request_host" || p.status == "request_guest";
+            if !transient {
+                continue;
+            }
+            let can_restore = p.status == "polling"
+                && p.pair_id.is_some()
+                && p.our_slot_id.is_some()
+                && p.our_slot_token.is_some()
+                && p.spake2_seed_b64.is_some();
+            if can_restore {
+                let restore_result = (|| -> Result<()> {
+                    let seed_bytes = crate::signing::b64decode(p.spake2_seed_b64.as_ref().unwrap())?;
+                    if seed_bytes.len() != 32 {
+                        bail!("spake2_seed_b64 decoded to {} bytes, want 32", seed_bytes.len());
+                    }
+                    let mut seed = [0u8; 32];
+                    seed.copy_from_slice(&seed_bytes);
+                    let role = match p.role.as_str() {
+                        "host" => "host",
+                        "guest" => "guest",
+                        _ => bail!("invalid role {:?}", p.role),
+                    };
+                    let s = crate::pair_session::restore_pair_session(
+                        role,
+                        &p.relay_url,
+                        p.pair_id.as_ref().unwrap(),
+                        &p.code,
+                        &p.code_hash,
+                        p.our_slot_id.as_ref().unwrap(),
+                        p.our_slot_token.as_ref().unwrap(),
+                        seed,
+                    )?;
+                    live().lock().unwrap().insert(p.code.clone(), s);
+                    Ok(())
+                })();
+                match restore_result {
+                    Ok(()) => {
+                        // Successful restore — pending file keeps status=polling.
+                        continue;
+                    }
+                    Err(e) => {
+                        // Restore failed — fall through to abort.
+                        p.last_error = Some(format!("restore_pair_session failed: {e}"));
+                    }
+                }
+            }
+            // Unrecoverable: abort (e.g. request_host that never made it past
+            // pair_open before crash, or a file from a pre-persistence build).
+            let client = crate::relay_client::RelayClient::new(&p.relay_url);
+            let _ = client.pair_abandon(&p.code_hash);
+            p.status = "aborted_restart".to_string();
+            if p.last_error.is_none() {
                 p.last_error = Some(
-                    "daemon restarted while session was mid-handshake; in-memory SPAKE2 state lost. Re-issue with a fresh code phrase.".to_string(),
-                );
-                write_pending(&p)?;
-                // Push so operator knows a session got wiped on restart.
-                crate::os_notify::toast(
-                    &format!("wire — pair aborted on restart ({})", p.code),
-                    "Daemon restarted mid-handshake. Re-issue: wire pair-host --detach",
+                    "daemon restarted mid-handshake; SPAKE2 state could not be restored (likely pre-v0.3.12 pending file). Re-issue with a fresh code phrase.".to_string(),
                 );
             }
+            write_pending(&p)?;
+            crate::os_notify::toast(
+                &format!("wire — pair aborted on restart ({})", p.code),
+                "Daemon restarted mid-handshake. Re-issue: wire pair-host --detach",
+            );
         }
     }
 
@@ -283,12 +353,23 @@ fn process_one(p: &mut PendingPair) -> Result<()> {
     match p.status.as_str() {
         "request_host" => {
             let s = pair_session_open("host", &p.relay_url, Some(&p.code))?;
+            // Persist restore state to disk BEFORE inserting into live map —
+            // ensures a crash between insert and file-write doesn't lose the
+            // seed/pair_id needed to recover.
+            p.pair_id = Some(s.pair_id.clone());
+            p.our_slot_id = Some(s.our_slot_id.clone());
+            p.our_slot_token = Some(s.our_slot_token.clone());
+            p.spake2_seed_b64 = Some(crate::signing::b64encode(&s.spake2_seed));
             live().lock().unwrap().insert(p.code.clone(), s);
             p.status = "polling".to_string();
             write_pending(p)?;
         }
         "request_guest" => {
             let s = pair_session_open("guest", &p.relay_url, Some(&p.code))?;
+            p.pair_id = Some(s.pair_id.clone());
+            p.our_slot_id = Some(s.our_slot_id.clone());
+            p.our_slot_token = Some(s.our_slot_token.clone());
+            p.spake2_seed_b64 = Some(crate::signing::b64encode(&s.spake2_seed));
             live().lock().unwrap().insert(p.code.clone(), s);
             p.status = "polling".to_string();
             write_pending(p)?;

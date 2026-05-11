@@ -256,6 +256,128 @@ async fn detached_pair_full_e2e_with_real_daemons() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn detached_pair_survives_daemon_restart_mid_handshake() {
+    // The v0.3.12 persistent-SPAKE2 promise: a daemon that dies AFTER pair_open
+    // (status=polling) but BEFORE sas_ready must recover from the pending file's
+    // persisted seed/pair_id/slot info on restart and still complete the
+    // handshake instead of bailing aborted_restart.
+    let relay_dir = fresh_dir("relay-restart");
+    let relay = wire::relay_server::Relay::new(relay_dir).await.unwrap();
+    let app = relay.router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let relay_url = format!("http://{addr}");
+
+    let paul = fresh_dir("paul-restart");
+    let willard = fresh_dir("willard-restart");
+    assert!(wire(&paul, &["init", "paul", "--relay", &relay_url]).status.success());
+    assert!(wire(&willard, &["init", "willard", "--relay", &relay_url]).status.success());
+
+    let mut paul_d = Some(spawn_daemon(&paul));
+    let _will_d = spawn_daemon(&willard);
+
+    let host_out = wire(
+        &paul,
+        &["pair-host", "--detach", "--json", "--relay", &relay_url],
+    );
+    let code: String = serde_json::from_slice::<Value>(&host_out.stdout).unwrap()["code_phrase"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let join_out = wire(
+        &willard,
+        &["pair-join", &code, "--detach", "--json", "--relay", &relay_url],
+    );
+    assert!(join_out.status.success());
+
+    // Wait until paul side reaches polling (i.e. pair_open succeeded, seed
+    // persisted to file).
+    let _ = wait_for(&paul, Instant::now() + Duration::from_secs(10), |items| {
+        items
+            .iter()
+            .find(|p| p["code"] == code && p["status"] == "polling")
+            .map(|_| true)
+    })
+    .expect("paul never reached polling");
+
+    // Verify the persisted fields are present on disk.
+    let pending_dir = paul.join("state/wire/pending-pair");
+    let pending_file = pending_dir.join(format!("{code}.json"));
+    let body = std::fs::read_to_string(&pending_file).expect("pending file");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["status"], "polling");
+    assert!(v["pair_id"].is_string(), "pair_id missing: {body}");
+    assert!(v["our_slot_id"].is_string(), "our_slot_id missing");
+    assert!(v["our_slot_token"].is_string(), "our_slot_token missing");
+    assert!(
+        v["spake2_seed_b64"].is_string(),
+        "spake2_seed_b64 missing: {body}"
+    );
+
+    // Kill paul daemon, simulating a crash mid-handshake.
+    drop(paul_d.take().unwrap());
+
+    // Restart it. cleanup_on_startup should restore from the persisted seed.
+    let _paul_d2 = spawn_daemon(&paul);
+
+    // Both sides should now reach sas_ready.
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let paul_sas = wait_for(&paul, deadline, |items| {
+        items
+            .iter()
+            .find(|p| p["code"] == code && p["status"] == "sas_ready")
+            .and_then(|p| p["sas"].as_str())
+            .map(str::to_string)
+    })
+    .expect("paul never reached sas_ready after restart");
+    let will_sas = wait_for(&willard, deadline, |items| {
+        items
+            .iter()
+            .find(|p| p["code"] == code && p["status"] == "sas_ready")
+            .and_then(|p| p["sas"].as_str())
+            .map(str::to_string)
+    })
+    .expect("willard never reached sas_ready");
+    assert_eq!(
+        paul_sas, will_sas,
+        "SAS digits must match across restart — proves seed reconstruction reproduced the same SPAKE2 scalar"
+    );
+
+    // Confirm + finalize.
+    assert!(wire(&paul, &["pair-confirm", &code, &paul_sas]).status.success());
+    assert!(wire(&willard, &["pair-confirm", &code, &will_sas]).status.success());
+
+    let drain = wait_for(&paul, Instant::now() + Duration::from_secs(15), |items| {
+        if items.is_empty() {
+            Some(true)
+        } else {
+            None
+        }
+    });
+    assert_eq!(drain, Some(true), "paul pair-list did not drain after restart");
+
+    // Peers VERIFIED on both sides.
+    let peers_p: Value =
+        serde_json::from_slice(&wire(&paul, &["peers", "--json"]).stdout).unwrap_or_default();
+    let peers_w: Value =
+        serde_json::from_slice(&wire(&willard, &["peers", "--json"]).stdout).unwrap_or_default();
+    let has = |v: &Value, h: &str| -> bool {
+        v.as_array()
+            .map(|a| {
+                a.iter().any(|p| {
+                    p.get("handle").and_then(Value::as_str) == Some(h)
+                        && p.get("tier").and_then(Value::as_str) == Some("VERIFIED")
+                })
+            })
+            .unwrap_or(false)
+    };
+    assert!(has(&peers_p, "willard"), "paul missing willard: {peers_p}");
+    assert!(has(&peers_w, "paul"), "willard missing paul: {peers_w}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn detached_pair_two_concurrent_hosts_against_two_guests() {
     // Stress: paul detach-hosts TWO concurrent pairs (codes A + B); two
     // separate guest daemons (alice + bob) each detach-join one. The

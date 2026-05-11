@@ -109,6 +109,29 @@ impl PakeSide {
         }
     }
 
+    /// Create with a deterministic seeded RNG. Same `(code_phrase, pair_id,
+    /// seed)` triple produces the same `state` + `msg_out`, so a process can
+    /// persist `seed` to disk and reconstruct an equivalent PakeSide after
+    /// restart. SECURITY: the seed combined with the code phrase reconstructs
+    /// the SPAKE2 secret scalar; treat the seed as sensitive (caller is
+    /// responsible for storing it in a directory with user-only file
+    /// permissions, like `$WIRE_HOME/state/wire/pending-pair/`).
+    pub fn from_seed(code_phrase: &str, pair_id: &[u8], seed: [u8; 32]) -> Self {
+        use rand_chacha::ChaCha20Rng;
+        use rand_chacha::rand_core::SeedableRng;
+        let parsed = parse_code_phrase(code_phrase).expect("invalid code phrase");
+        let rng = ChaCha20Rng::from_seed(seed);
+        let (state, msg_out) = Spake2::<Ed25519Group>::start_symmetric_with_rng(
+            &Password::new(parsed.as_bytes()),
+            &Identity::new(pair_id),
+            rng,
+        );
+        Self {
+            state: Mutex::new(Some(state)),
+            msg_out,
+        }
+    }
+
     /// Combine our state with the peer's `msg` to derive the shared SPAKE2 key.
     /// Returns 32 bytes of high-entropy shared secret.
     pub fn finish(&self, peer_msg: &[u8]) -> Result<[u8; 32]> {
@@ -192,6 +215,32 @@ pub fn open_bootstrap(aead_key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeded_pake_side_is_deterministic() {
+        // Two PakeSide instances built from the same seed must produce
+        // identical msg_out and (when paired with the other side) the same
+        // shared SPAKE2 key. Underpins daemon-restart recovery: we persist
+        // seed + reconstruct.
+        let seed = [42u8; 32];
+        let a = PakeSide::from_seed("12-ABCDEF", b"pair-id-x", seed);
+        let b = PakeSide::from_seed("12-ABCDEF", b"pair-id-x", seed);
+        assert_eq!(a.msg_out, b.msg_out, "msg_out diverges across same seed");
+
+        // Bob's side, different (fresh) randomness — needed to drive the
+        // SPAKE2 finish path so we can check key equivalence.
+        let bob = PakeSide::new("12-ABCDEF", b"pair-id-x");
+        let key_a = a.finish(&bob.msg_out).expect("a.finish");
+        let key_b = b.finish(&bob.msg_out).expect("b.finish");
+        assert_eq!(key_a, key_b, "shared key diverges across same seed");
+    }
+
+    #[test]
+    fn seeded_pake_side_changes_with_seed() {
+        let a = PakeSide::from_seed("12-ABCDEF", b"pair-id-x", [1u8; 32]);
+        let b = PakeSide::from_seed("12-ABCDEF", b"pair-id-x", [2u8; 32]);
+        assert_ne!(a.msg_out, b.msg_out, "msg_out collides across distinct seeds");
+    }
 
     #[test]
     fn code_phrase_has_expected_shape() {
