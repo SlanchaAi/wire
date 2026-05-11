@@ -238,6 +238,10 @@ impl Relay {
             .route("/v1/handle/claim", post(handle_claim))
             .route("/v1/handle/intro/:nick", post(handle_intro))
             .route("/.well-known/wire/agent", get(well_known_agent))
+            .route(
+                "/.well-known/agent-card.json",
+                get(well_known_agent_card_a2a),
+            )
             .merge(hot_writes)
             .with_state(self)
     }
@@ -886,6 +890,110 @@ async fn handle_intro(
 ///
 /// The `handle` query parameter may be just `<nick>` or `<nick>@<domain>`.
 /// Domain part is ignored (the relay only serves nicks it has on file).
+/// `GET /.well-known/agent-card.json?handle=<nick>` — A2A v1.0-compatible
+/// AgentCard serving wire's handle directory. Same data as `well_known_agent`
+/// but in the schema A2A clients (MSFT/AWS/Salesforce/SAP/ServiceNow tooling,
+/// agent-card-go, agent-card-python, A2A .NET SDK) already speak.
+///
+/// Wire-specific fields (DID, slot_id, profile blob, raw signed card) live
+/// under the standard A2A `extensions` array using the wire extension URI.
+/// A2A-only clients can pair to wire agents knowing only A2A vocabulary;
+/// wire-native clients get the full richer card by following the extension.
+async fn well_known_agent_card_a2a(
+    State(relay): State<Relay>,
+    Query(q): Query<WellKnownAgentQuery>,
+) -> impl IntoResponse {
+    let nick = q.handle.split('@').next().unwrap_or("").to_string();
+    if nick.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "handle missing nick"})),
+        )
+            .into_response();
+    }
+    let inner = relay.inner.lock().await;
+    let rec = match inner.handles.get(&nick) {
+        Some(r) => r.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("nick {nick:?} not claimed on this relay")})),
+            )
+                .into_response();
+        }
+    };
+    drop(inner);
+
+    let profile = rec.card.get("profile").cloned().unwrap_or(Value::Null);
+    let description = profile
+        .get("motto")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let display_name = profile
+        .get("display_name")
+        .and_then(Value::as_str)
+        .unwrap_or(&rec.nick)
+        .to_string();
+    let relay_url = rec.relay_url.clone().unwrap_or_default();
+    // Intro endpoint = where any A2A or wire client posts a signed pair-drop.
+    let endpoint = if !relay_url.is_empty() {
+        format!(
+            "{}/v1/handle/intro/{}",
+            relay_url.trim_end_matches('/'),
+            rec.nick
+        )
+    } else {
+        format!("/v1/handle/intro/{}", rec.nick)
+    };
+    let card_sig = rec.card.get("signature").cloned().unwrap_or(Value::Null);
+
+    // Build A2A v1.0 AgentCard shape with wire extension. Fields named to
+    // match the A2A spec exactly so downstream tooling (agent-card-go etc.)
+    // parses without custom code.
+    let a2a_card = json!({
+        "id": rec.did,
+        "name": display_name,
+        "description": description,
+        "version": "wire/0.5",
+        "endpoint": endpoint,
+        "provider": {
+            "name": "wire",
+            "url": "https://github.com/laulpogan/wire"
+        },
+        "capabilities": {
+            "streaming": false,
+            "pushNotifications": false,
+            "extendedAgentCard": true
+        },
+        "securitySchemes": {
+            "ed25519-event-sig": {
+                "type": "signature",
+                "alg": "EdDSA",
+                "description": "Wire-style signed events (kind=1100 pair_drop for intro; verify against embedded card pubkey)."
+            }
+        },
+        "security": [{"ed25519-event-sig": []}],
+        "skills": [],
+        "extensions": [{
+            "uri": "https://github.com/laulpogan/wire/ext/v0.5",
+            "description": "Wire-native fields: full signed agent-card, profile blob, DID, slot_id, mailbox relay coords.",
+            "required": false,
+            "params": {
+                "did": rec.did,
+                "handle": rec.nick,
+                "slot_id": rec.slot_id,
+                "relay_url": rec.relay_url,
+                "card": rec.card,
+                "profile": profile,
+                "claimed_at": rec.claimed_at,
+            }
+        }],
+        "signature": card_sig,
+    });
+    (StatusCode::OK, Json(a2a_card)).into_response()
+}
+
 async fn well_known_agent(
     State(relay): State<Relay>,
     Query(q): Query<WellKnownAgentQuery>,
