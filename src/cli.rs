@@ -2519,9 +2519,6 @@ fn cmd_notify(
     }
 }
 
-/// Best-effort OS-level toast for one inbox event. Each backend shells out to
-/// the platform-native binary (notify-send / osascript / powershell). Failures
-/// are swallowed — we'd rather lose a toast than crash the daemon.
 fn os_notify_inbox_event(ev: &crate::inbox_watch::InboxEvent) {
     let title = if ev.verified {
         format!("wire ← {}", ev.peer)
@@ -2529,41 +2526,7 @@ fn os_notify_inbox_event(ev: &crate::inbox_watch::InboxEvent) {
         format!("wire ← {} (UNVERIFIED)", ev.peer)
     };
     let body = format!("{}: {}", ev.kind, ev.body_preview);
-    os_toast(&title, &body);
-}
-
-#[cfg(target_os = "linux")]
-fn os_toast(title: &str, body: &str) {
-    let _ = std::process::Command::new("notify-send")
-        .arg("--app-name=wire")
-        .arg("--icon=mail-message-new")
-        .arg(title)
-        .arg(body)
-        .output();
-}
-
-#[cfg(target_os = "macos")]
-fn os_toast(title: &str, body: &str) {
-    // osascript expects double-quoted strings — escape backslashes + quotes.
-    let safe = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
-        "display notification \"{}\" with title \"{}\"",
-        safe(body),
-        safe(title),
-    );
-    let _ = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output();
-}
-
-#[cfg(target_os = "windows")]
-fn os_toast(title: &str, body: &str) {
-    // Native Windows toasts require WinRT bindings; powershell BurntToast is
-    // an opt-in module. The portable fallback is to print to stderr — the
-    // operator can pipe `wire notify` into any toast manager they prefer
-    // (e.g. wsl-notify-send, eww). v0.2 BACKLOG: ship a WinRT bindings shim.
-    eprintln!("[wire notify] {title}\n  {body}");
+    crate::os_notify::toast(&title, &body);
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]

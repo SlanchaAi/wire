@@ -268,11 +268,23 @@ fn process_one(p: &mut PendingPair) -> Result<()> {
                 .get_mut(&p.code)
                 .ok_or_else(|| anyhow!("no live session for {} (daemon restart?)", p.code))?;
             if pair_session_try_sas(s)?.is_some() {
-                // try_sas returns the dash-formatted string; we want raw 6
-                // digits in the file so display code can format consistently.
                 p.status = "sas_ready".to_string();
                 p.sas = s.sas.clone();
                 write_pending(p)?;
+                // Push to the operator's desktop so they don't have to remember
+                // to `wire pair-list`. Failures are swallowed in os_notify::toast.
+                let formatted = p
+                    .sas
+                    .as_ref()
+                    .map(|d| format!("{}-{}", &d[..3], &d[3..]))
+                    .unwrap_or_default();
+                let title = format!("wire — pair SAS ready ({})", p.code);
+                let body = format!(
+                    "Digits: {formatted}\nCompare with peer, then:\nwire pair-confirm {} {}",
+                    p.code,
+                    p.sas.as_deref().unwrap_or("")
+                );
+                crate::os_notify::toast(&title, &body);
             }
         }
         "confirmed" => {
@@ -300,7 +312,13 @@ fn process_one(p: &mut PendingPair) -> Result<()> {
                 .map(str::to_string);
             sessions.remove(&p.code);
             delete_pending(&p.code)?;
-            // No write_pending after delete — file is gone.
+            // Push a "paired" toast — closes the loop for the operator.
+            let title = format!("wire — paired ({})", p.code);
+            let body = format!(
+                "Peer: {}\n`wire peers` to confirm.",
+                p.peer_did.as_deref().unwrap_or("?")
+            );
+            crate::os_notify::toast(&title, &body);
         }
         // sas_ready (operator hasn't confirmed yet), aborted, aborted_restart:
         // terminal-from-daemon's-POV — nothing to do.

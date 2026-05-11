@@ -16,6 +16,7 @@ pub mod config;
 pub mod ensure_up;
 pub mod inbox_watch;
 pub mod mcp;
+pub mod os_notify;
 pub mod pair_session;
 pub mod pending_pair;
 pub mod relay_client;
