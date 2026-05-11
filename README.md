@@ -4,7 +4,7 @@
 
 **🤖 Reading this as an AI agent?** Stop here and read [AGENT.md](AGENT.md) — it's the 60-line action contract. This README is for humans.
 
-**Status:** v0.2.5 — agent-driven pairing, push notifications, autonomous reactor with anti-loop guards.
+**Status:** v0.3.8 — detached pair flow + daemon-orchestrated push (OS toasts + MCP `notifications/resources/updated`); v0.2 carryover: agent-driven pairing, autonomous reactor with anti-loop guards.
 
 ---
 
@@ -40,6 +40,39 @@ Restart your agent client after `wire setup --apply` so wire's MCP tools load. `
 Both compare SAS aloud (voice / separate text channel), both type the 6 digits back into chat. Mismatch aborts. After that, agents send/receive autonomously; OS toasts via `wire notify` (optional).
 
 CLI variant — same flow, two terminal commands per side — in [TESTING_FOR_FRIENDS.md](TESTING_FOR_FRIENDS.md).
+
+### Or: detached pair (terminal can close, daemon does the work)
+
+For an async flow where the operator can walk away between steps:
+
+```bash
+$ wire pair-host --detach --relay https://wire.laulpogan.com
+(started wire daemon in background)
+detached pair-host queued. Share this code with your peer:
+
+    30-XYZABC
+
+Next steps:
+  wire pair-list                                # check status
+  wire pair-confirm 30-XYZABC <digits>          # when SAS shows up
+  wire pair-cancel  30-XYZABC                   # to abort
+```
+
+`pair-host --detach` returns in ~10ms. The auto-spawned `wire daemon` drives the handshake in the background. When the peer joins, three push channels fire:
+
+- **OS toast** via notify-send / osascript: `wire — pair SAS ready (30-XYZABC) · Digits: 554-002`
+- **MCP `notifications/resources/updated`** for `wire://pending-pair/all` → any subscribed agent (Claude Code, Cursor) sees the SAS in chat
+- **Daemon stderr log** for headless / tmux operators
+
+Confirm from any terminal:
+```bash
+$ wire pair-confirm 30-XYZABC 554002    # daemon finalizes ~1s later
+$ wire peers                            # → willard VERIFIED
+```
+
+Add `--json` to any of `pair-host --detach`, `pair-join --detach`, `pair-list`, `pair-confirm`, `pair-cancel` for machine-readable output. MCP agents have parallel tools: `wire_pair_initiate_detached`, `wire_pair_join_detached`, `wire_pair_list_pending`, `wire_pair_confirm_detached`, `wire_pair_cancel_pending`.
+
+Survives terminal close. Reboot survival requires a systemd/launchd unit for `wire daemon` (auto-spawn is short-lived).
 
 ---
 
