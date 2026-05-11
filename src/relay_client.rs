@@ -146,6 +146,25 @@ impl RelayClient {
             .ok_or_else(|| anyhow!("pair_open response missing pair_id"))
     }
 
+    /// Forget the pair-slot at this code_hash on the relay. Either side can call;
+    /// knowledge of the code is the only auth. Idempotent — succeeds even if the
+    /// slot doesn't exist. Use after a client crash mid-handshake so the host
+    /// doesn't stay locked out until TTL.
+    pub fn pair_abandon(&self, code_hash: &str) -> Result<()> {
+        let body = serde_json::json!({"code_hash": code_hash});
+        let resp = self
+            .client
+            .post(format!("{}/v1/pair/abandon", self.base_url))
+            .json(&body)
+            .send()?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().unwrap_or_default();
+            return Err(anyhow!("pair_abandon failed: {status}: {detail}"));
+        }
+        Ok(())
+    }
+
     /// Read peer's SPAKE2 message + (eventually) sealed bootstrap from a pair-slot.
     pub fn pair_get(
         &self,

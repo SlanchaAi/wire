@@ -254,6 +254,18 @@ pub enum Command {
         #[arg(long)]
         no_setup: bool,
     },
+    /// Forget a half-finished pair-slot on the relay. Use this if `pair-host`
+    /// or `pair-join` crashed (process killed, network blip, OOM) before SAS
+    /// confirmation, leaving the relay-side slot stuck with "guest already
+    /// registered" or "host already registered" until the 5-minute TTL expires.
+    /// Either side can call. Idempotent.
+    PairAbandon {
+        /// The code phrase from the original pair-host (e.g. `58-NMTY7A`).
+        code_phrase: String,
+        /// Relay base URL.
+        #[arg(long, default_value = "https://wire.laulpogan.com")]
+        relay: String,
+    },
     /// Detect known MCP host config locations (Claude Desktop, Claude Code,
     /// Cursor, project-local) and either print or auto-merge the wire MCP
     /// server entry. Default prints; pass `--apply` to actually modify config
@@ -387,6 +399,10 @@ pub fn run() -> Result<()> {
             timeout,
             no_setup,
         } => cmd_pair(&handle, code.as_deref(), &relay, yes, timeout, no_setup),
+        Command::PairAbandon {
+            code_phrase,
+            relay,
+        } => cmd_pair_abandon(&code_phrase, &relay),
         Command::Setup { apply } => cmd_setup(apply),
         Command::Reactor {
             on_event,
@@ -1824,6 +1840,20 @@ fn cmd_pair(
     println!("  wire daemon start              # background sync of inbox/outbox vs relay");
     println!("  wire send <peer> claim <msg>   # send your peer something");
     println!("  wire tail                      # watch incoming events");
+    Ok(())
+}
+
+// ---------- pair-abandon — release stuck pair-slot ----------
+
+fn cmd_pair_abandon(code_phrase: &str, relay_url: &str) -> Result<()> {
+    // Accept either the raw phrase (e.g. "53-CKWIA5") or whatever the user
+    // typed — normalize via the existing parser.
+    let code = crate::sas::parse_code_phrase(code_phrase)?;
+    let code_hash = crate::pair_session::derive_code_hash(code);
+    let client = crate::relay_client::RelayClient::new(relay_url);
+    client.pair_abandon(&code_hash)?;
+    println!("abandoned pair-slot for code {code_phrase} on {relay_url}");
+    println!("host can now issue a fresh code; guest can re-join.");
     Ok(())
 }
 

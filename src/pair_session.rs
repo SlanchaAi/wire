@@ -94,6 +94,16 @@ fn store() -> &'static Store {
 }
 
 /// Insert a fresh session, returning the public session_id.
+/// SHA-256 hex of the domain-tagged code phrase. Both the host and guest
+/// derive the same value from the shared code, and the relay uses it as the
+/// pair-slot lookup key.
+pub fn derive_code_hash(code: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(b"wire/v1 code-phrase");
+    h.update(code.as_bytes());
+    hex::encode(h.finalize())
+}
+
 pub fn store_insert(s: PairSessionState) -> String {
     let id = s.pair_id.clone();
     let arc = Arc::new(Mutex::new(s));
@@ -192,12 +202,7 @@ pub fn pair_session_open(
         None => generate_code_phrase(),
     };
 
-    let code_hash = {
-        let mut h = Sha256::new();
-        h.update(b"wire/v1 code-phrase");
-        h.update(code.as_bytes());
-        hex::encode(h.finalize())
-    };
+    let code_hash = derive_code_hash(&code);
 
     let pake = PakeSide::new(&code, code_hash.as_bytes());
     let our_msg_b64 = crate::signing::b64encode(&pake.msg_out);

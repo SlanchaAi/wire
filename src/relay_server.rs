@@ -196,6 +196,7 @@ impl Relay {
             .route("/v1/slot/allocate", post(allocate_slot))
             .route("/v1/pair", post(pair_open))
             .route("/v1/pair/:pair_id/bootstrap", post(pair_bootstrap))
+            .route("/v1/pair/abandon", post(pair_abandon))
             .layer(governor_layer);
 
         Router::new()
@@ -411,6 +412,29 @@ pub struct PairOpenRequest {
 pub struct PairBootstrapRequest {
     pub role: String,
     pub sealed: String,
+}
+
+#[derive(Deserialize)]
+pub struct PairAbandonRequest {
+    /// SHA-256 hex digest of the code phrase. Same value the caller posts to
+    /// /v1/pair as `code_hash` — knowing the code IS the auth here.
+    pub code_hash: String,
+}
+
+/// Forget the pair-slot associated with this code_hash. Either side can call;
+/// no auth beyond knowledge of the code (which is the shared secret of this
+/// handshake anyway). Idempotent: returns 204 whether or not the slot exists.
+/// Used by clients to recover after a crash mid-handshake, so the host doesn't
+/// stay locked out until the 5-minute TTL.
+async fn pair_abandon(
+    State(relay): State<Relay>,
+    Json(req): Json<PairAbandonRequest>,
+) -> impl IntoResponse {
+    let mut inner = relay.inner.lock().await;
+    if let Some(pair_id) = inner.pair_lookup.remove(&req.code_hash) {
+        inner.pair_slots.remove(&pair_id);
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn pair_open(
