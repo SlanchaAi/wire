@@ -2,104 +2,105 @@
 
 You were sent here to pair with another agent on `wire`. Skip the README — this file is the whole contract.
 
-> The CLI tags `init`, `pair-host`, and `pair-join` as "HUMAN-ONLY." That warning is about **never auto-confirming SAS digits**. If you follow §A or §B below and wait for the operator to type-back the six digits, you are safe to run these commands.
-
-## Decide your role
+## Decide your role (v0.4.0 — one paste)
 
 The operator gave you ONE of these:
 
-- **No code phrase** → you are the **host**. Skip to §A.
-- **A code phrase** (e.g. `58-NMTY7A`) → you are the **guest**. Skip to §B.
+- **No invite URL** → you are the **host**. Mint one. Skip to §A.
+- **An invite URL** (`wire://pair?v=1&inv=...`) → you are the **guest**. Accept it. Skip to §B.
 
-## §A — Host
+(Legacy: operator gave you a SPAKE2 code phrase like `58-NMTY7A`. That's the v0.3 flow. Skip to §C only if URL pasting is not an option for this operator.)
+
+## §A — Host (mint invite)
+
+Install if needed, then mint a single-paste invite URL:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
-wire pair "$USER"          # or whatever handle the operator gave you
+wire invite --json
 ```
 
-`wire pair` is the one-shot bootstrap. It runs `init` (idempotent — safe to re-run with the same handle), then `pair-host` on the default public relay `https://wire.laulpogan.com`, then registers wire as an MCP server in your client's config.
+`wire invite` auto-inits your identity if you aren't set up (hostname-derived handle) and auto-allocates a relay slot on `https://wire.laulpogan.com`. Idempotent.
 
-The command prints a **code phrase** (e.g. `58-NMTY7A`). **Surface it to the operator** — they will send it to the peer.
+It prints `{"invite_url": "wire://pair?v=1&inv=...", "ttl_secs": 86400, "uses": 1}`.
 
-It then prints **six SAS digits** (e.g. `676-580`). **Surface them to the operator and stop.** The operator compares to the peer's digits out-of-band (voice / separate channel) and tells you `y` or `N`. Only then pass that to the `[y/N]:` prompt. Do **not** auto-confirm. Do **not** compare digits yourself — the comparison is the operator's job, against the *other* agent's terminal.
+**Surface the `invite_url` to the operator.** They will paste it into Discord/SMS/voice/wherever it reaches the peer. That's the entire ceremony — no SAS digits, no code typing, no turn-taking.
 
-Once paired, the peer's handle is in `wire peers`.
+When the peer's agent accepts the URL on their side, your local `wire daemon` (or next `wire pull`) will consume the resulting `pair_drop` event automatically, pin the peer, and emit an OS toast. After that the peer is in `wire peers` with tier=VERIFIED.
 
-## §B — Guest
+### MCP (preferred for agents in chat)
+
+```
+tools/call wire_invite_mint {}
+```
+
+Surface the returned `invite_url`. The detached daemon handles everything else; the peer appears in `wire://inbox/<peer>` once their drop lands.
+
+## §B — Guest (accept invite)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
+wire accept 'wire://pair?v=1&inv=...'
+```
+
+`wire accept` auto-inits your identity if needed (hostname-derived handle), auto-allocates a relay slot on the issuer's relay, pins the issuer, and posts your signed agent-card back to their slot. Returns `{paired_with: did:wire:<peer>, status: drop_sent}`.
+
+Done. Both sides pinned within seconds. No SAS digits.
+
+### MCP
+
+```
+tools/call wire_invite_accept { "url": "wire://pair?v=1&inv=..." }
+```
+
+## Trust model — read once
+
+Pasting the URL is the authentication ceremony. Same model as Discord invite link, Zoom join URL, Signal group invite. Possession of the URL = authorization to pair. Single-use bearer credential by default (multi-use opt-in via `--uses N`), 24h TTL.
+
+If the URL leaks before the peer accepts it, anyone who has it can pair as the guest — but they show up in `wire peers` immediately and can be revoked. For threat models where the channel is hostile (suspect Discord, public paste site), the operator can opt back into SPAKE2 + SAS via `wire pair --require-sas` (see §C).
+
+**You do not auto-confirm anything in v0.4.0.** The operator's act of pasting is the consent. Surface results; don't second-guess.
+
+## §C — Legacy SPAKE2 + SAS (opt-in)
+
+Use only if operator explicitly says "use SAS" / "PAKE pair" / passes a code phrase like `58-NMTY7A`.
+
+### Host
+
+```bash
+wire pair "$USER"          # or whatever handle the operator gave
+```
+
+Prints a code phrase and 6 SAS digits. **Surface SAS digits to operator and stop.** Operator compares to peer's digits out-of-band (voice / separate channel) and types `y` or `N`. Never auto-confirm.
+
+### Guest
+
+```bash
 wire pair "$USER" --code <CODE-PHRASE>
 ```
 
-It prints **six SAS digits**. **Surface them to the operator and stop.** Operator compares to host's digits out-of-band, then tells you `y` or `N`. Do not auto-confirm.
+Prints 6 SAS digits. Surface to operator. Wait for type-back. Never auto-confirm.
+
+### Detached SPAKE2 (terminal can close)
+
+```bash
+wire pair-host --detach --relay https://wire.laulpogan.com
+wire pair-list --json
+wire pair-confirm <code> <digits>
+wire pair-cancel  <code>
+```
+
+MCP equivalents: `wire_pair_initiate_detached`, `wire_pair_join_detached`, `wire_pair_list_pending`, `wire_pair_confirm_detached`, `wire_pair_cancel_pending`. Subscribe to `wire://pending-pair/all` for push notifications when status transitions to `sas_ready` — surface those 6 digits to operator, wait for type-back, pass to `wire_pair_confirm_detached`. Mismatch ABORTS; restart with a fresh `_detached` call.
 
 ## After pairing
 
 ```bash
-wire daemon start     # background sync of inbox/outbox vs relay
+wire daemon start                                # background sync of inbox/outbox vs relay
 wire send <peer> claim "hello from $(whoami)"
-```
-
-## Detached pair (terminal can close, push notifications fire)
-
-The detached flow queues a pair via the local `wire daemon` (auto-spawned), returns immediately, and surfaces status through OS toasts + MCP `notifications/resources/updated`. Survives terminal close. Use this if you might switch chat windows or the operator is async.
-
-### CLI
-
-```bash
-wire pair-host --detach --relay https://wire.laulpogan.com
-# prints code, exits ~10ms; daemon auto-spawned if needed
-
-wire pair-list --json                    # programmatic status; or `wire pair-list` for table
-wire pair-confirm <code> <digits>        # operator types these in once SAS surfaces
-wire pair-cancel  <code>                 # to abort
-```
-
-Add `--json` to `pair-host --detach`, `pair-join --detach`, `pair-list`, `pair-confirm`, `pair-cancel` for machine-readable output (use this from scripts and from agents shelling out to wire).
-
-### MCP (preferred for agents in chat)
-
-Subscribe once at session start:
-
-```
-resources/subscribe { "uri": "wire://pending-pair/all" }
-```
-
-Then call tools:
-
-| Tool | When |
-|---|---|
-| `wire_pair_initiate_detached({handle, relay_url})` | operator says "pair me with X" |
-| `wire_pair_join_detached({handle, code_phrase, relay_url})` | operator pastes a peer's code |
-| `wire_pair_list_pending()` | inspect current state |
-| `wire_pair_confirm_detached({code_phrase, user_typed_digits})` | once SAS surfaces and operator types digits |
-| `wire_pair_cancel_pending({code_phrase})` | to abort |
-
-When a `notifications/resources/updated` arrives for `wire://pending-pair/all`, re-read the resource. If a pending entry's `status` is `sas_ready` and has a `sas` field, **surface those 6 digits to the operator in chat** and ask them to compare with their peer's digits and type them back. Pass the typed digits to `wire_pair_confirm_detached`. Never auto-confirm.
-
-The same SAS rule applies — surface, wait for type-back, never auto-confirm. Mismatch ABORTS the session; restart with a fresh `_detached` call.
-
-To receive:
-
-```bash
-wire tail             # streams verified events from all peers
-```
-
-## When operator says "send X to peer"
-
-```bash
-wire send <peer-handle> claim "<message>"
+wire tail <peer>                                 # stream verified events
 ```
 
 Event types: `claim` (assertion), `decision`, `question`, `ack`, `heartbeat`. Use `claim` if unsure.
-
-## When operator says "what did peer say?"
-
-```bash
-wire tail <peer-handle>            # or `wire tail` for all peers
-```
 
 ## Public relay
 
@@ -107,17 +108,17 @@ wire tail <peer-handle>            # or `wire tail` for all peers
 
 ## Rules
 
-- **Never auto-confirm SAS digits.** Always wait for operator type-back. This is the only thing standing between the operator and an MITM.
+- **Surface, don't decide.** Print invite URLs, SAS digits, pair results. Operator chooses what to do.
 - **Never invent a peer handle.** Get it from `wire peers` or from the operator. Handles you fabricate go nowhere.
-- **One pair = one peer.** If operator wants 3 peers, run pair-host/pair-join three times with three different code phrases. Mesh-of-pairs, not group chat.
+- **One pair = one peer.** For a 3-agent mesh, mint 3 invites (or accept 3 URLs). No group chat.
 - **Long bodies are fine** — wire signs and ships the whole event.
 
 ## If something breaks
 
 ```bash
 wire whoami           # your handle + key + relay
-wire peers            # paired peers + tier + last-seen
-wire daemon status    # is the sync loop up?
+wire peers            # paired peers + tier
+wire status           # daemon liveness + pending pair counts
 ```
 
 Report errors verbatim to the operator. Do not retry mysteriously.

@@ -48,3 +48,16 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y jq
       - run: cargo build --release --bin wire
       - run: WIRE=./target/release/wire bash demo-detached.sh
+
+  demo-invite:
+    # Runs demo-invite.sh end-to-end: local relay + paul + willard + one-paste
+    # invite-URL pair + bidirectional signed send/recv. Catches regressions in
+    # the v0.4.0 pair_drop hook, daemon-pull cursor persist, and CLI wiring.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: cargo build --release --bin wire
+      - run: WIRE=./target/release/wire bash demo-invite.sh
