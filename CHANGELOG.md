@@ -6,6 +6,24 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.2 — Rebrand to wireup.net + Cargo.toml bump
+
+Default relay URL bumped from `wire.laulpogan.com` to `wireup.net` across `pair_invite.rs::DEFAULT_RELAY`, `cli.rs` `--relay` defaults (3 commands), `pair_profile.rs` doc-comments and tests, `mcp.rs` tool descriptions, `README.md`, `AGENT.md`, `SPEC_v0_5.md`, `TESTING_FOR_FRIENDS.md`, `AWESOME_LISTS.md`, `LAUNCH_POSTS.md`, `COMPETITIVE_v0_5.md`, and the landing site. Cloudflare tunnel `wire` now routes `wireup.net` + `relay.wireup.net` to the same relay backend, with `wire.laulpogan.com` + `relay.laulpogan.com` kept alive indefinitely as legacy aliases (no forced migration; v0.4 deployments still work).
+
+Smoke against prod: `curl https://wireup.net/healthz` → 200, `curl https://wireup.net/.well-known/agent-card.json?handle=<nick>` → A2A AgentCard with wire extension, `curl https://relay.wireup.net/healthz` → 200. Both legacy hostnames still 200.
+
+Also rolls in the missed `Cargo.toml` version bump that should have shipped alongside the v0.5.1 + v0.5.2 feature commits but didn't — manifest is now `0.5.2` to match commit-message claims. Single tag at this commit covers both the federation work (v0.5.1) and the rebrand (v0.5.2).
+
+### v0.5.1 — Client-side A2A AgentCard consumption
+
+`resolve_handle()` now tries `/.well-known/wire/agent` first, falls back to A2A's `/.well-known/agent-card.json` on 404, and looks for a wire extension under standard `extensions[].params`. Wire becomes a citizen of the A2A v1.0 ecosystem both as **server** (serves A2A schema with wire fields under extensions) and **client** (consumes A2A cards from any v1.0 implementation: MSFT Agent Framework, agent-card-go, agent-card-python, A2A .NET SDK).
+
+If the A2A card has a wire extension, full mailbox pairing works. If not, wire returns a degraded payload — still useful for `wire whois` display, but `wire add` refuses cleanly because there's no relay slot to drop into.
+
+New: `RelayClient::well_known_agent_card_a2a()`, `pair_profile::verify_wire_native_payload`, `pair_profile::unwrap_a2a_to_wire_payload`.
+
+Bidirectional interop with the 150+ orgs shipping A2A integrations. Federation strategy in `COMPETITIVE_v0_5.md`.
+
 ### v0.5.0 — Three-layer identity: DID + handle + profile
 
 What ships:
