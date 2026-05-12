@@ -6,6 +6,76 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.7 — DID collision fix + R7 listener-lifetime docs
+
+**DID collision bug.** Pre-v0.5.7 DIDs were `did:wire:<handle>` — derived
+purely from the human handle the operator typed at `wire init`. Two
+operators picking the same handle (or two homes on the same hostname
+auto-init'ing from `default_handle()`) produced **identical DIDs**
+despite different keypairs. Cryptographic signature verification still
+worked (sigs verify against the pubkey, not the DID string), but every
+identifier that routed by DID string — peer-map keys, inbox file paths,
+trust-map lookups — was ambiguous.
+
+v0.5.7+ DIDs are `did:wire:<handle>-<8-hex-of-sha256(pubkey)>`. Pubkey
+suffix is appended at card-build time, so the DID is uniquely tied to
+the keypair by construction. Two operators sharing the handle `paul`
+get distinct DIDs `did:wire:paul-a12b34c5` and `did:wire:paul-9f8e7d6c`.
+
+Schema changes:
+- `did_for_with_key(handle, public_key)` — new constructor, returns
+  pubkey-suffixed DID. Used at `wire init`, `wire claim`, agent-card
+  build, trust-self-pin.
+- `did_for(handle)` — legacy constructor kept for backward-compat
+  test fixtures + display helpers. New code should use the keyed form.
+- `display_handle_from_did(did)` — strips both the `did:wire:` prefix
+  and the v0.5.7+ pubkey suffix when present, returning the bare
+  handle for filesystem paths, trust-map lookups, OS toast titles.
+  Auto-detects legacy vs v0.5.7+ DID format.
+- Agent card gains a top-level `handle` field (mutable display name)
+  separate from `did` (immutable identifier). Identifier-extraction
+  sites that previously did `did.strip_prefix("did:wire:")` are
+  updated to prefer `card.handle` and fall back to
+  `display_handle_from_did`.
+
+Backward-compat: legacy DIDs of the form `did:wire:paul` continue to
+verify signatures (the verify path reads pubkey from `verify_keys`).
+display_handle_from_did handles both forms transparently. No state
+migration required for pre-v0.5.7 deployments.
+
+Call sites updated:
+- `src/cli.rs` — cmd_init, cmd_status, cmd_whoami, cmd_send,
+  cmd_pair_initiate, inbox-write path in run_sync_pull
+- `src/mcp.rs` — tool_whoami, tool_status, peer-listing
+- `src/pair_session.rs` — init_self_idempotent
+- `src/signing.rs::verify_message_v31` — handle extraction for trust
+  lookup
+- `src/trust.rs` — add_self_to_trust now uses keyed DID;
+  add_agent_card_pin prefers card.handle
+- `tests/cli.rs`, `tests/e2e_handle_pair.rs`, `tests/e2e_bilateral.rs`
+  — assertions updated to accept pubkey-suffixed DIDs
+
+**R7 listener-lifetime docs.** From the 2026-05-12 incident report:
+agents conflating /loop iteration teardown with wire listener teardown
+cause exactly the silent-channel problem the incident root-caused.
+Added AGENT.md section codifying:
+- Monitor (Claude Code) / SSE subscriber is session-lifetime, not
+  loop-iteration-lifetime
+- Do NOT TaskStop a listener as part of /loop teardown between cycles
+- v0.5.6+ daemons include the SSE subscriber for free; running
+  `wire daemon` IS the listener, no separate Monitor needed
+
+Tests: 162+ pass on changed surfaces (lib + cli + relay + handle-pair
++ bilateral). `tests/e2e_detached_pair.rs` has a pre-existing local-
+only flake on this Spark machine (verified pre-existing on clean
+v0.5.4 HEAD and unchanged by v0.5.7); CI in clean container has been
+green through v0.5.4 → v0.5.6.
+
+Deferred to v0.5.8: R2 (`time_sensitive_until` field), R3
+(responder-health events), R5 (3-layer health distinction in
+`wire status --peer`). These were originally scoped into v0.5.7 but
+split out to keep the DID fix bisectable.
+
 ### v0.5.6 — R1 phase 2: daemon subscribes to the SSE stream
 
 Second half of R1 from `docs/INCIDENT_REPORT_2026_05_12_AGENT_ATTENTION_LAYER.md`.

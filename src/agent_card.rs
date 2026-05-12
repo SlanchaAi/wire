@@ -22,14 +22,55 @@ use crate::signing::{b64decode, b64encode, make_key_id};
 pub const CARD_SCHEMA_VERSION: &str = "v3.1";
 pub const DID_METHOD: &str = "did:wire";
 
-/// Resolve a handle to its DID. Pass-through for any string already
-/// matching `did:*` (so callers can be lazy with mixed inputs).
+/// Build a DID from `handle` + `public_key`. Returns
+/// `did:wire:<handle>-<8-hex-of-sha256(public_key)>`. The pubkey suffix
+/// makes the DID uniquely tied to the keypair — two operators picking
+/// the same handle (e.g., both auto-init'ing as `<hostname>` on the same
+/// hostname) get distinct DIDs.
+///
+/// Pass-through for any string already starting with `did:*` (so callers
+/// can be lazy with mixed inputs).
+///
+/// Backward-compat: legacy DIDs of the form `did:wire:<handle>` (no
+/// pubkey suffix) shipped pre-v0.5.7. They still verify because signature
+/// verification reads the pubkey from `verify_keys`, not from the DID
+/// string. They're just non-unique across operators picking the same
+/// handle — the v0.5.7 cohort onward gets uniqueness by construction.
+pub fn did_for_with_key(handle: &str, public_key: &[u8]) -> String {
+    if handle.starts_with("did:") {
+        return handle.to_string();
+    }
+    let suffix = crate::signing::fingerprint(public_key);
+    format!("{DID_METHOD}:{handle}-{suffix}")
+}
+
+/// Legacy DID constructor — DID = `did:wire:<handle>` with no pubkey
+/// suffix. Pre-v0.5.7 model. Kept for backward-compat in code paths
+/// that don't have the pubkey on hand (display helpers, test fixtures)
+/// and for tests that pin specific DID strings. NEW callers should use
+/// `did_for_with_key`.
 pub fn did_for(handle: &str) -> String {
     if handle.starts_with("did:") {
         handle.to_string()
     } else {
         format!("{DID_METHOD}:{handle}")
     }
+}
+
+/// Extract the display-friendly handle from a DID. Handles both legacy
+/// (`did:wire:paul`) and v0.5.7+ (`did:wire:paul-abc12345`) forms. The
+/// v0.5.7 trailing `-<8-hex>` suffix is stripped when present.
+pub fn display_handle_from_did(did: &str) -> &str {
+    let stripped = did.strip_prefix("did:wire:").unwrap_or(did);
+    // v0.5.7+ form: `<handle>-<8-hex>`. Detect by trailing exactly 8 hex
+    // chars after a final `-`. Anything else passes through unchanged.
+    if let Some(idx) = stripped.rfind('-') {
+        let suffix = &stripped[idx + 1..];
+        if suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_hexdigit()) {
+            return &stripped[..idx];
+        }
+    }
+    stripped
 }
 
 /// Convenience type — at this stage we use serde_json::Value so the wire
@@ -76,7 +117,8 @@ pub fn build_agent_card(
 
     json!({
         "schema_version": CARD_SCHEMA_VERSION,
-        "did": did_for(handle),
+        "did": did_for_with_key(handle, public_key),
+        "handle": handle,
         "name": display_name,
         "capabilities": caps,
         "verify_keys": {
@@ -205,7 +247,11 @@ mod tests {
         let (_, pk) = generate_keypair();
         let card = build_agent_card("paul", &pk, None, None, None);
         assert_eq!(card["schema_version"], CARD_SCHEMA_VERSION);
-        assert_eq!(card["did"], "did:wire:paul");
+        // v0.5.7+: DID is pubkey-suffixed for cross-operator uniqueness.
+        let did = card["did"].as_str().unwrap();
+        assert!(did.starts_with("did:wire:paul-"), "got: {did}");
+        assert_eq!(did.len(), "did:wire:paul-".len() + 8);
+        assert_eq!(card["handle"], "paul");
         assert_eq!(card["name"], "Paul");
         let vks = card["verify_keys"].as_object().unwrap();
         assert_eq!(vks.len(), 1);

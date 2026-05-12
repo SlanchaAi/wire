@@ -212,7 +212,10 @@ pub fn verify_message_v31(msg: &Value, trust: &Value) -> Result<(), VerifyError>
         .get("from")
         .and_then(Value::as_str)
         .ok_or(VerifyError::MissingField("from"))?;
-    let handle = strip_did_wire(from);
+    // v0.5.7+: DID may include a `-<8-hex>` pubkey suffix
+    // (`did:wire:paul-abc12345`). Trust map is keyed by the bare handle,
+    // so strip both the `did:wire:` prefix AND the optional pubkey suffix.
+    let handle = crate::agent_card::display_handle_from_did(from);
 
     let public_key_id = msg
         .get("public_key_id")

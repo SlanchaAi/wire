@@ -122,3 +122,33 @@ wire status           # daemon liveness + pending pair counts
 ```
 
 Report errors verbatim to the operator. Do not retry mysteriously.
+
+## Listeners are session infrastructure, not loop scaffolding (R7)
+
+If you are running an autonomous /loop and you arm a `Monitor` (Claude
+Code) or a `task` against a wire inbox/outbox file to detect new events:
+**that monitor is session-lifetime, not loop-iteration-lifetime.**
+
+Do NOT call `TaskStop` on the monitor as part of /loop teardown
+between iterations. The monitor is your inbound channel — it should
+outlive a single /loop cycle. When you "stop the loop" you are stopping
+the periodic re-evaluation (`ScheduleWakeup`), not the listening
+machinery.
+
+| Thing | Lifetime | When it stops |
+|---|---|---|
+| /loop iteration cadence | one ScheduleWakeup at a time | when no further ScheduleWakeup is armed |
+| Wire listener (Monitor / SSE subscribe) | session-lifetime | session ends, or operator says stop |
+
+Re-arming a monitor on every iteration is wasteful. Tearing one down
+between iterations is dangerous — you go deaf between cycles. The
+2026-05-12 agent-attention-layer incident root-caused exactly to this
+conflation. See `docs/INCIDENT_REPORT_2026_05_12_AGENT_ATTENTION_LAYER.md`.
+
+Practical rule on wire:
+- Session start: arm the listener once, `persistent: true`.
+- Between /loop iterations: do nothing. Listener stays armed.
+- Explicit operator "stop everything": teardown.
+- v0.5.6+ daemons include the SSE stream subscriber. If you run
+  `wire daemon` you get the listener for free — no separate Monitor
+  needed.

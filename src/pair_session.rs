@@ -525,13 +525,18 @@ pub fn init_self_idempotent(
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let existing_handle = existing_did
-            .strip_prefix("did:wire:")
-            .unwrap_or(&existing_did)
-            .to_string();
+        // Prefer the explicit `handle` field on the card (v0.5.7+);
+        // fall back to the DID prefix-and-pubkey-suffix strip for legacy.
+        let existing_handle = card
+            .get("handle")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                crate::agent_card::display_handle_from_did(&existing_did).to_string()
+            });
         if existing_handle != handle {
             bail!(
-                "already initialized as did:wire:{existing_handle}; refusing to re-init with different handle {handle:?}. \
+                "already initialized as {existing_did}; refusing to re-init with different handle {handle:?}. \
                  Operator must explicitly delete config to re-init."
             );
         }
@@ -587,7 +592,7 @@ pub fn init_self_idempotent(
     crate::config::write_trust(&trust)?;
 
     let mut out = json!({
-        "did": format!("did:wire:{handle}"),
+        "did": crate::agent_card::did_for_with_key(handle, &pk_bytes),
         "handle": handle,
         "fingerprint": fingerprint(&pk_bytes),
         "key_id": make_key_id(handle, &pk_bytes),

@@ -38,7 +38,7 @@ fn version_flag_prints_semver() {
     let out = run(&home, &["--version"]);
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
-    assert!(s.contains("0.5.6"), "got: {s}");
+    assert!(s.contains("0.5.7"), "got: {s}");
 }
 
 #[test]
@@ -70,7 +70,11 @@ fn init_creates_keypair_and_card() {
     assert!(out.status.success(), "init failed: {:?}", out);
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
-    assert_eq!(parsed["did"], "did:wire:paul");
+    {
+        // v0.5.7+: DID is pubkey-suffixed (`did:wire:paul-<8hex>`).
+        let d = parsed["did"].as_str().unwrap();
+        assert!(d.starts_with("did:wire:paul-"), "got: {d}");
+    }
     assert!(parsed["fingerprint"].as_str().unwrap().len() == 8);
 
     // Files exist
@@ -97,7 +101,11 @@ fn whoami_after_init_returns_did_and_fingerprint() {
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
-    assert_eq!(parsed["did"], "did:wire:paul");
+    {
+        // v0.5.7+: DID is pubkey-suffixed (`did:wire:paul-<8hex>`).
+        let d = parsed["did"].as_str().unwrap();
+        assert!(d.starts_with("did:wire:paul-"), "got: {d}");
+    }
     assert_eq!(parsed["handle"], "paul");
     assert!(parsed["capabilities"].is_array());
 }
@@ -143,7 +151,13 @@ fn send_writes_to_outbox() {
     let lines: Vec<&str> = body.lines().collect();
     assert_eq!(lines.len(), 1);
     let event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(event["from"], "did:wire:paul");
+    {
+        let from = event["from"].as_str().unwrap();
+        assert!(from.starts_with("did:wire:paul-"), "from: {from}");
+    }
+    // `to` is constructed at send time from the peer-handle the operator
+    // typed; sender doesn't know the peer's pubkey yet, so the legacy
+    // (handle-only) DID form is preserved here.
     assert_eq!(event["to"], "did:wire:willard");
     assert!(event.get("signature").is_some());
     assert!(event.get("event_id").is_some());
@@ -333,7 +347,11 @@ fn mcp_tools_call_wire_whoami() {
     assert_eq!(resp["result"]["isError"], false);
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert_eq!(parsed["did"], "did:wire:paul");
+    {
+        // v0.5.7+: DID is pubkey-suffixed (`did:wire:paul-<8hex>`).
+        let d = parsed["did"].as_str().unwrap();
+        assert!(d.starts_with("did:wire:paul-"), "got: {d}");
+    }
     assert_eq!(parsed["handle"], "paul");
 }
 
@@ -382,7 +400,10 @@ fn mcp_tools_call_wire_init_idempotent_on_repeat() {
     assert_eq!(r1["result"]["isError"], false);
     let p1: serde_json::Value =
         serde_json::from_str(r1["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(p1["did"], "did:wire:alice");
+    {
+        let d = p1["did"].as_str().unwrap();
+        assert!(d.starts_with("did:wire:alice-"), "got: {d}");
+    }
     assert_eq!(p1["already_initialized"], false);
 
     let r2: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
@@ -423,7 +444,11 @@ fn status_after_init_shows_did_and_zero_peers() {
     assert!(out.status.success());
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(parsed["initialized"], true);
-    assert_eq!(parsed["did"], "did:wire:paul");
+    {
+        // v0.5.7+: DID is pubkey-suffixed (`did:wire:paul-<8hex>`).
+        let d = parsed["did"].as_str().unwrap();
+        assert!(d.starts_with("did:wire:paul-"), "got: {d}");
+    }
     assert_eq!(parsed["peers"].as_array().unwrap().len(), 0);
     assert_eq!(parsed["self_relay"], serde_json::Value::Null);
     assert_eq!(parsed["outbox"]["events"], 0);

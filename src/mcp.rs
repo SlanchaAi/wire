@@ -841,7 +841,7 @@ fn tool_whoami() -> Result<Value, String> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
+    let handle = crate::agent_card::display_handle_from_did(&did).to_string();
     let pk_b64 = card
         .get("verify_keys")
         .and_then(Value::as_object)
@@ -927,7 +927,7 @@ fn tool_send(args: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
+    let handle = crate::agent_card::display_handle_from_did(&did).to_string();
     let pk_b64 = card
         .get("verify_keys")
         .and_then(Value::as_object)

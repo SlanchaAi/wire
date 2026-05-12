@@ -170,7 +170,13 @@ async fn paul_sends_to_willard_via_relay_and_willard_verifies() {
     let line = stdout.lines().next().expect("tail produced no output");
     let event: Value = serde_json::from_str(line).unwrap();
     assert_eq!(event["event_id"], event_id);
-    assert_eq!(event["from"], "did:wire:paul");
+    {
+        // v0.5.7+: DID is pubkey-suffixed.
+        let from = event["from"].as_str().unwrap();
+        assert!(from.starts_with("did:wire:paul-"), "from: {from}");
+    }
+    // `to` is constructed from typed peer-handle; sender doesn't have peer's
+    // pubkey at send-time, so legacy (handle-only) form is preserved.
     assert_eq!(event["to"], "did:wire:willard");
     assert_eq!(event["body"], "ship the v0.1 demo");
     assert_eq!(event["verified"], true);

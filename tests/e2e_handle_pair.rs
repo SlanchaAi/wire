@@ -117,7 +117,11 @@ async fn wire_add_zero_paste_e2e() {
         String::from_utf8_lossy(&out.stderr)
     );
     let added: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
-    assert_eq!(added["paired_with"].as_str(), Some("did:wire:coffee-ghost"));
+    {
+        // v0.5.7+: DID is pubkey-suffixed.
+        let pw = added["paired_with"].as_str().unwrap();
+        assert!(pw.starts_with("did:wire:coffee-ghost-"), "got: {pw}");
+    }
 
     // A pulls → consumes pair_drop → pins B → emits pair_drop_ack.
     let a_pinned_b = wait_until(Instant::now() + Duration::from_secs(15), || {

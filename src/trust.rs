@@ -71,7 +71,15 @@ pub fn get_tier(trust: &Trust, peer_handle: &str) -> String {
 /// before calling `promote_to_verified`. Pinning alone DOES NOT verify.
 pub fn add_agent_card_pin(trust: &mut Trust, card: &Value, tier: Option<&str>) {
     let did = card.get("did").and_then(Value::as_str).unwrap_or_default();
-    let handle = did.strip_prefix("did:wire:").unwrap_or(did);
+    // v0.5.7+: prefer the explicit `handle` field on the card (display name).
+    // Fall back to stripping the DID prefix for legacy cards. For v0.5.7+
+    // pubkey-suffixed DIDs (`did:wire:paul-abc12345`), the display_handle
+    // helper strips the pubkey suffix back off.
+    let handle = card
+        .get("handle")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::agent_card::display_handle_from_did(did).to_string());
     if handle.is_empty() {
         panic!("card has no resolvable handle (did={did:?})");
     }
@@ -146,7 +154,7 @@ pub fn add_self_to_trust(trust: &mut Trust, handle: &str, public_key: &[u8]) {
     let key_id = make_key_id(handle, public_key);
     agents[handle] = json!({
         "tier": "ATTESTED",
-        "did": format!("did:wire:{handle}"),
+        "did": crate::agent_card::did_for_with_key(handle, public_key),
         "public_keys": [{
             "key_id": key_id,
             "key": b64encode(public_key),
@@ -188,7 +196,9 @@ mod tests {
         let mut t = empty_trust();
         add_agent_card_pin(&mut t, &card, None);
         assert_eq!(get_tier(&t, "paul"), "UNTRUSTED");
-        assert_eq!(t["agents"]["paul"]["did"], "did:wire:paul");
+        // v0.5.7+: DID is pubkey-suffixed.
+        let did = t["agents"]["paul"]["did"].as_str().unwrap();
+        assert!(did.starts_with("did:wire:paul-"), "got: {did}");
     }
 
     #[test]
@@ -239,7 +249,8 @@ mod tests {
         let mut t = empty_trust();
         add_self_to_trust(&mut t, "paul", &pk);
         assert_eq!(get_tier(&t, "paul"), "ATTESTED");
-        assert_eq!(t["agents"]["paul"]["did"], "did:wire:paul");
+        let did = t["agents"]["paul"]["did"].as_str().unwrap();
+        assert!(did.starts_with("did:wire:paul-"), "got: {did}");
     }
 
     #[test]

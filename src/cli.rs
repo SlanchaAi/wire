@@ -726,9 +726,10 @@ fn cmd_init(handle: &str, name: Option<&str>, relay: Option<&str>, as_json: bool
         relay_info = Some((url.to_string(), alloc.slot_id));
     }
 
+    let did_str = crate::agent_card::did_for_with_key(handle, &pk_bytes);
     if as_json {
         let mut out = json!({
-            "did": format!("did:wire:{handle}"),
+            "did": did_str.clone(),
             "fingerprint": fp,
             "key_id": key_id,
             "config_dir": config::config_dir()?.to_string_lossy(),
@@ -739,7 +740,7 @@ fn cmd_init(handle: &str, name: Option<&str>, relay: Option<&str>, as_json: bool
         }
         println!("{}", serde_json::to_string(&out)?);
     } else {
-        println!("generated did:wire:{handle} (ed25519:{key_id})");
+        println!("generated {did_str} (ed25519:{key_id})");
         println!(
             "config written to {}",
             config::config_dir()?.to_string_lossy()
@@ -776,7 +777,14 @@ fn cmd_status(as_json: bool) -> Result<()> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
+        // Prefer the explicit `handle` field added in v0.5.7. Fall back to
+        // stripping the DID prefix (and the v0.5.7+ pubkey suffix) for
+        // legacy cards.
+        let handle = card
+            .get("handle")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::agent_card::display_handle_from_did(&did).to_string());
         let pk_b64 = card
             .get("verify_keys")
             .and_then(Value::as_object)
@@ -970,7 +978,11 @@ fn cmd_whoami(as_json: bool) -> Result<()> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
+    let handle = card
+        .get("handle")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::agent_card::display_handle_from_did(&did).to_string());
     let pk_b64 = card
         .get("verify_keys")
         .and_then(Value::as_object)
@@ -1129,7 +1141,7 @@ fn cmd_send(peer: &str, kind: &str, body_arg: &str, as_json: bool) -> Result<()>
     let sk_seed = config::read_private_key()?;
     let card = config::read_agent_card()?;
     let did = card.get("did").and_then(Value::as_str).unwrap_or("");
-    let handle = did.strip_prefix("did:wire:").unwrap_or(did).to_string();
+    let handle = crate::agent_card::display_handle_from_did(did).to_string();
     let pk_b64 = card
         .get("verify_keys")
         .and_then(Value::as_object)
@@ -1347,7 +1359,7 @@ fn cmd_bind_relay(url: &str, as_json: bool) -> Result<()> {
     }
     let card = config::read_agent_card()?;
     let did = card.get("did").and_then(Value::as_str).unwrap_or("");
-    let handle = did.strip_prefix("did:wire:").unwrap_or(did).to_string();
+    let handle = crate::agent_card::display_handle_from_did(did).to_string();
 
     let client = crate::relay_client::RelayClient::new(url);
     if !client.healthz().unwrap_or(false) {
@@ -1581,7 +1593,7 @@ fn cmd_pull(as_json: bool) -> Result<()> {
                 let from = event
                     .get("from")
                     .and_then(Value::as_str)
-                    .map(|s| s.strip_prefix("did:wire:").unwrap_or(s).to_string())
+                    .map(|s| crate::agent_card::display_handle_from_did(s).to_string())
                     .unwrap_or_else(|| "unknown".to_string());
                 let path = inbox_dir.join(format!("{from}.jsonl"));
                 use std::io::Write;
@@ -1663,7 +1675,7 @@ fn cmd_rotate_slot(no_announce: bool, as_json: bool) -> Result<()> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
+    let handle = crate::agent_card::display_handle_from_did(&did).to_string();
     let pk_b64 = card
         .get("verify_keys")
         .and_then(Value::as_object)
@@ -2091,7 +2103,7 @@ fn run_sync_pull() -> Result<Value> {
                 let from = event
                     .get("from")
                     .and_then(Value::as_str)
-                    .map(|s| s.strip_prefix("did:wire:").unwrap_or(s).to_string())
+                    .map(|s| crate::agent_card::display_handle_from_did(s).to_string())
                     .unwrap_or_else(|| "unknown".to_string());
                 let path = inbox_dir.join(format!("{from}.jsonl"));
                 use std::io::Write;
@@ -2136,7 +2148,7 @@ fn cmd_pin(card_file: &str, as_json: bool) -> Result<()> {
     crate::trust::add_agent_card_pin(&mut trust, &card, Some("VERIFIED"));
 
     let did = card.get("did").and_then(Value::as_str).unwrap_or("");
-    let handle = did.strip_prefix("did:wire:").unwrap_or(did).to_string();
+    let handle = crate::agent_card::display_handle_from_did(did).to_string();
     config::write_trust(&trust)?;
 
     if as_json {
