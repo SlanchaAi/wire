@@ -705,7 +705,7 @@ fn tool_defs() -> Vec<Value> {
         // v0.5 — agentic hotline.
         json!({
             "name": "wire_add",
-            "description": "Zero-paste pair (v0.5). Resolve a peer handle (`nick@domain`) via the domain's `.well-known/wire/agent`, pin them locally, and deliver a signed pair-intro to their slot. Peer's daemon completes the bilateral pin on next pull. After ~1-2 sec both sides can `wire_send` to each other. Use this when the operator gives you a handle like `coffee-ghost@wire.laulpogan.com`.",
+            "description": "Zero-paste pair (v0.5). Resolve a peer handle (`nick@domain`) via the domain's `.well-known/wire/agent`, pin them locally, and deliver a signed pair-intro to their slot. Peer's daemon completes the bilateral pin on next pull. After ~1-2 sec both sides can `wire_send` to each other. Use this when the operator gives you a handle like `coffee-ghost@wireup.net`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

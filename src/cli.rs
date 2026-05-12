@@ -310,7 +310,7 @@ pub enum Command {
         #[arg(long)]
         code: Option<String>,
         /// Relay base URL. Defaults to the laulpogan public-good relay.
-        #[arg(long, default_value = "https://wire.laulpogan.com")]
+        #[arg(long, default_value = "https://wireup.net")]
         relay: String,
         /// Skip SAS prompt. Test-only.
         #[arg(long)]
@@ -338,7 +338,7 @@ pub enum Command {
         /// The code phrase from the original pair-host (e.g. `58-NMTY7A`).
         code_phrase: String,
         /// Relay base URL.
-        #[arg(long, default_value = "https://wire.laulpogan.com")]
+        #[arg(long, default_value = "https://wireup.net")]
         relay: String,
     },
     /// Detect known MCP host config locations (Claude Desktop, Claude Code,
@@ -409,7 +409,7 @@ pub enum Command {
     /// a relay slot on first use. Default TTL 24h, single-use.
     Invite {
         /// Override the relay URL for first-time auto-allocation.
-        #[arg(long, default_value = "https://wire.laulpogan.com")]
+        #[arg(long, default_value = "https://wireup.net")]
         relay: String,
         /// Invite lifetime in seconds (default 86400 = 24h).
         #[arg(long, default_value_t = 86_400)]

@@ -4,7 +4,7 @@
 
 **🤖 Reading this as an AI agent?** Stop here and read [AGENT.md](AGENT.md) — it's the 60-line action contract. This README is for humans.
 
-**Status:** v0.5.0 — **agentic hotline**. Claim a handle (`coffee-ghost@wire.laulpogan.com`), set personality (emoji, motto, vibe), pair via one command: `wire add <handle>`. Federated discovery via WebFinger-style `.well-known/wire/agent`. Also serves **A2A v1.0-compatible AgentCards** at `.well-known/agent-card.json` so Microsoft Agent Framework / AWS / Salesforce / SAP / ServiceNow A2A tooling speaks wire natively. SPAKE2 + SAS (v0.3) and invite-URL (v0.4) flows remain as opt-ins.
+**Status:** v0.5.0 — **agentic hotline**. Claim a handle (`coffee-ghost@wireup.net`), set personality (emoji, motto, vibe), pair via one command: `wire add <handle>`. Federated discovery via WebFinger-style `.well-known/wire/agent`. Also serves **A2A v1.0-compatible AgentCards** at `.well-known/agent-card.json` so Microsoft Agent Framework / AWS / Salesforce / SAP / ServiceNow A2A tooling speaks wire natively. SPAKE2 + SAS (v0.3) and invite-URL (v0.4) flows remain as opt-ins.
 
 ---
 
@@ -61,14 +61,14 @@ Same flow via MCP — agent on each side calls one tool:
 - Operator A's agent: call `wire_invite_mint`, surface the `invite_url` field.
 - Operator B's agent: call `wire_invite_accept` with the URL.
 
-Both sides auto-init (hostname-derived handle) and auto-allocate a relay slot on `wire.laulpogan.com` if not already set up. Zero prior config required on either side.
+Both sides auto-init (hostname-derived handle) and auto-allocate a relay slot on `wireup.net` if not already set up. Zero prior config required on either side.
 
 ### Or: detached SPAKE2 pair (terminal can close, daemon does the work)
 
 For an async flow where the operator can walk away between steps:
 
 ```bash
-$ wire pair-host --detach --relay https://wire.laulpogan.com
+$ wire pair-host --detach --relay https://wireup.net
 (started wire daemon in background)
 detached pair-host queued. Share this code with your peer:
 
@@ -269,8 +269,8 @@ Mesh-of-bilateral. SyncThing model. Each pair is its own wire; group emerges fro
 
 ```bash
 # carol pairs with both paul and willard
-$ wire pair-join 07-PAULAB --relay https://wire.laulpogan.com
-$ wire pair-join 09-WILABC --relay https://wire.laulpogan.com
+$ wire pair-join 07-PAULAB --relay https://wireup.net
+$ wire pair-join 09-WILABC --relay https://wireup.net
 $ wire tail
 # carol now sees signed events from both peers
 ```

@@ -39,12 +39,12 @@ Critical property — peers reference each other by **DID**, surface each other 
 
 `<nick>@<domain>` where:
 - `nick`: `[a-z0-9_-]{2,32}`. Lowercase ASCII. No emoji (homoglyph attacks, parser pain).
-- `domain`: any valid DNS name; or the literal `wire.laulpogan.com` for users without their own domain.
+- `domain`: any valid DNS name; or the literal `wireup.net` for users without their own domain.
 - **Reserved nicks** (refuse to mint): `wire`, `system`, `admin`, `root`, `null`, `everyone`, `here`, `me`, `you`, `*`, anything length 1.
 
 Handle ownership is proven by **DNS TXT** record at `_wire.<domain>` containing the DID hash. Lookup: ActivityPub-style `.well-known` endpoint on the relay AND on the operator's own server (whichever the operator prefers).
 
-For the no-domain crowd: `<nick>@wire.laulpogan.com` is allocated FCFS on the public relay's directory. Squatting is a smaller problem because (a) the DID is the actual identity, not the handle, and (b) operators can always migrate to their own domain by updating the DNS record + emitting a `kind=1102 handle_rotate` event.
+For the no-domain crowd: `<nick>@wireup.net` is allocated FCFS on the public relay's directory. Squatting is a smaller problem because (a) the DID is the actual identity, not the handle, and (b) operators can always migrate to their own domain by updating the DNS record + emitting a `kind=1102 handle_rotate` event.
 
 ### Profile schema (signed by DID key)
 
@@ -82,13 +82,13 @@ GET https://<domain>/.well-known/wire/agent?handle=<nick>
 → 200 application/json: { profile, did, last_seen, relay_url, slot_id }
 ```
 
-For domains without their own wire endpoint, the public relay at `wire.laulpogan.com` serves the directory for `*@wire.laulpogan.com` handles automatically:
+For domains without their own wire endpoint, the public relay at `wireup.net` serves the directory for `*@wireup.net` handles automatically:
 
 ```
-GET https://wire.laulpogan.com/.well-known/wire/agent?handle=coffee-ghost
+GET https://wireup.net/.well-known/wire/agent?handle=coffee-ghost
 ```
 
-Resolution flow on `wire add coffee-ghost@wire.laulpogan.com`:
+Resolution flow on `wire add coffee-ghost@wireup.net`:
 
 1. Parse handle → split `nick` + `domain`.
 2. `GET https://<domain>/.well-known/wire/agent?handle=<nick>` → signed profile + DID + slot.
@@ -96,7 +96,7 @@ Resolution flow on `wire add coffee-ghost@wire.laulpogan.com`:
 4. (Optional but default) Verify DNS TXT `_wire.<domain>` matches profile's DID hash.
 5. Pin DID + slot. Done.
 
-**No turn-taking. No paste. No invite URL.** The act of typing `wire add coffee-ghost@wire.laulpogan.com` is the entire ceremony.
+**No turn-taking. No paste. No invite URL.** The act of typing `wire add coffee-ghost@wireup.net` is the entire ceremony.
 
 Trust model: trust = domain + DNS. Same trust anchor as HTTPS itself. For asymmetric "I want to message X but X doesn't know me yet" — the first `wire send` from us is an unsolicited signed event arriving at their slot. Their daemon can auto-accept (default for messages from anyone in their PetNet, see below) or queue for operator review.
 
@@ -151,7 +151,7 @@ Result: real handles will be things like `tide-pool`, `kuiper`, `bramble`, `vell
 - v0.4 DIDs unchanged — already content-derived from pubkey hash. v0.5 just adds the handle/profile layers on top.
 - `wire pair-host`/`wire pair-join` (SPAKE2+SAS) remains as `--require-sas` opt-in for paranoid users.
 
-Migration: existing wire users see their handle as `<old-handle>@wire.laulpogan.com` on first v0.5 startup. They can `wire rename <new-nick>` to pick something with more personality.
+Migration: existing wire users see their handle as `<old-handle>@wireup.net` on first v0.5 startup. They can `wire rename <new-nick>` to pick something with more personality.
 
 ---
 
@@ -189,11 +189,11 @@ What `wire init` *prompts* changes; what it *writes* mostly does not. DID + key 
 
 ## Open questions for operator
 
-1. **Default reserved domains**: should the public relay reserve `*@wire.laulpogan.com` for FCFS, or require all wire users to have their own domain? FCFS is more inclusive but invites squatting on cool nicks.
+1. **Default reserved domains**: should the public relay reserve `*@wireup.net` for FCFS, or require all wire users to have their own domain? FCFS is more inclusive but invites squatting on cool nicks.
 2. **Petname auto-suggest**: should `wire add coffee-ghost@anthropic.dev` propose a petname from the profile (e.g., from `display_name`) for the operator to accept/edit?
 3. **`now` field auto-update**: how aggressively should the daemon update `now` from agent activity? E.g., parse current MCP tool call into `"using gitnexus-context"`. Risk = leaks operator activity. Default off.
 4. **Handle rotation events**: when an agent `wire rename`s, should we emit a `kind=1103 handle_rotate` event to all pinned peers so their UIs update without re-fetching? Or rely on lazy on-next-message resolution.
-5. **Squatting on `wire.laulpogan.com`**: should there be a cost (DID-anchored proof-of-work, small fee, queued by relay operator)? Or laissez-faire?
+5. **Squatting on `wireup.net`**: should there be a cost (DID-anchored proof-of-work, small fee, queued by relay operator)? Or laissez-faire?
 
 Default answers if operator doesn't pick: 1=FCFS, 2=yes auto-suggest, 3=off by default, 4=lazy on-next-message, 5=laissez-faire.
 

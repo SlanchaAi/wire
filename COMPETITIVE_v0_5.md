@@ -111,7 +111,7 @@ Wire's positioning is **partially differentiated, not novelly differentiated**. 
 
 ## Top 3 truest competitors (ranked by existential threat)
 
-1. **AMP** — wire's mirror image. Same Ed25519, same handle-as-email, same federation pitch, same Apache license. Pre-traction but spec is published. If a dev finds AMP first, wire reads as a re-implementation. **Wire's only structural edges:** (a) ciphertext-only relay, (b) MCP-first agent UX, (c) three-layer DID+handle+profile, (d) working hosted relay at wire.laulpogan.com. **Race is on.**
+1. **AMP** — wire's mirror image. Same Ed25519, same handle-as-email, same federation pitch, same Apache license. Pre-traction but spec is published. If a dev finds AMP first, wire reads as a re-implementation. **Wire's only structural edges:** (a) ciphertext-only relay, (b) MCP-first agent UX, (c) three-layer DID+handle+profile, (d) working hosted relay at wireup.net. **Race is on.**
 
 2. **Google A2A v1.0** — different stack layer (direct HTTPS RPC between always-on endpoints, not relay/mailbox), but owns the `/.well-known/` mindshare. Any dev evaluating wire will ask *"why not A2A?"*. **Wire's one-line answer:** A2A assumes always-online agent HTTP endpoints; wire's mailbox relay works for laptops and intermittently-connected agents.
 
@@ -161,7 +161,7 @@ Don't invent payments. When/if wire needs them, integrate Skyfire or AP2.
 Same logic.
 
 ### 5. Beat AMP to shipped traction
-Wire's race is with AMP, not A2A. AMP is pre-traction (25 stars, "Coming Soon" providers). Wire has working code + public-good relay + 159 tests + CI green. **Ship the live `wire.laulpogan.com` demo + write a HN/r/LocalLLaMA post before they do.**
+Wire's race is with AMP, not A2A. AMP is pre-traction (25 stars, "Coming Soon" providers). Wire has working code + public-good relay + 159 tests + CI green. **Ship the live `wireup.net` demo + write a HN/r/LocalLLaMA post before they do.**
 
 ---
 

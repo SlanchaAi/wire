@@ -32,7 +32,7 @@ use serde_json::{Value, json};
 
 use crate::config;
 
-pub const DEFAULT_RELAY: &str = "https://wire.laulpogan.com";
+pub const DEFAULT_RELAY: &str = "https://wireup.net";
 pub const DEFAULT_TTL_SECS: u64 = 86_400; // 24 hours
 
 /// Decoded contents of an invite URL.

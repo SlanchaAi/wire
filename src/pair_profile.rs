@@ -181,7 +181,7 @@ pub fn write_profile_field(field: &str, value: Value) -> Result<Value> {
 ///
 /// The relay-URL hint helps: if `relay_url` is `Some`, that base is used.
 /// Otherwise we assume `https://<domain>` (matches operator's DNS-anchored
-/// setup, e.g. `wire.laulpogan.com`).
+/// setup, e.g. `wireup.net`).
 pub fn resolve_handle(handle: &Handle, relay_url: Option<&str>) -> anyhow::Result<Value> {
     let base = relay_url
         .map(str::to_string)
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn parse_handle_accepts_underscore_and_digits() {
         assert!(parse_handle("dragonfly_42@home.arpa").is_ok());
-        assert!(parse_handle("v2@wire.laulpogan.com").is_ok());
+        assert!(parse_handle("v2@wireup.net").is_ok());
     }
 
     #[test]

@@ -20,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
 wire invite --json
 ```
 
-`wire invite` auto-inits your identity if you aren't set up (hostname-derived handle) and auto-allocates a relay slot on `https://wire.laulpogan.com`. Idempotent.
+`wire invite` auto-inits your identity if you aren't set up (hostname-derived handle) and auto-allocates a relay slot on `https://wireup.net`. Idempotent.
 
 It prints `{"invite_url": "wire://pair?v=1&inv=...", "ttl_secs": 86400, "uses": 1}`.
 
@@ -84,7 +84,7 @@ Prints 6 SAS digits. Surface to operator. Wait for type-back. Never auto-confirm
 ### Detached SPAKE2 (terminal can close)
 
 ```bash
-wire pair-host --detach --relay https://wire.laulpogan.com
+wire pair-host --detach --relay https://wireup.net
 wire pair-list --json
 wire pair-confirm <code> <digits>
 wire pair-cancel  <code>
@@ -104,7 +104,7 @@ Event types: `claim` (assertion), `decision`, `question`, `ack`, `heartbeat`. Us
 
 ## Public relay
 
-`https://wire.laulpogan.com` — public-good relay you can pair against without self-hosting. Sees only ciphertext + signatures. Healthz: `curl -fsS https://wire.laulpogan.com/healthz` → `ok`.
+`https://wireup.net` — public-good relay you can pair against without self-hosting. Sees only ciphertext + signatures. Healthz: `curl -fsS https://wireup.net/healthz` → `ok`.
 
 ## Rules
 

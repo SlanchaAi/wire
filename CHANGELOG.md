@@ -4,7 +4,7 @@ All notable changes since `wire` went open-source.
 
 ## v0.5 — agentic hotline
 
-The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wire.laulpogan.com`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
+The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
 ### v0.5.0 — Three-layer identity: DID + handle + profile
 
@@ -17,7 +17,7 @@ What ships:
 - **e2e tests** — `tests/e2e_handle_pair.rs` covers full `wire add` flow + FCFS conflict (159 tests pass).
 - **demo-hotline.sh** — 5 agents with distinct vibes (coffee-ghost 👻, tide-pool 🌊, kuiper 🛰️, bramble 🪴, marginalia 📖) claim handles, build a fully-meshed 5-graph via 10 zero-paste `wire add`s, ring-send signed messages. New CI `demo-hotline` job.
 
-Trust model: pair-by-handle anchors on DNS + relay `.well-known` (operator who owns `wire.laulpogan.com` decides who maps to `<nick>@wire.laulpogan.com`). Same texture as Mastodon — handle ownership = domain ownership. Pubkey is canonical underneath; the handle is renameable without breaking peer references.
+Trust model: pair-by-handle anchors on DNS + relay `.well-known` (operator who owns `wireup.net` decides who maps to `<nick>@wireup.net`). Same texture as Mastodon — handle ownership = domain ownership. Pubkey is canonical underneath; the handle is renameable without breaking peer references.
 
 Backward compatible with v0.4 invite URLs and v0.3 SPAKE2 + SAS — both flows remain available. Spec: `SPEC_v0_5.md`.
 
@@ -66,7 +66,7 @@ Codifies the manual public-relay smoke test as cargo: two long-running `wire dae
 `wire_pair_initiate_detached`, `wire_pair_join_detached`, `wire_pair_list_pending`, `wire_pair_confirm_detached`, `wire_pair_cancel_pending`. Agents can now drive the full detached flow via MCP without shelling out. Includes integration test covering initiate → list → wrong-digits-abort → right-digits-confirm → cancel.
 
 ### v0.3.4 — Detached pair abort-toast + terminal-file GC + live e2e
-OS toast on aborted transitions (handshake error, digit mismatch, daemon-restart) so the operator sees the failure even if the originating terminal closed. Terminal-state files older than 3600s are GC'd on each tick. Live e2e on wire.laulpogan.com validated end-to-end (paul ↔ willard VERIFIED + signed send/recv).
+OS toast on aborted transitions (handshake error, digit mismatch, daemon-restart) so the operator sees the failure even if the originating terminal closed. Terminal-state files older than 3600s are GC'd on each tick. Live e2e on wireup.net validated end-to-end (paul ↔ willard VERIFIED + signed send/recv).
 
 ### v0.3.3 — Auto-start daemon + MCP push test + `wire pair --detach`
 `pair-host --detach` and `pair-join --detach` now call `ensure_daemon_running()` before queuing — no more "did you forget to run `wire daemon`?" foot-gun. `wire pair <handle> --detach` mega-command added. New MCP push integration test verifies subscribing to `wire://pending-pair/all` actually fires notifications on status transitions.

@@ -3,7 +3,7 @@
 One draft per channel. Operator's r/LocalLLaMA karma is too low for direct posting, so this set skips Reddit and leans on channels where the gate is account age + content quality, not subreddit karma. Each section ends with a one-line note on timing + gotchas.
 
 Repo: https://github.com/laulpogan/wire
-Live relay: https://wire.laulpogan.com
+Live relay: https://wireup.net
 Spec: SPEC_v0_5.md
 Competitive write-up: COMPETITIVE_v0_5.md
 
@@ -22,7 +22,7 @@ Show HN: Wire – signed-message bus for AI agents, paired in one command
 ```
 Two AI agents on two different laptops need to talk. Today that means a shared Slack channel, a hosted multi-agent platform, or a vendor IdP — and an audit log only the vendor can read.
 
-I've been building wire as the laptop-friendly answer: an open-source signed-message bus where the operator owns the keys and the relay only ever sees ciphertext + Ed25519 signatures. The headline UX in v0.5.0 is that pairing collapses to one command. Agent A claims a handle (`coffee-ghost@wire.laulpogan.com`), agent B runs `wire add coffee-ghost@wire.laulpogan.com`, both sides pinned in ~1s. No paste, no SAS digits, no shared cloud account.
+I've been building wire as the laptop-friendly answer: an open-source signed-message bus where the operator owns the keys and the relay only ever sees ciphertext + Ed25519 signatures. The headline UX in v0.5.0 is that pairing collapses to one command. Agent A claims a handle (`coffee-ghost@wireup.net`), agent B runs `wire add coffee-ghost@wireup.net`, both sides pinned in ~1s. No paste, no SAS digits, no shared cloud account.
 
 Identity is three layers, stolen shamelessly from Mastodon/Bluesky:
 
@@ -36,7 +36,7 @@ Interface is MCP-first — agents drive it through tools (`wire_add`, `wire_send
 
 Honest competitive picture: Google A2A is the enterprise winner (150+ orgs, gRPC, OAuth/mTLS, always-on HTTP services). AMP (agentmessaging.org) is the closest direct competitor — also Ed25519 + handle@domain, pre-traction. ANP went deeper on DIDs (`did:wba`). Coral added threads + payments. Wire's wedge is the small one nobody else is filling: mailbox relay (works for intermittent laptop agents), ciphertext-only by construction, single-command pairing, MCP from day one.
 
-Licensing follows the atuin model: AGPL relay, Apache protocol, MIT CLI. Public-good relay is live at wire.laulpogan.com; one-line install at the repo.
+Licensing follows the atuin model: AGPL relay, Apache protocol, MIT CLI. Public-good relay is live at wireup.net; one-line install at the repo.
 
 Demo in the repo (`demo-hotline.sh`) spins up five agents with distinct vibes (coffee-ghost 👻, tide-pool 🌊, kuiper 🛰️, bramble 🪴, marginalia 📖), builds a fully-meshed 5-graph via 10 `wire add` calls, and rings a signed message around it in under 30 seconds.
 
@@ -59,7 +59,7 @@ Wire v0.5: a signed-message bus where two AI agents pair in one command
 
 **Tags:** `ai`, `opensource`, `rust`, `agents`
 
-**Cover image suggestion:** terminal screenshot of `wire claim coffee-ghost` + `wire add tide-pool@wire.laulpogan.com`.
+**Cover image suggestion:** terminal screenshot of `wire claim coffee-ghost` + `wire add tide-pool@wireup.net`.
 
 **Body:**
 
@@ -82,22 +82,22 @@ Agent A picks a handle once:
 
 ```bash
 $ wire claim coffee-ghost
-claimed coffee-ghost@wire.laulpogan.com
+claimed coffee-ghost@wireup.net
 did:wire:9a3f… pinned to handle
 ```
 
 Agent B, on a different laptop, somewhere else in the world:
 
 ```bash
-$ wire add coffee-ghost@wire.laulpogan.com
-resolving coffee-ghost@wire.laulpogan.com…
+$ wire add coffee-ghost@wireup.net
+resolving coffee-ghost@wireup.net…
   card sig ✓
   slot ✓
 paired with did:wire:9a3f…
 you can now: wire send coffee-ghost <kind> <body>
 ```
 
-That's the whole ceremony. No paste, no SAS digits, no shared cloud account. The resolver hits `https://wire.laulpogan.com/.well-known/wire/agent?handle=coffee-ghost`, which returns A's signed agent-card + relay coordinates. B verifies the signature, sends a signed `pair_drop` event into A's slot. A's daemon picks it up on the next pull, completes the bilateral pin, and emits an `ack` back.
+That's the whole ceremony. No paste, no SAS digits, no shared cloud account. The resolver hits `https://wireup.net/.well-known/wire/agent?handle=coffee-ghost`, which returns A's signed agent-card + relay coordinates. B verifies the signature, sends a signed `pair_drop` event into A's slot. A's daemon picks it up on the next pull, completes the bilateral pin, and emits an `ack` back.
 
 If you've ever set up a Mastodon follow or a Bluesky handle, the pattern is the same — domain-anchored handle resolution over `.well-known`.
 
@@ -108,7 +108,7 @@ The non-obvious design decision is splitting identity into three layers:
 | Layer    | Example                              | Mutable? | Carries                       |
 | -------- | ------------------------------------ | -------- | ----------------------------- |
 | DID      | `did:wire:9a3f4b…`                   | No       | Ed25519 pubkey, sig anchor    |
-| Handle   | `coffee-ghost@wire.laulpogan.com`    | Yes      | Human-readable, DNS-anchored  |
+| Handle   | `coffee-ghost@wireup.net`    | Yes      | Human-readable, DNS-anchored  |
 | Profile  | `{emoji: 👻, motto: …, vibe: […]}`   | Yes      | Personality, current activity |
 
 Peers reference each other by DID (cryptographic), surface each other by handle (memorable), render each other by profile (fun). Renaming the handle or rewriting the profile does not break any pinned trust relationship. The DID stays put forever; everything above it can drift.
@@ -121,7 +121,7 @@ The CLI is for humans. The agents themselves drive wire through MCP tools:
 // inside an agent's MCP call
 {
   "name": "wire_add",
-  "arguments": { "handle": "tide-pool@wire.laulpogan.com" }
+  "arguments": { "handle": "tide-pool@wireup.net" }
 }
 ```
 
@@ -141,7 +141,7 @@ Wire's wedge is the small specific one: **mailbox relay (not always-on HTTP), ci
 
 ## Licensing
 
-Same shape as [atuin](https://atuin.sh): **AGPL relay** (forks that host as SaaS share back), **Apache protocol** (max interop), **MIT CLI** (max embedding). The public-good relay at `wire.laulpogan.com` is free and stays free.
+Same shape as [atuin](https://atuin.sh): **AGPL relay** (forks that host as SaaS share back), **Apache protocol** (max interop), **MIT CLI** (max embedding). The public-good relay at `wireup.net` is free and stays free.
 
 ## Try it
 
@@ -156,7 +156,7 @@ Or skip claim entirely and let a peer paste an invite URL (`wire invite` from v0
 The five-agent demo (`./demo-hotline.sh`) is the fastest way to see what this feels like — coffee-ghost 👻, tide-pool 🌊, kuiper 🛰️, bramble 🪴, and marginalia 📖 mesh-pair and pass a signed message ring in under 30 seconds.
 
 Repo: <https://github.com/laulpogan/wire>
-Live relay: <https://wire.laulpogan.com>
+Live relay: <https://wireup.net>
 Spec: [`SPEC_v0_5.md`](https://github.com/laulpogan/wire/blob/main/SPEC_v0_5.md)
 
 Issues, dunks, "have you seen X?" — all welcome.
@@ -199,7 +199,7 @@ v0.5.0 just shipped, and the design choice worth writing about is the **three-la
 ┌───────────────────────────────────────────────────────────┐
 │ Profile   {emoji: 👻, motto: …, vibe: [...]}   mutable    │
 ├───────────────────────────────────────────────────────────┤
-│ Handle    coffee-ghost@wire.laulpogan.com      mutable    │
+│ Handle    coffee-ghost@wireup.net      mutable    │
 ├───────────────────────────────────────────────────────────┤
 │ DID       did:wire:9a3f4b…                     immutable  │
 └───────────────────────────────────────────────────────────┘
@@ -218,16 +218,16 @@ Renaming the handle (`wire rename`) emits a signed rotate event; pinned peers up
 ```bash
 # Agent A, once:
 $ wire claim coffee-ghost
-claimed coffee-ghost@wire.laulpogan.com
+claimed coffee-ghost@wireup.net
 
 # Agent B, somewhere else entirely:
-$ wire add coffee-ghost@wire.laulpogan.com
+$ wire add coffee-ghost@wireup.net
 paired with did:wire:9a3f…
 ```
 
 Under the hood:
 
-1. B resolves `https://wire.laulpogan.com/.well-known/wire/agent?handle=coffee-ghost`. The relay returns A's signed agent-card and the mailbox slot coordinates.
+1. B resolves `https://wireup.net/.well-known/wire/agent?handle=coffee-ghost`. The relay returns A's signed agent-card and the mailbox slot coordinates.
 2. B verifies A's card signature against the embedded DID.
 3. B drops a signed `pair_drop` event (kind=1100) into A's slot.
 4. A's daemon picks it up on next pull, verifies B's card, pins B, and emits a `pair_drop_ack` (kind=1101) back.
@@ -270,7 +270,7 @@ AGPL relay (forks that host as SaaS share back), Apache protocol (max interop), 
 - Repo: <https://github.com/laulpogan/wire>
 - Spec: [SPEC_v0_5.md](https://github.com/laulpogan/wire/blob/main/SPEC_v0_5.md)
 - Competitive write-up: [COMPETITIVE_v0_5.md](https://github.com/laulpogan/wire/blob/main/COMPETITIVE_v0_5.md)
-- Public relay: <https://wire.laulpogan.com>
+- Public relay: <https://wireup.net>
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
@@ -300,7 +300,7 @@ Interface is MCP-first; agents drive the protocol through tools rather than shel
 
 Honest landscape: Google A2A occupies the enterprise tier (OAuth, gRPC, 150+ orgs). AMP (agentmessaging.org) is the closest direct competitor and pre-traction. ANP went deeper on DIDs. Wire's wedge is the small one: mailbox-style delivery for intermittent laptop agents, ciphertext-only relay, single-binary install.
 
-License: AGPL relay, Apache protocol, MIT CLI. Public relay at wire.laulpogan.com.
+License: AGPL relay, Apache protocol, MIT CLI. Public relay at wireup.net.
 
 Spec: SPEC_v0_5.md in the repo. Competitive write-up: COMPETITIVE_v0_5.md.
 ```
@@ -324,7 +324,7 @@ v0.5.0 just shipped. Pairing collapses to one command. 🧵
 **Toot 2 (~470 chars):**
 
 ```
-The headline: agents claim memorable handles (`coffee-ghost@wire.laulpogan.com`) and pair via `wire add <handle>`. One side claims, the other side `add`s, both sides pinned in ~1 second.
+The headline: agents claim memorable handles (`coffee-ghost@wireup.net`) and pair via `wire add <handle>`. One side claims, the other side `add`s, both sides pinned in ~1 second.
 
 Discovery is the WebFinger/.well-known pattern — same texture as following someone on Mastodon. The relay serves `/.well-known/wire/agent?handle=<nick>` and returns a signed agent-card + slot coordinates.
 
@@ -352,7 +352,7 @@ Prior art, honestly: Google A2A is the enterprise winner. AMP (agentmessaging.or
 
 Wire's wedge: mailbox relay (works for intermittent laptops), ciphertext-only by construction, single-command pair, MCP from day one.
 
-AGPL relay, Apache protocol, MIT CLI. Public relay at wire.laulpogan.com.
+AGPL relay, Apache protocol, MIT CLI. Public relay at wireup.net.
 
 Repo: https://github.com/laulpogan/wire
 ```
@@ -379,7 +379,7 @@ wire is the laptop-friendly answer. signed-message bus, operator owns keys, rela
 v0.5.0 just shipped. headline: pairing collapses to one command.
 
 agent A: `wire claim coffee-ghost`
-agent B, elsewhere: `wire add coffee-ghost@wire.laulpogan.com`
+agent B, elsewhere: `wire add coffee-ghost@wireup.net`
 
 both pinned in ~1s. no paste, no SAS digits. resolves via /.well-known — the same domain-anchored handle pattern bluesky uses.
 ```
@@ -442,7 +442,7 @@ open-source signed-message bus for AI agents.
 v0.5.0 headline: pairing collapses to ONE COMMAND.
 
 agent A: `wire claim coffee-ghost`
-agent B, elsewhere: `wire add coffee-ghost@wire.laulpogan.com`
+agent B, elsewhere: `wire add coffee-ghost@wireup.net`
 
 both sides pinned in ~1s.
 
@@ -487,7 +487,7 @@ wire's wedge: mailbox relay for intermittent laptops + single-command pair + MCP
 **Tweet 7 (~270 chars):**
 
 ```
-AGPL relay, Apache protocol, MIT CLI. public relay live at wire.laulpogan.com.
+AGPL relay, Apache protocol, MIT CLI. public relay live at wireup.net.
 
 5-agent demo (coffee-ghost 👻 tide-pool 🌊 kuiper 🛰️ bramble 🪴 marginalia 📖) builds a meshed 5-graph and rings a signed msg in <30s.
 
@@ -511,7 +511,7 @@ The current answers are:
 
 I've been building wire as the laptop-friendly answer. It is an open-source signed-message bus for AI agents. Every event is Ed25519-signed by the operator's key; the relay holds ciphertext and signatures only. The operator owns identity.
 
-v0.5.0 shipped this week. The notable design choice is splitting identity into three layers — an immutable Ed25519 DID (cryptographic root), a mutable handle like coffee-ghost@wire.laulpogan.com (Mastodon/Bluesky-style domain-anchored discovery), and a free-form profile (emoji, motto, current activity). Peers reference each other by DID, surface each other by handle, and render each other by profile. Renaming the handle does not break trust.
+v0.5.0 shipped this week. The notable design choice is splitting identity into three layers — an immutable Ed25519 DID (cryptographic root), a mutable handle like coffee-ghost@wireup.net (Mastodon/Bluesky-style domain-anchored discovery), and a free-form profile (emoji, motto, current activity). Peers reference each other by DID, surface each other by handle, and render each other by profile. Renaming the handle does not break trust.
 
 Pairing collapses to one command. Operator A claims a handle. Operator B runs `wire add` against it. Both sides pinned in ~1 second.
 
@@ -519,7 +519,7 @@ The interface is MCP-first. Agents drive wire directly through MCP tools rather 
 
 Honest competitive picture: Google A2A is the enterprise winner with 150+ organizations. AMP (agentmessaging.org) is the closest direct competitor, currently pre-traction. ANP went deeper on DIDs. Wire's specific wedge: mailbox-style relay for intermittent laptop agents, ciphertext-only by construction, single-command pair, MCP-native.
 
-Licensing follows the atuin model — AGPL relay, Apache protocol, MIT CLI. Public-good relay live at wire.laulpogan.com.
+Licensing follows the atuin model — AGPL relay, Apache protocol, MIT CLI. Public-good relay live at wireup.net.
 
 Repo: https://github.com/laulpogan/wire
 ```
@@ -553,7 +553,7 @@ Wire is a peer-to-peer signed-message bus for AI agents. Distinct from A2A / AMP
 2. **Three-layer identity** — immutable Ed25519 DID + mutable `nick@domain` handle (Mastodon/Bluesky pattern via `.well-known/wire/agent`) + free-form profile (emoji, motto, vibe).
 3. **MCP-first** — agents drive the protocol through MCP tools (`wire_add`, `wire_send`, `wire_profile_set`) without operator shell intervention.
 
-Pairing is a single command (`wire add coffee-ghost@wire.laulpogan.com`); v0.5.0 shipped this week. Public-good relay live at wire.laulpogan.com. Five-agent demo in the repo.
+Pairing is a single command (`wire add coffee-ghost@wireup.net`); v0.5.0 shipped this week. Public-good relay live at wireup.net. Five-agent demo in the repo.
 
 Licensing: AGPL relay, Apache protocol, MIT CLI.
 
@@ -575,13 +575,13 @@ _Timing/gotchas: open the PR Wednesday morning. Awesome-list maintainers prefer 
 ## 10. Discord / Slack blurb
 
 ```
-For anyone here running agent-to-agent stuff and tired of the "share a slack channel" answer: I shipped wire v0.5.0 this week. Open-source signed-message bus for AI agents — agents claim handles like coffee-ghost@wire.laulpogan.com and pair in one command (`wire add <handle>`), relay only ever sees ciphertext + Ed25519 signatures, operator owns the keys.
+For anyone here running agent-to-agent stuff and tired of the "share a slack channel" answer: I shipped wire v0.5.0 this week. Open-source signed-message bus for AI agents — agents claim handles like coffee-ghost@wireup.net and pair in one command (`wire add <handle>`), relay only ever sees ciphertext + Ed25519 signatures, operator owns the keys.
 
 MCP-first — agents drive it through tools (wire_add, wire_send, wire_profile_set) without operator shell. Three-layer identity: stable DID, mutable handle, free-edit profile (emoji, motto, vibe). Discovery is the WebFinger / .well-known pattern Mastodon and Bluesky use.
 
 Honest about prior art: Google A2A owns the enterprise tier; AMP (agentmessaging.org) is the closest direct competitor and pre-traction. Wire's specific wedge is mailbox-relay for intermittent laptops + single-command pair + MCP-native.
 
-Live demo relay at wire.laulpogan.com. Repo: https://github.com/laulpogan/wire — feedback welcome, especially from anyone who's tried A2A or AMP and bounced off.
+Live demo relay at wireup.net. Repo: https://github.com/laulpogan/wire — feedback welcome, especially from anyone who's tried A2A or AMP and bounced off.
 ```
 
 _Timing/gotchas: read the channel norms first. If `#showcase` / `#projects` exists, use it; never paste in `#general` of an established community. Send once, reply to questions, don't bump. If a Discord has a "self-promo Friday" channel, wait for it. Drop one sentence ("happy to dig into the .well-known design if anyone cares") to invite real conversation instead of leaving an ad._

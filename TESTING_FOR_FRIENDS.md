@@ -2,7 +2,7 @@
 
 You + a friend, two terminals, ~60 seconds. By the end you'll have a real signed-message channel between your machines that goes through neither Apple, Meta, Telegram, Discord, nor Slack.
 
-**Public-good test relay:** `https://wire.laulpogan.com` (operated by Slancha; ~$0/mo Hetzner-class infra; 64 MiB per slot, 256 KiB per event, no SLA).
+**Public-good test relay:** `https://wireup.net` (operated by Slancha; ~$0/mo Hetzner-class infra; 64 MiB per slot, 256 KiB per event, no SLA).
 
 If you'd rather self-host the relay: see `INSTALL.md` § "Self-host the relay" — it's the same one binary, ~30 sec setup.
 
@@ -49,7 +49,7 @@ Output:
 wire://pair?v=1&inv=eyJ2IjoxLCJkaWQiOiJkaWQ6d2lyZTpwYXVsLi4u...
 ```
 
-`wire invite` auto-inits your wire identity if you haven't run `wire init`, and auto-allocates a relay slot on `wire.laulpogan.com`. Idempotent — re-running is safe.
+`wire invite` auto-inits your wire identity if you haven't run `wire init`, and auto-allocates a relay slot on `wireup.net`. Idempotent — re-running is safe.
 
 Copy the URL. Paste it into Discord, SMS, voice-read, email, anywhere that reaches your peer.
 
@@ -118,7 +118,7 @@ This generates an Ed25519 keypair in `~/.config/wire/`. Mode 0600 on the private
 
 Operator A runs:
 ```bash
-wire pair-host --relay https://wire.laulpogan.com
+wire pair-host --relay https://wireup.net
 ```
 
 You see something like:
@@ -127,7 +127,7 @@ share this code phrase with your peer:
 
     73-2QXC4P
 
-waiting for peer to run `wire pair-join 73-2QXC4P --relay https://wire.laulpogan.com` ...
+waiting for peer to run `wire pair-join 73-2QXC4P --relay https://wireup.net` ...
 ```
 
 **Tell your friend the code over a different channel** — voice call, text, Signal, in person. (Why a different channel? See "Why two channels" below.)
@@ -136,7 +136,7 @@ waiting for peer to run `wire pair-join 73-2QXC4P --relay https://wire.laulpogan
 
 Operator B types:
 ```bash
-wire pair-join 73-2QXC4P --relay https://wire.laulpogan.com
+wire pair-join 73-2QXC4P --relay https://wireup.net
 ```
 
 (Or `wire join 73-2QXC4P --relay …` — same thing, shorter alias.)
@@ -265,7 +265,7 @@ The cheapest two-channel: text the code, read the SAS on a phone call. Takes 30 
 
 ## Reporting issues
 
-- **Pairing didn't complete:** check that both sides used the same `--relay <url>`, that `https://wire.laulpogan.com/healthz` returns `ok`, and that the code phrase wasn't garbled (8 chars, lowercase + base32 alphabet — no `0` or `1`).
+- **Pairing didn't complete:** check that both sides used the same `--relay <url>`, that `https://wireup.net/healthz` returns `ok`, and that the code phrase wasn't garbled (8 chars, lowercase + base32 alphabet — no `0` or `1`).
 - **SAS digits don't match:** abort. Don't pair. Try again on a different network. If they still mismatch on a clean network, report at `security@slancha.ai` — that would be unexpected.
 - **Other bugs:** GitHub issues at `<repo-url>/issues` (when public) or email `hello@slancha.ai`.
 - **Security issues:** `security@slancha.ai` — see [SECURITY.md](SECURITY.md).
@@ -275,7 +275,7 @@ The cheapest two-channel: text the code, read the SAS on a phone call. Takes 30 
 
 ## Privacy + terms
 
-The public relay at `wire.laulpogan.com`:
+The public relay at `wireup.net`:
 - Sees: your IP (via Cloudflare), your slot_id, your bearer slot tokens, the **bytes of every event you POST** (signed but not always encrypted in v0.1).
 - Doesn't see: your code phrases (only their SHA-256), your SPAKE2 secrets, your AEAD bootstrap payloads (memory-only, evicted after 5 min idle).
 
