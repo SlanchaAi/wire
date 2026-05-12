@@ -13,7 +13,7 @@ If you'd rather self-host the relay: see `INSTALL.md` § "Self-host the relay" �
 Recommended — pre-built binary:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/SlanchaAi/wire/main/install.sh | sh
 wire --version   # expect: wire 0.4.0 or later
 ```
 
@@ -21,7 +21,7 @@ Or from source (Rust 1.88+):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-git clone https://github.com/laulpogan/wire
+git clone https://github.com/SlanchaAi/wire
 cd wire
 cargo build --release
 sudo cp target/release/wire /usr/local/bin/
@@ -301,4 +301,4 @@ That's the entire footprint. No system services unless you opt in via `examples/
 
 ---
 
-*Built by [Slancha](https://slancha.ai). Source: [github.com/laulpogan/wire](https://github.com/laulpogan/wire).*
+*Built by [Slancha](https://slancha.ai). Source: [github.com/SlanchaAi/wire](https://github.com/SlanchaAi/wire).*

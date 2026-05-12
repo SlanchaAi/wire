@@ -239,6 +239,11 @@ fn unwrap_a2a_to_wire_payload(a2a: &Value) -> anyhow::Result<Value> {
             exts.iter().find(|e| {
                 e.get("uri")
                     .and_then(Value::as_str)
+                    // STABLE EXTENSION NAMESPACE — see relay_server.rs comment.
+                    // The wire repo moved to SlanchaAi/wire but this URI MUST
+                    // stay matched against the original `laulpogan` namespace
+                    // forever; A2A extension URIs are opaque identifiers, not
+                    // forwardable URLs.
                     .map(|u| u.starts_with("https://github.com/laulpogan/wire/ext"))
                     .unwrap_or(false)
             })
@@ -280,7 +285,7 @@ pub fn render_self_summary() -> Result<String> {
         .and_then(Value::as_str)
         .unwrap_or("did:wire:?")
         .to_string();
-    let local_handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
+    let local_handle = crate::agent_card::display_handle_from_did(&did).to_string();
     let profile = card.get("profile").cloned().unwrap_or(Value::Null);
 
     let mut out = String::new();

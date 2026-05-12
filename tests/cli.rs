@@ -38,7 +38,7 @@ fn version_flag_prints_semver() {
     let out = run(&home, &["--version"]);
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
-    assert!(s.contains("0.5.7"), "got: {s}");
+    assert!(s.contains("0.5.8"), "got: {s}");
 }
 
 #[test]

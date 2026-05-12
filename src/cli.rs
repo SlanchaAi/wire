@@ -2813,7 +2813,7 @@ fn cmd_accept(url: &str, as_json: bool) -> Result<()> {
         println!("paired with {did}");
         println!(
             "you can now: wire send {} <kind> <body>",
-            did.strip_prefix("did:wire:").unwrap_or(did)
+            crate::agent_card::display_handle_from_did(did)
         );
     }
     Ok(())
@@ -2936,10 +2936,7 @@ fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Res
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("resolved missing did"))?
         .to_string();
-    let peer_handle = peer_did
-        .strip_prefix("did:wire:")
-        .unwrap_or(&peer_did)
-        .to_string();
+    let peer_handle = crate::agent_card::display_handle_from_did(&peer_did).to_string();
     let peer_slot_id = resolved
         .get("slot_id")
         .and_then(Value::as_str)
@@ -2975,10 +2972,7 @@ fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Res
     // is the v0.5 zero-paste open-mode path).
     let our_card = config::read_agent_card()?;
     let sk_seed = config::read_private_key()?;
-    let our_handle = our_did
-        .strip_prefix("did:wire:")
-        .unwrap_or(&our_did)
-        .to_string();
+    let our_handle = crate::agent_card::display_handle_from_did(&our_did).to_string();
     let pk_b64 = our_card
         .get("verify_keys")
         .and_then(Value::as_object)

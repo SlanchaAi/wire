@@ -35,7 +35,7 @@ jobs:
           # macos-13 GitHub-hosted runners had multi-hour queue starvation;
           # Apple Silicon (aarch64-apple-darwin) covers Mac users post-2020.
           # Intel Mac users on this version fall back to: cargo install --git
-          # https://github.com/laulpogan/wire wire. Re-add if v0.2 demand surfaces.
+          # https://github.com/SlanchaAi/wire wire. Re-add if v0.2 demand surfaces.
           - target: aarch64-apple-darwin
             os: macos-14
             artifact: wire

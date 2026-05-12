@@ -16,7 +16,7 @@ The operator gave you ONE of these:
 Install if needed, then mint a single-paste invite URL:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/SlanchaAi/wire/main/install.sh | sh
 wire invite --json
 ```
 
@@ -39,7 +39,7 @@ Surface the returned `invite_url`. The detached daemon handles everything else; 
 ## §B — Guest (accept invite)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/SlanchaAi/wire/main/install.sh | sh
 wire accept 'wire://pair?v=1&inv=...'
 ```
 

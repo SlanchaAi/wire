@@ -6,6 +6,60 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.8 — Repo moved to SlanchaAi/wire + DID-suffix call-site sweep
+
+Repo transferred from `github.com/laulpogan/wire` to
+`github.com/SlanchaAi/wire`. Old URL auto-redirects for ~12 months;
+existing clones can `git remote set-url` to migrate. Stars, forks,
+releases, issues, PRs all preserved.
+
+URL updates:
+- `Cargo.toml` repository field
+- `install.sh` REPO_URL + help text
+- README, AGENT.md, CHANGELOG, all *.md files
+- `.github/workflows/release.yml` comments
+- `landing/index.html` (Slancha-served)
+- relay's A2A AgentCard provider URL
+
+PRESERVED (do not change — federation contract):
+- `https://github.com/laulpogan/wire/ext/v0.5` — wire's A2A extension
+  namespace URI. A2A extension URIs are opaque identifiers, not
+  forwardable URLs. Comments added in `relay_server.rs` and
+  `pair_profile.rs` explaining why this string MUST stay as the
+  original `laulpogan` namespace forever, even though the repo moved.
+  Federation peers in the wild match on this exact string.
+
+DID-suffix call-site sweep: v0.5.7's DID change to pubkey-suffixed
+form (`did:wire:paul-abc12345`) updated agent-card construction and
+the most-visible verify/whoami paths, but ~10 other call sites still
+did raw `did.strip_prefix("did:wire:")` and got the suffixed form
+back. This caused trust-map (keyed by bare handle) vs relay-state
+(keyed by suffixed string) to disagree on the same peer — the
+`wire_add_zero_paste_e2e` test caught it: A's daemon consumed B's
+`pair_drop` and pinned B in trust as "night-train" but in relay-state
+as "night-train-xxxxx", so `wire peers` showed nothing.
+
+Fixed by replacing `did.strip_prefix("did:wire:").unwrap_or(...)` with
+`crate::agent_card::display_handle_from_did(...)` at every "extract
+handle from DID for routing" site:
+- `src/pair_invite.rs` — 4 sites (peer_handle in pair_drop consume,
+  peer_handle in accept_invite, our_handle in mint_invite + accept,
+  peer_handle in pair_drop_ack consume)
+- `src/pair_session.rs` — 2 sites (handle in pair_session_open,
+  peer_handle in pair finalize)
+- `src/pair_profile.rs` — 1 site (local_handle in whois display)
+- `src/mcp.rs` — 2 sites (peer_handle + our_handle_str in wire_add
+  tool)
+- `src/cli.rs` — 3 sites (post-pair "wire send" print hint,
+  peer_handle in cmd_add, our_handle in cmd_add)
+
+The internal `strip_did_wire` helper in `signing.rs` stays raw — it's
+used only for canonical signature comparison where the exact DID
+string (including any suffix) is the payload.
+
+Tests: `wire_add_zero_paste_e2e` now passes (was failing on v0.5.7
+due to the trust-vs-relay-state mismatch). Full suite green.
+
 ### v0.5.7 — DID collision fix + R7 listener-lifetime docs
 
 **DID collision bug.** Pre-v0.5.7 DIDs were `did:wire:<handle>` — derived

@@ -2,7 +2,7 @@
 
 One draft per channel. Operator's r/LocalLLaMA karma is too low for direct posting, so this set skips Reddit and leans on channels where the gate is account age + content quality, not subreddit karma. Each section ends with a one-line note on timing + gotchas.
 
-Repo: https://github.com/laulpogan/wire
+Repo: https://github.com/SlanchaAi/wire
 Live relay: https://wireup.net
 Spec: SPEC_v0_5.md
 Competitive write-up: COMPETITIVE_v0_5.md
@@ -42,7 +42,7 @@ Demo in the repo (`demo-hotline.sh`) spins up five agents with distinct vibes (c
 
 Happy to dig into any of: the .well-known design, why the relay never sees plaintext, how this compares to AMP specifically, or what's deliberately not in the box (no group rooms, no chain, no payments).
 
-https://github.com/laulpogan/wire
+https://github.com/SlanchaAi/wire
 ```
 
 _Timing/gotchas: post Tuesday or Wednesday, 8–10am ET. HN front page dies fast — answer questions for the first 4 hours. Don't reply to your own submission in the first hour (looks like padding). Sibling-tier "Show HN:" prefix is mandatory or dang relabels it._
@@ -146,7 +146,7 @@ Same shape as [atuin](https://atuin.sh): **AGPL relay** (forks that host as SaaS
 ## Try it
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/SlanchaAi/wire/main/install.sh | sh
 wire setup --apply           # registers wire MCP with Claude Code / Cursor
 wire claim <some-nick>       # claim a handle on the public relay
 ```
@@ -155,9 +155,9 @@ Or skip claim entirely and let a peer paste an invite URL (`wire invite` from v0
 
 The five-agent demo (`./demo-hotline.sh`) is the fastest way to see what this feels like — coffee-ghost 👻, tide-pool 🌊, kuiper 🛰️, bramble 🪴, and marginalia 📖 mesh-pair and pass a signed message ring in under 30 seconds.
 
-Repo: <https://github.com/laulpogan/wire>
+Repo: <https://github.com/SlanchaAi/wire>
 Live relay: <https://wireup.net>
-Spec: [`SPEC_v0_5.md`](https://github.com/laulpogan/wire/blob/main/SPEC_v0_5.md)
+Spec: [`SPEC_v0_5.md`](https://github.com/SlanchaAi/wire/blob/main/SPEC_v0_5.md)
 
 Issues, dunks, "have you seen X?" — all welcome.
 ```
@@ -267,13 +267,13 @@ AGPL relay (forks that host as SaaS share back), Apache protocol (max interop), 
 
 ## Try it
 
-- Repo: <https://github.com/laulpogan/wire>
-- Spec: [SPEC_v0_5.md](https://github.com/laulpogan/wire/blob/main/SPEC_v0_5.md)
-- Competitive write-up: [COMPETITIVE_v0_5.md](https://github.com/laulpogan/wire/blob/main/COMPETITIVE_v0_5.md)
+- Repo: <https://github.com/SlanchaAi/wire>
+- Spec: [SPEC_v0_5.md](https://github.com/SlanchaAi/wire/blob/main/SPEC_v0_5.md)
+- Competitive write-up: [COMPETITIVE_v0_5.md](https://github.com/SlanchaAi/wire/blob/main/COMPETITIVE_v0_5.md)
 - Public relay: <https://wireup.net>
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/laulpogan/wire/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/SlanchaAi/wire/main/install.sh | sh
 ```
 
 Five-agent demo (`./demo-hotline.sh`) is the 30-second smoke test.
@@ -287,7 +287,7 @@ _Timing/gotchas: post Wednesday 10am ET. Hashnode's algorithm rewards series —
 
 **Tags:** `practices`, `programming`, `plt`, `security`
 
-**URL field:** `https://github.com/laulpogan/wire`
+**URL field:** `https://github.com/SlanchaAi/wire`
 
 **Body (Show field):**
 
@@ -354,7 +354,7 @@ Wire's wedge: mailbox relay (works for intermittent laptops), ciphertext-only by
 
 AGPL relay, Apache protocol, MIT CLI. Public relay at wireup.net.
 
-Repo: https://github.com/laulpogan/wire
+Repo: https://github.com/SlanchaAi/wire
 ```
 
 _Timing/gotchas: post Tuesday or Wednesday 14:00 UTC (good overlap of EU evening + US morning). Use a content warning only if your instance norms expect one for tech threads. Tag `#FediverseDev` `#OpenSource` `#Rust` `#AI` on toot 1 only — tag spam tanks reach. Reply to your own thread within 60s to lock the sequence._
@@ -405,7 +405,7 @@ wire's wedge: mailbox relay for intermittent laptops, ciphertext-only, single-co
 
 AGPL relay / Apache spec / MIT CLI.
 
-https://github.com/laulpogan/wire
+https://github.com/SlanchaAi/wire
 ```
 
 _Timing/gotchas: post Tuesday 9am ET. Bluesky's feed rewards short hooks; first skeet must work as a standalone post because most viewers won't expand the thread. Don't tag — tags are noise on Bluesky. Embed the repo link as the last skeet so the link card surfaces._
@@ -491,7 +491,7 @@ AGPL relay, Apache protocol, MIT CLI. public relay live at wireup.net.
 
 5-agent demo (coffee-ghost 👻 tide-pool 🌊 kuiper 🛰️ bramble 🪴 marginalia 📖) builds a meshed 5-graph and rings a signed msg in <30s.
 
-repo: https://github.com/laulpogan/wire
+repo: https://github.com/SlanchaAi/wire
 ```
 
 _Timing/gotchas: post Tuesday 9–10am ET. Hook tweet has to land alone — most viewers see only tweet 1. No images = ~30% reach penalty on X; consider attaching a terminal screenshot of the pair flow to tweet 3. Don't tag big accounts; algorithm flags it as engagement bait._
@@ -521,7 +521,7 @@ Honest competitive picture: Google A2A is the enterprise winner with 150+ organi
 
 Licensing follows the atuin model — AGPL relay, Apache protocol, MIT CLI. Public-good relay live at wireup.net.
 
-Repo: https://github.com/laulpogan/wire
+Repo: https://github.com/SlanchaAi/wire
 ```
 
 _Timing/gotchas: post Tuesday or Wednesday 8–9am ET. LinkedIn rewards posts with no outbound links in the body — paste the GitHub link in the first comment instead if you want maximum reach. Three to five paragraph breaks, no walls of text. Don't tag anyone unless they've agreed to engage in the first hour._
@@ -543,7 +543,7 @@ Add wire — signed-message bus for agents (Ed25519 + handle@domain + MCP)
 **PR description:**
 
 ```markdown
-Adds [wire](https://github.com/laulpogan/wire) to the agent-communication / protocols section.
+Adds [wire](https://github.com/SlanchaAi/wire) to the agent-communication / protocols section.
 
 ## Why include it
 
@@ -562,7 +562,7 @@ Licensing: AGPL relay, Apache protocol, MIT CLI.
 Add under "Agent Communication Protocols" (or equivalent section):
 
 ```markdown
-- [wire](https://github.com/laulpogan/wire) — Open-source signed-message bus for AI agents. Ed25519 DIDs + `nick@domain` handles + WebFinger-style discovery. Pair in one command via MCP. Ciphertext-only relay. AGPL/Apache/MIT.
+- [wire](https://github.com/SlanchaAi/wire) — Open-source signed-message bus for AI agents. Ed25519 DIDs + `nick@domain` handles + WebFinger-style discovery. Pair in one command via MCP. Ciphertext-only relay. AGPL/Apache/MIT.
 ```
 
 Happy to relocate the entry or trim the description to match the list's house style.
@@ -581,7 +581,7 @@ MCP-first — agents drive it through tools (wire_add, wire_send, wire_profile_s
 
 Honest about prior art: Google A2A owns the enterprise tier; AMP (agentmessaging.org) is the closest direct competitor and pre-traction. Wire's specific wedge is mailbox-relay for intermittent laptops + single-command pair + MCP-native.
 
-Live demo relay at wireup.net. Repo: https://github.com/laulpogan/wire — feedback welcome, especially from anyone who's tried A2A or AMP and bounced off.
+Live demo relay at wireup.net. Repo: https://github.com/SlanchaAi/wire — feedback welcome, especially from anyone who's tried A2A or AMP and bounced off.
 ```
 
 _Timing/gotchas: read the channel norms first. If `#showcase` / `#projects` exists, use it; never paste in `#general` of an established community. Send once, reply to questions, don't bump. If a Discord has a "self-promo Friday" channel, wait for it. Drop one sentence ("happy to dig into the .well-known design if anyone cares") to invite real conversation instead of leaving an ad._

@@ -22,7 +22,7 @@
 
 set -eu
 
-REPO_URL="${WIRE_REPO_URL:-https://github.com/laulpogan/wire}"
+REPO_URL="${WIRE_REPO_URL:-https://github.com/SlanchaAi/wire}"
 # Default release-asset URL — points at GitHub Releases produced by .github/workflows/release.yml.
 # Override via WIRE_DIST_URL for testing or alternate hosts.
 DIST_URL="${WIRE_DIST_URL:-${REPO_URL}/releases/latest/download}"
@@ -128,5 +128,5 @@ if [ -x "$target" ]; then
     echo "  wire init <handle>"
     echo "  wire pair-host --relay <relay-url>   # pair with a friend"
     echo
-    echo "see 'wire --help' or https://github.com/laulpogan/wire for more."
+    echo "see 'wire --help' or https://github.com/SlanchaAi/wire for more."
 fi

@@ -30,7 +30,7 @@ curl -fsSL https://wire.slancha.ai/install.sh | sh
 If pre-built binary unavailable, install.sh falls back to this. You can also do it directly:
 
 ```bash
-git clone https://github.com/laulpogan/wire
+git clone https://github.com/SlanchaAi/wire
 cd wire
 cargo build --release
 ./target/release/wire --version

@@ -151,7 +151,7 @@ pub fn ensure_self_with_relay(
         if !client.healthz().unwrap_or(false) {
             bail!("phyllis: silent line — the switchboard at {relay} isn't picking up");
         }
-        let handle = did.strip_prefix("did:wire:").unwrap_or(&did);
+        let handle = crate::agent_card::display_handle_from_did(&did);
         let alloc = client.allocate_slot(Some(handle))?;
         relay_state["self"] = json!({
             "relay_url": relay,
@@ -315,11 +315,7 @@ pub fn accept_invite(url: &str) -> Result<Value> {
     crate::trust::add_agent_card_pin(&mut trust, &payload.card, Some("VERIFIED"));
     config::write_trust(&trust)?;
 
-    let peer_handle = payload
-        .did
-        .strip_prefix("did:wire:")
-        .unwrap_or(&payload.did)
-        .to_string();
+    let peer_handle = crate::agent_card::display_handle_from_did(&payload.did).to_string();
     let mut relay_state = config::read_relay_state()?;
     relay_state["peers"][&peer_handle] = json!({
         "relay_url": payload.relay_url,
@@ -333,10 +329,7 @@ pub fn accept_invite(url: &str) -> Result<Value> {
     // pending-invites and complete the bilateral pin.
     let our_card = config::read_agent_card()?;
     let sk_seed = config::read_private_key()?;
-    let our_handle = our_did
-        .strip_prefix("did:wire:")
-        .unwrap_or(&our_did)
-        .to_string();
+    let our_handle = crate::agent_card::display_handle_from_did(&our_did).to_string();
     let pk_b64 = our_card
         .get("verify_keys")
         .and_then(Value::as_object)
@@ -446,10 +439,7 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("peer card missing did"))?
         .to_string();
-    let peer_handle = peer_did
-        .strip_prefix("did:wire:")
-        .unwrap_or(&peer_did)
-        .to_string();
+    let peer_handle = crate::agent_card::display_handle_from_did(&peer_did).to_string();
 
     // Verify the event signature now that we have peer's pubkey.
     let mut tmp_trust = config::read_trust()?;
@@ -522,10 +512,7 @@ fn send_pair_drop_ack(
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("our card missing did"))?
         .to_string();
-    let our_handle = our_did
-        .strip_prefix("did:wire:")
-        .unwrap_or(&our_did)
-        .to_string();
+    let our_handle = crate::agent_card::display_handle_from_did(&our_did).to_string();
     let relay_state = config::read_relay_state()?;
     let self_state = relay_state.get("self").cloned().unwrap_or(Value::Null);
     let our_relay = self_state
@@ -597,7 +584,7 @@ pub fn maybe_consume_pair_drop_ack(event: &Value) -> Result<bool> {
         .get("from")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("ack missing 'from'"))?;
-    let peer_handle = from.strip_prefix("did:wire:").unwrap_or(from).to_string();
+    let peer_handle = crate::agent_card::display_handle_from_did(from).to_string();
     let peer_relay = body.get("relay_url").and_then(Value::as_str).unwrap_or("");
     let peer_slot_id = body.get("slot_id").and_then(Value::as_str).unwrap_or("");
     let peer_slot_token = body.get("slot_token").and_then(Value::as_str).unwrap_or("");

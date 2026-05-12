@@ -178,7 +178,7 @@ pub fn pair_session_open(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let handle = did.strip_prefix("did:wire:").unwrap_or(&did).to_string();
+    let handle = crate::agent_card::display_handle_from_did(&did).to_string();
 
     if need_alloc {
         let client = crate::relay_client::RelayClient::new(relay_url);
@@ -455,10 +455,7 @@ pub fn pair_session_finalize(s: &mut PairSessionState, timeout_secs: u64) -> Res
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let peer_handle = peer_did
-        .strip_prefix("did:wire:")
-        .unwrap_or(&peer_did)
-        .to_string();
+    let peer_handle = crate::agent_card::display_handle_from_did(&peer_did).to_string();
     let peer_relay_url = peer_payload
         .get("relay_url")
         .and_then(Value::as_str)

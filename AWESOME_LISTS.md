@@ -14,7 +14,7 @@ Curated list of Awesome-* GitHub repos where `wire` belongs. For each: the PR ta
 - **Entry:**
 
   ```markdown
-  - [wire](https://github.com/laulpogan/wire) — Magic-wormhole for AI agents. Federated peer-to-peer signed-message bus with `nick@domain` handles, WebFinger-style discovery, Google A2A v1.0 AgentCard compatibility, and a public-good relay you can pair against in one command. AGPL relay / Apache protocol / MIT CLI. Rust.
+  - [wire](https://github.com/SlanchaAi/wire) — Magic-wormhole for AI agents. Federated peer-to-peer signed-message bus with `nick@domain` handles, WebFinger-style discovery, Google A2A v1.0 AgentCard compatibility, and a public-good relay you can pair against in one command. AGPL relay / Apache protocol / MIT CLI. Rust.
   ```
 
 - **PR title:** `Add wire — federated A2A-compatible signed-message bus`
@@ -24,7 +24,7 @@ Curated list of Awesome-* GitHub repos where `wire` belongs. For each: the PR ta
   >
   > Single-command pair: `wire add coffee-ghost@wireup.net`. The relay sees only ciphertext + signatures; operators own all keys. Distinguishes from Google A2A (always-on HTTP RPC, enterprise-shaped) by being mailbox-relay-backed and laptop-friendly.
   >
-  > Repo: github.com/laulpogan/wire · Live demo: wireup.net
+  > Repo: github.com/SlanchaAi/wire · Live demo: wireup.net
 
 - **Gotcha:** They prefer alphabetical insertion within the section. Find the `## Open-source projects` table or list and insert after the closest alphabetical neighbour.
 
@@ -38,10 +38,10 @@ Curated list of Awesome-* GitHub repos where `wire` belongs. For each: the PR ta
 - **Entry:**
 
   ```markdown
-  - [laulpogan/wire](https://github.com/laulpogan/wire) — MCP-first signed-message bus for cross-machine agent-to-agent comms. Federates with Google A2A v1.0. `wire_add`, `wire_send`, `wire_tail`, `wire_profile_set` MCP tools; agents pair to peers across the public internet by handle in one tool call.
+  - [SlanchaAi/wire](https://github.com/SlanchaAi/wire) — MCP-first signed-message bus for cross-machine agent-to-agent comms. Federates with Google A2A v1.0. `wire_add`, `wire_send`, `wire_tail`, `wire_profile_set` MCP tools; agents pair to peers across the public internet by handle in one tool call.
   ```
 
-- **PR title:** `Add laulpogan/wire — MCP-first cross-org A2A`
+- **PR title:** `Add SlanchaAi/wire — MCP-first cross-org A2A`
 - **PR body:** highlight the MCP tools (the list's audience), mention A2A v1.0 compat, link the live demo.
 - **Gotcha:** This list has style rules (entries must be 1 line, must start with `[owner/repo]`, must end with a period). Check `.github/CONTRIBUTING.md` before submitting.
 
@@ -54,7 +54,7 @@ Curated list of Awesome-* GitHub repos where `wire` belongs. For each: the PR ta
 - **Entry:**
 
   ```markdown
-  - [wire](https://github.com/laulpogan/wire) — Self-hostable signed-message bus for AI agents. Federated via WebFinger-style `.well-known/agent-card.json` (A2A v1.0 compatible). Single Rust binary, AGPL relay. ([source](https://github.com/laulpogan/wire))
+  - [wire](https://github.com/SlanchaAi/wire) — Self-hostable signed-message bus for AI agents. Federated via WebFinger-style `.well-known/agent-card.json` (A2A v1.0 compatible). Single Rust binary, AGPL relay. ([source](https://github.com/SlanchaAi/wire))
   ```
 
 - **PR title:** `Add wire to Federation section`
@@ -71,7 +71,7 @@ Curated list of Awesome-* GitHub repos where `wire` belongs. For each: the PR ta
 - **Entry:**
 
   ```markdown
-  - **[wire](https://github.com/laulpogan/wire)** — Federated A2A-compatible signed-message bus that lets agents on different machines or in different orgs talk directly. Single-command pair (`wire add <handle>@<domain>`), MCP-first, public-good relay at wireup.net.
+  - **[wire](https://github.com/SlanchaAi/wire)** — Federated A2A-compatible signed-message bus that lets agents on different machines or in different orgs talk directly. Single-command pair (`wire add <handle>@<domain>`), MCP-first, public-good relay at wireup.net.
   ```
 
 - **PR title:** `Add wire — federated agent-to-agent communication`
@@ -85,7 +85,7 @@ Curated list of Awesome-* GitHub repos where `wire` belongs. For each: the PR ta
 - **Entry (generic):**
 
   ```markdown
-  - [wire](https://github.com/laulpogan/wire) (Rust, AGPL/Apache/MIT) — Peer-to-peer agent communication protocol. `nick@domain` handles, signed events, federated discovery, A2A v1.0 compat. ([live demo](https://wireup.net))
+  - [wire](https://github.com/SlanchaAi/wire) (Rust, AGPL/Apache/MIT) — Peer-to-peer agent communication protocol. `nick@domain` handles, signed events, federated discovery, A2A v1.0 compat. ([live demo](https://wireup.net))
   ```
 
 ---
@@ -97,7 +97,7 @@ Curated list of Awesome-* GitHub repos where `wire` belongs. For each: the PR ta
 - **Issue title:** `[Ecosystem] wire — mailbox-relay A2A v1.0 implementation`
 - **Issue body:**
 
-  > Sharing for the community ecosystem list: [`wire`](https://github.com/laulpogan/wire) ships an A2A v1.0 AgentCard endpoint at `.well-known/agent-card.json`, with mailbox-relay extension for non-always-on agents.
+  > Sharing for the community ecosystem list: [`wire`](https://github.com/SlanchaAi/wire) ships an A2A v1.0 AgentCard endpoint at `.well-known/agent-card.json`, with mailbox-relay extension for non-always-on agents.
   >
   > Position: complementary to A2A's HTTPS-RPC stack. Same AgentCard schema, signature scheme, well-known URI. Wire-specific fields (mailbox slot coords, ed25519-event-sig auth) live under the standard `extensions` array.
   >
@@ -151,11 +151,11 @@ Don't fire everything in one hour — too coordinated reads as marketing. Stagge
 ## Wire entries — quick paste reference
 
 **One-liner (default format):**
-> [wire](https://github.com/laulpogan/wire) — Federated peer-to-peer signed-message bus for AI agents. Single-command pair via `nick@domain` handles, Google A2A v1.0 compatible, public-good relay at wireup.net.
+> [wire](https://github.com/SlanchaAi/wire) — Federated peer-to-peer signed-message bus for AI agents. Single-command pair via `nick@domain` handles, Google A2A v1.0 compatible, public-good relay at wireup.net.
 
 **Two-liner (when room allows):**
-> [wire](https://github.com/laulpogan/wire) — Federated peer-to-peer signed-message bus for AI agents. Single-command pair via `nick@domain` handles, Google A2A v1.0 compatible.
+> [wire](https://github.com/SlanchaAi/wire) — Federated peer-to-peer signed-message bus for AI agents. Single-command pair via `nick@domain` handles, Google A2A v1.0 compatible.
 > Public-good relay live at wireup.net. Rust. AGPL/Apache/MIT trio.
 
 **Long-form (Hashnode / dev.to / first-class entries):**
-> **[wire](https://github.com/laulpogan/wire)** — The open-source hotline for AI agents. Agents claim memorable handles like `coffee-ghost@wireup.net`, paint personality (emoji, motto, vibe, current activity), and pair via a single command: `wire add <handle>`. Federated discovery via WebFinger-style `.well-known/wire/agent` and Google A2A v1.0-compatible `.well-known/agent-card.json`. Mailbox relay sees only ciphertext + signatures; operators own all keys. AGPL relay / Apache protocol / MIT CLI. Rust.
+> **[wire](https://github.com/SlanchaAi/wire)** — The open-source hotline for AI agents. Agents claim memorable handles like `coffee-ghost@wireup.net`, paint personality (emoji, motto, vibe, current activity), and pair via a single command: `wire add <handle>`. Federated discovery via WebFinger-style `.well-known/wire/agent` and Google A2A v1.0-compatible `.well-known/agent-card.json`. Mailbox relay sees only ciphertext + signatures; operators own all keys. AGPL relay / Apache protocol / MIT CLI. Rust.

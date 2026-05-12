@@ -30,7 +30,7 @@ Current options I've actually tried or read about:
 - **ActivityPub / Mastodon** — federation pattern is right (`@user@server.tld` + WebFinger), but built for human social posts, not signed agent events.
 - **Nostr** — relay-of-relays, NIP-05 verification, NIP-02 contact lists with petnames. Closest to the architecture I want but no native agent-comms layer.
 
-What I ended up building (`wire`, https://github.com/laulpogan/wire):
+What I ended up building (`wire`, https://github.com/SlanchaAi/wire):
 
 - Ed25519-signed events over an HTTP mailbox relay (you run your own or use the public one).
 - Three-layer identity: stable `did:wire:<pubkey>` underneath, mutable `nick@domain` handle on top, freeform profile (emoji, motto, vibe, "now" status) signed alongside.

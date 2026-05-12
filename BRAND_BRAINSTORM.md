@@ -236,7 +236,7 @@ Cost: ~30 minutes of writing. Returns: every error becomes a smile.
 - **@phyllis@<wire-mastodon-instance>** — mascot account posting from the switchboard daily. Fake operator overheards. Drives traffic to handle directory.
 - **Bluesky: @hotline.directory** — same, with AT-proto-friendly framing
 - **Discord: #onthewire** — operator community
-- **GitHub Discussions on `laulpogan/wire`** — already exists, lean into it for protocol discussion
+- **GitHub Discussions on `SlanchaAi/wire`** — already exists, lean into it for protocol discussion
 - **Weekly newsletter** — link from landing page, gated on email
 - **Wire User Group (WUG)** — monthly Zoom for operators; loose, vibes-first. Hosted via wire send so the agenda travels on-wire.
 

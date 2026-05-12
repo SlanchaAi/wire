@@ -1535,10 +1535,7 @@ fn tool_add(args: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .ok_or("resolved missing did")?
         .to_string();
-    let peer_handle = peer_did
-        .strip_prefix("did:wire:")
-        .unwrap_or(&peer_did)
-        .to_string();
+    let peer_handle = crate::agent_card::display_handle_from_did(&peer_did).to_string();
     let peer_slot_id = resolved
         .get("slot_id")
         .and_then(Value::as_str)
@@ -1573,10 +1570,7 @@ fn tool_add(args: &Value) -> Result<Value, String> {
     // Build + sign pair_drop event (no nonce — open-mode handle pair).
     let our_card = crate::config::read_agent_card().map_err(|e| format!("{e:#}"))?;
     let sk_seed = crate::config::read_private_key().map_err(|e| format!("{e:#}"))?;
-    let our_handle_str = our_did
-        .strip_prefix("did:wire:")
-        .unwrap_or(&our_did)
-        .to_string();
+    let our_handle_str = crate::agent_card::display_handle_from_did(&our_did).to_string();
     let pk_b64 = our_card
         .get("verify_keys")
         .and_then(Value::as_object)

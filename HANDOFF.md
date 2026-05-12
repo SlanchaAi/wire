@@ -93,7 +93,7 @@ No new `~/.claude/projects/.../memory/` writes this session. Codebase + git hist
 ## Resume prompt (paste this)
 
 ```
-You're resuming wire OSS dev (https://github.com/laulpogan/wire). Read /home/admin/Source/wire/HANDOFF.md first — it captures state through 2026-05-11.
+You're resuming wire OSS dev (https://github.com/SlanchaAi/wire). Read /home/admin/Source/wire/HANDOFF.md first — it captures state through 2026-05-11.
 
 Current state: v0.3.13 shipped + tagged, CI green on all 4 jobs (clippy/test/fmt/demo-detached). 144 tests. Detached pair line (v0.3.0→v0.3.13) feature-complete + CI-validated. Operator running /loop "fix A keep going, also test when feature is in a good spot" but A is saturated — current iters are 1hr fallback no-ops.
 
