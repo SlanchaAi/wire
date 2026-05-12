@@ -2,6 +2,7 @@ target/
 .git/
 .github/
 .cargo/
+.fly/
 *.log
 .DS_Store
 .idea/
@@ -18,3 +19,9 @@ SESSION_LOG_*.md
 DEPLOY_TEST.md
 PENTEST.md
 scripts/pentest.sh
+# Docs / examples — not needed at runtime, slow the build context
+docs/
+examples/
+demo-*.sh
+*.md
+!README.md

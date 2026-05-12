@@ -1,0 +1,74 @@
+# Fly.io app config for wire-relay-server.
+#
+# Deploy:
+#   fly launch --no-deploy           # first time: creates the app
+#   fly volumes create relay_state \
+#       --size 1 --region iad        # 1 GB persistent volume; wire-state lives here
+#   fly deploy                       # build + push + roll
+#   fly status                       # health
+#
+# Cutover:
+#   In Cloudflare DNS for wireup.net:
+#     - CNAME relay → <app>.fly.dev  (proxied / orange-cloud for DDoS + caching)
+#     - CNAME @ (apex) → <app>.fly.dev  OR keep apex on CF Pages for landing
+#   Then point new clients at `https://relay.wireup.net` and let DNS
+#   propagation drain old wireup.net traffic from Spark cloudflared tunnel.
+#
+# Pre-launch sanity:
+#   curl https://<app>.fly.dev/healthz                                   # → ok
+#   curl https://<app>.fly.dev/.well-known/agent-card.json?handle=test   # → 404 fine
+#
+# Cost @ v0.5 scale: $0 on Fly hobby plan (shared-cpu-1x 256MB + 1 GB volume covered).
+# Bump memory / region count when you outgrow it.
+
+app = "wireup-relay"
+primary_region = "iad"   # change if your CF edge sits elsewhere (sjc / fra / etc.)
+
+[build]
+# Empty — Fly uses the repo-root Dockerfile.
+
+[env]
+# wire-relay-server reads WIRE_HOME for slot state. Already set in the
+# Dockerfile, but re-stating here keeps Fly's config the single source
+# of truth for environment.
+WIRE_HOME = "/data"
+RUST_LOG = "wire=info"
+
+[http_service]
+internal_port = 8770
+force_https = true
+
+# SSE / streaming: never auto-stop machines while subscribers are
+# connected. min_machines_running = 1 keeps the relay warm.
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 1
+
+# Long timeouts so SSE keepalives don't disconnect.
+# (Fly's default 60s idle timeout would kill our 30s-keepalive streams.)
+[http_service.concurrency]
+type = "requests"
+soft_limit = 200
+hard_limit = 250
+
+[[mounts]]
+source = "relay_state"
+destination = "/data"
+# initial_size only applies on first attach; resize later with `fly volumes extend`.
+initial_size = "1gb"
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "256mb"
+cpus = 1
+# Bump to "shared-cpu-2x" + 512mb when SSE subscriber count >100.
+
+[checks]
+  [checks.healthz]
+  type = "http"
+  port = 8770
+  path = "/healthz"
+  interval = "15s"
+  timeout = "5s"
+  grace_period = "10s"
+  method = "GET"
