@@ -2944,32 +2944,13 @@ fn cmd_claim(
     public_url: Option<&str>,
     as_json: bool,
 ) -> Result<()> {
-    if !config::is_initialized()? {
-        bail!("not initialized — run `wire init <handle>` first");
-    }
     if !crate::pair_profile::is_valid_nick(nick) {
         bail!("nick {nick:?} invalid — must be 2..=32 chars, [a-z0-9_-], not reserved");
     }
-    let relay_state = config::read_relay_state()?;
-    let self_state = relay_state.get("self").cloned().unwrap_or(Value::Null);
-    let default_relay = self_state
-        .get("relay_url")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let relay_url = relay_override
-        .map(str::to_string)
-        .or(default_relay)
-        .ok_or_else(|| anyhow!("no relay URL — pass --relay or run `wire bind-relay` first"))?;
-    let slot_id = self_state
-        .get("slot_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("no slot allocated; run `wire bind-relay <url>` first"))?
-        .to_string();
-    let slot_token = self_state
-        .get("slot_token")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("no slot_token in relay-state"))?
-        .to_string();
+    // `wire claim` is the one-step bootstrap: auto-init + auto-allocate slot
+    // + claim handle. Operator should never have to run init/bind-relay first.
+    let (_did, relay_url, slot_id, slot_token) =
+        crate::pair_invite::ensure_self_with_relay(relay_override)?;
     let card = config::read_agent_card()?;
 
     let client = crate::relay_client::RelayClient::new(&relay_url);

@@ -221,3 +221,44 @@ async fn claim_409_on_competing_nick() {
         "stderr: {stderr}"
     );
 }
+
+/// Regression: `wire claim` from a fresh WIRE_HOME (no prior `wire init`,
+/// no prior `wire bind-relay`) should succeed by auto-initializing identity
+/// and auto-allocating the relay slot. This is the "ONE STEP" UX promise —
+/// see commit history if reintroducing the bail-on-uninit check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claim_from_fresh_home_one_step() {
+    let relay_dir = fresh_dir("relay");
+    let relay = wire::relay_server::Relay::new(relay_dir).await.unwrap();
+    let app = relay.router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let relay_url = format!("http://{addr}");
+
+    // Fresh home: zero prior commands.
+    let a = fresh_dir("kuiper");
+
+    let out = wire(
+        &a,
+        &["claim", "kuiper", "--relay", &relay_url, "--public-url", &relay_url],
+    );
+    assert!(
+        out.status.success(),
+        "claim from fresh home failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Identity + slot should now exist.
+    assert!(
+        a.join("config/wire/agent-card.json").exists(),
+        "agent-card.json not created by auto-init"
+    );
+    let relay_json =
+        std::fs::read_to_string(a.join("config/wire/relay.json")).expect("relay.json missing");
+    assert!(
+        relay_json.contains("slot_id"),
+        "relay-state self.slot_id not populated: {relay_json}"
+    );
+}

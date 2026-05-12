@@ -6,6 +6,29 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.3 — Bugfix: `wire claim` is actually one-step
+
+Caught by live-smoke against the production relay: `wire claim <nick>` on a
+fresh `WIRE_HOME` (no prior `wire init`, no prior `wire bind-relay`) was
+bailing with `error: no slot allocated; run \`wire bind-relay <url>\` first`.
+That breaks the "ONE STEP" UX promise of v0.5 — the operator-facing pitch
+since v0.5.0 has been *single command, zero prior setup*. v0.5.0 → v0.5.2
+shipped this gap.
+
+`cmd_claim` in `src/cli.rs` now calls `pair_invite::ensure_self_with_relay()`
+exactly the way `cmd_add` and `cmd_pair` already did — auto-init identity if
+missing, auto-allocate relay slot if missing, then claim. Idempotent on
+already-initialized homes.
+
+New regression test `claim_from_fresh_home_one_step` in
+`tests/e2e_handle_pair.rs` codifies the invariant so future refactors
+re-introducing the bail-on-uninit check fail CI immediately.
+
+Operator-visible: a brand-new install can now do `wire claim
+coffee-ghost@wireup.net` and have everything (identity, slot, handle) come
+into existence in one command, exactly as advertised. Same fix is already
+in MCP-tool form via `wire_claim`.
+
 ### v0.5.2 — Rebrand to wireup.net + Cargo.toml bump
 
 Default relay URL bumped from `wire.laulpogan.com` to `wireup.net` across `pair_invite.rs::DEFAULT_RELAY`, `cli.rs` `--relay` defaults (3 commands), `pair_profile.rs` doc-comments and tests, `mcp.rs` tool descriptions, `README.md`, `AGENT.md`, `SPEC_v0_5.md`, `TESTING_FOR_FRIENDS.md`, `AWESOME_LISTS.md`, `LAUNCH_POSTS.md`, `COMPETITIVE_v0_5.md`, and the landing site. Cloudflare tunnel `wire` now routes `wireup.net` + `relay.wireup.net` to the same relay backend, with `wire.laulpogan.com` + `relay.laulpogan.com` kept alive indefinitely as legacy aliases (no forced migration; v0.4 deployments still work).
