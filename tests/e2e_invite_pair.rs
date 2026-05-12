@@ -131,10 +131,18 @@ async fn invite_url_one_paste_pair_e2e() {
     assert_eq!(accept["paired_with"].as_str(), Some("did:wire:paul"));
 
     // 3. Wait for paul daemon to pull + consume pair_drop → pin willard.
-    let willard_pinned = wait_until(Instant::now() + Duration::from_secs(15), || {
+    // Require BOTH trust + relay-state to contain willard so the diagnostic
+    // assertions below can't race the daemon's mid-cycle write order (trust
+    // first, relay-state second; on CI slow runners the two-phase tick was
+    // observable as flakiness).
+    let willard_pinned = wait_until(Instant::now() + Duration::from_secs(20), || {
         let peers = wire(&paul, &["peers", "--json"]);
-        let body = String::from_utf8_lossy(&peers.stdout);
-        body.contains("willard")
+        if !String::from_utf8_lossy(&peers.stdout).contains("willard") {
+            return false;
+        }
+        let relay_str =
+            std::fs::read_to_string(paul.join("config/wire/relay.json")).unwrap_or_default();
+        relay_str.contains("willard")
     });
     if !willard_pinned {
         eprintln!("--- paul trust.json ---");
