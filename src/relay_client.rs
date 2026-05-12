@@ -116,6 +116,26 @@ impl RelayClient {
         Ok(resp.json()?)
     }
 
+    /// R4 — probe slot attentiveness. Returns `(event_count, last_pull_at_unix)`
+    /// — the relay's view of the slot's owner's most recent poll. `None` for
+    /// `last_pull_at_unix` means the slot has not been pulled since relay
+    /// restart. Best-effort: any HTTP failure returns `Ok((0, None))` so the
+    /// caller's pre-flight check degrades to "no signal" rather than abort.
+    pub fn slot_state(&self, slot_id: &str, slot_token: &str) -> Result<(usize, Option<u64>)> {
+        let url = format!("{}/v1/slot/{slot_id}/state", self.base_url);
+        let resp = match self.client.get(&url).bearer_auth(slot_token).send() {
+            Ok(r) => r,
+            Err(_) => return Ok((0, None)),
+        };
+        if !resp.status().is_success() {
+            return Ok((0, None));
+        }
+        let v: Value = resp.json().unwrap_or(Value::Null);
+        let count = v.get("event_count").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let last = v.get("last_pull_at_unix").and_then(Value::as_u64);
+        Ok((count, last))
+    }
+
     pub fn healthz(&self) -> Result<bool> {
         let resp = self
             .client

@@ -1065,6 +1065,63 @@ fn cmd_peers(as_json: bool) -> Result<()> {
 
 // ---------- send ----------
 
+/// R4 attentiveness pre-flight. Best-effort: any failure is silent.
+///
+/// Looks up `peer` in relay-state for slot_id + slot_token + relay_url, asks
+/// the relay for the slot's `last_pull_at_unix`, and prints a warning to
+/// stderr if the peer hasn't polled in > 5min (or never has). Threshold of
+/// 300s is the same wire daemon polling cadence rule-of-thumb — a peer
+/// hasn't crossed two heartbeats means probably degraded.
+fn maybe_warn_peer_attentiveness(peer: &str) {
+    let state = match config::read_relay_state() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let p = state.get("peers").and_then(|p| p.get(peer));
+    let slot_id = match p.and_then(|p| p.get("slot_id")).and_then(Value::as_str) {
+        Some(s) if !s.is_empty() => s,
+        _ => return,
+    };
+    let slot_token = match p.and_then(|p| p.get("slot_token")).and_then(Value::as_str) {
+        Some(s) if !s.is_empty() => s,
+        _ => return,
+    };
+    let relay_url = match p.and_then(|p| p.get("relay_url")).and_then(Value::as_str) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => match state
+            .get("self")
+            .and_then(|s| s.get("relay_url"))
+            .and_then(Value::as_str)
+        {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => return,
+        },
+    };
+    let client = crate::relay_client::RelayClient::new(&relay_url);
+    let (_count, last_pull) = match client.slot_state(slot_id, slot_token) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match last_pull {
+        None => {
+            eprintln!(
+                "phyllis: {peer}'s line is silent — relay sees no pulls yet. message will queue, but they may not be listening."
+            );
+        }
+        Some(t) if now.saturating_sub(t) > 300 => {
+            let mins = now.saturating_sub(t) / 60;
+            eprintln!(
+                "phyllis: {peer} hasn't picked up in {mins}m — message will queue, but they may be away."
+            );
+        }
+        _ => {}
+    }
+}
+
 fn cmd_send(peer: &str, kind: &str, body_arg: &str, as_json: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
@@ -1107,6 +1164,12 @@ fn cmd_send(peer: &str, kind: &str, body_arg: &str, as_json: bool) -> Result<()>
     });
     let signed = sign_message_v31(&event, &sk_seed, &pk_bytes, &handle)?;
     let event_id = signed["event_id"].as_str().unwrap_or("").to_string();
+
+    // R4: best-effort attentiveness pre-flight. Look up the peer's slot
+    // coords in relay-state and ask the relay how recently the peer pulled.
+    // Warn on stderr if the peer hasn't pulled in >5min OR has never pulled.
+    // Never blocks the send — the event still queues to outbox.
+    maybe_warn_peer_attentiveness(peer);
 
     // For now we append to outbox JSONL and rely on a future daemon to push
     // to the relay. That's the file-system contract from AGENT_INTEGRATION.md.

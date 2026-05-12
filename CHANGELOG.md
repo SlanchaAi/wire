@@ -6,6 +6,41 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.4 — R4: `wire send` attentiveness pre-flight + phyllis voice on hot errors
+
+From the 2026-05-12 agent-attention-layer incident report (R4 in
+`docs/INCIDENT_REPORT_2026_05_12_AGENT_ATTENTION_LAYER.md`): when sending
+to a peer, the CLI now does a best-effort relay probe of the peer's slot
+freshness and warns the operator on stderr if the peer hasn't pulled
+recently. Never blocks the send.
+
+New protocol surface:
+- `GET /v1/slot/:slot_id/state` on the relay — auth'd by slot_token,
+  returns `{event_count, last_pull_at_unix}`. Updated on every
+  `list_events` call.
+- `RelayClient::slot_state()` — best-effort client probe; HTTP failures
+  return `(0, None)` so the pre-flight degrades gracefully.
+
+New CLI behaviour: `wire send <peer>` checks the peer's slot state and
+emits one of:
+- silent if peer pulled within last 5 min
+- `phyllis: <peer> hasn't picked up in Nm — message will queue, but they
+  may be away.` if last pull > 5 min ago
+- `phyllis: <peer>'s line is silent — relay sees no pulls yet.` if peer
+  has never pulled
+
+The send always queues the event to the outbox. The warning is advisory
+— exactly the signal the operator needed in the 2026-05-12 incident
+where peer's auto-responder was OAuth-broken and silently dropping
+inbound for 10 hours while wire transport stayed green.
+
+Also rolls in the **phyllis voice** rewrite of the six hottest user-
+facing error strings (per BRAND_BRAINSTORM.md §9): handle validation,
+relay healthz failure, slot not claimed, slot already taken, SAS digit
+mismatch, outbox empty. Tests updated to match new vocabulary.
+
+162 tests pass (160 + 2 new slot_state tests).
+
 ### v0.5.3 — Bugfix: `wire claim` is actually one-step
 
 Caught by live-smoke against the production relay: `wire claim <nick>` on a

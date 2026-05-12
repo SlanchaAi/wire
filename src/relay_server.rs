@@ -68,6 +68,11 @@ struct Inner {
     tokens: HashMap<String, String>,
     /// slot_id -> total bytes stored. Enforced against MAX_SLOT_BYTES.
     slot_bytes: HashMap<String, usize>,
+    /// slot_id -> wall-clock unix seconds of the slot owner's last `list_events`
+    /// call. Used by `GET /v1/slot/:slot_id/state` so a remote sender can
+    /// gauge whether the slot's owner is still polling (i.e., still attentive).
+    /// `None` means the slot has never been pulled since the relay restarted.
+    last_pull_at_unix: HashMap<String, u64>,
     /// code_hash -> pair_id (lookup so guests find the host).
     pair_lookup: HashMap<String, String>,
     /// pair_id -> ephemeral pairing state.
@@ -147,6 +152,7 @@ impl Relay {
             slots: HashMap::new(),
             tokens: HashMap::new(),
             slot_bytes: HashMap::new(),
+            last_pull_at_unix: HashMap::new(),
             pair_lookup: HashMap::new(),
             pair_slots: HashMap::new(),
             handles: HashMap::new(),
@@ -234,6 +240,7 @@ impl Relay {
         Router::new()
             .route("/healthz", get(healthz))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
+            .route("/v1/slot/:slot_id/state", get(slot_state))
             .route("/v1/pair/:pair_id", get(pair_get))
             .route("/v1/handle/claim", post(handle_claim))
             .route("/v1/handle/intro/:nick", post(handle_intro))
@@ -1038,7 +1045,15 @@ async fn list_events(
         return resp;
     }
     let limit = q.limit.unwrap_or(100).min(1000);
-    let inner = relay.inner.lock().await;
+    let mut inner = relay.inner.lock().await;
+    // R4: record this pull as proof that the slot owner is still polling.
+    // Anyone holding the slot_token (i.e., a paired peer) can later read
+    // last_pull_at_unix via /v1/slot/:slot_id/state to gauge attentiveness.
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    inner.last_pull_at_unix.insert(slot_id.clone(), now_unix);
     let events = inner.slots.get(&slot_id).cloned().unwrap_or_default();
     let start = match q.since {
         Some(eid) => events
@@ -1051,6 +1066,33 @@ async fn list_events(
     let end = (start + limit).min(events.len());
     let slice = events[start..end].to_vec();
     (StatusCode::OK, Json(slice)).into_response()
+}
+
+/// R4 — slot-attentiveness probe. Authenticated by slot_token (so only
+/// paired peers can ask). Returns `last_pull_at_unix` (the slot owner's most
+/// recent `list_events` call, in unix seconds) and `event_count` (total
+/// stored). A remote sender uses this before `wire send <peer>` to warn the
+/// operator if the peer hasn't polled recently.
+async fn slot_state(
+    State(relay): State<Relay>,
+    Path(slot_id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = check_token(&relay, &headers, &slot_id).await {
+        return resp;
+    }
+    let inner = relay.inner.lock().await;
+    let event_count = inner.slots.get(&slot_id).map(|v| v.len()).unwrap_or(0);
+    let last_pull_at_unix = inner.last_pull_at_unix.get(&slot_id).copied();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "slot_id": slot_id,
+            "event_count": event_count,
+            "last_pull_at_unix": last_pull_at_unix,
+        })),
+    )
+        .into_response()
 }
 
 async fn check_token(

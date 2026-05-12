@@ -349,3 +349,93 @@ async fn relay_recovers_state_after_restart() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["event_id"], "survive");
 }
+
+#[tokio::test]
+async fn slot_state_reports_pull_freshness_after_list_events() {
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir).await;
+    let client = reqwest::Client::new();
+    let alloc: Value = client
+        .post(format!("{base}/v1/slot/allocate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let slot_id = alloc["slot_id"].as_str().unwrap().to_string();
+    let slot_token = alloc["slot_token"].as_str().unwrap().to_string();
+
+    // Before any pull, last_pull_at_unix should be absent.
+    let state0: Value = client
+        .get(format!("{base}/v1/slot/{slot_id}/state"))
+        .bearer_auth(&slot_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(state0["event_count"], 0);
+    assert!(
+        state0["last_pull_at_unix"].is_null(),
+        "expected null pre-pull, got: {state0}"
+    );
+
+    // Pull the slot — this is the slot owner saying "I'm here, I'm reading".
+    let _: Value = client
+        .get(format!("{base}/v1/events/{slot_id}"))
+        .bearer_auth(&slot_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Now state should show a non-null last_pull_at_unix close to now.
+    let state1: Value = client
+        .get(format!("{base}/v1/slot/{slot_id}/state"))
+        .bearer_auth(&slot_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let last = state1["last_pull_at_unix"].as_u64().expect("populated");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(
+        now.saturating_sub(last) < 5,
+        "last_pull_at_unix should be within 5s of now (now={now} last={last})"
+    );
+}
+
+#[tokio::test]
+async fn slot_state_rejects_wrong_token() {
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir).await;
+    let client = reqwest::Client::new();
+    let alloc: Value = client
+        .post(format!("{base}/v1/slot/allocate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let slot_id = alloc["slot_id"].as_str().unwrap().to_string();
+
+    let resp = client
+        .get(format!("{base}/v1/slot/{slot_id}/state"))
+        .bearer_auth("wrong-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
