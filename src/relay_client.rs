@@ -261,6 +261,33 @@ impl RelayClient {
         Ok(resp.json()?)
     }
 
+    /// Resolve a handle on this relay via A2A v1.0 `.well-known/agent-card.json?handle=<nick>`.
+    /// Returns the parsed AgentCard JSON. Wire-served relays embed wire-native
+    /// fields (DID, slot_id, profile, raw card) under `extensions[0].params`.
+    /// Foreign A2A agents return their A2A card without wire ext — useful for
+    /// `wire whois` even when full mailbox pairing isn't possible.
+    pub fn well_known_agent_card_a2a(&self, handle: &str) -> Result<Value> {
+        let resp = self
+            .client
+            .get(format!("{}/.well-known/agent-card.json", self.base_url))
+            .query(&[("handle", handle)])
+            .send()
+            .with_context(|| {
+                format!(
+                    "GET {}/.well-known/agent-card.json?handle={handle}",
+                    self.base_url
+                )
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().unwrap_or_default();
+            return Err(anyhow!(
+                "well_known_agent_card_a2a failed: {status}: {detail}"
+            ));
+        }
+        Ok(resp.json()?)
+    }
+
     /// Resolve a handle on this relay via `.well-known/wire/agent?handle=<nick>`.
     /// Caller passes either the full `nick@domain` or just `<nick>` — the
     /// server only uses the local part.

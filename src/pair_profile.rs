@@ -187,7 +187,25 @@ pub fn resolve_handle(handle: &Handle, relay_url: Option<&str>) -> anyhow::Resul
         .map(str::to_string)
         .unwrap_or_else(|| format!("https://{}", handle.domain));
     let client = crate::relay_client::RelayClient::new(&base);
-    let resolved = client.well_known_agent(&handle.nick)?;
+
+    // v0.5.1: try the wire-native endpoint first (richer), fall back to the
+    // A2A v1.0 endpoint, then extract the wire extension from the A2A card.
+    // This lets `wire whois` resolve agents whose relay only serves the A2A
+    // schema (other A2A v1.0 implementations like agent-card-go, MSFT Agent
+    // Framework, A2A .NET SDK) and not just wire-native ones.
+    match client.well_known_agent(&handle.nick) {
+        Ok(resolved) => verify_wire_native_payload(&resolved).map(|()| resolved),
+        Err(_wire_err) => {
+            // Fall back to A2A endpoint.
+            let a2a_card = client.well_known_agent_card_a2a(&handle.nick)?;
+            unwrap_a2a_to_wire_payload(&a2a_card)
+        }
+    }
+}
+
+/// Verify the wire-native resolve payload has matching DID in container + card,
+/// and that the card signature is valid.
+fn verify_wire_native_payload(resolved: &Value) -> anyhow::Result<()> {
     let card = resolved
         .get("card")
         .ok_or_else(|| anyhow!("resolved payload missing 'card' field"))?;
@@ -204,7 +222,51 @@ pub fn resolve_handle(handle: &Handle, relay_url: Option<&str>) -> anyhow::Resul
     if did_in_resp != did_in_card {
         bail!("resolved DID mismatch: payload={did_in_resp} card={did_in_card}");
     }
-    Ok(resolved)
+    Ok(())
+}
+
+/// Given an A2A v1.0 AgentCard, extract the wire extension (if present) and
+/// return a wire-native-shaped payload `{did, nick, card, slot_id, relay_url,
+/// claimed_at}`. If no wire extension is present, return a degraded payload
+/// (still useful for `wire whois` display) with the A2A-only fields.
+fn unwrap_a2a_to_wire_payload(a2a: &Value) -> anyhow::Result<Value> {
+    let wire_ext = a2a
+        .get("extensions")
+        .and_then(Value::as_array)
+        .and_then(|exts| {
+            exts.iter().find(|e| {
+                e.get("uri")
+                    .and_then(Value::as_str)
+                    .map(|u| u.starts_with("https://github.com/laulpogan/wire/ext"))
+                    .unwrap_or(false)
+            })
+        });
+    if let Some(ext) = wire_ext {
+        let params = ext
+            .get("params")
+            .cloned()
+            .ok_or_else(|| anyhow!("A2A wire extension missing params"))?;
+        // Verify wire card sig inside the extension.
+        if let Some(card) = params.get("card") {
+            crate::agent_card::verify_agent_card(card)
+                .map_err(|e| anyhow!("A2A wire extension card sig invalid: {e}"))?;
+        }
+        return Ok(params);
+    }
+
+    // No wire extension. Return a degraded but useful payload built from A2A
+    // standard fields. `wire add` will detect the missing slot_id and refuse
+    // to pair (no mailbox to drop into), but `wire whois` can still render.
+    Ok(json!({
+        "did": a2a.get("id").cloned().unwrap_or(Value::Null),
+        "nick": a2a.get("name").cloned().unwrap_or(Value::Null),
+        "card": Value::Null,
+        "slot_id": Value::Null,
+        "relay_url": a2a.get("endpoint").cloned().unwrap_or(Value::Null),
+        "claimed_at": Value::Null,
+        "a2a_only": true,
+        "a2a_card": a2a.clone(),
+    }))
 }
 
 /// Render the local agent's profile as a friendly multi-line string for
