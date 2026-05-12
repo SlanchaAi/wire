@@ -6,6 +6,69 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.6 — R1 phase 2: daemon subscribes to the SSE stream
+
+Second half of R1 from `docs/INCIDENT_REPORT_2026_05_12_AGENT_ATTENTION_LAYER.md`.
+Builds on the v0.5.5 relay-side SSE endpoint. The daemon now opens its
+own slot's stream on startup and uses it as the wake signal for the
+polling loop. End-to-end effect: a peer's `wire send` reaches the
+recipient's local inbox in tens of milliseconds — at least as long as
+the receiver has `wire daemon` running. The 5-second polling cadence
+(and the 25-minute /loop-iteration cadence that triggered the
+2026-05-12 incident) become irrelevant for any connected peer.
+
+How it works:
+- New `src/daemon_stream.rs` module — spawns a dedicated thread on
+  daemon startup that opens `GET /v1/events/<own_slot>/stream` against
+  the operator's configured relay using their own `slot_token`. The
+  thread parses SSE `data:` lines as they arrive and signals a
+  `std::sync::mpsc::channel` on every event.
+- Daemon main loop replaces `std::thread::sleep(interval)` with
+  `wake_rx.recv_timeout(interval)` — sleeps until either (a) the next
+  poll-interval tick OR (b) a stream wake-up, whichever comes first.
+  On wake, the loop drains any accumulated wakes (multiple stream
+  events coalesce into a single pull) and runs the normal
+  `run_sync_push` + `run_sync_pull` + `pending_pair::tick` cycle.
+- Polling stays in place as the safety net. Stream-down does NOT mean
+  events-down — the regular interval still ticks and re-fetches via
+  `list_events`. If the stream errors or disconnects, the subscriber
+  reconnects with exponential backoff (1s → 2s → 4s → 8s, capped 30s).
+- One-way wake signal, not the data path. The actual event verify +
+  inbox write goes through `run_sync_pull` so we keep signature
+  verification, dedup, and trust enforcement on the exact same path as
+  polling. The stream only changes WHEN pull runs, not HOW.
+
+Failure model:
+- Relay restart: stream closes cleanly, subscriber reconnects in 1s.
+- Network partition: read returns `Err`, backoff retry to 30s cap.
+- Daemon hasn't been paired yet (`relay-state.self` empty): subscriber
+  errors with "relay-state missing", sleeps for backoff, retries — by
+  the time `wire claim` or `wire pair` populates state, the next
+  reconnect picks it up automatically. No daemon restart required.
+- `wire daemon --once` (one-shot CI mode): subscriber thread is NOT
+  spawned. Single-cycle behaviour unchanged.
+
+MCP integration (free): the inbox-watcher introduced in v0.2.0 fires
+`notifications/resources/updated` on every new line written to
+`state/wire/inbox/<peer>.jsonl`. With v0.5.6 the daemon now writes to
+inbox in ~10ms instead of ~5s, so a connected Claude Code session
+subscribed to `wire://inbox/<peer>` sees the same near-real-time push.
+No new MCP tool needed — `wire_subscribe` is unnecessary because the
+existing resource-subscription path is now stream-driven.
+
+Operator-visible:
+- Running `wire daemon` now logs occasional `daemon-stream: ...` lines
+  on connect/disconnect/reconnect for observability.
+- Pulls fire on stream events rather than (just) every 5s, so the
+  "pulled=N" log lines come in bursts matching peer activity instead
+  of at clockwork intervals.
+- `wire daemon --once` unchanged (CI use case).
+
+Tests: 48+ pass on changed surfaces (relay/cli/mcp_pair/handle_pair
+suites). e2e_detached_pair has a pre-existing local-only flake on this
+Spark machine (verified pre-existing on clean v0.5.4 HEAD); CI runs in
+a clean container and was green on v0.5.4 + v0.5.5.
+
 ### v0.5.5 — R1 phase 1: server-sent-events push stream on relay
 
 First half of R1 from the agent-attention-layer postmortem

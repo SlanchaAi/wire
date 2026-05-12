@@ -1892,6 +1892,16 @@ fn cmd_daemon(interval_secs: u64, once: bool, as_json: bool) -> Result<()> {
         eprintln!("daemon: pending-pair cleanup_on_startup error: {e:#}");
     }
 
+    // R1 phase 2: spawn the SSE stream subscriber. On every event pushed
+    // to our slot, the subscriber signals `wake_rx`; we use it as the
+    // sleep-or-wake gate of the polling loop. Polling stays as the
+    // safety net — stream errors fall back transparently to the existing
+    // interval-based cadence.
+    let (wake_tx, wake_rx) = std::sync::mpsc::channel::<()>();
+    if !once {
+        crate::daemon_stream::spawn_stream_subscriber(wake_tx);
+    }
+
     loop {
         let pushed = run_sync_push().unwrap_or_else(|e| {
             eprintln!("daemon: push error: {e:#}");
@@ -1957,7 +1967,12 @@ fn cmd_daemon(interval_secs: u64, once: bool, as_json: bool) -> Result<()> {
         if once {
             return Ok(());
         }
-        std::thread::sleep(interval);
+        // Wait either for the next poll-interval tick OR for a stream
+        // wake signal — whichever comes first. Drain any additional
+        // wake-ups that accumulated during the previous cycle since one
+        // pull catches up everything.
+        let _ = wake_rx.recv_timeout(interval);
+        while wake_rx.try_recv().is_ok() {}
     }
 }
 
