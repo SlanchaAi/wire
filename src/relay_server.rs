@@ -73,6 +73,12 @@ struct Inner {
     /// gauge whether the slot's owner is still polling (i.e., still attentive).
     /// `None` means the slot has never been pulled since the relay restarted.
     last_pull_at_unix: HashMap<String, u64>,
+    /// slot_id -> active SSE subscribers (R1 push). Each `UnboundedSender`
+    /// belongs to one open `GET /v1/events/:slot_id/stream` connection.
+    /// On every successful `post_event` to a slot we walk the slot's list
+    /// and broadcast the event; closed channels are pruned lazily on send-
+    /// error. Auth: subscribers presented a valid slot_token at stream open.
+    streams: HashMap<String, Vec<tokio::sync::mpsc::UnboundedSender<Value>>>,
     /// code_hash -> pair_id (lookup so guests find the host).
     pair_lookup: HashMap<String, String>,
     /// pair_id -> ephemeral pairing state.
@@ -153,6 +159,7 @@ impl Relay {
             tokens: HashMap::new(),
             slot_bytes: HashMap::new(),
             last_pull_at_unix: HashMap::new(),
+            streams: HashMap::new(),
             pair_lookup: HashMap::new(),
             pair_slots: HashMap::new(),
             handles: HashMap::new(),
@@ -241,6 +248,7 @@ impl Relay {
             .route("/healthz", get(healthz))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
             .route("/v1/slot/:slot_id/state", get(slot_state))
+            .route("/v1/events/:slot_id/stream", get(stream_events))
             .route("/v1/pair/:pair_id", get(pair_get))
             .route("/v1/handle/claim", post(handle_claim))
             .route("/v1/handle/intro/:nick", post(handle_intro))
@@ -437,10 +445,65 @@ async fn post_event(
         )
             .into_response();
     }
+    // R1 push: broadcast the new event to every active SSE subscriber on
+    // this slot. Dead channels are pruned in-place. The broadcast happens
+    // AFTER the disk persist so subscribers and disk readers see the same
+    // events; on persist failure we already returned 500 above.
+    {
+        let mut inner = relay.inner.lock().await;
+        if let Some(subs) = inner.streams.get_mut(&slot_id) {
+            subs.retain(|tx| tx.send(req.event.clone()).is_ok());
+        }
+    }
     (
         StatusCode::CREATED,
         Json(json!({"event_id": event_id, "status": "stored"})),
     )
+        .into_response()
+}
+
+/// R1 — server-sent-events push stream for a slot. Auth'd by slot_token
+/// (same as `list_events`). The connection registers an `UnboundedSender`
+/// on the slot's subscriber list; every subsequent `post_event` to the slot
+/// fans out to all subscribers as `data: <event-json>\n\n` lines. The
+/// connection stays open until the client disconnects.
+///
+/// A 30-second keepalive ping is emitted automatically so reverse proxies
+/// (Cloudflare tunnel, nginx) don't time out the upstream.
+///
+/// Note: the subscriber sees events posted AFTER it subscribed. To catch
+/// up on history first, the client should call `GET /v1/events/:slot_id`
+/// with `since=` before opening the stream.
+async fn stream_events(
+    State(relay): State<Relay>,
+    Path(slot_id): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+    use futures::stream::StreamExt;
+
+    if let Err(resp) = check_token(&relay, &headers, &slot_id).await {
+        return resp;
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    {
+        let mut inner = relay.inner.lock().await;
+        inner.streams.entry(slot_id.clone()).or_default().push(tx);
+    }
+
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(|ev| {
+        SseEvent::default()
+            .json_data(&ev)
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    });
+
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(30))
+                .text("phyllis: still on the line"),
+        )
         .into_response()
 }
 

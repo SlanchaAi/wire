@@ -6,6 +6,56 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.5 — R1 phase 1: server-sent-events push stream on relay
+
+First half of R1 from the agent-attention-layer postmortem
+(`docs/INCIDENT_REPORT_2026_05_12_AGENT_ATTENTION_LAYER.md`). Eliminates
+the polling-cadence floor for connected peers: when peer B opens an SSE
+stream against their own slot, every `post_event` from peer A reaches B
+in milliseconds instead of waiting for B's next ~5s daemon pull.
+
+New protocol surface:
+- `GET /v1/events/:slot_id/stream` — Server-Sent Events endpoint, auth'd
+  by `slot_token` (same gate as `list_events`). Returns
+  `Content-Type: text/event-stream`. On open the relay registers an
+  `UnboundedSender` on the slot's subscriber list; every subsequent
+  `post_event` to that slot fans out the event as `data:
+  <event-json>\n\n`. The connection stays open until the client
+  disconnects.
+- Keepalive comment `phyllis: still on the line` emitted every 30s so
+  Cloudflare tunnel + nginx don't time-out the upstream.
+- Subscriber sees events posted AFTER it subscribed. To catch up on
+  history first, clients should `GET /v1/events/:slot_id?since=` before
+  opening the stream — same model as Kafka/Redis pubsub.
+
+Implementation:
+- Inner state gains `streams: HashMap<String, Vec<UnboundedSender>>` —
+  per-slot active subscriber channels. `post_event` walks the
+  subscriber list after a successful disk persist and broadcasts; dead
+  channels (peer disconnected) are pruned lazily on `tx.send` returning
+  `Err`.
+- Disk-persist runs BEFORE broadcast, so durable stream readers and
+  cold-start `list_events` readers observe the same set of events.
+
+Deferred to v0.5.6:
+- Daemon-side subscriber loop (`wire daemon` opens the stream on its own
+  slot, falls back to polling on disconnect with exponential backoff).
+- `wire daemon --stream-only` flag for no-poll operation when the stream
+  is reliable.
+- MCP-side `wire_subscribe` tool that surfaces stream events as
+  `notifications/resources/updated` to connected Claude Code sessions
+  (closes R1 in full).
+
+Tests: 162+ pass (160 previous + 2 new SSE tests in tests/relay.rs):
+- `sse_stream_pushes_event_to_subscriber` opens stream, posts event,
+  asserts the event_id arrives on the SSE response within 2s.
+- `sse_stream_rejects_wrong_token` asserts 403 on missing/wrong auth.
+
+Operator-visible: nothing today. Daemon still polls. The endpoint is
+live on prod (`https://wireup.net/v1/events/<slot_id>/stream`) for
+external tools (MCP servers, watchdogs, custom integrations) to consume
+now. Daemon adoption ships in v0.5.6.
+
 ### v0.5.4 — R4: `wire send` attentiveness pre-flight + phyllis voice on hot errors
 
 From the 2026-05-12 agent-attention-layer incident report (R4 in

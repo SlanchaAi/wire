@@ -439,3 +439,100 @@ async fn slot_state_rejects_wrong_token() {
         .unwrap();
     assert_eq!(resp.status(), 403);
 }
+
+#[tokio::test]
+async fn sse_stream_pushes_event_to_subscriber() {
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir).await;
+    let client = reqwest::Client::new();
+    let alloc: Value = client
+        .post(format!("{base}/v1/slot/allocate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let slot_id = alloc["slot_id"].as_str().unwrap().to_string();
+    let slot_token = alloc["slot_token"].as_str().unwrap().to_string();
+
+    // Open SSE subscriber in background.
+    let stream_url = format!("{base}/v1/events/{slot_id}/stream");
+    let tok_for_stream = slot_token.clone();
+    let recv = tokio::spawn(async move {
+        use futures::StreamExt;
+        let resp = reqwest::Client::new()
+            .get(&stream_url)
+            .bearer_auth(&tok_for_stream)
+            .send()
+            .await
+            .expect("stream open");
+        assert!(
+            resp.status().is_success(),
+            "stream status: {}",
+            resp.status()
+        );
+        let mut bytes = resp.bytes_stream();
+        // Read up to ~2s for the first data: line we expect.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut buf = Vec::new();
+        while tokio::time::Instant::now() < deadline {
+            tokio::select! {
+                chunk = bytes.next() => match chunk {
+                    Some(Ok(b)) => {
+                        buf.extend_from_slice(&b);
+                        let s = String::from_utf8_lossy(&buf);
+                        if s.contains("nudge-me-now") {
+                            return true;
+                        }
+                    }
+                    _ => return false,
+                },
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+            }
+        }
+        false
+    });
+
+    // Give the subscriber a moment to register.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // POST an event; subscriber should see it on the stream.
+    let resp = client
+        .post(format!("{base}/v1/events/{slot_id}"))
+        .bearer_auth(&slot_token)
+        .json(&json!({"event": {"event_id": "nudge-me-now", "body": "wake up"}}))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let saw_it = recv.await.unwrap();
+    assert!(saw_it, "SSE subscriber never saw the broadcast event");
+}
+
+#[tokio::test]
+async fn sse_stream_rejects_wrong_token() {
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir).await;
+    let client = reqwest::Client::new();
+    let alloc: Value = client
+        .post(format!("{base}/v1/slot/allocate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let slot_id = alloc["slot_id"].as_str().unwrap().to_string();
+
+    let resp = client
+        .get(format!("{base}/v1/events/{slot_id}/stream"))
+        .bearer_auth("wrong")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}

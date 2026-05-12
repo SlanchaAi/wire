@@ -1,6 +1,6 @@
 [package]
 name = "wire"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2024"
 rust-version = "1.88"
 description = "Magic-wormhole for AI agents — bilateral signed-message bus over a mailbox relay"
@@ -38,9 +38,11 @@ dirs = "5"
 anyhow = "1"
 axum = "0.7"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "fs", "io-util"] }
+tokio-stream = "0.1"
+futures = "0.3"
 tower = "0.5"
 tower_governor = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "stream"] }
 spake2 = "0.4"
 hkdf = "0.12"
 chacha20poly1305 = "0.10"
