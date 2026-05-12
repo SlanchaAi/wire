@@ -639,7 +639,7 @@ async fn handle_claim(
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
-                "error": "nick must be 2..=32 chars, [a-z0-9_-], not reserved",
+                "error": "phyllis: that handle won't fit in the books — nicks need 2-32 chars, lowercase [a-z0-9_-], not on the reserved list",
                 "nick": req.nick,
             })),
         )
@@ -673,7 +673,7 @@ async fn handle_claim(
             return (
                 StatusCode::CONFLICT,
                 Json(json!({
-                    "error": "nick already claimed by a different DID",
+                    "error": "phyllis: this line's already taken by someone else — pick another handle or buzz the rightful owner",
                     "nick": req.nick,
                     "claimed_by": existing.did,
                 })),
@@ -762,7 +762,7 @@ async fn handle_intro(
             None => {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(json!({"error": format!("nick {nick:?} not claimed on this relay")})),
+                    Json(json!({"error": format!("phyllis: that number's been disconnected — {nick:?} isn't claimed on this switchboard")})),
                 )
                     .into_response();
             }
@@ -917,7 +917,7 @@ async fn well_known_agent_card_a2a(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("nick {nick:?} not claimed on this relay")})),
+                Json(json!({"error": format!("phyllis: that number's been disconnected — {nick:?} isn't claimed on this switchboard")})),
             )
                 .into_response();
         }
@@ -1022,7 +1022,7 @@ async fn well_known_agent(
             .into_response(),
         None => (
             StatusCode::NOT_FOUND,
-            Json(json!({"error": format!("nick {nick:?} not claimed on this relay")})),
+            Json(json!({"error": format!("phyllis: that number's been disconnected — {nick:?} isn't claimed on this switchboard")})),
         )
             .into_response(),
     }

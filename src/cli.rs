@@ -711,7 +711,9 @@ fn cmd_init(handle: &str, name: Option<&str>, relay: Option<&str>, as_json: bool
     if let Some(url) = relay {
         let client = crate::relay_client::RelayClient::new(url);
         if !client.healthz().unwrap_or(false) {
-            bail!("relay healthz failed at {url} — is the server running?");
+            bail!(
+                "phyllis: silent line — the switchboard at {url} isn't picking up. is the server running?"
+            );
         }
         let alloc = client.allocate_slot(Some(handle))?;
         let mut state = config::read_relay_state()?;
@@ -1286,7 +1288,9 @@ fn cmd_bind_relay(url: &str, as_json: bool) -> Result<()> {
 
     let client = crate::relay_client::RelayClient::new(url);
     if !client.healthz().unwrap_or(false) {
-        bail!("relay healthz failed at {url} — is the server running?");
+        bail!(
+            "phyllis: silent line — the switchboard at {url} isn't picking up. is the server running?"
+        );
     }
     let alloc = client.allocate_slot(Some(&handle))?;
     let mut state = config::read_relay_state()?;
@@ -1373,7 +1377,7 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
                 serde_json::to_string(&json!({"pushed": [], "skipped": []}))?
             );
         } else {
-            println!("outbox empty — nothing to push");
+            println!("phyllis: nothing to dial out — write a message first with `wire send`");
         }
         return Ok(());
     }
@@ -1611,7 +1615,9 @@ fn cmd_rotate_slot(no_announce: bool, as_json: bool) -> Result<()> {
     // Allocate new slot on the same relay.
     let client = crate::relay_client::RelayClient::new(&url);
     if !client.healthz().unwrap_or(false) {
-        bail!("relay healthz failed at {url} — abort rotation; old slot still valid");
+        bail!(
+            "phyllis: silent line — the switchboard at {url} isn't picking up. aborting rotation; old slot still valid."
+        );
     }
     let alloc = client.allocate_slot(Some(&handle))?;
     let new_slot_id = alloc.slot_id.clone();
@@ -2945,7 +2951,9 @@ fn cmd_claim(
     as_json: bool,
 ) -> Result<()> {
     if !crate::pair_profile::is_valid_nick(nick) {
-        bail!("nick {nick:?} invalid — must be 2..=32 chars, [a-z0-9_-], not reserved");
+        bail!(
+            "phyllis: {nick:?} won't fit in the books — handles need 2-32 chars, lowercase [a-z0-9_-], not on the reserved list"
+        );
     }
     // `wire claim` is the one-step bootstrap: auto-init + auto-allocate slot
     // + claim handle. Operator should never have to run init/bind-relay first.

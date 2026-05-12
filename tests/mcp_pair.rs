@@ -471,7 +471,10 @@ async fn pair_confirm_with_wrong_digits_aborts_session() {
             Duration::from_secs(5),
         )
         .expect_err("wrong digits must abort");
-    assert!(err.contains("mismatch"), "got: {err}");
+    assert!(
+        err.contains("mismatch") || err.contains("wrong dial-back"),
+        "got: {err}"
+    );
 
     // Subsequent call to that session_id returns "no such session" (eagerly removed)
     let err2 = mcp

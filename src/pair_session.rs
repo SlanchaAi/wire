@@ -183,7 +183,7 @@ pub fn pair_session_open(
     if need_alloc {
         let client = crate::relay_client::RelayClient::new(relay_url);
         if !client.healthz().unwrap_or(false) {
-            bail!("relay healthz failed at {relay_url}");
+            bail!("phyllis: silent line — the switchboard at {relay_url} isn't picking up");
         }
         let alloc = client.allocate_slot(Some(&handle))?;
         relay_state["self"] = json!({
@@ -378,7 +378,9 @@ pub fn pair_session_confirm_sas(s: &mut PairSessionState, typed: &str) -> Result
         }
         if diff != 0 {
             s.aborted = Some("SAS mismatch — user-typed digits did not match".into());
-            bail!("SAS digit mismatch — pairing aborted (start a fresh pair-initiate)");
+            bail!(
+                "phyllis: wrong dial-back — the operator is hanging up the line (start a fresh pair-initiate)"
+            );
         }
     }
     s.sas_confirmed = true;
@@ -554,7 +556,7 @@ pub fn init_self_idempotent(
             if relay_state["self"].is_null() {
                 let client = crate::relay_client::RelayClient::new(url);
                 if !client.healthz().unwrap_or(false) {
-                    bail!("relay healthz failed at {url}");
+                    bail!("phyllis: silent line — the switchboard at {url} isn't picking up");
                 }
                 let alloc = client.allocate_slot(Some(handle))?;
                 let mut rs = relay_state;
@@ -596,7 +598,7 @@ pub fn init_self_idempotent(
     if let Some(url) = relay {
         let client = crate::relay_client::RelayClient::new(url);
         if !client.healthz().unwrap_or(false) {
-            bail!("relay healthz failed at {url}");
+            bail!("phyllis: silent line — the switchboard at {url} isn't picking up");
         }
         let alloc = client.allocate_slot(Some(handle))?;
         let mut rs = crate::config::read_relay_state()?;
@@ -628,7 +630,7 @@ mod tests {
     fn confirm_sas_mismatch_aborts_session() {
         let mut s = mk_sas_ready_state("384217");
         let err = pair_session_confirm_sas(&mut s, "999999").unwrap_err();
-        assert!(err.to_string().contains("mismatch"));
+        assert!(err.to_string().contains("wrong dial-back"));
         assert!(s.aborted.is_some());
         assert!(!s.sas_confirmed);
     }

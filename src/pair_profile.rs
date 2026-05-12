@@ -58,7 +58,9 @@ pub fn parse_handle(s: &str) -> Result<Handle> {
         bail!("handle has empty nick or domain: {s:?}");
     }
     if !is_valid_nick(nick) {
-        bail!("nick {nick:?} invalid — must be 2..=32 chars, [a-z0-9_-], not reserved");
+        bail!(
+            "phyllis: {nick:?} won't fit in the books — handles need 2-32 chars, lowercase [a-z0-9_-], not on the reserved list"
+        );
     }
     if !is_valid_domain(domain) {
         bail!("domain {domain:?} invalid — must be lowercase ASCII, dot-separated");

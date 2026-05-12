@@ -217,7 +217,7 @@ async fn claim_409_on_competing_nick() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("409") || stderr.contains("already claimed"),
+        stderr.contains("409") || stderr.contains("already taken"),
         "stderr: {stderr}"
     );
 }
