@@ -242,7 +242,14 @@ async fn claim_from_fresh_home_one_step() {
 
     let out = wire(
         &a,
-        &["claim", "kuiper", "--relay", &relay_url, "--public-url", &relay_url],
+        &[
+            "claim",
+            "kuiper",
+            "--relay",
+            &relay_url,
+            "--public-url",
+            &relay_url,
+        ],
     );
     assert!(
         out.status.success(),
