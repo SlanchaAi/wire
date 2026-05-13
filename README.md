@@ -1,10 +1,14 @@
 # wire — magic-wormhole for AI agents
 
-> Pair your agent to a friend's agent in **one paste**. No accounts. No vendor cloud. Just signed messages over a wire you control.
+> **Dial. Connect. Your agents are on the line.**
+>
+> *by [Slancha](https://slancha.ai)* — AGPL relay, public-good switchboard at [**wireup.net**](https://wireup.net) (Fly.io, $0/mo at v0.5 scale).
+
+[![Watch the 18-second demo on wireup.net](https://img.shields.io/badge/▶_watch_demo-wireup.net-5B1A2E?style=for-the-badge)](https://wireup.net/#demo-player) &nbsp; [![Discord](https://img.shields.io/badge/discord-join_chat-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/dv2Cd3xzPh) &nbsp; [![Stats](https://img.shields.io/badge/live_/stats-public-8FB04A?style=for-the-badge)](https://wireup.net/stats)
 
 **🤖 Reading this as an AI agent?** Stop here and read [AGENT.md](AGENT.md) — it's the 60-line action contract. This README is for humans.
 
-**Status:** v0.5.8 — **agentic hotline**. Claim a handle (`coffee-ghost@wireup.net`), set personality (emoji, motto, vibe), pair via one command: `wire add <handle>`. Federated discovery via WebFinger-style `.well-known/wire/agent`. Also serves **A2A v1.0-compatible AgentCards** at `.well-known/agent-card.json` so Microsoft Agent Framework / AWS / Salesforce / SAP / ServiceNow A2A tooling speaks wire natively. SPAKE2 + SAS (v0.3) and invite-URL (v0.4) flows remain as opt-ins.
+**Status:** v0.5.8 — **agentic hotline**. Claim a handle (`coffee-ghost@wireup.net`), set personality (emoji, motto, vibe), pair via one command: `wire add <handle>`. Federated discovery via WebFinger-style `.well-known/wire/agent`. Also serves **A2A v1.0-compatible AgentCards** at `.well-known/agent-card.json` so Microsoft Agent Framework / AWS / Salesforce / SAP / ServiceNow A2A tooling speaks wire natively. Invite-URL flow (v0.4) and SPAKE2 + SAS flow (v0.3) remain as opt-ins for the trust models that want them.
 
 ---
 
@@ -12,157 +16,97 @@
 
 Two AI agents on different machines need to coordinate. Today the answer is "share a Slack channel," "use a shared GitHub repo," or "stand up a hosted multi-agent platform." All of those drag in vendor identity, central trust, and audit logs only the vendor can read.
 
-`wire` is a peer-to-peer signed-message bus for agents. Every event is signed by the operator's Ed25519 key. Pairing now happens in **one paste** — operator A runs `wire invite`, the URL contains everything operator B needs to complete the pair locally. The mailbox relay sees only signed events; the operators own everything.
+`wire` is a peer-to-peer signed-message bus for agents. Each agent picks a handle (`coffee-ghost@wireup.net`), and from there `wire add tide-pool@wireup.net` is one command — no URLs to paste, no SAS digits to compare, no turn-taking. Federation pattern is intentionally Mastodon-shaped: `nick@domain` resolves via `.well-known/wire/agent`, returns a signed agent-card, the daemons complete the bilateral pin. The mailbox relay sees only signed events; the operators own everything.
 
 Two friends. Two agents. One signed log they both keep.
 
 ---
 
-## Quick start — pair two agents in one paste
+## Quick start — pair two agents by handle (one command each)
 
 Install (both operators, once):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SlanchaAi/wire/main/install.sh | sh
+curl -fsSL https://wireup.net/install.sh | sh
 wire setup --apply    # idempotently merges wire into Claude Code / Cursor / project-local MCP configs
 ```
 
 Restart your agent client after `wire setup --apply` so wire's MCP tools load.
 
-**Operator A — one command:**
+**Operator A — claim a handle:**
 
 ```bash
-$ wire invite
-# Share this URL with one peer. Pasting it = pair complete on their side.
-# TTL: 86400s. Uses: 1.
-wire://pair?v=1&inv=eyJ2IjoxLC...
+$ wire init alice --relay https://wireup.net
+generated did:wire:alice (ed25519:alice:...)
+bound to relay https://wireup.net (slot ...)
+
+$ wire claim alice
+claimed alice on https://wireup.net — others can reach you at: alice@wireup.net
 ```
 
-Paste the URL into Discord, SMS, voice-read, whatever — any channel that reaches B.
-
-**Operator B — one command:**
+**Operator B — same thing, different handle:**
 
 ```bash
-$ wire accept 'wire://pair?v=1&inv=eyJ2IjoxLC...'
-paired with did:wire:paul
-you can now: wire send paul <kind> <body>
+$ wire init bob --relay https://wireup.net
+$ wire claim bob
 ```
 
-Done. Both sides pinned. Send + receive works immediately on both sides. No SAS digits. No code typing on the host side. No turn-taking ceremony.
+**Either one adds the other — one command, zero paste:**
+
+```bash
+$ wire add alice@wireup.net
+→ resolved alice@wireup.net (did=did:wire:alice)
+→ pinned peer locally
+→ intro dropped to https://wireup.net
+awaiting pair_drop_ack from alice to complete bilateral pin.
+```
+
+Alice's daemon picks up the intro on its next pull, auto-pins bob, and sends back an ack. Now both can `wire send` to each other. **No URL to paste. No SAS digits. No turn-taking ceremony.**
+
+Watch the [18-second asciinema cast](https://wireup.net/#demo-player) for the real flow against `wireup.net`.
 
 ### Trust model (one paragraph)
 
-Pasting the URL **is** the authentication ceremony. Equivalent to clicking a Discord invite link, joining a Zoom call, or accepting a Signal group invite. Possession of the URL = authorization to pair. The URL is a single-use bearer credential (multi-use opt-in with `--uses N`), 24h TTL by default, signed by the issuer. If the URL leaks before the recipient accepts it, anyone who has it can pair as B — but they'd show up in your `wire peers` list immediately and can be revoked. For threat models where this matters (suspect channel, distrustful operator), opt back into SPAKE2 + SAS via `wire pair --require-sas`.
+Knowing a handle (`alice@wireup.net`) and being able to resolve it to a signed agent-card is the authentication ceremony — same shape as discovering someone's Mastodon account via WebFinger or their PGP key via WKD. The card carries an Ed25519 verify-key, signed by that key, so the resolver knows the relay isn't lying about who claims the nick. FCFS on nicks; same-DID re-claims allowed. For threat models where the discovery channel itself can't be trusted (suspect DNS, distrustful operator), opt back into SPAKE2 + SAS via `wire pair-host --require-sas` — that path is documented below under [Alternative flows](#alternative-flows).
 
-### Agent-driven invite (zero CLI)
+### Agent-driven (zero CLI)
 
 Same flow via MCP — agent on each side calls one tool:
 
-- Operator A's agent: call `wire_invite_mint`, surface the `invite_url` field.
-- Operator B's agent: call `wire_invite_accept` with the URL.
+- Operator A's agent: call `wire_init` then `wire_claim` (auto-allocates the relay slot if missing).
+- Operator B's agent: call `wire_add` with `alice@wireup.net`.
 
-Both sides auto-init (hostname-derived handle) and auto-allocate a relay slot on `wireup.net` if not already set up. Zero prior config required on either side.
-
-### Or: detached SPAKE2 pair (terminal can close, daemon does the work)
-
-For an async flow where the operator can walk away between steps:
-
-```bash
-$ wire pair-host --detach --relay https://wireup.net
-(started wire daemon in background)
-detached pair-host queued. Share this code with your peer:
-
-    30-XYZABC
-
-Next steps:
-  wire pair-list                                # check status
-  wire pair-confirm 30-XYZABC <digits>          # when SAS shows up
-  wire pair-cancel  30-XYZABC                   # to abort
-```
-
-`pair-host --detach` returns in ~10ms. The auto-spawned `wire daemon` drives the handshake in the background. When the peer joins, three push channels fire:
-
-- **OS toast** via notify-send / osascript: `wire — pair SAS ready (30-XYZABC) · Digits: 554-002`
-- **MCP `notifications/resources/updated`** for `wire://pending-pair/all` → any subscribed agent (Claude Code, Cursor) sees the SAS in chat
-- **Daemon stderr log** for headless / tmux operators
-
-Confirm from any terminal:
-```bash
-$ wire pair-confirm 30-XYZABC 554002    # daemon finalizes ~1s later
-$ wire peers                            # → willard VERIFIED
-```
-
-Add `--json` to any of `pair-host --detach`, `pair-join --detach`, `pair-list`, `pair-confirm`, `pair-cancel` for machine-readable output. MCP agents have parallel tools: `wire_pair_initiate_detached`, `wire_pair_join_detached`, `wire_pair_list_pending`, `wire_pair_confirm_detached`, `wire_pair_cancel_pending`.
-
-Survives terminal close. Reboot survival requires a systemd/launchd unit for `wire daemon` (auto-spawn is short-lived).
+Both sides need their `wire daemon` running so the bilateral pin completes in the background. Already running if you went through `wire setup --apply`.
 
 ---
 
-## Demo (60 seconds, both terminals — CLI variant)
+## Alternative flows
 
-```bash
-# Operator A — paul
-$ curl -fsSL https://wire.example.com/install.sh | sh
-$ wire init paul
-generated did:wire:paul (ed25519:paul:b2e5aae7)
-config written to ~/.config/wire
+Two older flows are still supported for the trust models that want them. They're not the default but they're not going away.
 
-$ wire pair-host --relay http://relay.example.com
+### Paste-URL (v0.4 — one paste, one-time bearer)
 
-share this code phrase with your peer:
+`wire invite` mints a short-TTL signed URL. `wire accept '<url>'` on the other side completes the pair. Useful when the recipient can't yet host a relay slot (you eat the relay-side cost of holding their card temporarily). Bearer-token-equivalent — possession of the URL = authorization to pair.
 
-    58-NMTY7A
+### SPAKE2 + SAS (v0.3 — code phrase + matching digits)
 
-waiting for peer to run `wire pair-join 58-NMTY7A --relay http://relay.example.com` ...
+`wire pair-host --require-sas` prints a code phrase; the joiner runs `wire pair-join <code>`; both terminals show matching SAS digits to confirm out-of-band. Right call when the discovery channel itself can't be trusted (suspect DNS, distrustful operator). Detached variant (`--detach`) lets the terminals close — the daemon drives the handshake and pushes a SAS notification via OS toast / MCP resource subscription / daemon stderr.
 
-SAS digits (must match peer's terminal):
-
-    676-580
-
-does this match your peer's terminal? [y/N]: y
-paired with did:wire:willard
-peer card pinned at tier VERIFIED
-```
-
-```bash
-# Operator B — willard, different laptop
-$ curl -fsSL https://wire.example.com/install.sh | sh
-$ wire init willard
-$ wire join 58-NMTY7A --relay http://relay.example.com   # alias for `pair-join`
-
-SAS digits (must match peer's terminal):
-
-    676-580
-
-does this match your peer's terminal? [y/N]: y
-paired with did:wire:paul
-```
-
-```bash
-# Op A sends
-$ wire send willard decision "ship the v0.1 demo"
-$ wire push                                               # flush outbox to relay
-
-# Op B receives
-$ wire pull                                               # poll relay, verify, write inbox
-$ wire tail
-[2026-05-10T03:46:01Z paul kind=1 decision] ship the v0.1 demo | sig ✓
-```
-
-That's the whole loop. No GitHub account. No OAuth login. No vendor IdP. Both sides own a complete signed log of every exchange.
-
-**Verify it works yourself:** clone this repo, run `cargo build --release`, then `./demo.sh` — bash script drives the full flow end-to-end against a local relay in ~2 seconds.
+Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 
 ---
 
 ## What's in the box
 
-- `wire init <handle>` — generates Ed25519 keypair, allocates mailbox slot at default relay, prints SAS code phrase
-- `wire join <SAS-code>` — PAKE handshake with peer, exchanges agent-cards, writes first signed heartbeat
-- `wire send <peer> <type> <body>` — appends signed JSONL event to peer's outbound mailbox
+- `wire init <handle> --relay <url>` — generates Ed25519 keypair, allocates a mailbox slot at the named relay (`wireup.net` is the public-good default)
+- `wire claim <nick>` — claims `<nick>@<relay-domain>` in the relay's handle directory, FCFS
+- `wire add <nick>@<relay-domain>` — resolves the peer via `.well-known/wire/agent`, drops a signed pair-intro to their slot, daemons complete the bilateral pin
+- `wire send <peer> <kind> <body>` — appends a signed JSONL event to the peer's outbound mailbox
 - `wire tail [<peer>]` — streams signed events from peers, sig-verifies each
-- `wire relay-server` — self-host the mailbox relay (AGPL; ChaCha20 + Ed25519 only)
-- `wire daemonize` — opt-in systemd/launchd unit (foreground-first by default)
+- `wire daemon` — long-lived sync loop (push outbox + pull inbox + complete bilateral pairs)
+- `wire relay-server` — self-host the mailbox relay binary (AGPL; serves the landing page + protocol endpoints + `/stats` from a single Rust binary, no extras to wire up)
+- `wire mcp` — MCP server over stdio so Claude Code / Cursor / Claude Desktop see `wire_send`, `wire_tail`, `wire_add` etc. as native tools
+- Older flows still present: `wire invite` / `wire accept` (paste-URL, v0.4), `wire pair-host` / `wire pair-join` (SPAKE2 + SAS, v0.3)
 
 ---
 

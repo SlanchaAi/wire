@@ -147,4 +147,4 @@ echo "  wire claim <handle>"
 echo "  wire add <friend>@wireup.net"
 echo
 echo "source: https://github.com/${REPO}"
-echo "discord: https://discord.gg/Qx3Bb2fF"
+echo "discord: https://discord.gg/dv2Cd3xzPh"
