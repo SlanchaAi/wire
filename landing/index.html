@@ -659,8 +659,8 @@
         <script>
           window.addEventListener('DOMContentLoaded', function () {
             if (typeof AsciinemaPlayer !== 'undefined') {
-              AsciinemaPlayer.create('/demo.cast', document.getElementById('demo-player'), {
-                autoPlay: false,
+              var player = AsciinemaPlayer.create('/demo.cast', document.getElementById('demo-player'), {
+                autoPlay: true,
                 loop: false,
                 speed: 1.4,
                 idleTimeLimit: 1.2,
