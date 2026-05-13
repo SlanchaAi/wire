@@ -1,0 +1,14 @@
+# CF Pages path routing — landing on Pages, wire endpoints proxied to Fly.
+#
+# Status 200 = rewrite (proxy), not redirect. Query strings preserved.
+# Only non-streaming endpoints proxied through Pages. SSE / slot / pair /
+# event traffic flows direct to whatever `relay_url` each handle stored
+# (e.g. https://relay.wireup.net) — never through wireup.net.
+#
+# Future handle claims MUST set relay_url = https://relay.wireup.net so
+# returned agent cards point clients at Fly direct, bypassing this proxy.
+
+/healthz                       https://wireup-relay.fly.dev/healthz                       200
+/.well-known/wire/agent        https://wireup-relay.fly.dev/.well-known/wire/agent        200
+/.well-known/agent-card.json   https://wireup-relay.fly.dev/.well-known/agent-card.json   200
+/v1/handle/*                   https://wireup-relay.fly.dev/v1/handle/:splat              200
