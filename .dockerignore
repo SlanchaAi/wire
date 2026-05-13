@@ -19,9 +19,10 @@ SESSION_LOG_*.md
 DEPLOY_TEST.md
 PENTEST.md
 scripts/pentest.sh
-# Docs / examples — not needed at runtime, slow the build context
+# Docs / examples / landing — not needed at runtime, slow the build context
 docs/
 examples/
+landing/
 demo-*.sh
 *.md
 !README.md
