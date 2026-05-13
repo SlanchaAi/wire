@@ -43,6 +43,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tower_governor::{
     GovernorLayer, governor::GovernorConfigBuilder, key_extractor::GlobalKeyExtractor,
@@ -59,6 +61,18 @@ const MAX_SLOT_BYTES: usize = 64 * 1024 * 1024;
 pub struct Relay {
     inner: Arc<Mutex<Inner>>,
     state_dir: PathBuf,
+    counters: Arc<RelayCounters>,
+}
+
+/// Lock-free usage counters served by GET /stats. All counters reset to 0
+/// on process restart; persisted state (handles_active, slots_active) lives
+/// on the volume and survives. boot_unix lets /stats compute uptime.
+struct RelayCounters {
+    boot_unix: u64,
+    handle_claims_total: AtomicU64,
+    slot_allocations_total: AtomicU64,
+    pair_opens_total: AtomicU64,
+    events_posted_total: AtomicU64,
 }
 
 struct Inner {
@@ -211,9 +225,20 @@ impl Relay {
                 }
             }
         }
+        let boot_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
             state_dir,
+            counters: Arc::new(RelayCounters {
+                boot_unix,
+                handle_claims_total: AtomicU64::new(0),
+                slot_allocations_total: AtomicU64::new(0),
+                pair_opens_total: AtomicU64::new(0),
+                events_posted_total: AtomicU64::new(0),
+            }),
         })
     }
 
@@ -248,6 +273,7 @@ impl Relay {
             .route("/", get(landing_index))
             .route("/favicon.svg", get(landing_favicon))
             .route("/healthz", get(healthz))
+            .route("/stats", get(stats))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
             .route("/v1/slot/:slot_id/state", get(slot_state))
             .route("/v1/events/:slot_id/stream", get(stream_events))
@@ -339,6 +365,31 @@ async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, "ok\n")
 }
 
+// Public aggregate-usage snapshot. Counter fields (`*_total`) reset on
+// process restart; state fields (`handles_active`, `slots_active`) survive
+// on the persistent volume. No DIDs / handles / IPs leaked — counts only.
+async fn stats(State(relay): State<Relay>) -> impl IntoResponse {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let inner = relay.inner.lock().await;
+    let streams_active: usize = inner.streams.values().map(Vec::len).sum();
+    let body = json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_seconds": now.saturating_sub(relay.counters.boot_unix),
+        "handles_active": inner.handles.len(),
+        "slots_active": inner.slots.len(),
+        "pair_slots_open": inner.pair_slots.len(),
+        "streams_active": streams_active,
+        "handle_claims_total": relay.counters.handle_claims_total.load(Ordering::Relaxed),
+        "slot_allocations_total": relay.counters.slot_allocations_total.load(Ordering::Relaxed),
+        "pair_opens_total": relay.counters.pair_opens_total.load(Ordering::Relaxed),
+        "events_posted_total": relay.counters.events_posted_total.load(Ordering::Relaxed),
+    });
+    (StatusCode::OK, Json(body))
+}
+
 // Static landing site baked into the binary so apex (wireup.net) can flip
 // straight to Fly without a separate static-host. ~37 KB total — negligible
 // against the release binary size, and keeps the relay self-contained.
@@ -381,6 +432,10 @@ async fn allocate_slot(
         )
             .into_response();
     }
+    relay
+        .counters
+        .slot_allocations_total
+        .fetch_add(1, Ordering::Relaxed);
     (
         StatusCode::CREATED,
         Json(json!({"slot_id": slot_id, "slot_token": slot_token})),
@@ -471,6 +526,10 @@ async fn post_event(
         )
             .into_response();
     }
+    relay
+        .counters
+        .events_posted_total
+        .fetch_add(1, Ordering::Relaxed);
     // R1 push: broadcast the new event to every active SSE subscriber on
     // this slot. Dead channels are pruned in-place. The broadcast happens
     // AFTER the disk persist so subscribers and disk readers see the same
@@ -593,6 +652,10 @@ async fn pair_open(
                 .pair_lookup
                 .insert(req.code_hash.clone(), new_id.clone());
             inner.pair_slots.insert(new_id.clone(), PairSlot::default());
+            relay
+                .counters
+                .pair_opens_total
+                .fetch_add(1, Ordering::Relaxed);
             new_id
         }
     };
@@ -816,6 +879,10 @@ async fn handle_claim(
         let mut inner = relay.inner.lock().await;
         inner.handles.insert(req.nick.clone(), record);
     }
+    relay
+        .counters
+        .handle_claims_total
+        .fetch_add(1, Ordering::Relaxed);
     (
         StatusCode::CREATED,
         Json(json!({
