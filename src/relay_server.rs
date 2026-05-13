@@ -286,6 +286,7 @@ impl Relay {
         Router::new()
             .route("/", get(landing_index))
             .route("/favicon.svg", get(landing_favicon))
+            .route("/og.png", get(landing_og))
             .route("/healthz", get(healthz))
             .route("/stats", get(stats))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
@@ -460,6 +461,21 @@ async fn landing_favicon() -> impl IntoResponse {
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
         FAVICON_SVG,
+    )
+}
+
+async fn landing_og() -> impl IntoResponse {
+    static OG_PNG: &[u8] = include_bytes!("../landing/og.png");
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=86400",
+            ),
+        ],
+        OG_PNG,
     )
 }
 
