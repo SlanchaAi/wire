@@ -288,6 +288,7 @@ impl Relay {
             .route("/favicon.svg", get(landing_favicon))
             .route("/og.png", get(landing_og))
             .route("/demo.cast", get(landing_demo_cast))
+            .route("/install.sh", get(landing_install_sh))
             .route("/healthz", get(healthz))
             .route("/stats", get(stats))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
@@ -495,6 +496,24 @@ async fn landing_demo_cast() -> impl IntoResponse {
             ),
         ],
         DEMO_CAST,
+    )
+}
+
+async fn landing_install_sh() -> impl IntoResponse {
+    static INSTALL_SH: &[u8] = include_bytes!("../landing/install.sh");
+    (
+        StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/x-shellscript; charset=utf-8",
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=300",
+            ),
+        ],
+        INSTALL_SH,
     )
 }
 

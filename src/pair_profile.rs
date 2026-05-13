@@ -21,9 +21,73 @@ pub const PROFILE_SCHEMA_VERSION: &str = "v0.5";
 
 /// Reserved nick set — refuse to mint any of these as the local part of a
 /// handle. Length-1 nicks also reserved (impose `nick.len() >= 2`).
+///
+/// Categories (alphabetical within each group):
+///   - protocol primitives:  agent, system, wire
+///   - common-handle-pattern admins (NOT pre-claimed; reserved for the
+///     domain operator to claim if they choose):  abuse, admin, api, contact,
+///     help, info, noreply, postmaster, root, security, support, webmaster
+///   - meta/audience selectors:  all, everyone, here, me, none, null, self,
+///     team, you
+///   - system / daemon-shaped:  bot, daemon, kernel, robot, server, service, sys
+///   - role / staff names:  mod, moderator, official, ops, owner, staff
+///   - test / placeholder names:  bar, baz, demo, example, foo, test
+///   - brand defense (third-party AI vendors — discourage squat-impersonation):
+///     anthropic, claude, copilot, cursor, gemini, mistral, openai
+///   - slancha = wire's developer org — defensive even though pre-claimed.
 pub const RESERVED_NICKS: &[&str] = &[
-    "wire", "system", "admin", "root", "null", "everyone", "here", "me", "you", "self", "all",
+    "abuse",
+    "admin",
+    "agent",
+    "all",
+    "anthropic",
+    "api",
+    "bar",
+    "baz",
+    "bot",
+    "claude",
+    "contact",
+    "copilot",
+    "cursor",
+    "daemon",
+    "demo",
+    "everyone",
+    "example",
+    "foo",
+    "gemini",
+    "help",
+    "here",
+    "hostmaster",
+    "info",
+    "kernel",
+    "me",
+    "mistral",
+    "mod",
+    "moderator",
     "none",
+    "noreply",
+    "null",
+    "official",
+    "openai",
+    "ops",
+    "owner",
+    "postmaster",
+    "robot",
+    "root",
+    "security",
+    "self",
+    "server",
+    "service",
+    "slancha",
+    "staff",
+    "support",
+    "sys",
+    "system",
+    "team",
+    "test",
+    "webmaster",
+    "wire",
+    "you",
 ];
 
 /// Parsed handle: `nick@domain`. `domain` is lowercased.

@@ -1,0 +1,73 @@
+name: backup wireup-relay /data
+# Nightly snapshot of the wireup-relay Fly volume mounted at /data.
+# - tars /data on the machine via `flyctl ssh console -C tar ...`
+# - downloads the tar into the runner
+# - uploads as a GitHub Actions artifact (90-day retention, free)
+#
+# Restore path:
+#   gh run download <run-id> -n wireup-relay-data
+#   flyctl ssh sftp shell -a wireup-relay <<< 'put data.tar.gz /data/'
+#   flyctl ssh console -a wireup-relay -C 'tar xzf /data/data.tar.gz -C /data/'
+#
+# Why not R2/S3: those need a new account + creds. GHA artifacts cost $0,
+# survive 90 days, and don't add operational surface. Switch to R2 when
+# the relay holds anything that matters past 90 days.
+
+on:
+  schedule:
+    - cron: '0 7 * * *'   # 07:00 UTC = 03:00 EDT / 00:00 PDT
+  workflow_dispatch:       # manual trigger via gh workflow run
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    name: tar /data → artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: tar /data on the Fly machine
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          # tar to /tmp (ephemeral) so the volume itself isn't polluted
+          flyctl ssh console -a wireup-relay -C "sh -c 'cd /data && tar czf /tmp/data-snapshot.tar.gz . && ls -la /tmp/data-snapshot.tar.gz'"
+
+      - name: copy tar from machine → runner
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          flyctl ssh sftp get -a wireup-relay /tmp/data-snapshot.tar.gz artifact/data-snapshot.tar.gz
+          ls -la artifact/
+
+      - name: stamp metadata
+        run: |
+          set -euo pipefail
+          cd artifact
+          {
+            echo "snapshot_taken_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "github_run_id: ${{ github.run_id }}"
+            echo "tarball_sha256: $(sha256sum data-snapshot.tar.gz | awk '{print $1}')"
+            echo "tarball_size_bytes: $(stat -c%s data-snapshot.tar.gz)"
+          } > METADATA.txt
+          cat METADATA.txt
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wireup-relay-data-${{ github.run_id }}
+          path: artifact/
+          retention-days: 90
+
+      - name: clean up tar on machine
+        if: always()
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl ssh console -a wireup-relay -C "rm -f /tmp/data-snapshot.tar.gz" || true
