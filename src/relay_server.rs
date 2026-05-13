@@ -64,15 +64,24 @@ pub struct Relay {
     counters: Arc<RelayCounters>,
 }
 
-/// Lock-free usage counters served by GET /stats. All counters reset to 0
-/// on process restart; persisted state (handles_active, slots_active) lives
-/// on the volume and survives. boot_unix lets /stats compute uptime.
+/// Lock-free usage counters served by GET /stats. Counter values are
+/// loaded from `<state_dir>/counters.json` on startup and snapshotted back
+/// to disk every 30s by `spawn_counter_persister`, so deploys + restarts
+/// don't reset them. `boot_unix` is per-process — uptime is process-local.
 struct RelayCounters {
     boot_unix: u64,
     handle_claims_total: AtomicU64,
     slot_allocations_total: AtomicU64,
     pair_opens_total: AtomicU64,
     events_posted_total: AtomicU64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct CountersSnapshot {
+    handle_claims_total: u64,
+    slot_allocations_total: u64,
+    pair_opens_total: u64,
+    events_posted_total: u64,
 }
 
 struct Inner {
@@ -229,15 +238,20 @@ impl Relay {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        // Reload counter snapshot. Missing/corrupt file → start at zero.
+        let snap: CountersSnapshot = match tokio::fs::read_to_string(state_dir.join("counters.json")).await {
+            Ok(body) => serde_json::from_str(&body).unwrap_or_default(),
+            Err(_) => CountersSnapshot::default(),
+        };
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
             state_dir,
             counters: Arc::new(RelayCounters {
                 boot_unix,
-                handle_claims_total: AtomicU64::new(0),
-                slot_allocations_total: AtomicU64::new(0),
-                pair_opens_total: AtomicU64::new(0),
-                events_posted_total: AtomicU64::new(0),
+                handle_claims_total: AtomicU64::new(snap.handle_claims_total),
+                slot_allocations_total: AtomicU64::new(snap.slot_allocations_total),
+                pair_opens_total: AtomicU64::new(snap.pair_opens_total),
+                events_posted_total: AtomicU64::new(snap.events_posted_total),
             }),
         })
     }
@@ -319,6 +333,41 @@ impl Relay {
             loop {
                 tick.tick().await;
                 me.evict_expired_pair_slots().await;
+            }
+        });
+    }
+
+    /// Snapshot the in-process counters to `<state_dir>/counters.json`. Called
+    /// every 30s by `spawn_counter_persister` and once during graceful
+    /// shutdown so a deploy doesn't reset the running totals.
+    pub async fn persist_counters(&self) -> Result<()> {
+        let snap = CountersSnapshot {
+            handle_claims_total: self.counters.handle_claims_total.load(Ordering::Relaxed),
+            slot_allocations_total: self.counters.slot_allocations_total.load(Ordering::Relaxed),
+            pair_opens_total: self.counters.pair_opens_total.load(Ordering::Relaxed),
+            events_posted_total: self.counters.events_posted_total.load(Ordering::Relaxed),
+        };
+        let body = serde_json::to_vec_pretty(&snap)?;
+        let path = self.state_dir.join("counters.json");
+        tokio::fs::write(path, body).await?;
+        Ok(())
+    }
+
+    /// Spawn a background tokio task that calls `persist_counters` every 30s.
+    /// Loss bound: counters can drift back up to 30s on crash. Acceptable for
+    /// telemetry-style observability.
+    pub fn spawn_counter_persister(&self) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            // First tick fires immediately; skip it so we don't write the
+            // freshly-loaded snapshot back unchanged.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                if let Err(e) = me.persist_counters().await {
+                    eprintln!("counter persist failed: {e}");
+                }
             }
         });
     }
@@ -1322,15 +1371,20 @@ fn random_hex(n_bytes: usize) -> String {
 pub async fn serve(bind: &str, state_dir: PathBuf) -> Result<()> {
     let relay = Relay::new(state_dir).await?;
     relay.spawn_pair_sweeper();
-    let app = relay.router();
+    relay.spawn_counter_persister();
+    let app = relay.clone().router();
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
     eprintln!("wire relay-server listening on {bind}");
+    let shutdown_relay = relay.clone();
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
-            eprintln!("\nshutting down");
+            eprintln!("\nshutting down — final counter snapshot");
+            if let Err(e) = shutdown_relay.persist_counters().await {
+                eprintln!("final counter persist failed: {e}");
+            }
         })
         .await?;
     Ok(())
