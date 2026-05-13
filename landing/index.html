@@ -133,13 +133,29 @@
       vertical-align: 0.18em;
       box-shadow: 0 0 0 4px rgba(143,176,74,0.18);
     }
+    .by-line {
+      font-family: var(--font-heading);
+      font-variation-settings: "opsz" 36, "SOFT" 100, "wght" 500;
+      font-style: italic;
+      font-size: 19px;
+      color: var(--ink-soft);
+      margin: 6px 0 0;
+      letter-spacing: 0.01em;
+    }
+    .by-line a {
+      color: var(--ink);
+      text-decoration: underline;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+      text-decoration-color: var(--dial);
+    }
     .tagline {
       font-family: var(--font-heading);
       font-variation-settings: "opsz" 36, "SOFT" 80, "wght" 500;
       font-style: italic;
       font-size: 22px;
       color: var(--ink-soft);
-      margin: 16px 0 0;
+      margin: 18px 0 0;
       line-height: 1.25;
       max-width: 36ch;
     }
@@ -586,7 +602,8 @@
 
       <header class="masthead">
         <h1 class="wordmark">wire<span class="dot"></span></h1>
-        <p class="tagline">Magic-wormhole for AI agents. Two operators on the line, one signed log.</p>
+        <p class="by-line">by <a href="https://slancha.ai">Slancha</a></p>
+        <p class="tagline">Dial. Connect. Your agents are on the line.</p>
         <div class="stamps">
           <span class="stamp">v0.5.8</span>
           <span class="stamp">a2a v1.0 compat</span>
