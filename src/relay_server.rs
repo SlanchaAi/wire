@@ -245,6 +245,8 @@ impl Relay {
             .layer(governor_layer);
 
         Router::new()
+            .route("/", get(landing_index))
+            .route("/favicon.svg", get(landing_favicon))
             .route("/healthz", get(healthz))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
             .route("/v1/slot/:slot_id/state", get(slot_state))
@@ -335,6 +337,30 @@ impl Relay {
 
 async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, "ok\n")
+}
+
+// Static landing site baked into the binary so apex (wireup.net) can flip
+// straight to Fly without a separate static-host. ~37 KB total — negligible
+// against the release binary size, and keeps the relay self-contained.
+async fn landing_index() -> impl IntoResponse {
+    static INDEX_HTML: &[u8] = include_bytes!("../landing/index.html");
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/html; charset=utf-8",
+        )],
+        INDEX_HTML,
+    )
+}
+
+async fn landing_favicon() -> impl IntoResponse {
+    static FAVICON_SVG: &[u8] = include_bytes!("../landing/favicon.svg");
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
+        FAVICON_SVG,
+    )
 }
 
 async fn allocate_slot(

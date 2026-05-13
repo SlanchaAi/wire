@@ -19,10 +19,10 @@ SESSION_LOG_*.md
 DEPLOY_TEST.md
 PENTEST.md
 scripts/pentest.sh
-# Docs / examples / landing — not needed at runtime, slow the build context
+# Docs / examples — not needed at runtime, slow the build context.
+# landing/ IS needed: relay binary embeds it via include_bytes! to serve /.
 docs/
 examples/
-landing/
 demo-*.sh
 *.md
 !README.md

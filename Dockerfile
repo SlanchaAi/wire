@@ -20,6 +20,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY tests ./tests
+COPY landing ./landing
 
 RUN cargo build --release --bin wire
 
