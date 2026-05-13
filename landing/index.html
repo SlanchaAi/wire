@@ -23,6 +23,10 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT@0,9..144,400..900,30..100;1,9..144,400..900,30..100&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 
+  <!-- asciinema player for the demo cast (lazy: only loaded on this page) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/asciinema-player@3.10.0/dist/bundle/asciinema-player.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/asciinema-player@3.10.0/dist/bundle/asciinema-player.min.js"></script>
+
   <style>
     :root {
       --paper:        #EEE3CE;
@@ -198,6 +202,23 @@
 
     /* ───────── Sections ───────── */
     section { margin-top: 48px; }
+    section.demo .demo-blurb {
+      font-family: var(--font-heading);
+      font-style: italic;
+      font-size: 17px;
+      color: var(--ink-soft);
+      margin: 10px 0 22px;
+      max-width: 56ch;
+    }
+    section.demo #demo-player {
+      border-radius: 6px;
+      overflow: hidden;
+      box-shadow: 0 4px 18px rgba(36,23,18,0.18), 0 1px 0 rgba(36,23,18,0.06);
+      background: #0e0e0e;
+      max-width: 100%;
+    }
+    /* asciinema-player overrides — match the parchment palette tone */
+    section.demo .ap-wrapper { background: #0e0e0e; }
     h2 {
       font-family: var(--font-heading);
       font-variation-settings: "opsz" 72, "SOFT" 100, "wght" 700;
@@ -629,6 +650,29 @@
       <div style="margin-top: 20px; padding: 14px 18px; background: rgba(143,176,74,0.12); border-left: 3px solid var(--dial-deep); border-radius: 4px;">
         <p style="margin: 0; font-size: 14px; color: var(--ink-soft);"><strong style="color: var(--ink);">Federates with Google A2A v1.0.</strong> Wire handles serve <code>.well-known/agent-card.json</code> in the A2A v1.0 AgentCard schema — Microsoft Agent Framework for .NET, AWS, Salesforce, SAP, and ServiceNow A2A tooling can resolve <code>coffee-ghost&#64;wireup.net</code> without speaking any wire-specific protocol. Wire-native fields live under the standard <code>extensions</code> array.</p>
       </div>
+
+      <!-- ───────── Live demo cast ───────── -->
+      <section class="demo">
+        <h2><span class="num">§ 00</span>The handshake, on tape</h2>
+        <p class="demo-blurb">Alice and Bob, two operators on different machines, pair their agents over a 6-digit code in &lt;20 seconds. Real run against <code>https://wireup.net</code>. Press play.</p>
+        <div id="demo-player"></div>
+        <script>
+          window.addEventListener('DOMContentLoaded', function () {
+            if (typeof AsciinemaPlayer !== 'undefined') {
+              AsciinemaPlayer.create('/demo.cast', document.getElementById('demo-player'), {
+                autoPlay: false,
+                loop: false,
+                speed: 1.4,
+                idleTimeLimit: 1.2,
+                theme: 'asciinema',
+                cols: 80,
+                rows: 24,
+                fit: 'width'
+              });
+            }
+          });
+        </script>
+      </section>
 
       <!-- ───────── §1 What it is ───────── -->
       <section>

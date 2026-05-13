@@ -287,6 +287,7 @@ impl Relay {
             .route("/", get(landing_index))
             .route("/favicon.svg", get(landing_favicon))
             .route("/og.png", get(landing_og))
+            .route("/demo.cast", get(landing_demo_cast))
             .route("/healthz", get(healthz))
             .route("/stats", get(stats))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
@@ -476,6 +477,24 @@ async fn landing_og() -> impl IntoResponse {
             ),
         ],
         OG_PNG,
+    )
+}
+
+async fn landing_demo_cast() -> impl IntoResponse {
+    static DEMO_CAST: &[u8] = include_bytes!("../landing/demo.cast");
+    (
+        StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/x-asciicast",
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=3600",
+            ),
+        ],
+        DEMO_CAST,
     )
 }
 
