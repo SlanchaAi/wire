@@ -86,6 +86,30 @@ struct CountersSnapshot {
     events_posted_total: u64,
 }
 
+/// One row in `<state_dir>/stats-history.jsonl` — written every 30s by
+/// `spawn_counter_persister` so /stats.html can draw sparklines. Live-state
+/// fields (`*_active`) are point-in-time; *_total fields are the cumulative
+/// counters at that timestamp. Field names mirror the /stats endpoint.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HistoryEntry {
+    ts: u64,
+    handles_active: usize,
+    slots_active: usize,
+    pair_slots_open: usize,
+    streams_active: usize,
+    handle_claims_total: u64,
+    handle_first_claims_total: u64,
+    slot_allocations_total: u64,
+    pair_opens_total: u64,
+    events_posted_total: u64,
+}
+
+#[derive(Deserialize)]
+pub struct StatsHistoryQuery {
+    /// How many hours of history to return, default 24, max 168 (7 days).
+    pub hours: Option<u64>,
+}
+
 struct Inner {
     /// slot_id -> ordered list of stored events (parsed JSON Values).
     slots: HashMap<String, Vec<Value>>,
@@ -327,6 +351,8 @@ impl Relay {
             .route("/install.sh", get(landing_install_sh))
             .route("/healthz", get(healthz))
             .route("/stats", get(stats))
+            .route("/stats.html", get(landing_stats_html))
+            .route("/stats.history", get(stats_history))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
             .route("/v1/slot/:slot_id/state", get(slot_state))
             .route(
@@ -401,9 +427,56 @@ impl Relay {
         Ok(())
     }
 
-    /// Spawn a background tokio task that calls `persist_counters` every 30s.
-    /// Loss bound: counters can drift back up to 30s on crash. Acceptable for
-    /// telemetry-style observability.
+    /// Append one row to `<state_dir>/stats-history.jsonl` mirroring the
+    /// /stats endpoint at this instant. Used by /stats.html for sparklines.
+    /// File grows ~250 B per call → ~720 KB/day. A future prune wave can
+    /// roll old entries off once the history exceeds 90 days.
+    pub async fn append_history(&self) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let (handles_active, slots_active, pair_slots_open, streams_active) = {
+            let inner = self.inner.lock().await;
+            (
+                inner.handles.len(),
+                inner.slots.len(),
+                inner.pair_slots.len(),
+                inner.streams.values().map(Vec::len).sum::<usize>(),
+            )
+        };
+        let entry = HistoryEntry {
+            ts: now,
+            handles_active,
+            slots_active,
+            pair_slots_open,
+            streams_active,
+            handle_claims_total: self.counters.handle_claims_total.load(Ordering::Relaxed),
+            handle_first_claims_total: self
+                .counters
+                .handle_first_claims_total
+                .load(Ordering::Relaxed),
+            slot_allocations_total: self.counters.slot_allocations_total.load(Ordering::Relaxed),
+            pair_opens_total: self.counters.pair_opens_total.load(Ordering::Relaxed),
+            events_posted_total: self.counters.events_posted_total.load(Ordering::Relaxed),
+        };
+        let line = serde_json::to_vec(&entry)?;
+        let path = self.state_dir.join("stats-history.jsonl");
+        let mut f = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await?;
+        f.write_all(&line).await?;
+        f.write_all(b"\n").await?;
+        f.flush().await?;
+        Ok(())
+    }
+
+    /// Spawn a background tokio task that calls `persist_counters` every 30s
+    /// + appends a history row on the same tick. Loss bound: counters can
+    ///   drift back up to 30s on crash, history can drop one row.
     pub fn spawn_counter_persister(&self) {
         let me = self.clone();
         tokio::spawn(async move {
@@ -415,6 +488,9 @@ impl Relay {
                 tick.tick().await;
                 if let Err(e) = me.persist_counters().await {
                     eprintln!("counter persist failed: {e}");
+                }
+                if let Err(e) = me.append_history().await {
+                    eprintln!("history append failed: {e}");
                 }
             }
         });
@@ -465,6 +541,51 @@ async fn healthz() -> impl IntoResponse {
 // Public aggregate-usage snapshot. Counter fields (`*_total`) reset on
 // process restart; state fields (`handles_active`, `slots_active`) survive
 // on the persistent volume. No DIDs / handles / IPs leaked — counts only.
+async fn stats_history(
+    State(relay): State<Relay>,
+    Query(q): Query<StatsHistoryQuery>,
+) -> impl IntoResponse {
+    let hours = q.hours.unwrap_or(24).min(168);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cutoff = now.saturating_sub(hours * 3600);
+    let path = relay.state_dir.join("stats-history.jsonl");
+    let body = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+    let entries: Vec<Value> = body
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| {
+            v.get("ts")
+                .and_then(Value::as_u64)
+                .map(|t| t >= cutoff)
+                .unwrap_or(false)
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "hours": hours,
+            "now_unix": now,
+            "count": entries.len(),
+            "entries": entries,
+        })),
+    )
+}
+
+async fn landing_stats_html() -> impl IntoResponse {
+    static STATS_HTML: &[u8] = include_bytes!("../landing/stats.html");
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=60"),
+        ],
+        STATS_HTML,
+    )
+}
+
 async fn stats(State(relay): State<Relay>) -> impl IntoResponse {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
