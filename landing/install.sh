@@ -23,7 +23,6 @@ set -eu
 
 REPO="SlanchaAi/wire"
 BIN_NAME="wire"
-RELEASE_API="https://api.github.com/repos/${REPO}/releases/latest"
 
 # ───── platform detection ─────
 uname_s=$(uname -s 2>/dev/null || echo unknown)
@@ -70,19 +69,12 @@ else
 fi
 mkdir -p "$INSTALL_DIR"
 
-# ───── find latest release tag ─────
-echo "→ finding latest wire release..."
-TAG=$(curl -fsSL "$RELEASE_API" \
-    | grep -m1 '"tag_name"' \
-    | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
-if [ -z "$TAG" ]; then
-    echo "could not determine latest release tag from $RELEASE_API" >&2
-    exit 1
-fi
-echo "  latest: $TAG"
-
-BIN_FILE="wire-${TAG}-${TARGET}"
-DL_BIN="https://github.com/${REPO}/releases/download/${TAG}/wire-${TARGET}"
+# ───── direct download URLs ─────
+# Use GitHub's /releases/latest/download/<asset> alias — it 302-redirects to
+# the current tag's asset without consuming the anonymous API rate limit (60
+# req/hr/IP). Anonymous clients on shared NATs were 403ing during install.
+echo "→ resolving latest wire release..."
+DL_BIN="https://github.com/${REPO}/releases/latest/download/wire-${TARGET}"
 DL_SHA="${DL_BIN}.sha256"
 
 # ───── download + verify ─────
@@ -139,7 +131,8 @@ case ":$PATH:" in
 esac
 
 echo
-echo "wire ${TAG} installed at $INSTALL_DIR/$BIN_NAME"
+VERSION_LINE=$("$INSTALL_DIR/$BIN_NAME" --version 2>/dev/null || echo "wire")
+echo "${VERSION_LINE} installed at $INSTALL_DIR/$BIN_NAME"
 echo
 echo "next step:"
 echo "  wire init <handle> --relay https://wireup.net"
