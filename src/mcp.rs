@@ -537,7 +537,8 @@ fn tool_defs() -> Vec<Value> {
                 "properties": {
                     "peer": {"type": "string", "description": "Peer handle (without did:wire: prefix). Must be a pinned peer; check wire_peers first."},
                     "kind": {"type": "string", "description": "Event kind: a name (decision, claim, ack, agent_card, trust_add_key, trust_revoke_key, wire_open, wire_close) or a numeric kind id."},
-                    "body": {"type": "string", "description": "Event body. Plain text becomes a JSON string; valid JSON is parsed and embedded structurally."}
+                    "body": {"type": "string", "description": "Event body. Plain text becomes a JSON string; valid JSON is parsed and embedded structurally."},
+                    "time_sensitive_until": {"type": "string", "description": "Optional advisory deadline: duration (`30m`, `2h`, `1d`) or RFC3339 timestamp."}
                 },
                 "required": ["peer", "kind", "body"]
             }
@@ -916,6 +917,7 @@ fn tool_send(args: &Value) -> Result<Value, String> {
         .get("body")
         .and_then(Value::as_str)
         .ok_or("missing 'body'")?;
+    let deadline = args.get("time_sensitive_until").and_then(Value::as_str);
 
     if !config::is_initialized().map_err(|e| e.to_string())? {
         return Err("not initialized — operator must run `wire init <handle>` first".into());
@@ -946,7 +948,7 @@ fn tool_send(args: &Value) -> Result<Value, String> {
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
 
-    let event = json!({
+    let mut event = json!({
         "timestamp": now,
         "from": did,
         "to": format!("did:wire:{peer}"),
@@ -954,6 +956,10 @@ fn tool_send(args: &Value) -> Result<Value, String> {
         "kind": kind_id,
         "body": body_value,
     });
+    if let Some(deadline) = deadline {
+        event["time_sensitive_until"] =
+            json!(crate::cli::parse_deadline_until(deadline).map_err(|e| e.to_string())?);
+    }
     let signed =
         sign_message_v31(&event, &sk_seed, &pk_bytes, &handle).map_err(|e| e.to_string())?;
     let event_id = signed["event_id"].as_str().unwrap_or("").to_string();

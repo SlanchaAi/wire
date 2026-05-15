@@ -69,6 +69,9 @@ pub enum Command {
         kind: String,
         /// Event body — free-form text or `@/path/to/body.json` to load from file.
         body: String,
+        /// Advisory deadline: duration (`30m`, `2h`, `1d`) or RFC3339 timestamp.
+        #[arg(long)]
+        deadline: Option<String>,
         /// Emit JSON.
         #[arg(long)]
         json: bool,
@@ -532,8 +535,9 @@ pub fn run() -> Result<()> {
             peer,
             kind,
             body,
+            deadline,
             json,
-        } => cmd_send(&peer, &kind, &body, json),
+        } => cmd_send(&peer, &kind, &body, deadline.as_deref(), json),
         Command::Tail { peer, json, limit } => cmd_tail(peer.as_deref(), json, limit),
         Command::Verify { path, json } => cmd_verify(&path, json),
         Command::Mcp => cmd_mcp(),
@@ -1134,7 +1138,37 @@ fn maybe_warn_peer_attentiveness(peer: &str) {
     }
 }
 
-fn cmd_send(peer: &str, kind: &str, body_arg: &str, as_json: bool) -> Result<()> {
+pub(crate) fn parse_deadline_until(input: &str) -> Result<String> {
+    let trimmed = input.trim();
+    if time::OffsetDateTime::parse(trimmed, &time::format_description::well_known::Rfc3339).is_ok()
+    {
+        return Ok(trimmed.to_string());
+    }
+    let (amount, unit) = trimmed.split_at(trimmed.len().saturating_sub(1));
+    let n: i64 = amount
+        .parse()
+        .with_context(|| format!("deadline must be `30m`, `2h`, `1d`, or RFC3339: {input:?}"))?;
+    if n <= 0 {
+        bail!("deadline duration must be positive: {input:?}");
+    }
+    let duration = match unit {
+        "m" => time::Duration::minutes(n),
+        "h" => time::Duration::hours(n),
+        "d" => time::Duration::days(n),
+        _ => bail!("deadline must end in m, h, d, or be RFC3339: {input:?}"),
+    };
+    Ok((time::OffsetDateTime::now_utc() + duration)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string()))
+}
+
+fn cmd_send(
+    peer: &str,
+    kind: &str,
+    body_arg: &str,
+    deadline: Option<&str>,
+    as_json: bool,
+) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
     }
@@ -1166,7 +1200,7 @@ fn cmd_send(peer: &str, kind: &str, body_arg: &str, as_json: bool) -> Result<()>
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
 
-    let event = json!({
+    let mut event = json!({
         "timestamp": now,
         "from": did,
         "to": format!("did:wire:{peer}"),
@@ -1174,6 +1208,9 @@ fn cmd_send(peer: &str, kind: &str, body_arg: &str, as_json: bool) -> Result<()>
         "kind": kind_id,
         "body": body_value,
     });
+    if let Some(deadline) = deadline {
+        event["time_sensitive_until"] = json!(parse_deadline_until(deadline)?);
+    }
     let signed = sign_message_v31(&event, &sk_seed, &pk_bytes, &handle)?;
     let event_id = signed["event_id"].as_str().unwrap_or("").to_string();
 
@@ -1277,7 +1314,12 @@ fn cmd_tail(peer: Option<&str>, as_json: bool, limit: usize) -> Result<()> {
                     })
                     .unwrap_or_default();
                 let mark = if verified { "✓" } else { "✗" };
-                println!("[{ts} {from} kind={kind} {kind_name}] {summary} | sig {mark}");
+                let deadline = event
+                    .get("time_sensitive_until")
+                    .and_then(Value::as_str)
+                    .map(|d| format!(" deadline: {d}"))
+                    .unwrap_or_default();
+                println!("[{ts} {from} kind={kind} {kind_name}{deadline}] {summary} | sig {mark}");
             }
             count += 1;
             if limit > 0 && count >= limit {
