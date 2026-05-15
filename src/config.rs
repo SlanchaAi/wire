@@ -235,6 +235,66 @@ pub fn write_relay_state(state: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Path to the flock file that serialises concurrent read-modify-write
+/// transactions against `relay.json`. Separate file because flock on the
+/// data file itself races with file replacement (fs::write truncates +
+/// rewrites — atomic-ish but the lock identity disappears).
+fn relay_state_lock_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("relay.lock"))
+}
+
+/// Atomic read-modify-write against `relay.json`. Holds an exclusive
+/// `fs2::FileExt::lock_exclusive` for the whole transaction so concurrent
+/// `wire` processes (multiple daemons, CLI vs daemon, CLI vs MCP) cannot
+/// race the cursor or peer-pin entries.
+///
+/// P0.3 (0.5.11). Today's debug had three concurrent `wire` processes
+/// (stale 0.2.4 daemon, fresh 0.5.10 daemon, and the CLI) racing the
+/// `self.last_pulled_event_id` cursor — one would advance it past an
+/// event, another would later rewind via stale snapshot. flock makes
+/// that impossible.
+///
+/// Lock timeout: blocks indefinitely (well-behaved processes release in
+/// < 1ms). Use sparingly outside short RMW windows — long holds will
+/// stall every other `wire` process.
+pub fn update_relay_state<F>(modifier: F) -> Result<()>
+where
+    F: FnOnce(&mut Value) -> Result<()>,
+{
+    use fs2::FileExt;
+    let lock_path = relay_state_lock_path()?;
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
+    }
+    // Open / create the lock file. Holding a handle keeps the file
+    // alive for the lifetime of the transaction.
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening {lock_path:?}"))?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("flock {lock_path:?}"))?;
+
+    // Read fresh state INSIDE the lock — any prior snapshot would be a
+    // race window. Then run the modifier. Then write atomically.
+    let mut state = read_relay_state()?;
+    let result = modifier(&mut state);
+    let write_result = if result.is_ok() {
+        write_relay_state(&state)
+    } else {
+        Ok(())
+    };
+    // RAII: drop releases the lock. Explicit unlock for clarity + to
+    // ensure unlock happens even if Drop ordering ever changes.
+    let _ = fs2::FileExt::unlock(&lock_file);
+    result?;
+    write_result?;
+    Ok(())
+}
+
 /// Test-only helpers. Lives outside `tests` mod so other modules' tests
 /// can share the same WIRE_HOME isolation. Tests run in-process and share
 /// process-wide env state, so all WIRE_HOME mutators must use this lock or
@@ -319,6 +379,59 @@ mod tests {
             let t = read_trust().unwrap();
             assert_eq!(t["version"], 1);
             assert!(t["agents"].is_object());
+        });
+    }
+
+    #[test]
+    fn update_relay_state_writes_through_lock() {
+        // P0.3 smoke: update_relay_state runs the modifier and persists the
+        // result. Doesn't exercise concurrent flock contention (that needs
+        // multi-process orchestration; deferred to an e2e test) but at least
+        // proves the happy path works end-to-end through the new lock
+        // wrapper.
+        with_temp_home(|| {
+            ensure_dirs().unwrap();
+            // Seed initial state.
+            let initial = json!({"self": null, "peers": {}});
+            write_relay_state(&initial).unwrap();
+            // Run an update.
+            super::update_relay_state(|state| {
+                state["self"] = json!({
+                    "relay_url": "https://test",
+                    "slot_id": "abc",
+                    "slot_token": "tok",
+                });
+                Ok(())
+            })
+            .unwrap();
+            // Verify persisted.
+            let after = read_relay_state().unwrap();
+            assert_eq!(after["self"]["relay_url"], "https://test");
+            assert_eq!(after["self"]["slot_id"], "abc");
+        });
+    }
+
+    #[test]
+    fn update_relay_state_modifier_error_does_not_clobber() {
+        // P0.3 contract: if the modifier returns Err, the state on disk
+        // must NOT be overwritten — partial work shouldn't half-land. The
+        // operator's prior state should survive the failed RMW.
+        with_temp_home(|| {
+            ensure_dirs().unwrap();
+            let initial = json!({"self": {"relay_url": "https://prior"}, "peers": {}});
+            write_relay_state(&initial).unwrap();
+            let result = super::update_relay_state(|state| {
+                // Trash the state mid-modifier...
+                state["self"] = json!({"relay_url": "https://NEVER_PERSIST"});
+                // ...then fail. Write must NOT happen.
+                anyhow::bail!("simulated mid-RMW error")
+            });
+            assert!(result.is_err());
+            let after = read_relay_state().unwrap();
+            assert_eq!(
+                after["self"]["relay_url"], "https://prior",
+                "state on disk must not reflect aborted modifier"
+            );
         });
     }
 

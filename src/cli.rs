@@ -2216,15 +2216,18 @@ fn cmd_pull(as_json: bool) -> Result<()> {
     // transient verify errors. See `pull::process_events`.
     let result = crate::pull::process_events(&events, last_event_id, &inbox_dir)?;
 
-    // Persist cursor only if it changed. RE-READ relay state — pair_drop /
-    // pair_drop_ack handlers may have written peer pins during the batch
-    // and we don't want to clobber them with a stale snapshot.
+    // P0.3 (0.5.11): cursor write goes through update_relay_state, which
+    // takes an exclusive flock on relay.lock for the whole RMW. Concurrent
+    // wire processes (multi-daemon, CLI vs daemon, CLI vs MCP) serialise
+    // through the lock — no more racing the cursor like today's debug.
     if let Some(eid) = &result.advance_cursor_to {
-        let mut fresh = config::read_relay_state()?;
-        if let Some(self_obj) = fresh.get_mut("self").and_then(Value::as_object_mut) {
-            self_obj.insert("last_pulled_event_id".into(), Value::String(eid.clone()));
-        }
-        config::write_relay_state(&fresh)?;
+        let eid = eid.clone();
+        config::update_relay_state(|state| {
+            if let Some(self_obj) = state.get_mut("self").and_then(Value::as_object_mut) {
+                self_obj.insert("last_pulled_event_id".into(), Value::String(eid));
+            }
+            Ok(())
+        })?;
     }
 
     if as_json {
@@ -2690,13 +2693,15 @@ fn run_sync_pull() -> Result<Value> {
     // re-emerge by another route.
     let result = crate::pull::process_events(&events, last_event_id, &inbox_dir)?;
 
-    // Persist cursor only if changed.
+    // P0.3 (0.5.11): same flock-protected RMW as cmd_pull.
     if let Some(eid) = &result.advance_cursor_to {
-        let mut fresh = config::read_relay_state()?;
-        if let Some(self_obj) = fresh.get_mut("self").and_then(Value::as_object_mut) {
-            self_obj.insert("last_pulled_event_id".into(), Value::String(eid.clone()));
-        }
-        config::write_relay_state(&fresh)?;
+        let eid = eid.clone();
+        config::update_relay_state(|state| {
+            if let Some(self_obj) = state.get_mut("self").and_then(Value::as_object_mut) {
+                self_obj.insert("last_pulled_event_id".into(), Value::String(eid));
+            }
+            Ok(())
+        })?;
     }
 
     Ok(json!({

@@ -36,6 +36,7 @@ time = { version = "0.3", features = ["formatting", "macros", "parsing", "serde"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
 anyhow = "1"
+fs2 = "0.4"
 axum = "0.7"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "fs", "io-util"] }
 tokio-stream = "0.1"
