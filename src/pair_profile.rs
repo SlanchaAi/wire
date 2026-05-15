@@ -121,9 +121,14 @@ pub fn parse_handle(s: &str) -> Result<Handle> {
     if nick.is_empty() || domain.is_empty() {
         bail!("handle has empty nick or domain: {s:?}");
     }
-    if !is_valid_nick(nick) {
+    // Resolve-time check uses syntax only — clients must still be able to
+    // PARSE + RESOLVE a reserved nick (e.g. `wire add slancha@wireup.net`
+    // when slancha is in RESERVED_NICKS but already-claimed by the org).
+    // Reservation is a CLAIM-time concern; enforced by relay handle_claim
+    // and CLI cmd_claim via is_valid_nick().
+    if !nick_syntax_ok(nick) {
         bail!(
-            "phyllis: {nick:?} won't fit in the books — handles need 2-32 chars, lowercase [a-z0-9_-], not on the reserved list"
+            "phyllis: {nick:?} won't fit in the books — handles need 2-32 chars, lowercase [a-z0-9_-]"
         );
     }
     if !is_valid_domain(domain) {
@@ -135,19 +140,24 @@ pub fn parse_handle(s: &str) -> Result<Handle> {
     })
 }
 
-/// True iff `s` is a syntactically valid nick (handle local-part). Does NOT
-/// check reservation — that is enforced by `parse_handle` AND by relay
-/// directory at claim time.
-pub fn is_valid_nick(s: &str) -> bool {
+/// True iff `s` is a syntactically valid nick: 2-32 chars, lowercase
+/// `[a-z0-9_-]`. Does NOT check the reserved list — call `is_valid_nick`
+/// for that (which combines syntax + reservation, intended for claim sites).
+pub fn nick_syntax_ok(s: &str) -> bool {
     let len = s.len();
     if !(2..=32).contains(&len) {
         return false;
     }
-    if RESERVED_NICKS.contains(&s) {
-        return false;
-    }
     s.bytes()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// True iff `s` is syntactically valid AND not reserved. Use this at CLAIM
+/// time (relay's handle_claim, CLI's cmd_claim). For resolve/parse,
+/// `nick_syntax_ok` is the right primitive — reserved handles must still
+/// be resolvable so clients can pair against pre-claimed org handles.
+pub fn is_valid_nick(s: &str) -> bool {
+    nick_syntax_ok(s) && !RESERVED_NICKS.contains(&s)
 }
 
 fn is_valid_domain(s: &str) -> bool {
@@ -420,12 +430,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_handle_rejects_reserved_nicks() {
+    fn parse_handle_accepts_reserved_nicks_for_resolution() {
+        // Reserved nicks must still PARSE so clients can resolve / `wire add`
+        // pre-claimed org handles like slancha@wireup.net. Reservation is a
+        // CLAIM-time concern — covered by `is_valid_nick_rejects_reserved`
+        // below.
         for r in RESERVED_NICKS {
+            // Skip single-char entries — they fail syntax regardless.
+            if r.len() < 2 {
+                continue;
+            }
             let s = format!("{r}@example.com");
             assert!(
-                parse_handle(&s).is_err(),
-                "expected reserved nick {r:?} to be rejected"
+                parse_handle(&s).is_ok(),
+                "expected reserved nick {r:?} to parse OK for resolution"
+            );
+        }
+    }
+
+    #[test]
+    fn is_valid_nick_rejects_reserved() {
+        for r in RESERVED_NICKS {
+            assert!(
+                !is_valid_nick(r),
+                "expected is_valid_nick to reject reserved nick {r:?} (claim-time check)"
             );
         }
     }
