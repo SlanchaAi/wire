@@ -1666,10 +1666,14 @@ fn cmd_bind_relay(url: &str, as_json: bool) -> Result<()> {
     let did = card.get("did").and_then(Value::as_str).unwrap_or("");
     let handle = crate::agent_card::display_handle_from_did(did).to_string();
 
-    let client = crate::relay_client::RelayClient::new(url);
+    let normalized = url.trim_end_matches('/');
+    let client = crate::relay_client::RelayClient::new(normalized);
     if !client.healthz().unwrap_or(false) {
         bail!(
-            "phyllis: silent line — the switchboard at {url} isn't picking up. is the server running?"
+            "phyllis: silent line — the switchboard at {normalized} isn't picking up.\n\
+             test reachability from this machine:  curl -v {normalized}/healthz\n\
+             if curl also fails, a sandbox / proxy / firewall is the usual cause.\n\
+             (OpenShell sandbox? run `curl -fsSL https://wireup.net/openshell-policy.sh | bash -s <sandbox-name>` on the host first.)"
         );
     }
     let alloc = client.allocate_slot(Some(&handle))?;
@@ -3151,7 +3155,38 @@ fn cmd_invite(relay: &str, ttl: u64, uses: u32, share: bool, as_json: bool) -> R
 }
 
 fn cmd_accept(url: &str, as_json: bool) -> Result<()> {
-    let result = crate::pair_invite::accept_invite(url)?;
+    // If the user pasted an HTTP(S) short URL (e.g. https://wireup.net/i/AB12),
+    // resolve it to the underlying wire://pair?... URL via ?format=url before
+    // accepting. Saves them from having to know which URL shape goes where.
+    let resolved = if url.starts_with("http://") || url.starts_with("https://") {
+        let sep = if url.contains('?') { '&' } else { '?' };
+        let resolve_url = format!("{url}{sep}format=url");
+        let client = reqwest::blocking::Client::new();
+        let resp = client
+            .get(&resolve_url)
+            .send()
+            .with_context(|| format!("GET {resolve_url}"))?;
+        if !resp.status().is_success() {
+            bail!(
+                "could not resolve short URL {url} (HTTP {})",
+                resp.status()
+            );
+        }
+        let body = resp.text().unwrap_or_default().trim().to_string();
+        if !body.starts_with("wire://pair?") {
+            bail!(
+                "short URL {url} did not resolve to a wire:// invite. \
+                 (got: {}{})",
+                body.chars().take(80).collect::<String>(),
+                if body.chars().count() > 80 { "…" } else { "" }
+            );
+        }
+        body
+    } else {
+        url.to_string()
+    };
+
+    let result = crate::pair_invite::accept_invite(&resolved)?;
     if as_json {
         println!("{}", serde_json::to_string(&result)?);
     } else {

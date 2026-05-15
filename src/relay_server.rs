@@ -1364,15 +1364,28 @@ async fn invite_register(
         .into_response()
 }
 
+#[derive(Deserialize)]
+pub struct InviteScriptQuery {
+    /// `format=url` returns the raw `wire://pair?...` URL as text/plain
+    /// (used by `wire accept https://wireup.net/i/<token>` to resolve a
+    /// short URL programmatically). Default: shell-script template.
+    /// Note: ?format=url does NOT decrement `uses_remaining` — it's a
+    /// resolution lookup, not an acceptance. The actual accept happens
+    /// when the wire:// URL is consumed by `pair_invite::accept_invite`.
+    pub format: Option<String>,
+}
+
 async fn invite_script(
     State(relay): State<Relay>,
     Path(token): Path<String>,
+    Query(q): Query<InviteScriptQuery>,
 ) -> impl IntoResponse {
     // Token shape: 6 lowercase hex. Reject anything else immediately so a
     // path-traversal try never reaches the map lookup.
     if token.len() != 6 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
         return (StatusCode::NOT_FOUND, "not found\n").into_response();
     }
+    let want_raw_url = q.format.as_deref() == Some("url");
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1389,10 +1402,32 @@ async fn invite_script(
             if n == 0 {
                 return (StatusCode::GONE, "this invite has been used up\n").into_response();
             }
-            rec.uses_remaining = Some(n - 1);
+            // Only decrement on script-template fetch (the one that's
+            // actually doing the pair). The raw-URL resolution path is a
+            // lookup, not an accept.
+            if !want_raw_url {
+                rec.uses_remaining = Some(n - 1);
+            }
         }
         rec.invite_url.clone()
     };
+    if want_raw_url {
+        return (
+            StatusCode::OK,
+            [
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                ),
+                (
+                    axum::http::header::CACHE_CONTROL,
+                    "private, no-store, max-age=0",
+                ),
+            ],
+            invite_url,
+        )
+            .into_response();
+    }
     let escaped = invite_url.replace('\'', "'\\''");
     let script = format!(
         "#!/bin/sh\n\
