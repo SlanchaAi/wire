@@ -721,7 +721,15 @@ pub fn run() -> Result<()> {
             no_setup,
             detach,
         } => {
-            if detach {
+            // P0.P (0.5.11): if the handle is in `nick@domain` form, route to
+            // the zero-paste megacommand path — `wire pair slancha-spark@
+            // wireup.net` does add + poll-for-ack + verify in one shot. The
+            // SAS / code-based pair flow stays available for handles without
+            // `@` (bootstrap pairing between two boxes that don't yet share a
+            // relay directory).
+            if handle.contains('@') && code.is_none() {
+                cmd_pair_megacommand(&handle, Some(&relay), timeout, false)
+            } else if detach {
                 cmd_pair_detach(&handle, code.as_deref(), &relay)
             } else {
                 cmd_pair(&handle, code.as_deref(), &relay, yes, timeout, no_setup)
@@ -3600,6 +3608,94 @@ fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Res
         );
     }
     Ok(())
+}
+
+// ---------- pair megacommand (zero-paste handle-based) ----------
+
+/// `wire pair <nick@domain>` zero-shot. Dispatched from Command::Pair when
+/// the handle is in `nick@domain` form. Wraps:
+///
+///   1. cmd_add — resolve, pin, drop intro
+///   2. Wait up to `timeout_secs` for the peer's `pair_drop_ack` to arrive
+///      (signalled by `peers.<handle>.slot_token` populating in relay state)
+///   3. Verify bilateral pin: trust contains peer + relay state has token
+///   4. Print final state — both sides VERIFIED + can `wire send`
+///
+/// On timeout: hard-errors with the specific stuck step so the operator
+/// knows which side to chase. No silent partial success.
+fn cmd_pair_megacommand(
+    handle_arg: &str,
+    relay_override: Option<&str>,
+    timeout_secs: u64,
+    _as_json: bool,
+) -> Result<()> {
+    let parsed = crate::pair_profile::parse_handle(handle_arg)?;
+    let peer_handle = parsed.nick.clone();
+
+    eprintln!("wire pair: resolving {handle_arg}...");
+    cmd_add(handle_arg, relay_override, /* as_json */ false)?;
+
+    eprintln!(
+        "wire pair: intro delivered. waiting up to {timeout_secs}s for {peer_handle} \
+         to ack (their daemon must be running + pulling)..."
+    );
+
+    // Trigger an immediate daemon-style pull so we don't wait the full daemon
+    // interval. Best-effort — if it fails, we still fall through to the
+    // polling loop.
+    let _ = run_sync_pull();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let poll_interval = std::time::Duration::from_millis(500);
+
+    loop {
+        // Drain anything new from the relay (e.g. our pair_drop_ack landing).
+        let _ = run_sync_pull();
+        let relay_state = config::read_relay_state()?;
+        let peer_entry = relay_state
+            .get("peers")
+            .and_then(|p| p.get(&peer_handle))
+            .cloned();
+        let token = peer_entry
+            .as_ref()
+            .and_then(|e| e.get("slot_token"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+
+        if !token.is_empty() {
+            // Bilateral pin complete — we have their slot_token, we can send.
+            let trust = config::read_trust()?;
+            let pinned_in_trust = trust
+                .get("agents")
+                .and_then(|a| a.get(&peer_handle))
+                .is_some();
+            println!(
+                "wire pair: paired with {peer_handle}.\n  trust: {}  bilateral: yes (slot_token recorded)\n  next: `wire send {peer_handle} \"<msg>\"`",
+                if pinned_in_trust { "VERIFIED" } else { "MISSING (bug)" }
+            );
+            return Ok(());
+        }
+
+        if std::time::Instant::now() >= deadline {
+            // Timeout — surface the EXACT stuck step. Likely culprits:
+            //   - peer daemon not running on their box
+            //   - peer's relay slot is offline
+            //   - their daemon is on an older binary that doesn't know
+            //     pair_drop kind=1100 (the P0.1 class — now visible via
+            //     wire pull --json on their side as a blocking rejection)
+            bail!(
+                "wire pair: timed out after {timeout_secs}s. \
+                 peer {peer_handle} never sent pair_drop_ack. \
+                 likely causes: (a) their daemon is down — ask them to run \
+                 `wire status` and `wire daemon &`; (b) their binary is older \
+                 than 0.5.x and doesn't understand pair_drop events — ask \
+                 them to `wire upgrade`; (c) network / relay blip — re-run \
+                 `wire pair {handle_arg}` to retry."
+            );
+        }
+
+        std::thread::sleep(poll_interval);
+    }
 }
 
 fn cmd_claim(
