@@ -69,6 +69,9 @@ pub enum Command {
         kind: String,
         /// Event body — free-form text or `@/path/to/body.json` to load from file.
         body: String,
+        /// Advisory deadline: duration (`30m`, `2h`, `1d`) or RFC3339 timestamp.
+        #[arg(long)]
+        deadline: Option<String>,
         /// Emit JSON.
         #[arg(long)]
         json: bool,
@@ -138,8 +141,16 @@ pub enum Command {
     /// Print a summary of identity, relay binding, peers, inbox/outbox queue depth.
     /// Useful as a single "where am I" check.
     Status {
+        /// Inspect a paired peer's transport / attention / responder health.
+        #[arg(long)]
+        peer: Option<String>,
         #[arg(long)]
         json: bool,
+    },
+    /// Publish or inspect auto-responder health for this slot.
+    Responder {
+        #[command(subcommand)]
+        command: ResponderCommand,
     },
     /// Pin a peer's signed agent-card from a file. (Manual out-of-band pairing
     /// — fallback path; the magic-wormhole flow is `pair-host` / `pair-join`.)
@@ -492,6 +503,29 @@ pub enum Command {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum ResponderCommand {
+    /// Publish this agent's auto-responder health.
+    Set {
+        /// One of: online, offline, oauth_locked, rate_limited, degraded.
+        status: String,
+        /// Optional operator-facing reason.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read responder health for self, or for a paired peer.
+    Get {
+        /// Optional peer handle; omitted means this agent's own slot.
+        peer: Option<String>,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ProfileAction {
     /// Set a profile field. Field names: display_name, emoji, motto, vibe,
     /// pronouns, avatar_url, handle, now. Values are strings except `vibe`
@@ -525,17 +559,32 @@ pub fn run() -> Result<()> {
             relay,
             json,
         } => cmd_init(&handle, name.as_deref(), relay.as_deref(), json),
-        Command::Status { json } => cmd_status(json),
+        Command::Status { peer, json } => {
+            if let Some(peer) = peer {
+                cmd_status_peer(&peer, json)
+            } else {
+                cmd_status(json)
+            }
+        }
         Command::Whoami { json } => cmd_whoami(json),
         Command::Peers { json } => cmd_peers(json),
         Command::Send {
             peer,
             kind,
             body,
+            deadline,
             json,
-        } => cmd_send(&peer, &kind, &body, json),
+        } => cmd_send(&peer, &kind, &body, deadline.as_deref(), json),
         Command::Tail { peer, json, limit } => cmd_tail(peer.as_deref(), json, limit),
         Command::Verify { path, json } => cmd_verify(&path, json),
+        Command::Responder { command } => match command {
+            ResponderCommand::Set {
+                status,
+                reason,
+                json,
+            } => cmd_responder_set(&status, reason.as_deref(), json),
+            ResponderCommand::Get { peer, json } => cmd_responder_get(peer.as_deref(), json),
+        },
         Command::Mcp => cmd_mcp(),
         Command::RelayServer { bind } => cmd_relay_server(&bind),
         Command::BindRelay { url, json } => cmd_bind_relay(&url, json),
@@ -964,6 +1013,218 @@ fn scan_jsonl_dir(dir: &std::path::Path) -> Result<Value> {
     Ok(json!({"files": files, "events": events}))
 }
 
+// ---------- responder health ----------
+
+fn responder_status_allowed(status: &str) -> bool {
+    matches!(
+        status,
+        "online" | "offline" | "oauth_locked" | "rate_limited" | "degraded"
+    )
+}
+
+fn relay_slot_for(peer: Option<&str>) -> Result<(String, String, String, String)> {
+    let state = config::read_relay_state()?;
+    let (label, slot_info) = match peer {
+        Some(peer) => (
+            peer.to_string(),
+            state
+                .get("peers")
+                .and_then(|p| p.get(peer))
+                .ok_or_else(|| anyhow!("unknown peer {peer:?} in relay state"))?,
+        ),
+        None => (
+            "self".to_string(),
+            state.get("self").filter(|v| !v.is_null()).ok_or_else(|| {
+                anyhow!("self slot not bound — run `wire bind-relay <url>` first")
+            })?,
+        ),
+    };
+    let relay_url = slot_info["relay_url"]
+        .as_str()
+        .ok_or_else(|| anyhow!("{label} relay_url missing"))?
+        .to_string();
+    let slot_id = slot_info["slot_id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("{label} slot_id missing"))?
+        .to_string();
+    let slot_token = slot_info["slot_token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("{label} slot_token missing"))?
+        .to_string();
+    Ok((label, relay_url, slot_id, slot_token))
+}
+
+fn cmd_responder_set(status: &str, reason: Option<&str>, as_json: bool) -> Result<()> {
+    if !responder_status_allowed(status) {
+        bail!("status must be one of: online, offline, oauth_locked, rate_limited, degraded");
+    }
+    let (_label, relay_url, slot_id, slot_token) = relay_slot_for(None)?;
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+    let mut record = json!({
+        "status": status,
+        "set_at": now,
+    });
+    if let Some(reason) = reason {
+        record["reason"] = json!(reason);
+    }
+    if status == "online" {
+        record["last_success_at"] = json!(now);
+    }
+    let client = crate::relay_client::RelayClient::new(&relay_url);
+    let saved = client.responder_health_set(&slot_id, &slot_token, &record)?;
+    if as_json {
+        println!("{}", serde_json::to_string(&saved)?);
+    } else {
+        let reason = saved
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(|r| format!(" — {r}"))
+            .unwrap_or_default();
+        println!(
+            "responder {}{}",
+            saved
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or(status),
+            reason
+        );
+    }
+    Ok(())
+}
+
+fn cmd_responder_get(peer: Option<&str>, as_json: bool) -> Result<()> {
+    let (label, relay_url, slot_id, slot_token) = relay_slot_for(peer)?;
+    let client = crate::relay_client::RelayClient::new(&relay_url);
+    let health = client.responder_health_get(&slot_id, &slot_token)?;
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "target": label,
+                "responder_health": health,
+            }))?
+        );
+    } else if health.is_null() {
+        println!("{label}: responder health not reported");
+    } else {
+        let status = health
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let reason = health
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(|r| format!(" — {r}"))
+            .unwrap_or_default();
+        let last_success = health
+            .get("last_success_at")
+            .and_then(Value::as_str)
+            .map(|t| format!(" (last_success: {t})"))
+            .unwrap_or_default();
+        println!("{label}: {status}{reason}{last_success}");
+    }
+    Ok(())
+}
+
+fn cmd_status_peer(peer: &str, as_json: bool) -> Result<()> {
+    let (_label, relay_url, slot_id, slot_token) = relay_slot_for(Some(peer))?;
+    let client = crate::relay_client::RelayClient::new(&relay_url);
+
+    let started = std::time::Instant::now();
+    let transport_ok = client.healthz().unwrap_or(false);
+    let latency_ms = started.elapsed().as_millis() as u64;
+
+    let (event_count, last_pull_at_unix) = client.slot_state(&slot_id, &slot_token)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let attention = match last_pull_at_unix {
+        Some(last) if now.saturating_sub(last) <= 300 => json!({
+            "status": "ok",
+            "last_pull_at_unix": last,
+            "age_seconds": now.saturating_sub(last),
+            "event_count": event_count,
+        }),
+        Some(last) => json!({
+            "status": "stale",
+            "last_pull_at_unix": last,
+            "age_seconds": now.saturating_sub(last),
+            "event_count": event_count,
+        }),
+        None => json!({
+            "status": "never_pulled",
+            "last_pull_at_unix": Value::Null,
+            "event_count": event_count,
+        }),
+    };
+
+    let responder_health = client.responder_health_get(&slot_id, &slot_token)?;
+    let responder = if responder_health.is_null() {
+        json!({"status": "not_reported", "record": Value::Null})
+    } else {
+        json!({
+            "status": responder_health
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            "record": responder_health,
+        })
+    };
+
+    let report = json!({
+        "peer": peer,
+        "transport": {
+            "status": if transport_ok { "ok" } else { "error" },
+            "relay_url": relay_url,
+            "latency_ms": latency_ms,
+        },
+        "attention": attention,
+        "responder": responder,
+    });
+
+    if as_json {
+        println!("{}", serde_json::to_string(&report)?);
+    } else {
+        let transport_line = if transport_ok {
+            format!("ok relay reachable ({latency_ms}ms)")
+        } else {
+            "error relay unreachable".to_string()
+        };
+        println!("transport      {transport_line}");
+        match report["attention"]["status"].as_str().unwrap_or("unknown") {
+            "ok" => println!(
+                "attention      ok last pull {}s ago",
+                report["attention"]["age_seconds"].as_u64().unwrap_or(0)
+            ),
+            "stale" => println!(
+                "attention      stale last pull {}m ago",
+                report["attention"]["age_seconds"].as_u64().unwrap_or(0) / 60
+            ),
+            "never_pulled" => println!("attention      never pulled since relay reset"),
+            other => println!("attention      {other}"),
+        }
+        if report["responder"]["status"] == "not_reported" {
+            println!("auto-responder not reported");
+        } else {
+            let record = &report["responder"]["record"];
+            let status = record
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let reason = record
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(|r| format!(" — {r}"))
+                .unwrap_or_default();
+            println!("auto-responder {status}{reason}");
+        }
+    }
+    Ok(())
+}
+
 // (Old cmd_join stub removed — superseded by cmd_pair_join below.)
 
 // ---------- whoami ----------
@@ -1134,7 +1395,37 @@ fn maybe_warn_peer_attentiveness(peer: &str) {
     }
 }
 
-fn cmd_send(peer: &str, kind: &str, body_arg: &str, as_json: bool) -> Result<()> {
+pub(crate) fn parse_deadline_until(input: &str) -> Result<String> {
+    let trimmed = input.trim();
+    if time::OffsetDateTime::parse(trimmed, &time::format_description::well_known::Rfc3339).is_ok()
+    {
+        return Ok(trimmed.to_string());
+    }
+    let (amount, unit) = trimmed.split_at(trimmed.len().saturating_sub(1));
+    let n: i64 = amount
+        .parse()
+        .with_context(|| format!("deadline must be `30m`, `2h`, `1d`, or RFC3339: {input:?}"))?;
+    if n <= 0 {
+        bail!("deadline duration must be positive: {input:?}");
+    }
+    let duration = match unit {
+        "m" => time::Duration::minutes(n),
+        "h" => time::Duration::hours(n),
+        "d" => time::Duration::days(n),
+        _ => bail!("deadline must end in m, h, d, or be RFC3339: {input:?}"),
+    };
+    Ok((time::OffsetDateTime::now_utc() + duration)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string()))
+}
+
+fn cmd_send(
+    peer: &str,
+    kind: &str,
+    body_arg: &str,
+    deadline: Option<&str>,
+    as_json: bool,
+) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
     }
@@ -1166,7 +1457,7 @@ fn cmd_send(peer: &str, kind: &str, body_arg: &str, as_json: bool) -> Result<()>
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
 
-    let event = json!({
+    let mut event = json!({
         "timestamp": now,
         "from": did,
         "to": format!("did:wire:{peer}"),
@@ -1174,6 +1465,9 @@ fn cmd_send(peer: &str, kind: &str, body_arg: &str, as_json: bool) -> Result<()>
         "kind": kind_id,
         "body": body_value,
     });
+    if let Some(deadline) = deadline {
+        event["time_sensitive_until"] = json!(parse_deadline_until(deadline)?);
+    }
     let signed = sign_message_v31(&event, &sk_seed, &pk_bytes, &handle)?;
     let event_id = signed["event_id"].as_str().unwrap_or("").to_string();
 
@@ -1277,7 +1571,12 @@ fn cmd_tail(peer: Option<&str>, as_json: bool, limit: usize) -> Result<()> {
                     })
                     .unwrap_or_default();
                 let mark = if verified { "✓" } else { "✗" };
-                println!("[{ts} {from} kind={kind} {kind_name}] {summary} | sig {mark}");
+                let deadline = event
+                    .get("time_sensitive_until")
+                    .and_then(Value::as_str)
+                    .map(|d| format!(" deadline: {d}"))
+                    .unwrap_or_default();
+                println!("[{ts} {from} kind={kind} {kind_name}{deadline}] {summary} | sig {mark}");
             }
             count += 1;
             if limit > 0 && count >= limit {

@@ -38,7 +38,7 @@ fn version_flag_prints_semver() {
     let out = run(&home, &["--version"]);
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
-    assert!(s.contains("0.5.8"), "got: {s}");
+    assert!(s.contains("0.5.9"), "got: {s}");
 }
 
 #[test]
@@ -161,6 +161,40 @@ fn send_writes_to_outbox() {
     assert_eq!(event["to"], "did:wire:willard");
     assert!(event.get("signature").is_some());
     assert!(event.get("event_id").is_some());
+}
+
+#[test]
+fn send_deadline_writes_signed_time_sensitive_until() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul"]);
+    let deadline = "2030-01-02T03:04:05Z";
+    let out = run(
+        &home,
+        &[
+            "send",
+            "willard",
+            "decision",
+            "ship before the window closes",
+            "--deadline",
+            deadline,
+            "--json",
+        ],
+    );
+    assert!(out.status.success(), "send failed: {:?}", out);
+
+    let outbox = home.join("state/wire/outbox/willard.jsonl");
+    let body = std::fs::read_to_string(&outbox).unwrap();
+    let event: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+    assert_eq!(event["time_sensitive_until"], deadline);
+
+    let event_path = home.join("deadline-event.json");
+    std::fs::write(&event_path, body.trim_end()).unwrap();
+    let verify = run(&home, &["verify", event_path.to_str().unwrap(), "--json"]);
+    assert!(
+        verify.status.success(),
+        "verify failed: stderr={}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
 }
 
 #[test]

@@ -357,12 +357,20 @@ async fn paul_pair_hosts_willard_joins_then_send_round_trips() {
     let host_stdout = String::from_utf8(host_out.stdout).unwrap();
     let host_final: Value =
         serde_json::from_str(host_stdout.trim().lines().last().unwrap()).unwrap();
-    assert_eq!(host_final["paired_with"], "did:wire:willard");
+    let host_paired = host_final["paired_with"].as_str().unwrap();
+    assert!(
+        host_paired.starts_with("did:wire:willard-"),
+        "got: {host_paired}"
+    );
 
     let join_stdout = String::from_utf8(join_out.stdout).unwrap();
     let join_final: Value =
         serde_json::from_str(join_stdout.trim().lines().last().unwrap()).unwrap();
-    assert_eq!(join_final["paired_with"], "did:wire:paul");
+    let join_paired = join_final["paired_with"].as_str().unwrap();
+    assert!(
+        join_paired.starts_with("did:wire:paul-"),
+        "got: {join_paired}"
+    );
 
     // SAS digits should match across both sides.
     assert_eq!(host_final["sas"], join_final["sas"]);

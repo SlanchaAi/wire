@@ -33,6 +33,13 @@ async fn spawn_relay(state_dir: std::path::PathBuf) -> String {
     format!("http://{addr}")
 }
 
+fn signed_card(handle: &str, profile: Value) -> Value {
+    let (private_key, public_key) = wire::signing::generate_keypair();
+    let mut card = wire::agent_card::build_agent_card(handle, &public_key, None, None, None);
+    card["profile"] = profile;
+    wire::agent_card::sign_agent_card(&card, &private_key)
+}
+
 #[tokio::test]
 async fn healthz_returns_200() {
     let dir = fresh_state_dir();
@@ -441,6 +448,71 @@ async fn slot_state_rejects_wrong_token() {
 }
 
 #[tokio::test]
+async fn responder_health_roundtrip_auth_and_persistence() {
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir.clone()).await;
+    let client = reqwest::Client::new();
+    let alloc: Value = client
+        .post(format!("{base}/v1/slot/allocate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let slot_id = alloc["slot_id"].as_str().unwrap().to_string();
+    let slot_token = alloc["slot_token"].as_str().unwrap().to_string();
+    let record = json!({
+        "status": "offline",
+        "reason": "OAuth expired",
+        "last_success_at": "2026-05-15T20:14:00Z",
+        "set_at": "2026-05-15T20:15:00Z",
+    });
+
+    let wrong = client
+        .post(format!("{base}/v1/slot/{slot_id}/responder-health"))
+        .bearer_auth("wrong-token")
+        .json(&record)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), 403);
+
+    let set = client
+        .post(format!("{base}/v1/slot/{slot_id}/responder-health"))
+        .bearer_auth(&slot_token)
+        .json(&record)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(set.status(), 200);
+
+    let state: Value = client
+        .get(format!("{base}/v1/slot/{slot_id}/state"))
+        .bearer_auth(&slot_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(state["responder_health"], record);
+
+    let base2 = spawn_relay(dir).await;
+    let state2: Value = client
+        .get(format!("{base2}/v1/slot/{slot_id}/state"))
+        .bearer_auth(&slot_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(state2["responder_health"], record);
+}
+
+#[tokio::test]
 async fn sse_stream_pushes_event_to_subscriber() {
     let dir = fresh_state_dir();
     let base = spawn_relay(dir).await;
@@ -535,4 +607,219 @@ async fn sse_stream_rejects_wrong_token() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn a2a_agent_card_uses_slancha_extension_uri() {
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir).await;
+    let client = reqwest::Client::new();
+    let alloc: Value = client
+        .post(format!("{base}/v1/slot/allocate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let slot_id = alloc["slot_id"].as_str().unwrap();
+    let slot_token = alloc["slot_token"].as_str().unwrap();
+    let (private_key, public_key) = wire::signing::generate_keypair();
+    let card = wire::agent_card::sign_agent_card(
+        &wire::agent_card::build_agent_card("alice", &public_key, None, None, None),
+        &private_key,
+    );
+
+    let claim_resp = client
+        .post(format!("{base}/v1/handle/claim"))
+        .bearer_auth(slot_token)
+        .json(&json!({
+            "nick": "alice",
+            "slot_id": slot_id,
+            "relay_url": base,
+            "card": card,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(claim_resp.status(), 201);
+
+    let a2a_card: Value = client
+        .get(format!("{base}/.well-known/agent-card.json?handle=alice"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        a2a_card["extensions"][0]["uri"],
+        "https://slancha.ai/wire/ext/v0.5"
+    );
+}
+
+#[tokio::test]
+async fn stats_split_first_claims_from_reclaims() {
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir).await;
+    let client = reqwest::Client::new();
+    let alloc: Value = client
+        .post(format!("{base}/v1/slot/allocate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let slot_id = alloc["slot_id"].as_str().unwrap();
+    let slot_token = alloc["slot_token"].as_str().unwrap();
+    let (private_key, public_key) = wire::signing::generate_keypair();
+    let card = wire::agent_card::sign_agent_card(
+        &wire::agent_card::build_agent_card("alice", &public_key, None, None, None),
+        &private_key,
+    );
+
+    let first: Value = client
+        .post(format!("{base}/v1/handle/claim"))
+        .bearer_auth(slot_token)
+        .json(&json!({
+            "nick": "alice",
+            "slot_id": slot_id,
+            "relay_url": base,
+            "card": card,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first["status"], "claimed");
+    let stats1: Value = client
+        .get(format!("{base}/stats"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stats1["handle_claims_total"], 1);
+    assert_eq!(stats1["handle_first_claims_total"], 1);
+
+    let reclaim: Value = client
+        .post(format!("{base}/v1/handle/claim"))
+        .bearer_auth(slot_token)
+        .json(&json!({
+            "nick": "alice",
+            "slot_id": slot_id,
+            "relay_url": base,
+            "card": card,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reclaim["status"], "re-claimed");
+    let stats2: Value = client
+        .get(format!("{base}/stats"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stats2["handle_claims_total"], 2);
+    assert_eq!(stats2["handle_first_claims_total"], 1);
+}
+
+#[tokio::test]
+async fn handles_directory_paginates_filters_vibe_and_respects_listed_false() {
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir).await;
+    let client = reqwest::Client::new();
+
+    for (nick, profile) in [
+        (
+            "alice",
+            json!({"emoji": "A", "motto": "alpha", "vibe": ["Nocturnal"], "pronouns": "she/her", "now": {"text": "tuning"}}),
+        ),
+        (
+            "bravo",
+            json!({"emoji": "B", "motto": "beta", "vibe": ["solar"], "listed": false}),
+        ),
+        (
+            "carol",
+            json!({"emoji": "C", "motto": "gamma", "vibe": ["nocturnal", "ops"]}),
+        ),
+    ] {
+        let alloc: Value = client
+            .post(format!("{base}/v1/slot/allocate"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let slot_id = alloc["slot_id"].as_str().unwrap();
+        let slot_token = alloc["slot_token"].as_str().unwrap();
+        let card = signed_card(nick, profile);
+        let resp = client
+            .post(format!("{base}/v1/handle/claim"))
+            .bearer_auth(slot_token)
+            .json(&json!({
+                "nick": nick,
+                "slot_id": slot_id,
+                "relay_url": base,
+                "card": card,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201);
+    }
+
+    let page1: Value = client
+        .get(format!("{base}/v1/handles?limit=1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page1["handles"].as_array().unwrap().len(), 1);
+    assert_eq!(page1["handles"][0]["nick"], "alice");
+    assert_eq!(page1["next_cursor"], "alice");
+
+    let page2: Value = client
+        .get(format!("{base}/v1/handles?limit=10&cursor=alice"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page2["handles"].as_array().unwrap().len(), 1);
+    assert_eq!(page2["handles"][0]["nick"], "carol");
+    assert!(page2["next_cursor"].is_null());
+
+    let nocturnal: Value = client
+        .get(format!("{base}/v1/handles?vibe=NOCTURNAL"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let nicks: Vec<_> = nocturnal["handles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["nick"].as_str().unwrap())
+        .collect();
+    assert_eq!(nicks, vec!["alice", "carol"]);
 }

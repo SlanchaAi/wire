@@ -71,6 +71,7 @@ pub struct Relay {
 struct RelayCounters {
     boot_unix: u64,
     handle_claims_total: AtomicU64,
+    handle_first_claims_total: AtomicU64,
     slot_allocations_total: AtomicU64,
     pair_opens_total: AtomicU64,
     events_posted_total: AtomicU64,
@@ -79,6 +80,7 @@ struct RelayCounters {
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct CountersSnapshot {
     handle_claims_total: u64,
+    handle_first_claims_total: u64,
     slot_allocations_total: u64,
     pair_opens_total: u64,
     events_posted_total: u64,
@@ -108,6 +110,8 @@ struct Inner {
     pair_slots: HashMap<String, PairSlot>,
     /// nick -> registered handle directory entry (v0.5).
     handles: HashMap<String, HandleRecord>,
+    /// slot_id -> latest operator-published auto-responder health record (R3).
+    responder_health: HashMap<String, ResponderHealthRecord>,
 }
 
 /// One entry in the relay's handle directory (v0.5 — agentic hotline).
@@ -121,6 +125,16 @@ struct HandleRecord {
     pub slot_id: String,
     pub relay_url: Option<String>,
     pub claimed_at: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ResponderHealthRecord {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_success_at: Option<String>,
+    pub set_at: String,
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +191,7 @@ impl Relay {
     pub async fn new(state_dir: PathBuf) -> Result<Self> {
         tokio::fs::create_dir_all(state_dir.join("slots")).await?;
         tokio::fs::create_dir_all(state_dir.join("handles")).await?;
+        tokio::fs::create_dir_all(state_dir.join("responder-health")).await?;
         let mut inner = Inner {
             slots: HashMap::new(),
             tokens: HashMap::new(),
@@ -186,6 +201,7 @@ impl Relay {
             pair_lookup: HashMap::new(),
             pair_slots: HashMap::new(),
             handles: HashMap::new(),
+            responder_health: HashMap::new(),
         };
         // Reload tokens
         let token_path = state_dir.join("tokens.json");
@@ -234,21 +250,41 @@ impl Relay {
                 }
             }
         }
+        // Reload responder health records (R3).
+        let responder_health_dir = state_dir.join("responder-health");
+        if responder_health_dir.exists() {
+            let mut rd = tokio::fs::read_dir(&responder_health_dir).await?;
+            while let Some(entry) = rd.next_entry().await? {
+                let path = entry.path();
+                if path.extension().and_then(|x| x.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(slot_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let body = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+                if let Ok(rec) = serde_json::from_str::<ResponderHealthRecord>(&body) {
+                    inner.responder_health.insert(slot_id.to_string(), rec);
+                }
+            }
+        }
         let boot_unix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         // Reload counter snapshot. Missing/corrupt file → start at zero.
-        let snap: CountersSnapshot = match tokio::fs::read_to_string(state_dir.join("counters.json")).await {
-            Ok(body) => serde_json::from_str(&body).unwrap_or_default(),
-            Err(_) => CountersSnapshot::default(),
-        };
+        let snap: CountersSnapshot =
+            match tokio::fs::read_to_string(state_dir.join("counters.json")).await {
+                Ok(body) => serde_json::from_str(&body).unwrap_or_default(),
+                Err(_) => CountersSnapshot::default(),
+            };
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
             state_dir,
             counters: Arc::new(RelayCounters {
                 boot_unix,
                 handle_claims_total: AtomicU64::new(snap.handle_claims_total),
+                handle_first_claims_total: AtomicU64::new(snap.handle_first_claims_total),
                 slot_allocations_total: AtomicU64::new(snap.slot_allocations_total),
                 pair_opens_total: AtomicU64::new(snap.pair_opens_total),
                 events_posted_total: AtomicU64::new(snap.events_posted_total),
@@ -293,10 +329,15 @@ impl Relay {
             .route("/stats", get(stats))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
             .route("/v1/slot/:slot_id/state", get(slot_state))
+            .route(
+                "/v1/slot/:slot_id/responder-health",
+                post(responder_health_set),
+            )
             .route("/v1/events/:slot_id/stream", get(stream_events))
             .route("/v1/pair/:pair_id", get(pair_get))
             .route("/v1/handle/claim", post(handle_claim))
             .route("/v1/handle/intro/:nick", post(handle_intro))
+            .route("/v1/handles", get(handles_directory))
             .route("/.well-known/wire/agent", get(well_known_agent))
             .route(
                 "/.well-known/agent-card.json",
@@ -346,6 +387,10 @@ impl Relay {
     pub async fn persist_counters(&self) -> Result<()> {
         let snap = CountersSnapshot {
             handle_claims_total: self.counters.handle_claims_total.load(Ordering::Relaxed),
+            handle_first_claims_total: self
+                .counters
+                .handle_first_claims_total
+                .load(Ordering::Relaxed),
             slot_allocations_total: self.counters.slot_allocations_total.load(Ordering::Relaxed),
             pair_opens_total: self.counters.pair_opens_total.load(Ordering::Relaxed),
             events_posted_total: self.counters.events_posted_total.load(Ordering::Relaxed),
@@ -435,6 +480,7 @@ async fn stats(State(relay): State<Relay>) -> impl IntoResponse {
         "pair_slots_open": inner.pair_slots.len(),
         "streams_active": streams_active,
         "handle_claims_total": relay.counters.handle_claims_total.load(Ordering::Relaxed),
+        "handle_first_claims_total": relay.counters.handle_first_claims_total.load(Ordering::Relaxed),
         "slot_allocations_total": relay.counters.slot_allocations_total.load(Ordering::Relaxed),
         "pair_opens_total": relay.counters.pair_opens_total.load(Ordering::Relaxed),
         "events_posted_total": relay.counters.events_posted_total.load(Ordering::Relaxed),
@@ -449,10 +495,7 @@ async fn landing_index() -> impl IntoResponse {
     static INDEX_HTML: &[u8] = include_bytes!("../landing/index.html");
     (
         StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/html; charset=utf-8",
-        )],
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
         INDEX_HTML,
     )
 }
@@ -472,10 +515,7 @@ async fn landing_og() -> impl IntoResponse {
         StatusCode::OK,
         [
             (axum::http::header::CONTENT_TYPE, "image/png"),
-            (
-                axum::http::header::CACHE_CONTROL,
-                "public, max-age=86400",
-            ),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         OG_PNG,
     )
@@ -486,14 +526,8 @@ async fn landing_demo_cast() -> impl IntoResponse {
     (
         StatusCode::OK,
         [
-            (
-                axum::http::header::CONTENT_TYPE,
-                "application/x-asciicast",
-            ),
-            (
-                axum::http::header::CACHE_CONTROL,
-                "public, max-age=3600",
-            ),
+            (axum::http::header::CONTENT_TYPE, "application/x-asciicast"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=3600"),
         ],
         DEMO_CAST,
     )
@@ -508,10 +542,7 @@ async fn landing_install_sh() -> impl IntoResponse {
                 axum::http::header::CONTENT_TYPE,
                 "text/x-shellscript; charset=utf-8",
             ),
-            (
-                axum::http::header::CACHE_CONTROL,
-                "public, max-age=300",
-            ),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=300"),
         ],
         INSTALL_SH,
     )
@@ -927,22 +958,24 @@ async fn handle_claim(
     };
 
     // FCFS check.
-    {
+    let first_claim = {
         let inner = relay.inner.lock().await;
-        if let Some(existing) = inner.handles.get(&req.nick)
-            && existing.did != did
-        {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": "phyllis: this line's already taken by someone else — pick another handle or buzz the rightful owner",
-                    "nick": req.nick,
-                    "claimed_by": existing.did,
-                })),
-            )
-                .into_response();
+        match inner.handles.get(&req.nick) {
+            Some(existing) if existing.did != did => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "phyllis: this line's already taken by someone else — pick another handle or buzz the rightful owner",
+                        "nick": req.nick,
+                        "claimed_by": existing.did,
+                    })),
+                )
+                    .into_response();
+            }
+            Some(_) => false,
+            None => true,
         }
-    }
+    };
 
     let now = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -986,12 +1019,18 @@ async fn handle_claim(
         .counters
         .handle_claims_total
         .fetch_add(1, Ordering::Relaxed);
+    if first_claim {
+        relay
+            .counters
+            .handle_first_claims_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
     (
         StatusCode::CREATED,
         Json(json!({
             "nick": req.nick,
             "did": did,
-            "status": "claimed",
+            "status": if first_claim { "claimed" } else { "re-claimed" },
         })),
     )
         .into_response()
@@ -1000,6 +1039,91 @@ async fn handle_claim(
 #[derive(Deserialize)]
 pub struct WellKnownAgentQuery {
     pub handle: String,
+}
+
+#[derive(Deserialize)]
+pub struct HandlesDirectoryQuery {
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+    pub vibe: Option<String>,
+}
+
+async fn handles_directory(
+    State(relay): State<Relay>,
+    Query(q): Query<HandlesDirectoryQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let vibe_filter = q.vibe.as_ref().map(|v| v.to_ascii_lowercase());
+    let inner = relay.inner.lock().await;
+    let mut records: Vec<HandleRecord> = inner.handles.values().cloned().collect();
+    drop(inner);
+    records.sort_by(|a, b| a.nick.cmp(&b.nick));
+
+    let cursor = q.cursor.as_deref();
+    let mut eligible = Vec::new();
+    for rec in records {
+        if cursor.is_some_and(|c| rec.nick.as_str() <= c) {
+            continue;
+        }
+        let profile = rec.card.get("profile").cloned().unwrap_or(Value::Null);
+        if profile
+            .get("listed")
+            .and_then(Value::as_bool)
+            .is_some_and(|listed| !listed)
+        {
+            continue;
+        }
+        if let Some(want) = &vibe_filter {
+            let matched = profile
+                .get("vibe")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter().any(|v| {
+                        v.as_str()
+                            .map(|s| s.eq_ignore_ascii_case(want))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if !matched {
+                continue;
+            }
+        }
+        eligible.push((rec, profile));
+    }
+
+    let has_more = eligible.len() > limit;
+    let page = eligible.into_iter().take(limit).collect::<Vec<_>>();
+    let next_cursor = if has_more {
+        page.last().map(|(rec, _)| rec.nick.clone())
+    } else {
+        None
+    };
+    let handles: Vec<Value> = page
+        .into_iter()
+        .map(|(rec, profile)| {
+            json!({
+                "nick": rec.nick,
+                "did": rec.did,
+                "profile": {
+                    "emoji": profile.get("emoji").cloned().unwrap_or(Value::Null),
+                    "motto": profile.get("motto").cloned().unwrap_or(Value::Null),
+                    "vibe": profile.get("vibe").cloned().unwrap_or(Value::Null),
+                    "pronouns": profile.get("pronouns").cloned().unwrap_or(Value::Null),
+                    "now": profile.get("now").cloned().unwrap_or(Value::Null),
+                },
+                "claimed_at": rec.claimed_at,
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "handles": handles,
+            "next_cursor": next_cursor,
+        })),
+    )
+        .into_response()
 }
 
 /// `POST /v1/handle/intro/:nick` — drop a signed pair-introduction event
@@ -1242,13 +1366,10 @@ async fn well_known_agent_card_a2a(
         "security": [{"ed25519-event-sig": []}],
         "skills": [],
         "extensions": [{
-            // STABLE EXTENSION NAMESPACE — do NOT change this URI even
-            // though the wire repo moved from laulpogan/wire to
-            // SlanchaAi/wire. A2A extension URIs are treated as opaque
-            // identifiers by federation peers; changing the string would
-            // break compatibility with every wire-extension-aware client
-            // already in the wild. Keep `laulpogan` here forever.
-            "uri": "https://github.com/laulpogan/wire/ext/v0.5",
+            // A2A extension URIs are opaque namespace identifiers, not
+            // forwardable URLs. Changing this string is a coordinated
+            // federation-spec bump because peers match it exactly.
+            "uri": "https://slancha.ai/wire/ext/v0.5",
             "description": "Wire-native fields: full signed agent-card, profile blob, DID, slot_id, mailbox relay coords.",
             "required": false,
             "params": {
@@ -1349,15 +1470,56 @@ async fn slot_state(
     let inner = relay.inner.lock().await;
     let event_count = inner.slots.get(&slot_id).map(|v| v.len()).unwrap_or(0);
     let last_pull_at_unix = inner.last_pull_at_unix.get(&slot_id).copied();
+    let responder_health = inner.responder_health.get(&slot_id).cloned();
     (
         StatusCode::OK,
         Json(json!({
             "slot_id": slot_id,
             "event_count": event_count,
             "last_pull_at_unix": last_pull_at_unix,
+            "responder_health": responder_health,
         })),
     )
         .into_response()
+}
+
+async fn responder_health_set(
+    State(relay): State<Relay>,
+    Path(slot_id): Path<String>,
+    headers: HeaderMap,
+    Json(record): Json<ResponderHealthRecord>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_token(&relay, &headers, &slot_id).await {
+        return resp;
+    }
+    let path = relay
+        .state_dir
+        .join("responder-health")
+        .join(format!("{slot_id}.json"));
+    let body = match serde_json::to_vec_pretty(&record) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("serialize failed: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    if let Err(e) = tokio::fs::write(&path, body).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("persist failed: {e}")})),
+        )
+            .into_response();
+    }
+    {
+        let mut inner = relay.inner.lock().await;
+        inner
+            .responder_health
+            .insert(slot_id.clone(), record.clone());
+    }
+    (StatusCode::OK, Json(record)).into_response()
 }
 
 async fn check_token(

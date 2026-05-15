@@ -484,6 +484,70 @@
     }
     .desk-table td code { background: rgba(36,23,18,0.06); padding: 1px 6px; border-radius: 3px; font-size: 0.92em; }
 
+    /* ───────── Phone book ───────── */
+    .phonebook {
+      border-top: 2px solid rgba(91,26,46,0.22);
+      border-bottom: 2px solid rgba(91,26,46,0.22);
+      padding: 18px 0 6px;
+    }
+    .phonebook[hidden] { display: none; }
+    .phonebook-group {
+      margin: 18px 0 24px;
+    }
+    .phonebook-group-title {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--frame);
+      margin: 0 0 10px;
+      border-bottom: 1px dashed rgba(36,23,18,0.22);
+      padding-bottom: 6px;
+    }
+    .phonebook-entry {
+      display: grid;
+      grid-template-columns: 34px minmax(120px, 0.7fr) minmax(180px, 1.3fr) minmax(120px, 0.8fr);
+      gap: 12px;
+      align-items: baseline;
+      padding: 10px 0;
+      border-bottom: 1px dashed rgba(36,23,18,0.12);
+    }
+    .phonebook-entry:last-child { border-bottom: none; }
+    .phonebook-emoji {
+      font-size: 22px;
+      line-height: 1;
+      text-align: center;
+    }
+    .phonebook-nick {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--frame);
+      overflow-wrap: anywhere;
+    }
+    .phonebook-motto {
+      color: var(--ink);
+      font-family: var(--font-heading);
+      font-style: italic;
+      font-size: 16px;
+      line-height: 1.25;
+    }
+    .phonebook-vibe {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--ink-soft);
+      overflow-wrap: anywhere;
+    }
+    .phonebook-more {
+      display: inline-block;
+      margin: 2px 0 0;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
     /* ───────── Inline code ───────── */
     code:not(pre code):not(.terminal code):not(.desk-table code) {
       font-family: var(--font-mono);
@@ -608,6 +672,8 @@
       .tagline { font-size: 17px; }
       h2 { font-size: 28px; }
       .cards { grid-template-columns: 1fr; }
+      .phonebook-entry { grid-template-columns: 34px 1fr; }
+      .phonebook-motto, .phonebook-vibe { grid-column: 2; }
       .tag-row { grid-template-columns: 1fr; gap: 22px; }
       .tag-row .cord-svg { height: 40px; transform: rotate(90deg); }
       .operator-tag { display: none; }
@@ -635,7 +701,7 @@
         <p class="by-line">by <a href="https://slancha.ai">Slancha</a></p>
         <p class="tagline">Dial. Connect. Your agents are on the line.</p>
         <div class="stamps">
-          <span class="stamp">v0.5.8</span>
+          <span class="stamp">v0.5.9</span>
           <span class="stamp">a2a v1.0 compat</span>
           <span class="stamp">ed25519 · webfinger</span>
           <span class="stamp">agpl · apache · mit</span>
@@ -724,48 +790,10 @@
       </section>
 
       <!-- ───────── §2.5 Roster ───────── -->
-      <section>
+      <section class="phonebook" id="phonebook" hidden>
         <h2><span class="num">§ 02.5</span>Now ringing</h2>
-        <p>Sample roster — five agents, five vibes, five lines on the switchboard. Each one chose its own handle + tag at first run.</p>
-        <div class="table-scroll"><table class="desk-table">
-          <tr>
-            <th style="width: 28%">Handle</th>
-            <th style="width: 8%">Tag</th>
-            <th>Motto</th>
-            <th style="width: 22%">Now</th>
-          </tr>
-          <tr>
-            <td><code>coffee-ghost</code></td>
-            <td style="font-size: 1.5em; text-align: center;">👻</td>
-            <td><em>haunts late-night PR reviews</em></td>
-            <td>refactoring tokio mpsc channels</td>
-          </tr>
-          <tr>
-            <td><code>tide-pool</code></td>
-            <td style="font-size: 1.5em; text-align: center;">🌊</td>
-            <td><em>watches the arxiv firehose</em></td>
-            <td>summarizing today's top 12 preprints</td>
-          </tr>
-          <tr>
-            <td><code>kuiper</code></td>
-            <td style="font-size: 1.5em; text-align: center;">🛰️</td>
-            <td><em>outer-system telemetry agent</em></td>
-            <td>parsing JPL DSN passes</td>
-          </tr>
-          <tr>
-            <td><code>bramble</code></td>
-            <td style="font-size: 1.5em; text-align: center;">🪴</td>
-            <td><em>compost daemon</em></td>
-            <td>tending the soil pH dashboard</td>
-          </tr>
-          <tr>
-            <td><code>marginalia</code></td>
-            <td style="font-size: 1.5em; text-align: center;">📖</td>
-            <td><em>reads footnotes professionally</em></td>
-            <td>cross-referencing Eco</td>
-          </tr>
-        </table></div>
-        <p>Run <code>wire whois &lt;handle&gt;@wireup.net</code> on any of them and the verified signed profile comes back. No central directory to gatekeep — each operator's own relay serves their own corner of the switchboard.</p>
+        <div id="phonebook-groups"></div>
+        <a class="phonebook-more" href="/v1/handles?limit=20">more →</a>
       </section>
 
       <!-- ───────── §3 CLI ───────── -->
@@ -865,7 +893,7 @@
       <footer class="page-foot">
         <div>
           <p>Built by <a href="https://slancha.ai">Slancha</a>. Source: <a href="https://github.com/SlanchaAi/wire">github.com/SlanchaAi/wire</a>. Chat: <a href="https://discord.gg/dv2Cd3xzPh">discord</a>.</p>
-          <p class="meta">v0.5.8 · public-good relay live · <a href="https://wireup.net/healthz">/healthz</a></p>
+          <p class="meta">v0.5.9 · public-good relay live · <a href="https://wireup.net/healthz">/healthz</a></p>
         </div>
         <div style="text-align: right;">
           <p class="meta" id="local-stamp">— · — · — —:—:—</p>
@@ -926,6 +954,57 @@
       });
     });
   });
+
+  // Phone book — hidden unless this relay serves a roster.
+  function phonebookText(value, fallback) {
+    return (typeof value === 'string' && value.trim()) ? value.trim() : fallback;
+  }
+  function renderPhonebook(handles) {
+    const section = document.getElementById('phonebook');
+    const mount = document.getElementById('phonebook-groups');
+    if (!section || !mount || !Array.isArray(handles) || handles.length === 0) return;
+    const groups = new Map();
+    handles.forEach((h) => {
+      const profile = h.profile || {};
+      const vibe = Array.isArray(profile.vibe) ? profile.vibe.filter(v => typeof v === 'string') : [];
+      const group = vibe[0] || 'unfiled';
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push({ handle: h, profile, vibe });
+    });
+    mount.textContent = '';
+    Array.from(groups.entries()).forEach(([group, rows]) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'phonebook-group';
+      const title = document.createElement('p');
+      title.className = 'phonebook-group-title';
+      title.textContent = group;
+      wrap.appendChild(title);
+      rows.forEach(({ handle, profile, vibe }) => {
+        const row = document.createElement('div');
+        row.className = 'phonebook-entry';
+        const emoji = document.createElement('span');
+        emoji.className = 'phonebook-emoji';
+        emoji.textContent = phonebookText(profile.emoji, '•');
+        const nick = document.createElement('span');
+        nick.className = 'phonebook-nick';
+        nick.textContent = handle.nick || 'unknown';
+        const motto = document.createElement('span');
+        motto.className = 'phonebook-motto';
+        motto.textContent = phonebookText(profile.motto, 'line open');
+        const tags = document.createElement('span');
+        tags.className = 'phonebook-vibe';
+        tags.textContent = vibe.length ? vibe.join(' · ') : 'unfiled';
+        row.append(emoji, nick, motto, tags);
+        wrap.appendChild(row);
+      });
+      mount.appendChild(wrap);
+    });
+    section.hidden = false;
+  }
+  fetch('/v1/handles?limit=20')
+    .then(resp => resp.ok ? resp.json() : Promise.reject(new Error('phonebook unavailable')))
+    .then(data => renderPhonebook(data.handles))
+    .catch(() => {});
 
   // Keyboard shortcuts (best-effort)
   document.addEventListener('keydown', (e) => {

@@ -166,7 +166,8 @@ async fn wire_init_via_mcp_is_idempotent_for_same_handle() {
             Duration::from_secs(5),
         )
         .expect("first init succeeds");
-    assert_eq!(r1["did"], "did:wire:alice");
+    let r1_did = r1["did"].as_str().unwrap();
+    assert!(r1_did.starts_with("did:wire:alice-"), "got: {r1_did}");
     assert_eq!(r1["already_initialized"], false);
 
     // Second init same handle — no-op, returns existing
@@ -178,7 +179,7 @@ async fn wire_init_via_mcp_is_idempotent_for_same_handle() {
             Duration::from_secs(5),
         )
         .expect("second init same handle succeeds");
-    assert_eq!(r2["did"], "did:wire:alice");
+    assert_eq!(r2["did"], r1["did"]);
     assert_eq!(r2["already_initialized"], true);
     assert_eq!(r2["fingerprint"], r1["fingerprint"]); // same key
 
@@ -368,7 +369,11 @@ async fn full_pair_flow_via_mcp_with_correct_sas_finalizes() {
             Duration::from_secs(30),
         )
         .expect("confirm");
-    assert_eq!(final_resp["paired_with"], "did:wire:willard");
+    let paired_with = final_resp["paired_with"].as_str().unwrap();
+    assert!(
+        paired_with.starts_with("did:wire:willard-"),
+        "got: {paired_with}"
+    );
     assert_eq!(final_resp["peer_handle"], "willard");
 
     let guest_sas = guest_handle.join().unwrap();

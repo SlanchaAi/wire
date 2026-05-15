@@ -177,6 +177,7 @@ pub const PROFILE_FIELDS: &[&str] = &[
     "avatar_url",
     "handle",
     "now",
+    "listed",
 ];
 
 /// Read this agent's profile blob from the agent-card. Returns `Value::Null`
@@ -303,12 +304,7 @@ fn unwrap_a2a_to_wire_payload(a2a: &Value) -> anyhow::Result<Value> {
             exts.iter().find(|e| {
                 e.get("uri")
                     .and_then(Value::as_str)
-                    // STABLE EXTENSION NAMESPACE — see relay_server.rs comment.
-                    // The wire repo moved to SlanchaAi/wire but this URI MUST
-                    // stay matched against the original `laulpogan` namespace
-                    // forever; A2A extension URIs are opaque identifiers, not
-                    // forwardable URLs.
-                    .map(|u| u.starts_with("https://github.com/laulpogan/wire/ext"))
+                    .map(|u| u.starts_with("https://slancha.ai/wire/ext"))
                     .unwrap_or(false)
             })
         });

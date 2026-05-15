@@ -128,7 +128,11 @@ async fn invite_url_one_paste_pair_e2e() {
         String::from_utf8_lossy(&out.stderr)
     );
     let accept: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
-    assert_eq!(accept["paired_with"].as_str(), Some("did:wire:paul"));
+    let pw = accept["paired_with"].as_str().expect("paired_with string");
+    assert!(
+        pw.starts_with("did:wire:paul-"),
+        "expected pubkey-suffixed paul DID, got: {pw}"
+    );
 
     // 3. Wait for paul daemon to pull + consume pair_drop → pin willard.
     // Require BOTH trust + relay-state to contain willard so the diagnostic
