@@ -1228,13 +1228,10 @@ async fn well_known_agent_card_a2a(
         "security": [{"ed25519-event-sig": []}],
         "skills": [],
         "extensions": [{
-            // STABLE EXTENSION NAMESPACE — do NOT change this URI even
-            // though the wire repo moved from laulpogan/wire to
-            // SlanchaAi/wire. A2A extension URIs are treated as opaque
-            // identifiers by federation peers; changing the string would
-            // break compatibility with every wire-extension-aware client
-            // already in the wild. Keep `laulpogan` here forever.
-            "uri": "https://github.com/laulpogan/wire/ext/v0.5",
+            // A2A extension URIs are opaque namespace identifiers, not
+            // forwardable URLs. Changing this string is a coordinated
+            // federation-spec bump because peers match it exactly.
+            "uri": "https://slancha.ai/wire/ext/v0.5",
             "description": "Wire-native fields: full signed agent-card, profile blob, DID, slot_id, mailbox relay coords.",
             "required": false,
             "params": {

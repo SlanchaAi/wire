@@ -536,3 +536,53 @@ async fn sse_stream_rejects_wrong_token() {
         .unwrap();
     assert_eq!(resp.status(), 403);
 }
+
+#[tokio::test]
+async fn a2a_agent_card_uses_slancha_extension_uri() {
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir).await;
+    let client = reqwest::Client::new();
+    let alloc: Value = client
+        .post(format!("{base}/v1/slot/allocate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let slot_id = alloc["slot_id"].as_str().unwrap();
+    let slot_token = alloc["slot_token"].as_str().unwrap();
+    let (private_key, public_key) = wire::signing::generate_keypair();
+    let card = wire::agent_card::sign_agent_card(
+        &wire::agent_card::build_agent_card("alice", &public_key, None, None, None),
+        &private_key,
+    );
+
+    let claim_resp = client
+        .post(format!("{base}/v1/handle/claim"))
+        .bearer_auth(slot_token)
+        .json(&json!({
+            "nick": "alice",
+            "slot_id": slot_id,
+            "relay_url": base,
+            "card": card,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(claim_resp.status(), 201);
+
+    let a2a_card: Value = client
+        .get(format!("{base}/.well-known/agent-card.json?handle=alice"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        a2a_card["extensions"][0]["uri"],
+        "https://slancha.ai/wire/ext/v0.5"
+    );
+}
