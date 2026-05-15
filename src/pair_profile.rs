@@ -177,6 +177,7 @@ pub const PROFILE_FIELDS: &[&str] = &[
     "avatar_url",
     "handle",
     "now",
+    "listed",
 ];
 
 /// Read this agent's profile blob from the agent-card. Returns `Value::Null`

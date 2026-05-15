@@ -337,6 +337,7 @@ impl Relay {
             .route("/v1/pair/:pair_id", get(pair_get))
             .route("/v1/handle/claim", post(handle_claim))
             .route("/v1/handle/intro/:nick", post(handle_intro))
+            .route("/v1/handles", get(handles_directory))
             .route("/.well-known/wire/agent", get(well_known_agent))
             .route(
                 "/.well-known/agent-card.json",
@@ -1038,6 +1039,91 @@ async fn handle_claim(
 #[derive(Deserialize)]
 pub struct WellKnownAgentQuery {
     pub handle: String,
+}
+
+#[derive(Deserialize)]
+pub struct HandlesDirectoryQuery {
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+    pub vibe: Option<String>,
+}
+
+async fn handles_directory(
+    State(relay): State<Relay>,
+    Query(q): Query<HandlesDirectoryQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let vibe_filter = q.vibe.as_ref().map(|v| v.to_ascii_lowercase());
+    let inner = relay.inner.lock().await;
+    let mut records: Vec<HandleRecord> = inner.handles.values().cloned().collect();
+    drop(inner);
+    records.sort_by(|a, b| a.nick.cmp(&b.nick));
+
+    let cursor = q.cursor.as_deref();
+    let mut eligible = Vec::new();
+    for rec in records {
+        if cursor.is_some_and(|c| rec.nick.as_str() <= c) {
+            continue;
+        }
+        let profile = rec.card.get("profile").cloned().unwrap_or(Value::Null);
+        if profile
+            .get("listed")
+            .and_then(Value::as_bool)
+            .is_some_and(|listed| !listed)
+        {
+            continue;
+        }
+        if let Some(want) = &vibe_filter {
+            let matched = profile
+                .get("vibe")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter().any(|v| {
+                        v.as_str()
+                            .map(|s| s.eq_ignore_ascii_case(want))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if !matched {
+                continue;
+            }
+        }
+        eligible.push((rec, profile));
+    }
+
+    let has_more = eligible.len() > limit;
+    let page = eligible.into_iter().take(limit).collect::<Vec<_>>();
+    let next_cursor = if has_more {
+        page.last().map(|(rec, _)| rec.nick.clone())
+    } else {
+        None
+    };
+    let handles: Vec<Value> = page
+        .into_iter()
+        .map(|(rec, profile)| {
+            json!({
+                "nick": rec.nick,
+                "did": rec.did,
+                "profile": {
+                    "emoji": profile.get("emoji").cloned().unwrap_or(Value::Null),
+                    "motto": profile.get("motto").cloned().unwrap_or(Value::Null),
+                    "vibe": profile.get("vibe").cloned().unwrap_or(Value::Null),
+                    "pronouns": profile.get("pronouns").cloned().unwrap_or(Value::Null),
+                    "now": profile.get("now").cloned().unwrap_or(Value::Null),
+                },
+                "claimed_at": rec.claimed_at,
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "handles": handles,
+            "next_cursor": next_cursor,
+        })),
+    )
+        .into_response()
 }
 
 /// `POST /v1/handle/intro/:nick` — drop a signed pair-introduction event

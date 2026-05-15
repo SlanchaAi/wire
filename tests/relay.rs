@@ -33,6 +33,13 @@ async fn spawn_relay(state_dir: std::path::PathBuf) -> String {
     format!("http://{addr}")
 }
 
+fn signed_card(handle: &str, profile: Value) -> Value {
+    let (private_key, public_key) = wire::signing::generate_keypair();
+    let mut card = wire::agent_card::build_agent_card(handle, &public_key, None, None, None);
+    card["profile"] = profile;
+    wire::agent_card::sign_agent_card(&card, &private_key)
+}
+
 #[tokio::test]
 async fn healthz_returns_200() {
     let dir = fresh_state_dir();
@@ -727,4 +734,92 @@ async fn stats_split_first_claims_from_reclaims() {
         .unwrap();
     assert_eq!(stats2["handle_claims_total"], 2);
     assert_eq!(stats2["handle_first_claims_total"], 1);
+}
+
+#[tokio::test]
+async fn handles_directory_paginates_filters_vibe_and_respects_listed_false() {
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir).await;
+    let client = reqwest::Client::new();
+
+    for (nick, profile) in [
+        (
+            "alice",
+            json!({"emoji": "A", "motto": "alpha", "vibe": ["Nocturnal"], "pronouns": "she/her", "now": {"text": "tuning"}}),
+        ),
+        (
+            "bravo",
+            json!({"emoji": "B", "motto": "beta", "vibe": ["solar"], "listed": false}),
+        ),
+        (
+            "carol",
+            json!({"emoji": "C", "motto": "gamma", "vibe": ["nocturnal", "ops"]}),
+        ),
+    ] {
+        let alloc: Value = client
+            .post(format!("{base}/v1/slot/allocate"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let slot_id = alloc["slot_id"].as_str().unwrap();
+        let slot_token = alloc["slot_token"].as_str().unwrap();
+        let card = signed_card(nick, profile);
+        let resp = client
+            .post(format!("{base}/v1/handle/claim"))
+            .bearer_auth(slot_token)
+            .json(&json!({
+                "nick": nick,
+                "slot_id": slot_id,
+                "relay_url": base,
+                "card": card,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201);
+    }
+
+    let page1: Value = client
+        .get(format!("{base}/v1/handles?limit=1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page1["handles"].as_array().unwrap().len(), 1);
+    assert_eq!(page1["handles"][0]["nick"], "alice");
+    assert_eq!(page1["next_cursor"], "alice");
+
+    let page2: Value = client
+        .get(format!("{base}/v1/handles?limit=10&cursor=alice"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page2["handles"].as_array().unwrap().len(), 1);
+    assert_eq!(page2["handles"][0]["nick"], "carol");
+    assert!(page2["next_cursor"].is_null());
+
+    let nocturnal: Value = client
+        .get(format!("{base}/v1/handles?vibe=NOCTURNAL"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let nicks: Vec<_> = nocturnal["handles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["nick"].as_str().unwrap())
+        .collect();
+    assert_eq!(nicks, vec!["alice", "carol"]);
 }
