@@ -136,6 +136,22 @@ struct Inner {
     handles: HashMap<String, HandleRecord>,
     /// slot_id -> latest operator-published auto-responder health record (R3).
     responder_health: HashMap<String, ResponderHealthRecord>,
+    /// token -> short-URL invite record (v0.5.10 — one-curl onboarding).
+    /// Token is the path segment in `GET /i/{token}`. Record holds the
+    /// underlying `wire://pair?...` URL plus TTL/uses bookkeeping.
+    invites: HashMap<String, InviteRecord>,
+}
+
+/// One entry in the short-URL invite map. Persisted to
+/// `<state_dir>/invites.jsonl` so deploys don't drop active invites.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct InviteRecord {
+    token: String,
+    invite_url: String,
+    expires_unix: u64,
+    /// `None` = unlimited until TTL hits. `Some(n)` = decrement each fetch.
+    uses_remaining: Option<u32>,
+    created_unix: u64,
 }
 
 /// One entry in the relay's handle directory (v0.5 — agentic hotline).
@@ -226,6 +242,7 @@ impl Relay {
             pair_slots: HashMap::new(),
             handles: HashMap::new(),
             responder_health: HashMap::new(),
+            invites: HashMap::new(),
         };
         // Reload tokens
         let token_path = state_dir.join("tokens.json");
@@ -289,6 +306,26 @@ impl Relay {
                 let body = tokio::fs::read_to_string(&path).await.unwrap_or_default();
                 if let Ok(rec) = serde_json::from_str::<ResponderHealthRecord>(&body) {
                     inner.responder_health.insert(slot_id.to_string(), rec);
+                }
+            }
+        }
+        // Reload short-URL invites. JSONL append-only; later entries with
+        // the same token overwrite earlier (won't happen — tokens are
+        // unique by construction — but coded defensively).
+        let invites_path = state_dir.join("invites.jsonl");
+        if invites_path.exists() {
+            let now_unix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let body = tokio::fs::read_to_string(&invites_path)
+                .await
+                .unwrap_or_default();
+            for line in body.lines() {
+                if let Ok(rec) = serde_json::from_str::<InviteRecord>(line)
+                    && rec.expires_unix > now_unix
+                {
+                    inner.invites.insert(rec.token.clone(), rec);
                 }
             }
         }
@@ -368,6 +405,8 @@ impl Relay {
             .route("/v1/handle/claim", post(handle_claim))
             .route("/v1/handle/intro/:nick", post(handle_intro))
             .route("/v1/handles", get(handles_directory))
+            .route("/v1/invite/register", post(invite_register))
+            .route("/i/:token", get(invite_script))
             .route("/.well-known/wire/agent", get(well_known_agent))
             .route(
                 "/.well-known/agent-card.json",
@@ -1203,6 +1242,182 @@ pub struct HandlesDirectoryQuery {
     pub cursor: Option<String>,
     pub limit: Option<usize>,
     pub vibe: Option<String>,
+}
+
+// ─── short-URL invites (v0.5.10) ──────────────────────────────────────────
+// One-curl onboarding: the invitor registers their `wire://pair?...` URL
+// here, gets back a 6-hex token. Anyone who does
+//   curl -fsSL https://wireup.net/i/<token> | sh
+// gets wire installed (if needed) + the invite accepted, in one shot.
+//
+// Possession of the short URL = pair authorization (same shape as the
+// underlying wire:// invite — it's just a redirector).
+
+#[derive(Deserialize)]
+pub struct InviteRegisterRequest {
+    /// The wire://pair?... URL produced by `wire invite`. Required.
+    pub invite_url: String,
+    /// Lifetime in seconds. Default 86400 (24h). Capped at 7 days.
+    #[serde(default)]
+    pub ttl_seconds: Option<u64>,
+    /// If `Some(n)`, the short URL can be fetched N times before 410s.
+    /// `None` = unlimited until TTL hits.
+    #[serde(default)]
+    pub uses: Option<u32>,
+}
+
+impl Relay {
+    /// Append one InviteRecord to `<state_dir>/invites.jsonl`.
+    async fn persist_invite(&self, rec: &InviteRecord) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let mut line = serde_json::to_vec(rec)?;
+        line.push(b'\n');
+        let path = self.state_dir.join("invites.jsonl");
+        let mut f = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await?;
+        f.write_all(&line).await?;
+        f.flush().await?;
+        Ok(())
+    }
+}
+
+async fn invite_register(
+    State(relay): State<Relay>,
+    Json(req): Json<InviteRegisterRequest>,
+) -> impl IntoResponse {
+    if req.invite_url.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invite_url required"})),
+        )
+            .into_response();
+    }
+    // Length cap on the embedded URL to keep persisted records bounded.
+    if req.invite_url.len() > 8_192 {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({"error": "invite_url > 8 KiB"})),
+        )
+            .into_response();
+    }
+    let ttl = req.ttl_seconds.unwrap_or(86_400).clamp(60, 7 * 86_400);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // 6-hex token → 16.7M space. Collision probability negligible at v0.5
+    // scale; if a collision happens (1 in 16M) we 409 and the caller retries.
+    let token = random_hex(3);
+    let rec = InviteRecord {
+        token: token.clone(),
+        invite_url: req.invite_url,
+        expires_unix: now + ttl,
+        uses_remaining: req.uses,
+        created_unix: now,
+    };
+    {
+        let mut inner = relay.inner.lock().await;
+        if inner.invites.contains_key(&token) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "token collision, retry"})),
+            )
+                .into_response();
+        }
+        inner.invites.insert(token.clone(), rec.clone());
+    }
+    if let Err(e) = relay.persist_invite(&rec).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("persist failed: {e}")})),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "token": token,
+            "path": format!("/i/{token}"),
+            "expires_unix": rec.expires_unix,
+            "uses_remaining": rec.uses_remaining,
+        })),
+    )
+        .into_response()
+}
+
+async fn invite_script(
+    State(relay): State<Relay>,
+    Path(token): Path<String>,
+) -> impl IntoResponse {
+    // Token shape: 6 lowercase hex. Reject anything else immediately so a
+    // path-traversal try never reaches the map lookup.
+    if token.len() != 6 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (StatusCode::NOT_FOUND, "not found\n").into_response();
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let invite_url = {
+        let mut inner = relay.inner.lock().await;
+        let Some(rec) = inner.invites.get_mut(&token) else {
+            return (StatusCode::NOT_FOUND, "not found\n").into_response();
+        };
+        if rec.expires_unix <= now {
+            return (StatusCode::GONE, "this invite has expired\n").into_response();
+        }
+        if let Some(n) = rec.uses_remaining {
+            if n == 0 {
+                return (StatusCode::GONE, "this invite has been used up\n").into_response();
+            }
+            rec.uses_remaining = Some(n - 1);
+        }
+        rec.invite_url.clone()
+    };
+    let escaped = invite_url.replace('\'', "'\\''");
+    let script = format!(
+        "#!/bin/sh\n\
+         # wire — one-curl onboarding (install + pair in one shot)\n\
+         # source: https://github.com/SlanchaAi/wire\n\
+         set -eu\n\
+         INVITE='{escaped}'\n\
+         echo \"\u{2192} checking for wire CLI...\"\n\
+         if ! command -v wire >/dev/null 2>&1; then\n  \
+           echo \"\u{2192} wire not installed; installing first...\"\n  \
+           curl -fsSL https://wireup.net/install.sh | sh\n  \
+           case \":$PATH:\" in\n    \
+             *:\"$HOME/.local/bin\":*) ;;\n    \
+             *) export PATH=\"$HOME/.local/bin:$PATH\" ;;\n  \
+           esac\n  \
+           if ! command -v wire >/dev/null 2>&1; then\n    \
+             echo \"\"\n    \
+             echo \"wire was installed to ~/.local/bin but it's not on \\$PATH yet.\"\n    \
+             echo \"Open a new shell, then run:\"\n    \
+             echo \"  wire accept '$INVITE'\"\n    \
+             exit 0\n  \
+           fi\n\
+         fi\n\
+         echo \"\u{2192} accepting invite...\"\n\
+         wire accept \"$INVITE\"\n"
+    );
+    (
+        StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/x-shellscript; charset=utf-8",
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "private, no-store, max-age=0",
+            ),
+        ],
+        script,
+    )
+        .into_response()
 }
 
 async fn handles_directory(

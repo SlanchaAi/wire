@@ -429,6 +429,11 @@ pub enum Command {
         /// consumed (default 1).
         #[arg(long, default_value_t = 1)]
         uses: u32,
+        /// Register the invite at the relay's short-URL endpoint and print
+        /// a `curl ... | sh` one-liner the peer can run on a fresh machine.
+        /// Installs wire if missing, then accepts the invite, then pairs.
+        #[arg(long)]
+        share: bool,
         /// Emit JSON.
         #[arg(long)]
         json: bool,
@@ -673,8 +678,9 @@ pub fn run() -> Result<()> {
             relay,
             ttl,
             uses,
+            share,
             json,
-        } => cmd_invite(&relay, ttl, uses, json),
+        } => cmd_invite(&relay, ttl, uses, share, json),
         Command::Accept { url, json } => cmd_accept(&url, json),
         Command::Whois {
             handle,
@@ -3080,18 +3086,62 @@ fn cmd_pair_abandon(code_phrase: &str, relay_url: &str) -> Result<()> {
 
 // ---------- invite / accept — one-paste pair (v0.4.0) ----------
 
-fn cmd_invite(relay: &str, ttl: u64, uses: u32, as_json: bool) -> Result<()> {
+fn cmd_invite(relay: &str, ttl: u64, uses: u32, share: bool, as_json: bool) -> Result<()> {
     let url = crate::pair_invite::mint_invite(Some(ttl), uses, Some(relay))?;
+
+    // If --share, register the invite at the relay's short-URL endpoint and
+    // build the one-curl onboarding line for the peer to paste.
+    let share_payload: Option<Value> = if share {
+        let client = reqwest::blocking::Client::new();
+        let single_use = if uses == 1 { Some(1u32) } else { None };
+        let body = json!({
+            "invite_url": url,
+            "ttl_seconds": ttl,
+            "uses": single_use,
+        });
+        let endpoint = format!("{}/v1/invite/register", relay.trim_end_matches('/'));
+        let resp = client.post(&endpoint).json(&body).send()?;
+        if !resp.status().is_success() {
+            let code = resp.status();
+            let txt = resp.text().unwrap_or_default();
+            bail!("relay {code} on /v1/invite/register: {txt}");
+        }
+        let parsed: Value = resp.json()?;
+        let token = parsed
+            .get("token")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("relay reply missing token"))?
+            .to_string();
+        let share_url = format!("{}/i/{}", relay.trim_end_matches('/'), token);
+        let curl_line = format!("curl -fsSL {share_url} | sh");
+        Some(json!({
+            "token": token,
+            "share_url": share_url,
+            "curl": curl_line,
+            "expires_unix": parsed.get("expires_unix"),
+        }))
+    } else {
+        None
+    };
+
     if as_json {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "invite_url": url,
-                "ttl_secs": ttl,
-                "uses": uses,
-                "relay": relay,
-            }))?
+        let mut out = json!({
+            "invite_url": url,
+            "ttl_secs": ttl,
+            "uses": uses,
+            "relay": relay,
+        });
+        if let Some(s) = &share_payload {
+            out["share"] = s.clone();
+        }
+        println!("{}", serde_json::to_string(&out)?);
+    } else if let Some(s) = share_payload {
+        let curl = s.get("curl").and_then(Value::as_str).unwrap_or("");
+        eprintln!(
+            "# One-curl onboarding. Share this single line — installs wire if missing,"
         );
+        eprintln!("# accepts the invite, pairs both sides. TTL: {ttl}s. Uses: {uses}.");
+        println!("{curl}");
     } else {
         eprintln!("# Share this URL with one peer. Pasting it = pair complete on their side.");
         eprintln!("# TTL: {ttl}s. Uses: {uses}.");
