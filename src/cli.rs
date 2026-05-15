@@ -427,6 +427,25 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// One-shot full bootstrap — `wire up <nick@relay-host>` does in one
+    /// command what 0.5.10 took five (init + bind-relay + claim + daemon-
+    /// background + remember-to-restart-on-login). Idempotent: re-run on
+    /// an already-set-up box prints state without churn.
+    ///
+    /// Examples:
+    ///   wire up paul@wireup.net           # full bootstrap
+    ///   wire up paul-mac@wireup.net       # ditto, nick = paul-mac
+    ///   wire up paul                      # bootstrap, default relay
+    Up {
+        /// Full handle in `nick@relay-host` form, or just `nick` (defaults
+        /// to the configured public relay wireup.net).
+        handle: String,
+        /// Optional display name (defaults to capitalized nick).
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Claim a nick on a relay's handle directory. Anyone can then reach
     /// this agent by `<nick>@<relay-domain>` via the relay's
     /// `.well-known/wire/agent` endpoint. FCFS; same-DID re-claims allowed.
@@ -754,6 +773,11 @@ pub fn run() -> Result<()> {
             relay,
             json,
         } => cmd_add(&handle, relay.as_deref(), json),
+        Command::Up {
+            handle,
+            name,
+            json,
+        } => cmd_up(&handle, name.as_deref(), json),
         Command::Claim {
             nick,
             relay,
@@ -1882,6 +1906,26 @@ mod monitor_tests {
         assert_eq!(parsed["peer"], "spark");
         assert_eq!(parsed["kind"], "claim");
         assert_eq!(parsed["body_preview"], "hi");
+    }
+
+    #[test]
+    fn monitor_does_not_drop_on_verified_null() {
+        // Spark's bug confession on 2026-05-15: their monitor pipeline ran
+        // `select(.verified == true)` against inbox JSONL. Daemon writes
+        // events with verified=null (verification happens at tail-time, not
+        // write-time), so the filter silently rejected everything — same
+        // anti-pattern as P0.1 at the JSON-jq level. Cost: 4 of my events
+        // never surfaced for ~30min.
+        //
+        // wire monitor's render path must NOT consult `.verified` for any
+        // filter decision. Lock that in here so a future "be conservative,
+        // only emit verified" patch can't quietly land.
+        let mut e = ev("spark", "claim", "from disk with verified=null");
+        e.verified = false; // worst case — even if disk says unverified, emit
+        let line = monitor_render(&e, false).unwrap();
+        assert!(line.contains("from disk with verified=null"));
+        // Noise filter operates purely on kind, never on verified.
+        assert!(!monitor_is_noise_kind("claim"));
     }
 }
 
@@ -3608,6 +3652,135 @@ fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Res
         );
     }
     Ok(())
+}
+
+// ---------- up megacommand (full bootstrap) ----------
+
+/// `wire up <nick@relay-host>` — single command from fresh box to ready-to-
+/// pair. Composes the steps that today's onboarding walks operators through
+/// one by one (init / bind-relay / claim / background daemon / arm monitor
+/// recipe). Idempotent: every step checks current state and skips if done.
+///
+/// Argument parsing accepts:
+///   - `<nick>@<relay-host>` — explicit relay
+///   - `<nick>`              — defaults to wireup.net (the configured public
+///                             relay)
+fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
+    let (nick, relay_url) = match handle_arg.split_once('@') {
+        Some((n, host)) => {
+            let url = if host.starts_with("http://") || host.starts_with("https://") {
+                host.to_string()
+            } else {
+                format!("https://{host}")
+            };
+            (n.to_string(), url)
+        }
+        None => (handle_arg.to_string(), crate::pair_invite::DEFAULT_RELAY.to_string()),
+    };
+
+    let mut report: Vec<(String, String)> = Vec::new();
+    let mut step = |stage: &str, detail: String| {
+        report.push((stage.to_string(), detail.clone()));
+        if !as_json {
+            eprintln!("wire up: {stage} — {detail}");
+        }
+    };
+
+    // 1. init (or verify existing identity matches the requested nick).
+    if config::is_initialized()? {
+        let card = config::read_agent_card()?;
+        let existing_did = card.get("did").and_then(Value::as_str).unwrap_or("");
+        let existing_handle =
+            crate::agent_card::display_handle_from_did(existing_did).to_string();
+        if existing_handle != nick {
+            bail!(
+                "wire up: already initialized as {existing_handle:?} but you asked for {nick:?}. \
+                 Either run with the existing handle (`wire up {existing_handle}@<relay>`) or \
+                 delete `{:?}` to start fresh.",
+                config::config_dir()?
+            );
+        }
+        step("init", format!("already initialized as {existing_handle}"));
+    } else {
+        cmd_init(&nick, name, Some(&relay_url), /* as_json */ false)?;
+        step("init", format!("created identity {nick} bound to {relay_url}"));
+    }
+
+    // 2. Ensure relay binding matches. cmd_init with --relay binds it; if
+    // already initialized we may need to bind to the requested relay
+    // separately (operator switched relays).
+    let relay_state = config::read_relay_state()?;
+    let bound_relay = relay_state
+        .get("self")
+        .and_then(|s| s.get("relay_url"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if bound_relay.is_empty() {
+        // Identity exists but never bound to a relay — bind now.
+        cmd_bind_relay(&relay_url, /* as_json */ false)?;
+        step("bind-relay", format!("bound to {relay_url}"));
+    } else if bound_relay != relay_url {
+        step(
+            "bind-relay",
+            format!(
+                "WARNING: identity bound to {bound_relay} but you specified {relay_url}. \
+                 Keeping existing binding. Run `wire bind-relay {relay_url}` to switch."
+            ),
+        );
+    } else {
+        step("bind-relay", format!("already bound to {bound_relay}"));
+    }
+
+    // 3. Claim nick on the relay's handle directory. Idempotent — same-DID
+    // re-claims are accepted by the relay.
+    match cmd_claim(&nick, Some(&relay_url), None, /* as_json */ false) {
+        Ok(()) => step("claim", format!("{nick}@{} claimed", strip_proto(&relay_url))),
+        Err(e) => step(
+            "claim",
+            format!("WARNING: claim failed: {e}. You can retry `wire claim {nick}`."),
+        ),
+    }
+
+    // 4. Background daemon — must be running for pull/push/ack to flow.
+    match crate::ensure_up::ensure_daemon_running() {
+        Ok(true) => step("daemon", "started fresh background daemon".to_string()),
+        Ok(false) => step("daemon", "already running".to_string()),
+        Err(e) => step(
+            "daemon",
+            format!("WARNING: could not start daemon: {e}. Run `wire daemon &` manually."),
+        ),
+    }
+
+    // 5. Final summary — point operator at the next commands.
+    let summary = format!(
+        "ready. `wire pair <peer>@<relay>` to pair, `wire send <peer> \"<msg>\"` to send, \
+         `wire monitor` to watch incoming events."
+    );
+    step("ready", summary.clone());
+
+    if as_json {
+        let steps_json: Vec<_> = report
+            .iter()
+            .map(|(k, v)| json!({"stage": k, "detail": v}))
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "nick": nick,
+                "relay": relay_url,
+                "steps": steps_json,
+            }))?
+        );
+    }
+    Ok(())
+}
+
+/// Strip http:// or https:// prefix for display in `wire up` step output.
+fn strip_proto(url: &str) -> String {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .to_string()
 }
 
 // ---------- pair megacommand (zero-paste handle-based) ----------
