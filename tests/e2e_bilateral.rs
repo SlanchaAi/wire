@@ -296,3 +296,55 @@ async fn responder_health_cli_set_get_roundtrip() {
     assert_eq!(get_json["responder_health"]["status"], "offline");
     assert_eq!(get_json["responder_health"]["reason"], "OAuth expired");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_peer_json_reports_three_health_layers() {
+    let relay_dir = fresh_dir("relay-status-peer");
+    let relay = wire::relay_server::Relay::new(relay_dir).await.unwrap();
+    let app = relay.router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let relay_url = format!("http://{addr}");
+
+    let paul_home = fresh_dir("paul-status-peer");
+    let willard_home = fresh_dir("willard-status-peer");
+    assert!(wire(&paul_home, &["init", "paul"]).status.success());
+    assert!(wire(&willard_home, &["init", "willard"]).status.success());
+    assert!(
+        wire(&paul_home, &["bind-relay", &relay_url])
+            .status
+            .success()
+    );
+    assert!(
+        wire(&willard_home, &["bind-relay", &relay_url])
+            .status
+            .success()
+    );
+    let willard_relay: Value = serde_json::from_str(
+        &std::fs::read_to_string(willard_home.join("config/wire/relay.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        wire(
+            &paul_home,
+            &[
+                "add-peer-slot",
+                "willard",
+                &relay_url,
+                willard_relay["self"]["slot_id"].as_str().unwrap(),
+                willard_relay["self"]["slot_token"].as_str().unwrap(),
+            ],
+        )
+        .status
+        .success()
+    );
+
+    let out = wire(&paul_home, &["status", "--peer", "willard", "--json"]);
+    assert!(out.status.success(), "status --peer failed");
+    let status: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(status["transport"]["status"], "ok");
+    assert_eq!(status["attention"]["status"], "never_pulled");
+    assert_eq!(status["responder"]["status"], "not_reported");
+}

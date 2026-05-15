@@ -141,6 +141,9 @@ pub enum Command {
     /// Print a summary of identity, relay binding, peers, inbox/outbox queue depth.
     /// Useful as a single "where am I" check.
     Status {
+        /// Inspect a paired peer's transport / attention / responder health.
+        #[arg(long)]
+        peer: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -556,7 +559,13 @@ pub fn run() -> Result<()> {
             relay,
             json,
         } => cmd_init(&handle, name.as_deref(), relay.as_deref(), json),
-        Command::Status { json } => cmd_status(json),
+        Command::Status { peer, json } => {
+            if let Some(peer) = peer {
+                cmd_status_peer(&peer, json)
+            } else {
+                cmd_status(json)
+            }
+        }
         Command::Whoami { json } => cmd_whoami(json),
         Command::Peers { json } => cmd_peers(json),
         Command::Send {
@@ -1115,6 +1124,103 @@ fn cmd_responder_get(peer: Option<&str>, as_json: bool) -> Result<()> {
             .map(|t| format!(" (last_success: {t})"))
             .unwrap_or_default();
         println!("{label}: {status}{reason}{last_success}");
+    }
+    Ok(())
+}
+
+fn cmd_status_peer(peer: &str, as_json: bool) -> Result<()> {
+    let (_label, relay_url, slot_id, slot_token) = relay_slot_for(Some(peer))?;
+    let client = crate::relay_client::RelayClient::new(&relay_url);
+
+    let started = std::time::Instant::now();
+    let transport_ok = client.healthz().unwrap_or(false);
+    let latency_ms = started.elapsed().as_millis() as u64;
+
+    let (event_count, last_pull_at_unix) = client.slot_state(&slot_id, &slot_token)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let attention = match last_pull_at_unix {
+        Some(last) if now.saturating_sub(last) <= 300 => json!({
+            "status": "ok",
+            "last_pull_at_unix": last,
+            "age_seconds": now.saturating_sub(last),
+            "event_count": event_count,
+        }),
+        Some(last) => json!({
+            "status": "stale",
+            "last_pull_at_unix": last,
+            "age_seconds": now.saturating_sub(last),
+            "event_count": event_count,
+        }),
+        None => json!({
+            "status": "never_pulled",
+            "last_pull_at_unix": Value::Null,
+            "event_count": event_count,
+        }),
+    };
+
+    let responder_health = client.responder_health_get(&slot_id, &slot_token)?;
+    let responder = if responder_health.is_null() {
+        json!({"status": "not_reported", "record": Value::Null})
+    } else {
+        json!({
+            "status": responder_health
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            "record": responder_health,
+        })
+    };
+
+    let report = json!({
+        "peer": peer,
+        "transport": {
+            "status": if transport_ok { "ok" } else { "error" },
+            "relay_url": relay_url,
+            "latency_ms": latency_ms,
+        },
+        "attention": attention,
+        "responder": responder,
+    });
+
+    if as_json {
+        println!("{}", serde_json::to_string(&report)?);
+    } else {
+        let transport_line = if transport_ok {
+            format!("ok relay reachable ({latency_ms}ms)")
+        } else {
+            "error relay unreachable".to_string()
+        };
+        println!("transport      {transport_line}");
+        match report["attention"]["status"].as_str().unwrap_or("unknown") {
+            "ok" => println!(
+                "attention      ok last pull {}s ago",
+                report["attention"]["age_seconds"].as_u64().unwrap_or(0)
+            ),
+            "stale" => println!(
+                "attention      stale last pull {}m ago",
+                report["attention"]["age_seconds"].as_u64().unwrap_or(0) / 60
+            ),
+            "never_pulled" => println!("attention      never pulled since relay reset"),
+            other => println!("attention      {other}"),
+        }
+        if report["responder"]["status"] == "not_reported" {
+            println!("auto-responder not reported");
+        } else {
+            let record = &report["responder"]["record"];
+            let status = record
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let reason = record
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(|r| format!(" — {r}"))
+                .unwrap_or_default();
+            println!("auto-responder {status}{reason}");
+        }
     }
     Ok(())
 }
