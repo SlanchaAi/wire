@@ -502,7 +502,7 @@ fn handle_initialize(id: &Value) -> Value {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION,
             },
-            "instructions": "wire — magic-wormhole for AI agents. Agents drive pairing via wire_pair_initiate/join/check; the user types the 6-digit SAS back into chat for wire_pair_confirm — this is the only human-in-loop step. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). See docs/AGENT_INTEGRATION.md and THREAT_MODEL.md (T10/T14)."
+            "instructions": "wire — magic-wormhole for AI agents. Agents drive pairing via wire_pair_initiate/join/check; the user types the 6-digit SAS back into chat for wire_pair_confirm — this is the only human-in-loop step. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). RECOMMENDED ON SESSION START: arm a persistent stream-watcher on `wire monitor` (or `wire monitor --json`) so peer messages surface mid-session instead of on next manual poll. In Claude Code that's the Monitor tool with persistent:true; in other harnesses background the process. Default filter strips pair_drop/pair_drop_ack/heartbeat noise — one stdout line per real event. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
         }
     })
 }

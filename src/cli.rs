@@ -87,6 +87,34 @@ pub enum Command {
         #[arg(long, default_value_t = 0)]
         limit: usize,
     },
+    /// Live tail of new inbox events across all pinned peers — one line per
+    /// new event, handshake (pair_drop / pair_drop_ack / heartbeat) filtered
+    /// by default.
+    ///
+    /// Designed to be left running in an agent harness's stream-watcher
+    /// (Claude Code Monitor tool, etc.) so peer messages surface in the
+    /// session as they arrive, not on next manual `wire pull`.
+    ///
+    /// See docs/AGENT_INTEGRATION.md for the recommended Monitor invocation
+    /// template.
+    Monitor {
+        /// Only show events from this peer.
+        #[arg(long)]
+        peer: Option<String>,
+        /// Emit JSONL (one InboxEvent per line) for tooling consumption.
+        #[arg(long)]
+        json: bool,
+        /// Include handshake events (pair_drop, pair_drop_ack, heartbeat).
+        /// Default filters them out as noise.
+        #[arg(long)]
+        include_handshake: bool,
+        /// Poll interval in milliseconds. Lower = lower latency, higher CPU.
+        #[arg(long, default_value_t = 500)]
+        interval_ms: u64,
+        /// Replay last N events from history before going live (0 = none).
+        #[arg(long, default_value_t = 0)]
+        replay: usize,
+    },
     /// Verify a signed event from a JSON file or stdin (`-`).
     Verify {
         /// Path to event JSON, or `-` for stdin.
@@ -581,6 +609,13 @@ pub fn run() -> Result<()> {
             json,
         } => cmd_send(&peer, &kind, &body, deadline.as_deref(), json),
         Command::Tail { peer, json, limit } => cmd_tail(peer.as_deref(), json, limit),
+        Command::Monitor {
+            peer,
+            json,
+            include_handshake,
+            interval_ms,
+            replay,
+        } => cmd_monitor(peer.as_deref(), json, include_handshake, interval_ms, replay),
         Command::Verify { path, json } => cmd_verify(&path, json),
         Command::Responder { command } => match command {
             ResponderCommand::Set {
@@ -1594,6 +1629,221 @@ fn cmd_tail(peer: Option<&str>, as_json: bool, limit: usize) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---------- monitor (live-tail across all peers, harness-friendly) ----------
+
+/// Events filtered out of `wire monitor` by default — pair handshake +
+/// liveness pings. Operators almost never want these surfaced; an explicit
+/// `--include-handshake` brings them back.
+fn monitor_is_noise_kind(kind: &str) -> bool {
+    matches!(kind, "pair_drop" | "pair_drop_ack" | "heartbeat")
+}
+
+/// Render a single InboxEvent for `wire monitor` output. JSON form emits the
+/// full structured event for tooling consumption; the plain form is a tight
+/// one-line summary suitable as a harness stream-watcher notification.
+fn monitor_render(e: &crate::inbox_watch::InboxEvent, as_json: bool) -> Result<String> {
+    if as_json {
+        Ok(serde_json::to_string(e)?)
+    } else {
+        let eid_short: String = e.event_id.chars().take(12).collect();
+        let body = e.body_preview.replace('\n', " ");
+        let ts: String = e.timestamp.chars().take(19).collect();
+        Ok(format!("[{ts}] {}/{} ({eid_short}) {body}", e.peer, e.kind))
+    }
+}
+
+/// `wire monitor` — long-running line-per-event stream of new inbox events.
+///
+/// Built for agent harnesses that have an "every stdout line is a chat
+/// notification" stream watcher (Claude Code Monitor tool, etc.). One
+/// command, persistent, filtered. Replaces the manual `tail -F inbox/*.jsonl
+/// | python parse | grep -v pair_drop` pipeline operators improvise on day
+/// one of every wire session.
+///
+/// Default filter strips `pair_drop`, `pair_drop_ack`, and `heartbeat` —
+/// pure handshake / liveness noise that operators almost never want
+/// surfaced. Pass `--include-handshake` if you do.
+///
+/// Cursor: in-memory only. Starts from EOF (so a fresh `wire monitor`
+/// doesn't drown the operator in replay), with optional `--replay N` to
+/// emit the last N events first.
+fn cmd_monitor(
+    peer_filter: Option<&str>,
+    as_json: bool,
+    include_handshake: bool,
+    interval_ms: u64,
+    replay: usize,
+) -> Result<()> {
+    let inbox_dir = config::inbox_dir()?;
+    if !inbox_dir.exists() {
+        if !as_json {
+            eprintln!(
+                "wire monitor: inbox dir {inbox_dir:?} missing — has the daemon ever run?"
+            );
+        }
+        // Still proceed — InboxWatcher::from_dir_head handles missing dir.
+    }
+
+    // Optional replay — read existing files and emit the last `replay` events
+    // (post-filter) before going live. Useful when the harness restarts and
+    // wants recent context.
+    if replay > 0 && inbox_dir.exists() {
+        let mut all: Vec<crate::inbox_watch::InboxEvent> = Vec::new();
+        for entry in std::fs::read_dir(&inbox_dir)?.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let peer = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if let Some(filter) = peer_filter {
+                if peer != filter {
+                    continue;
+                }
+            }
+            let body = std::fs::read_to_string(&path).unwrap_or_default();
+            for line in body.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let signed: Value = match serde_json::from_str(line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let ev = crate::inbox_watch::InboxEvent::from_signed(
+                    &peer,
+                    signed,
+                    /* verified */ true,
+                );
+                if !include_handshake && monitor_is_noise_kind(&ev.kind) {
+                    continue;
+                }
+                all.push(ev);
+            }
+        }
+        // Sort by timestamp string (RFC3339-ish — lexicographic order matches
+        // chronological for same-zoned timestamps).
+        all.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        let start = all.len().saturating_sub(replay);
+        for ev in &all[start..] {
+            println!("{}", monitor_render(ev, as_json)?);
+        }
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+    }
+
+    // Live loop. InboxWatcher::from_head() seeds cursors at current EOF, so
+    // the first poll only returns events that arrived AFTER startup.
+    let mut w = crate::inbox_watch::InboxWatcher::from_head()?;
+    let sleep_dur = std::time::Duration::from_millis(interval_ms.max(50));
+
+    loop {
+        let events = w.poll()?;
+        let mut wrote = false;
+        for ev in events {
+            if let Some(filter) = peer_filter {
+                if ev.peer != filter {
+                    continue;
+                }
+            }
+            if !include_handshake && monitor_is_noise_kind(&ev.kind) {
+                continue;
+            }
+            println!("{}", monitor_render(&ev, as_json)?);
+            wrote = true;
+        }
+        if wrote {
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+        }
+        std::thread::sleep(sleep_dur);
+    }
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::*;
+    use crate::inbox_watch::InboxEvent;
+    use serde_json::Value;
+
+    fn ev(peer: &str, kind: &str, body: &str) -> InboxEvent {
+        InboxEvent {
+            peer: peer.to_string(),
+            event_id: "abcd1234567890ef".to_string(),
+            kind: kind.to_string(),
+            body_preview: body.to_string(),
+            verified: true,
+            timestamp: "2026-05-15T23:14:07.123456Z".to_string(),
+            raw: Value::Null,
+        }
+    }
+
+    #[test]
+    fn monitor_filter_drops_handshake_kinds_by_default() {
+        // The whole point: pair_drop / pair_drop_ack / heartbeat are
+        // protocol noise. If they leak into the operator's chat stream by
+        // default, the recipe is useless ("wire monitor talks too much,
+        // disabled it"). Burn this rule in.
+        assert!(monitor_is_noise_kind("pair_drop"));
+        assert!(monitor_is_noise_kind("pair_drop_ack"));
+        assert!(monitor_is_noise_kind("heartbeat"));
+
+        // Real-payload kinds — operator wants every one.
+        assert!(!monitor_is_noise_kind("claim"));
+        assert!(!monitor_is_noise_kind("decision"));
+        assert!(!monitor_is_noise_kind("ack"));
+        assert!(!monitor_is_noise_kind("request"));
+        assert!(!monitor_is_noise_kind("note"));
+        // Unknown future kinds shouldn't be filtered as noise either —
+        // operator probably wants to see something they don't recognise,
+        // not have it silently dropped (the P0.1 lesson at the UX layer).
+        assert!(!monitor_is_noise_kind("future_kind_we_dont_know"));
+    }
+
+    #[test]
+    fn monitor_render_plain_is_one_short_line() {
+        let e = ev("willard", "claim", "real v8 train shipped 1350 steps");
+        let line = monitor_render(&e, false).unwrap();
+        // Must be single-line.
+        assert!(!line.contains('\n'), "render must be one line: {line}");
+        // Must include peer, kind, body fragment, short event_id.
+        assert!(line.contains("willard"));
+        assert!(line.contains("claim"));
+        assert!(line.contains("real v8 train"));
+        // Short event id (first 12 chars).
+        assert!(line.contains("abcd12345678"));
+        assert!(!line.contains("abcd1234567890ef"), "should truncate full id");
+        // RFC3339-ish second precision.
+        assert!(line.contains("2026-05-15T23:14:07"));
+    }
+
+    #[test]
+    fn monitor_render_strips_newlines_from_body() {
+        // Multi-line bodies (markdown lists, code, etc.) must collapse to
+        // one line — otherwise a single message produces multiple
+        // notifications in the harness, ruining the "one event = one line"
+        // contract the Monitor tool relies on.
+        let e = ev("spark", "claim", "line one\nline two\nline three");
+        let line = monitor_render(&e, false).unwrap();
+        assert!(!line.contains('\n'), "newlines must be stripped: {line}");
+        assert!(line.contains("line one line two line three"));
+    }
+
+    #[test]
+    fn monitor_render_json_is_valid_jsonl() {
+        let e = ev("spark", "claim", "hi");
+        let line = monitor_render(&e, true).unwrap();
+        assert!(!line.contains('\n'));
+        let parsed: Value = serde_json::from_str(&line).expect("valid JSONL");
+        assert_eq!(parsed["peer"], "spark");
+        assert_eq!(parsed["kind"], "claim");
+        assert_eq!(parsed["body_preview"], "hi");
+    }
 }
 
 // ---------- verify ----------

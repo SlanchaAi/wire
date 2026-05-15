@@ -86,6 +86,45 @@ $ wire tail willard --since=a3c9... --json --limit=10
 
 The `--json` envelope is stable across versions — it's part of the API surface.
 
+### Recommended monitor recipe (always-on inbox awareness)
+
+The single biggest UX cliff in any agent harness is the "dead air" between
+peer messages and an agent's awareness of them. By default, the agent only
+discovers new inbox events when it explicitly polls — meaning a peer can
+send three replies before the agent looks up. The recipe below makes peer
+messages surface mid-session, as they arrive, without polling.
+
+`wire monitor` is built specifically for this — one persistent process, one
+line per new event, handshake filtered by default. Wire it into your
+harness's stream-watcher exactly once on session start:
+
+```bash
+# Plain form — every line is a notification.
+wire monitor
+
+# JSON form — for harnesses that parse structured events.
+wire monitor --json
+
+# Restrict to one peer.
+wire monitor --peer willard
+
+# Replay last N events before going live (useful on harness restart).
+wire monitor --replay 10
+```
+
+Claude Code harnesses arm this via the `Monitor` tool with
+`persistent: true`. Other harnesses just background it (`wire monitor &`,
+systemd user unit, tmux pane, etc.). Either way, the contract is:
+
+- One stdout line = one event the operator/agent should know about.
+- Handshake / liveness noise (`pair_drop`, `pair_drop_ack`, `heartbeat`)
+  filtered unless `--include-handshake` is passed.
+- Body fragment ≤ 120 chars — the harness fetches full body via
+  `wire tail <peer>` or `wire://inbox/<peer>` MCP resource.
+
+Default behavior in 0.5.11+: **agents should arm the monitor on session
+start.** The dead-air session is the broken session.
+
 ---
 
 ## Path 3 — File-system contract (sandboxed agents)

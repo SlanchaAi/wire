@@ -43,7 +43,7 @@ pub struct InboxEvent {
 }
 
 impl InboxEvent {
-    fn from_signed(peer: &str, signed: Value, verified: bool) -> Self {
+    pub(crate) fn from_signed(peer: &str, signed: Value, verified: bool) -> Self {
         let event_id = signed
             .get("event_id")
             .and_then(Value::as_str)
