@@ -1036,7 +1036,13 @@ fn relay_slot_for(peer: Option<&str>) -> Result<(String, String, String, String)
             state
                 .get("peers")
                 .and_then(|p| p.get(peer))
-                .ok_or_else(|| anyhow!("unknown peer {peer:?} in relay state"))?,
+                .ok_or_else(|| {
+                    anyhow!(
+                        "unknown peer {peer:?} in relay state — pair with them first:\n  \
+                         wire add {peer}@wireup.net   (or {peer}@<their-relay>)\n\
+                         (`wire peers` lists who you've already paired with.)"
+                    )
+                })?,
         ),
         None => (
             "self".to_string(),
