@@ -6,6 +6,37 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.9 — directory + R2/R3/R5 + consent design + cleanup
+
+Operator-visible health now has three layers. `wire send --deadline` adds an
+optional signed `time_sensitive_until` field for advisory wall-clock urgency.
+`wire responder set/get` lets an operator publish auto-responder health to the
+relay, and `wire status --peer <handle>` reports transport reachability, peer
+attention freshness, and responder health in one place.
+
+Relays now publish a local phone book at `GET /v1/handles`, with pagination,
+case-insensitive `vibe` filtering, and profile-level opt-out via
+`wire profile set listed false`. The landing page's "Now ringing" section
+fetches that endpoint and renders the first 20 listed handles.
+
+The A2A extension URI moved from the old GitHub namespace to
+`https://slancha.ai/wire/ext/v0.5`. Wire is still pre-traction enough for the
+clean migration; extension URIs remain opaque identifiers matched exactly by
+federation peers.
+
+`/stats` now separates `handle_claims_total` from
+`handle_first_claims_total`, so repeated same-DID profile or slot re-claims no
+longer inflate the public growth number.
+
+`docs/CONSENT_DESIGN.md` records wire's current stance on cross-machine agent
+handoff: wire owns transport, identity is separate, and consent stays
+receiver-policy-first until real cross-org delegation pressure justifies a
+portable token format.
+
+`src/macaroon.rs` adds speculative, standalone macaroon-style scoped
+delegation scaffolding with mint/verify/serialize tests. It is not wired into
+the relay, CLI, or event envelope in v0.5.9.
+
 ### v0.5.8 — Repo moved to SlanchaAi/wire + DID-suffix call-site sweep
 
 Repo transferred from `github.com/laulpogan/wire` to
