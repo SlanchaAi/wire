@@ -239,10 +239,11 @@ impl Relay {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         // Reload counter snapshot. Missing/corrupt file → start at zero.
-        let snap: CountersSnapshot = match tokio::fs::read_to_string(state_dir.join("counters.json")).await {
-            Ok(body) => serde_json::from_str(&body).unwrap_or_default(),
-            Err(_) => CountersSnapshot::default(),
-        };
+        let snap: CountersSnapshot =
+            match tokio::fs::read_to_string(state_dir.join("counters.json")).await {
+                Ok(body) => serde_json::from_str(&body).unwrap_or_default(),
+                Err(_) => CountersSnapshot::default(),
+            };
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
             state_dir,
@@ -449,10 +450,7 @@ async fn landing_index() -> impl IntoResponse {
     static INDEX_HTML: &[u8] = include_bytes!("../landing/index.html");
     (
         StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/html; charset=utf-8",
-        )],
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
         INDEX_HTML,
     )
 }
@@ -472,10 +470,7 @@ async fn landing_og() -> impl IntoResponse {
         StatusCode::OK,
         [
             (axum::http::header::CONTENT_TYPE, "image/png"),
-            (
-                axum::http::header::CACHE_CONTROL,
-                "public, max-age=86400",
-            ),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         OG_PNG,
     )
@@ -486,14 +481,8 @@ async fn landing_demo_cast() -> impl IntoResponse {
     (
         StatusCode::OK,
         [
-            (
-                axum::http::header::CONTENT_TYPE,
-                "application/x-asciicast",
-            ),
-            (
-                axum::http::header::CACHE_CONTROL,
-                "public, max-age=3600",
-            ),
+            (axum::http::header::CONTENT_TYPE, "application/x-asciicast"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=3600"),
         ],
         DEMO_CAST,
     )
@@ -508,10 +497,7 @@ async fn landing_install_sh() -> impl IntoResponse {
                 axum::http::header::CONTENT_TYPE,
                 "text/x-shellscript; charset=utf-8",
             ),
-            (
-                axum::http::header::CACHE_CONTROL,
-                "public, max-age=300",
-            ),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=300"),
         ],
         INSTALL_SH,
     )
