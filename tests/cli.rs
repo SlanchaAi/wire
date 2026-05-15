@@ -41,7 +41,10 @@ fn version_flag_prints_semver() {
     // Track Cargo.toml version automatically so the test doesn't need a manual
     // bump on every release.
     let expected = env!("CARGO_PKG_VERSION");
-    assert!(s.contains(expected), "got: {s} (expected to contain {expected})");
+    assert!(
+        s.contains(expected),
+        "got: {s} (expected to contain {expected})"
+    );
 }
 
 #[test]

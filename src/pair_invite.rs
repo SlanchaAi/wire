@@ -148,9 +148,7 @@ pub fn ensure_self_with_relay(
 
     if self_state.is_null() || self_state.get("slot_id").and_then(Value::as_str).is_none() {
         let client = crate::relay_client::RelayClient::new(relay);
-        if !client.healthz().unwrap_or(false) {
-            bail!("phyllis: silent line — the switchboard at {relay} isn't picking up");
-        }
+        client.check_healthz()?;
         let handle = crate::agent_card::display_handle_from_did(&did);
         let alloc = client.allocate_slot(Some(handle))?;
         relay_state["self"] = json!({

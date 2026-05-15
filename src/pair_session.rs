@@ -182,9 +182,7 @@ pub fn pair_session_open(
 
     if need_alloc {
         let client = crate::relay_client::RelayClient::new(relay_url);
-        if !client.healthz().unwrap_or(false) {
-            bail!("phyllis: silent line — the switchboard at {relay_url} isn't picking up");
-        }
+        client.check_healthz()?;
         let alloc = client.allocate_slot(Some(&handle))?;
         relay_state["self"] = json!({
             "relay_url": relay_url,
@@ -557,9 +555,7 @@ pub fn init_self_idempotent(
         if let Some(url) = relay {
             if relay_state["self"].is_null() {
                 let client = crate::relay_client::RelayClient::new(url);
-                if !client.healthz().unwrap_or(false) {
-                    bail!("phyllis: silent line — the switchboard at {url} isn't picking up");
-                }
+                client.check_healthz()?;
                 let alloc = client.allocate_slot(Some(handle))?;
                 let mut rs = relay_state;
                 rs["self"] = json!({
@@ -599,9 +595,7 @@ pub fn init_self_idempotent(
 
     if let Some(url) = relay {
         let client = crate::relay_client::RelayClient::new(url);
-        if !client.healthz().unwrap_or(false) {
-            bail!("phyllis: silent line — the switchboard at {url} isn't picking up");
-        }
+        client.check_healthz()?;
         let alloc = client.allocate_slot(Some(handle))?;
         let mut rs = crate::config::read_relay_state()?;
         rs["self"] = json!({

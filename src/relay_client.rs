@@ -189,6 +189,31 @@ impl RelayClient {
         Ok(resp.status().is_success())
     }
 
+    /// Healthz pre-flight that surfaces the underlying reqwest error in its
+    /// own message. Use at every "is the relay reachable before we mutate
+    /// state" site. The three possible failure modes (network error, 5xx
+    /// from a reachable host, healthy) each get a distinct diagnostic line.
+    pub fn check_healthz(&self) -> anyhow::Result<()> {
+        match self.healthz() {
+            Ok(true) => Ok(()),
+            Ok(false) => anyhow::bail!(
+                "phyllis: silent line — {}/healthz returned non-200.\n\
+                 the host is reachable but the relay isn't returning ok. test:\n  \
+                 curl -v {}/healthz",
+                self.base_url,
+                self.base_url
+            ),
+            Err(e) => anyhow::bail!(
+                "phyllis: silent line — couldn't reach {}/healthz: {e:#}.\n\
+                 test reachability from this machine:\n  curl -v {}/healthz\n\
+                 if curl also fails, a sandbox / proxy / firewall is the usual cause.\n\
+                 (OpenShell sandbox? run `curl -fsSL https://wireup.net/openshell-policy.sh | bash -s <sandbox-name>` on the host first.)",
+                self.base_url,
+                self.base_url
+            ),
+        }
+    }
+
     /// Open or join a pair-slot. Returns the relay-assigned `pair_id`.
     /// `role` must be `"host"` or `"guest"`. The host calls first; the guest
     /// uses the same `code_hash` and finds the existing slot.

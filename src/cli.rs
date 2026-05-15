@@ -766,7 +766,7 @@ fn cmd_init(handle: &str, name: Option<&str>, relay: Option<&str>, as_json: bool
     if let Some(url) = relay {
         let normalized = url.trim_end_matches('/');
         let client = crate::relay_client::RelayClient::new(normalized);
-        check_healthz(&client, normalized)?;
+        client.check_healthz()?;
         let alloc = client.allocate_slot(Some(handle))?;
         let mut state = config::read_relay_state()?;
         state["self"] = json!({
@@ -1661,27 +1661,6 @@ fn cmd_relay_server(bind: &str) -> Result<()> {
 
 // ---------- bind-relay ----------
 
-/// Healthz pre-flight that surfaces the underlying reqwest error.
-/// Returns `Ok(())` only when the relay returns 2xx on `/healthz`.
-/// On failure, bails with phyllis voice + the actual error string +
-/// a curl reproducer + an OpenShell-sandbox hint.
-fn check_healthz(client: &crate::relay_client::RelayClient, normalized: &str) -> Result<()> {
-    match client.healthz() {
-        Ok(true) => Ok(()),
-        Ok(false) => bail!(
-            "phyllis: silent line — {normalized}/healthz returned non-200.\n\
-             the host is reachable but the relay isn't returning ok. test:\n  \
-             curl -v {normalized}/healthz"
-        ),
-        Err(e) => bail!(
-            "phyllis: silent line — couldn't reach {normalized}/healthz: {e:#}.\n\
-             test reachability from this machine:\n  curl -v {normalized}/healthz\n\
-             if curl also fails, a sandbox / proxy / firewall is the usual cause.\n\
-             (OpenShell sandbox? run `curl -fsSL https://wireup.net/openshell-policy.sh | bash -s <sandbox-name>` on the host first.)"
-        ),
-    }
-}
-
 fn cmd_bind_relay(url: &str, as_json: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
@@ -1692,7 +1671,7 @@ fn cmd_bind_relay(url: &str, as_json: bool) -> Result<()> {
 
     let normalized = url.trim_end_matches('/');
     let client = crate::relay_client::RelayClient::new(normalized);
-    check_healthz(&client, normalized)?;
+    client.check_healthz()?;
     let alloc = client.allocate_slot(Some(&handle))?;
     let mut state = config::read_relay_state()?;
     state["self"] = json!({
@@ -2016,7 +1995,9 @@ fn cmd_rotate_slot(no_announce: bool, as_json: bool) -> Result<()> {
     // Allocate new slot on the same relay.
     let normalized = url.trim_end_matches('/').to_string();
     let client = crate::relay_client::RelayClient::new(&normalized);
-    check_healthz(&client, &normalized).context("aborting rotation; old slot still valid")?;
+    client
+        .check_healthz()
+        .context("aborting rotation; old slot still valid")?;
     let alloc = client.allocate_slot(Some(&handle))?;
     let new_slot_id = alloc.slot_id.clone();
     let new_slot_token = alloc.slot_token.clone();
