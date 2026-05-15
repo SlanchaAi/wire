@@ -348,11 +348,14 @@ impl Relay {
             .route("/favicon.svg", get(landing_favicon))
             .route("/og.png", get(landing_og))
             .route("/demo.cast", get(landing_demo_cast))
+            .route("/install", get(landing_install_sh))
             .route("/install.sh", get(landing_install_sh))
             .route("/healthz", get(healthz))
-            .route("/stats", get(stats))
+            .route("/stats", get(stats_root))
+            .route("/stats.json", get(stats_json))
             .route("/stats.html", get(landing_stats_html))
             .route("/stats.history", get(stats_history))
+            .route("/phonebook", get(landing_phonebook_html))
             .route("/phonebook.html", get(landing_phonebook_html))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
             .route("/v1/slot/:slot_id/state", get(slot_state))
@@ -599,7 +602,27 @@ async fn landing_phonebook_html() -> impl IntoResponse {
     )
 }
 
-async fn stats(State(relay): State<Relay>) -> impl IntoResponse {
+/// `/stats` dispatch: serve the pretty HTML dashboard to browsers (Accept
+/// includes text/html) and JSON to everything else (curl, scripts, scrapers).
+/// Keeps the JSON contract intact while letting humans land on the page at
+/// the short URL.
+async fn stats_root(
+    State(relay): State<Relay>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let wants_html = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .contains("text/html");
+    if wants_html {
+        landing_stats_html().await.into_response()
+    } else {
+        stats_json(State(relay)).await.into_response()
+    }
+}
+
+async fn stats_json(State(relay): State<Relay>) -> impl IntoResponse {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
