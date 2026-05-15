@@ -30,9 +30,19 @@ uname_m=$(uname -m 2>/dev/null || echo unknown)
 
 case "$uname_s" in
     Linux)
+        # Detect libc: musl (Alpine, distroless, immutable) vs glibc (most
+        # mainstream distros). `ldd --version` is the portable check; the
+        # ld-musl-*.so.1 file presence is a robust fallback in case `ldd`
+        # is missing (some distroless images strip it).
+        LIBC="gnu"
+        if ldd --version 2>&1 | grep -qi musl; then
+            LIBC="musl"
+        elif [ -f /lib/ld-musl-x86_64.so.1 ] || [ -f /lib/ld-musl-aarch64.so.1 ]; then
+            LIBC="musl"
+        fi
         case "$uname_m" in
-            x86_64|amd64)  TARGET="x86_64-unknown-linux-gnu" ;;
-            aarch64|arm64) TARGET="aarch64-unknown-linux-gnu" ;;
+            x86_64|amd64)  TARGET="x86_64-unknown-linux-${LIBC}" ;;
+            aarch64|arm64) TARGET="aarch64-unknown-linux-${LIBC}" ;;
             *) echo "unsupported Linux arch: $uname_m" >&2; exit 1 ;;
         esac
         ;;
