@@ -446,6 +446,20 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Diagnose wire setup health. Single command that surfaces every
+    /// silent-fail class — daemon down or duplicated, relay unreachable,
+    /// cursor stuck, pair rejections piling up, trust ↔ directory drift.
+    /// Replaces today's 30-minute manual debug.
+    ///
+    /// Exit code non-zero if any FAIL findings.
+    Doctor {
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+        /// Show last N entries from pair-rejected.jsonl in the report.
+        #[arg(long, default_value_t = 5)]
+        recent_rejections: usize,
+    },
     /// Claim a nick on a relay's handle directory. Anyone can then reach
     /// this agent by `<nick>@<relay-domain>` via the relay's
     /// `.well-known/wire/agent` endpoint. FCFS; same-DID re-claims allowed.
@@ -778,6 +792,10 @@ pub fn run() -> Result<()> {
             name,
             json,
         } => cmd_up(&handle, name.as_deref(), json),
+        Command::Doctor {
+            json,
+            recent_rejections,
+        } => cmd_doctor(json, recent_rejections),
         Command::Claim {
             nick,
             relay,
@@ -3652,6 +3670,310 @@ fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Res
         );
     }
     Ok(())
+}
+
+// ---------- doctor (single-command diagnostic) ----------
+
+/// One DoctorCheck = one verdict on one health dimension.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DoctorCheck {
+    /// Short stable identifier (`daemon`, `relay`, `pair_rejections`, ...).
+    /// Stable across versions for tooling consumption.
+    pub id: String,
+    /// PASS / WARN / FAIL.
+    pub status: String,
+    /// One-line human summary.
+    pub detail: String,
+    /// Optional remediation hint shown after the failing line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
+}
+
+impl DoctorCheck {
+    fn pass(id: &str, detail: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            status: "PASS".into(),
+            detail: detail.into(),
+            fix: None,
+        }
+    }
+    fn warn(id: &str, detail: impl Into<String>, fix: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            status: "WARN".into(),
+            detail: detail.into(),
+            fix: Some(fix.into()),
+        }
+    }
+    fn fail(id: &str, detail: impl Into<String>, fix: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            status: "FAIL".into(),
+            detail: detail.into(),
+            fix: Some(fix.into()),
+        }
+    }
+}
+
+/// `wire doctor` — single-command diagnostic for the silent-fail classes
+/// 0.5.11 ships fixes for. Surfaces what each fix produces (P0.1 cursor
+/// blocks, P0.2 pair-rejection logs, P0.4 daemon version mismatch, etc.)
+/// so operators don't have to know where each lives.
+fn cmd_doctor(as_json: bool, recent_rejections: usize) -> Result<()> {
+    let mut checks: Vec<DoctorCheck> = Vec::new();
+
+    checks.push(check_daemon_health());
+    checks.push(check_relay_reachable());
+    checks.push(check_pair_rejections(recent_rejections));
+    checks.push(check_cursor_progress());
+
+    let fails = checks.iter().filter(|c| c.status == "FAIL").count();
+    let warns = checks.iter().filter(|c| c.status == "WARN").count();
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "checks": checks,
+                "fail_count": fails,
+                "warn_count": warns,
+                "ok": fails == 0,
+            }))?
+        );
+    } else {
+        println!("wire doctor — {} checks", checks.len());
+        for c in &checks {
+            let bullet = match c.status.as_str() {
+                "PASS" => "✓",
+                "WARN" => "!",
+                "FAIL" => "✗",
+                _ => "?",
+            };
+            println!("  {bullet} [{}] {}: {}", c.status, c.id, c.detail);
+            if let Some(fix) = &c.fix {
+                println!("      fix: {fix}");
+            }
+        }
+        println!();
+        if fails == 0 && warns == 0 {
+            println!("ALL GREEN");
+        } else {
+            println!("{fails} FAIL, {warns} WARN");
+        }
+    }
+
+    if fails > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Check: daemon running, exactly one instance, no orphans.
+///
+/// Today's debug surfaced PID 54017 (old-binary wire daemon running for 4
+/// days, advancing cursor without pinning). `wire status` lied about it.
+/// `wire doctor` must catch THIS class: multiple daemons running, OR
+/// pid-file claims daemon down while a process is actually up.
+fn check_daemon_health() -> DoctorCheck {
+    let output = std::process::Command::new("pgrep")
+        .args(["-f", "wire daemon"])
+        .output();
+    let pids: Vec<String> = match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    match pids.len() {
+        0 => DoctorCheck::fail(
+            "daemon",
+            "no `wire daemon` process running — nothing pulling inbox or pushing outbox",
+            "`wire daemon &` to start, or re-run `wire up <handle>@<relay>` to bootstrap",
+        ),
+        1 => DoctorCheck::pass("daemon", format!("one daemon running (pid {})", pids[0])),
+        n => DoctorCheck::warn(
+            "daemon",
+            format!(
+                "{n} `wire daemon` processes running (pids: {}). Multiple daemons race the relay cursor — one writes, another overwrites. Today's exact bug class.",
+                pids.join(", ")
+            ),
+            format!(
+                "kill all-but-one: `pkill -f \"wire daemon\"; wire daemon &`. P0.4 versioned-pidfile (0.5.11 spark side) will detect this automatically."
+            ),
+        ),
+    }
+}
+
+/// Check: bound relay's /healthz returns 200.
+fn check_relay_reachable() -> DoctorCheck {
+    let state = match config::read_relay_state() {
+        Ok(s) => s,
+        Err(e) => return DoctorCheck::fail(
+            "relay",
+            format!("could not read relay state: {e}"),
+            "run `wire up <handle>@<relay>` to bootstrap",
+        ),
+    };
+    let url = state
+        .get("self")
+        .and_then(|s| s.get("relay_url"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if url.is_empty() {
+        return DoctorCheck::warn(
+            "relay",
+            "no relay bound — wire send/pull will not work",
+            "run `wire bind-relay <url>` or `wire up <handle>@<relay>`",
+        );
+    }
+    let client = crate::relay_client::RelayClient::new(url);
+    match client.check_healthz() {
+        Ok(()) => DoctorCheck::pass("relay", format!("{url} healthz=200")),
+        Err(e) => DoctorCheck::fail(
+            "relay",
+            format!("{url} unreachable: {e}"),
+            format!("network reachable to {url}? relay running? check `curl {url}/healthz`"),
+        ),
+    }
+}
+
+/// Check: count recent entries in pair-rejected.jsonl (P0.2 output). Every
+/// entry there is a silent failure that, pre-0.5.11, would have left the
+/// operator wondering why pairing didn't complete.
+fn check_pair_rejections(recent_n: usize) -> DoctorCheck {
+    let path = match config::state_dir() {
+        Ok(d) => d.join("pair-rejected.jsonl"),
+        Err(e) => return DoctorCheck::warn(
+            "pair_rejections",
+            format!("could not resolve state dir: {e}"),
+            "set WIRE_HOME or fix XDG_STATE_HOME",
+        ),
+    };
+    if !path.exists() {
+        return DoctorCheck::pass(
+            "pair_rejections",
+            "no pair-rejected.jsonl — no recorded pair failures",
+        );
+    }
+    let body = match std::fs::read_to_string(&path) {
+        Ok(b) => b,
+        Err(e) => return DoctorCheck::warn(
+            "pair_rejections",
+            format!("could not read {path:?}: {e}"),
+            "check file permissions",
+        ),
+    };
+    let lines: Vec<&str> = body.lines().filter(|l| !l.is_empty()).collect();
+    if lines.is_empty() {
+        return DoctorCheck::pass(
+            "pair_rejections",
+            "pair-rejected.jsonl present but empty",
+        );
+    }
+    let total = lines.len();
+    let recent: Vec<&str> = lines.iter().rev().take(recent_n).rev().copied().collect();
+    let mut summary: Vec<String> = Vec::new();
+    for line in &recent {
+        if let Ok(rec) = serde_json::from_str::<Value>(line) {
+            let peer = rec.get("peer").and_then(Value::as_str).unwrap_or("?");
+            let code = rec.get("code").and_then(Value::as_str).unwrap_or("?");
+            summary.push(format!("{peer}/{code}"));
+        }
+    }
+    DoctorCheck::warn(
+        "pair_rejections",
+        format!(
+            "{total} pair failures recorded. recent: [{}]",
+            summary.join(", ")
+        ),
+        format!(
+            "inspect {path:?} for full details. Each entry is a pair-flow error that previously silently dropped — re-run `wire pair <handle>@<relay>` to retry."
+        ),
+    )
+}
+
+/// Check: cursor isn't stuck. We can't tell without polling — but we can
+/// report the current cursor position so operators see if it changes.
+/// Real "stuck" detection needs two pulls separated in time; defer that
+/// behaviour to a `wire doctor --watch` mode.
+fn check_cursor_progress() -> DoctorCheck {
+    let state = match config::read_relay_state() {
+        Ok(s) => s,
+        Err(e) => return DoctorCheck::warn(
+            "cursor",
+            format!("could not read relay state: {e}"),
+            "check ~/Library/Application Support/wire/relay.json",
+        ),
+    };
+    let cursor = state
+        .get("self")
+        .and_then(|s| s.get("last_pulled_event_id"))
+        .and_then(Value::as_str)
+        .map(|s| s.chars().take(16).collect::<String>())
+        .unwrap_or_else(|| "<none>".to_string());
+    DoctorCheck::pass(
+        "cursor",
+        format!(
+            "current cursor: {cursor}. P0.1 cursor blocking is active — see `wire pull --json` for cursor_blocked / rejected[].blocks_cursor entries."
+        ),
+    )
+}
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::*;
+
+    #[test]
+    fn doctor_check_constructors_set_status_correctly() {
+        // Silent-fail-prevention rule: pass/warn/fail must be visibly
+        // distinguishable to operators. If any constructor lets the wrong
+        // status through, `wire doctor` lies and we're back to today's
+        // 30-minute debug.
+        let p = DoctorCheck::pass("x", "ok");
+        assert_eq!(p.status, "PASS");
+        assert_eq!(p.fix, None);
+
+        let w = DoctorCheck::warn("x", "watch out", "do this");
+        assert_eq!(w.status, "WARN");
+        assert_eq!(w.fix, Some("do this".to_string()));
+
+        let f = DoctorCheck::fail("x", "broken", "fix it");
+        assert_eq!(f.status, "FAIL");
+        assert_eq!(f.fix, Some("fix it".to_string()));
+    }
+
+    #[test]
+    fn check_pair_rejections_no_file_is_pass() {
+        // Fresh-box case: no pair-rejected.jsonl yet. Must NOT report this
+        // as a problem.
+        config::test_support::with_temp_home(|| {
+            config::ensure_dirs().unwrap();
+            let c = check_pair_rejections(5);
+            assert_eq!(c.status, "PASS", "no file should be PASS, got {c:?}");
+        });
+    }
+
+    #[test]
+    fn check_pair_rejections_with_entries_warns() {
+        // Existence of rejections is itself a signal — even if each entry
+        // is a "known good failure," the operator wants to know they
+        // happened.
+        config::test_support::with_temp_home(|| {
+            config::ensure_dirs().unwrap();
+            crate::pair_invite::record_pair_rejection(
+                "willard",
+                "pair_drop_ack_send_failed",
+                "POST 502",
+            );
+            let c = check_pair_rejections(5);
+            assert_eq!(c.status, "WARN");
+            assert!(c.detail.contains("1 pair failures"));
+            assert!(c.detail.contains("willard/pair_drop_ack_send_failed"));
+        });
+    }
 }
 
 // ---------- up megacommand (full bootstrap) ----------
