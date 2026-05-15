@@ -235,28 +235,39 @@ pub fn write_relay_state(state: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Test-only helpers. Lives outside `tests` mod so other modules' tests
+/// can share the same WIRE_HOME isolation. Tests run in-process and share
+/// process-wide env state, so all WIRE_HOME mutators must use this lock or
+/// they race each other.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
+pub(crate) mod test_support {
     use std::sync::Mutex;
 
-    /// Tests run in-process so they share env vars; serialize them.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn with_temp_home<F: FnOnce()>(f: F) {
+    pub fn with_temp_home<F: FnOnce()>(f: F) {
         // Recover from poison so one failing test doesn't cascade-fail the rest.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = std::env::temp_dir().join(format!("wire-test-{}", rand::random::<u32>()));
         // SAFETY: ENV_LOCK serializes all callers, so no concurrent env access.
         unsafe { std::env::set_var("WIRE_HOME", &tmp) };
-        let _ = fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         unsafe { std::env::remove_var("WIRE_HOME") };
-        let _ = fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
         if let Err(e) = result {
             std::panic::resume_unwind(e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn with_temp_home<F: FnOnce()>(f: F) {
+        super::test_support::with_temp_home(f)
     }
 
     #[test]

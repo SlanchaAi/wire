@@ -1858,73 +1858,20 @@ fn cmd_pull(as_json: bool) -> Result<()> {
     let client = crate::relay_client::RelayClient::new(url);
     let events = client.list_events(slot_id, slot_token, last_event_id.as_deref(), Some(1000))?;
 
-    let trust = config::read_trust()?;
     let inbox_dir = config::inbox_dir()?;
     config::ensure_dirs()?;
 
-    let mut written = Vec::new();
-    let mut rejected = Vec::new();
-    let mut last_seen: Option<String> = last_event_id.clone();
+    // P0.1 (0.5.11): cursor advancement now blocks on unknown kinds and
+    // transient verify errors. See `pull::process_events`.
+    let result = crate::pull::process_events(&events, last_event_id, &inbox_dir)?;
 
-    for event in &events {
-        let event_id = event
-            .get("event_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        last_seen = Some(event_id.clone());
-
-        // v0.4.0 invite-pair: detect + consume pair_drop events BEFORE the
-        // trust check (sender isn't pinned yet by definition). Successful
-        // consumption pins the sender; we then re-read trust so the event
-        // passes verify and lands in the inbox normally.
-        let drop_paired = matches!(
-            crate::pair_invite::maybe_consume_pair_drop(event),
-            Ok(Some(_))
-        );
-        // v0.5: handle pair_drop_ack — peer (paired via wire add) returning
-        // their slot_token so we can `wire send` to them. Updates relay-state
-        // in place; the event itself is from a now-trusted peer so the
-        // normal verify path still fires it into the inbox.
-        let _ack_consumed = crate::pair_invite::maybe_consume_pair_drop_ack(event).ok();
-        let active_trust = if drop_paired {
-            config::read_trust()?
-        } else {
-            trust.clone()
-        };
-
-        match crate::signing::verify_message_v31(event, &active_trust) {
-            Ok(()) => {
-                let from = event
-                    .get("from")
-                    .and_then(Value::as_str)
-                    .map(|s| crate::agent_card::display_handle_from_did(s).to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                let path = inbox_dir.join(format!("{from}.jsonl"));
-                use std::io::Write;
-                let mut f = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)?;
-                let mut line = serde_json::to_vec(event)?;
-                line.push(b'\n');
-                f.write_all(&line)?;
-                written.push(json!({"event_id": event_id, "from": from}));
-            }
-            Err(e) => {
-                rejected.push(json!({"event_id": event_id, "reason": e.to_string()}));
-            }
-        }
-    }
-
-    // Persist cursor. RE-READ relay state from disk: maybe_consume_pair_drop
-    // (and any other in-loop side effect) may have added new peer pins during
-    // the iteration. Using the stale snapshot from the loop's start would
-    // silently wipe those out.
-    if let Some(eid) = last_seen {
+    // Persist cursor only if it changed. RE-READ relay state — pair_drop /
+    // pair_drop_ack handlers may have written peer pins during the batch
+    // and we don't want to clobber them with a stale snapshot.
+    if let Some(eid) = &result.advance_cursor_to {
         let mut fresh = config::read_relay_state()?;
         if let Some(self_obj) = fresh.get_mut("self").and_then(Value::as_object_mut) {
-            self_obj.insert("last_pulled_event_id".into(), Value::String(eid));
+            self_obj.insert("last_pulled_event_id".into(), Value::String(eid.clone()));
         }
         config::write_relay_state(&fresh)?;
     }
@@ -1933,18 +1880,35 @@ fn cmd_pull(as_json: bool) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string(&json!({
-                "written": written,
-                "rejected": rejected,
+                "written": result.written,
+                "rejected": result.rejected,
                 "total_seen": events.len(),
+                "cursor_blocked": result.blocked,
+                "cursor_advanced_to": result.advance_cursor_to,
             }))?
         );
     } else {
-        println!(
-            "pulled {} event(s); wrote {}; rejected {} (bad signature)",
-            events.len(),
-            written.len(),
-            rejected.len()
-        );
+        let blocking = result
+            .rejected
+            .iter()
+            .filter(|r| r.get("blocks_cursor").and_then(Value::as_bool) == Some(true))
+            .count();
+        if blocking > 0 {
+            println!(
+                "pulled {} event(s); wrote {}; rejected {} ({} BLOCKING cursor — see `wire pull --json`)",
+                events.len(),
+                result.written.len(),
+                result.rejected.len(),
+                blocking,
+            );
+        } else {
+            println!(
+                "pulled {} event(s); wrote {}; rejected {}",
+                events.len(),
+                result.written.len(),
+                result.rejected.len(),
+            );
+        }
     }
     Ok(())
 }
@@ -2367,75 +2331,30 @@ fn run_sync_pull() -> Result<Value> {
     }
     let client = crate::relay_client::RelayClient::new(url);
     let events = client.list_events(slot_id, slot_token, last_event_id.as_deref(), Some(1000))?;
-    let trust = config::read_trust()?;
     let inbox_dir = config::inbox_dir()?;
     config::ensure_dirs()?;
 
-    let mut written = Vec::new();
-    let mut rejected = Vec::new();
-    let mut last_seen = last_event_id;
+    // P0.1 (0.5.11): shared cursor-blocking logic. Daemon's --once path
+    // must match the CLI's `wire pull` semantics or version-skew bugs
+    // re-emerge by another route.
+    let result = crate::pull::process_events(&events, last_event_id, &inbox_dir)?;
 
-    for event in &events {
-        let event_id = event
-            .get("event_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        last_seen = Some(event_id.clone());
-
-        // v0.4.0 invite-pair: detect + consume pair_drop events BEFORE the
-        // trust check (sender isn't pinned yet by definition). Successful
-        // consumption pins the sender; we then re-read trust so the event
-        // passes verify and lands in the inbox normally.
-        let drop_paired = matches!(
-            crate::pair_invite::maybe_consume_pair_drop(event),
-            Ok(Some(_))
-        );
-        // v0.5: handle pair_drop_ack — peer (paired via wire add) returning
-        // their slot_token so we can `wire send` to them. Updates relay-state
-        // in place; the event itself is from a now-trusted peer so the
-        // normal verify path still fires it into the inbox.
-        let _ack_consumed = crate::pair_invite::maybe_consume_pair_drop_ack(event).ok();
-        let active_trust = if drop_paired {
-            config::read_trust()?
-        } else {
-            trust.clone()
-        };
-
-        match crate::signing::verify_message_v31(event, &active_trust) {
-            Ok(()) => {
-                let from = event
-                    .get("from")
-                    .and_then(Value::as_str)
-                    .map(|s| crate::agent_card::display_handle_from_did(s).to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                let path = inbox_dir.join(format!("{from}.jsonl"));
-                use std::io::Write;
-                let mut f = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)?;
-                let mut line = serde_json::to_vec(event)?;
-                line.push(b'\n');
-                f.write_all(&line)?;
-                written.push(json!({"event_id": event_id, "from": from}));
-            }
-            Err(e) => {
-                rejected.push(json!({"event_id": event_id, "reason": e.to_string()}));
-            }
-        }
-    }
-
-    if let Some(eid) = last_seen {
-        // Re-read: maybe_consume_pair_drop may have added a peer pin mid-loop.
+    // Persist cursor only if changed.
+    if let Some(eid) = &result.advance_cursor_to {
         let mut fresh = config::read_relay_state()?;
         if let Some(self_obj) = fresh.get_mut("self").and_then(Value::as_object_mut) {
-            self_obj.insert("last_pulled_event_id".into(), Value::String(eid));
+            self_obj.insert("last_pulled_event_id".into(), Value::String(eid.clone()));
         }
         config::write_relay_state(&fresh)?;
     }
 
-    Ok(json!({"written": written, "rejected": rejected, "total_seen": events.len()}))
+    Ok(json!({
+        "written": result.written,
+        "rejected": result.rejected,
+        "total_seen": events.len(),
+        "cursor_blocked": result.blocked,
+        "cursor_advanced_to": result.advance_cursor_to,
+    }))
 }
 
 // ---------- pin (manual out-of-band peer pairing) ----------
