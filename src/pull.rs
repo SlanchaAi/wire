@@ -119,13 +119,47 @@ pub fn process_events(
         }
 
         // pair_drop / pair_drop_ack — pre-trust side effects that pin sender.
-        let drop_paired = matches!(
-            pair_invite::maybe_consume_pair_drop(event),
-            Ok(Some(_))
-        );
+        let drop_paired = match pair_invite::maybe_consume_pair_drop(event) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(e) => {
+                // P0.2: a pair_drop that WAS recognised (kind=1100, type=pair_drop)
+                // but FAILED during consumption is exactly the silent-fail class —
+                // sender expects to be pinned but isn't, and never finds out. Log
+                // + structured record for `wire doctor`.
+                let peer_handle = event
+                    .get("from")
+                    .and_then(Value::as_str)
+                    .map(|s| crate::agent_card::display_handle_from_did(s).to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                eprintln!(
+                    "wire pull: pair_drop from {peer_handle} consume FAILED: {e}. \
+                     sender will not be pinned; have them re-add or retry."
+                );
+                pair_invite::record_pair_rejection(
+                    &peer_handle,
+                    "pair_drop_consume_failed",
+                    &e.to_string(),
+                );
+                false
+            }
+        };
         if let Err(e) = pair_invite::maybe_consume_pair_drop_ack(event) {
-            // P0.2 (partial): warn loud instead of silently dropping.
-            eprintln!("warn: pair_drop_ack consumption failed: {e}");
+            let peer_handle = event
+                .get("from")
+                .and_then(Value::as_str)
+                .map(|s| crate::agent_card::display_handle_from_did(s).to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            eprintln!(
+                "wire pull: pair_drop_ack from {peer_handle} consume FAILED: {e}. \
+                 their slot_token NOT recorded; we cannot `wire send` to them \
+                 until they retry."
+            );
+            pair_invite::record_pair_rejection(
+                &peer_handle,
+                "pair_drop_ack_consume_failed",
+                &e.to_string(),
+            );
         }
         let active_trust = if drop_paired {
             config::read_trust()?

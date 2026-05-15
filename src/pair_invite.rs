@@ -35,6 +35,60 @@ use crate::config;
 pub const DEFAULT_RELAY: &str = "https://wireup.net";
 pub const DEFAULT_TTL_SECS: u64 = 86_400; // 24 hours
 
+/// P0.2 (0.5.11): write a structured rejection record for `wire doctor`
+/// to surface later. Best-effort — if we can't even open the file, fall
+/// back to stderr so the operator at least sees the failure mode in their
+/// shell. Anything is better than silent.
+///
+/// Lives at `$WIRE_HOME/state/wire/pair-rejected.jsonl`. One JSON line per
+/// rejected pair event. Append-only.
+pub(crate) fn record_pair_rejection(peer_handle: &str, code: &str, detail: &str) {
+    let line = json!({
+        "ts": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        "peer": peer_handle,
+        "code": code,
+        "detail": detail,
+    });
+    let serialised = match serde_json::to_string(&line) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("wire: could not serialise pair-rejected entry: {e}");
+            return;
+        }
+    };
+    let path = match config::state_dir() {
+        Ok(d) => d.join("pair-rejected.jsonl"),
+        Err(e) => {
+            eprintln!("wire: state_dir unresolved, dropping pair-rejected log: {e}");
+            return;
+        }
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("wire: could not create {parent:?}: {e}");
+            return;
+        }
+    }
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            if let Err(e) = writeln!(f, "{serialised}") {
+                eprintln!("wire: could not append pair-rejected to {path:?}: {e}");
+            }
+        }
+        Err(e) => {
+            eprintln!("wire: could not open {path:?}: {e}");
+        }
+    }
+}
+
 /// Decoded contents of an invite URL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvitePayload {
@@ -408,7 +462,13 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
             let p: PendingInvite = serde_json::from_slice(&std::fs::read(&path)?)
                 .with_context(|| format!("reading pending invite {path:?}"))?;
             if now_unix() > p.exp {
-                let _ = std::fs::remove_file(&path);
+                // P0.2: warn if cleanup fails — orphaned expired invites in
+                // `pending-invites/` will pile up and confuse `wire doctor`.
+                if let Err(e) = std::fs::remove_file(&path) {
+                    eprintln!(
+                        "wire: could not delete expired invite {path:?}: {e}"
+                    );
+                }
                 return Ok(None);
             }
             pending = Some(p);
@@ -465,7 +525,14 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
     // Skipped entirely for handle-initiated pair_drops (no pending record).
     if let (Some(pending), Some(invite_path)) = (pending, invite_path) {
         if pending.uses_remaining <= 1 {
-            let _ = std::fs::remove_file(&invite_path);
+            // P0.2: warn — leaking single-use invite files lets them get
+            // accidentally re-consumed if the file timestamp parser glitches
+            // or a backup tool reverts state. Not fatal but worth flagging.
+            if let Err(e) = std::fs::remove_file(&invite_path) {
+                eprintln!(
+                    "wire: could not delete consumed invite {invite_path:?}: {e}"
+                );
+            }
         } else {
             let mut updated = pending.clone();
             updated.uses_remaining -= 1;
@@ -483,10 +550,28 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
     // know OUR slot_token yet — they can post to our `/v1/handle/intro/<nick>`
     // but they can't `wire send` back through the normal slot endpoint until
     // they have it. Send a `pair_drop_ack` event back carrying our slot_token.
-    // Best-effort; if it fails we log + continue (the sender will retry, or
-    // the operator can rerun `wire add` on the other side).
+    //
+    // P0.2 (0.5.11): NOT silent anymore. The bilateral pin only completes if
+    // this POST succeeds — if we drop the error, the peer never gets our
+    // slot_token and sits forever in PENDING_ACK from their side, with no
+    // visible failure on either side. That was the 30-min-debug failure mode
+    // earlier today. Log loudly + record to pair-rejected so `wire doctor`
+    // can surface it.
     if nonce_opt.is_none() {
-        let _ = send_pair_drop_ack(&peer_handle, peer_relay, peer_slot_id, peer_slot_token);
+        if let Err(e) =
+            send_pair_drop_ack(&peer_handle, peer_relay, peer_slot_id, peer_slot_token)
+        {
+            eprintln!(
+                "wire: pair_drop_ack send to {peer_handle} @ {peer_relay} slot {peer_slot_id} FAILED: {e}. \
+                 inbound pin succeeded but peer cannot bilateral-pin without our slot_token. \
+                 retry with `wire add {peer_handle}@<their-relay>` or have peer re-add us."
+            );
+            record_pair_rejection(
+                &peer_handle,
+                "pair_drop_ack_send_failed",
+                &e.to_string(),
+            );
+        }
     }
 
     Ok(Some(peer_did))
@@ -603,6 +688,58 @@ pub fn maybe_consume_pair_drop_ack(event: &Value) -> Result<bool> {
     Ok(true)
 }
 
-// Unit tests removed — they mutate WIRE_HOME and race with other env-mutating
-// tests in the same binary. Coverage is provided by tests/e2e_invite_pair.rs
-// which runs as a separate process with isolated WIRE_HOME per test.
+// Earlier note: "tests removed because of WIRE_HOME race." That's no longer
+// true — `config::test_support::with_temp_home` serialises env-mutating
+// tests behind a process-wide mutex, so unit tests here are safe again.
+// Keep e2e coverage in `tests/e2e_invite_pair.rs` for full-flow paranoia.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config;
+
+    #[test]
+    fn record_pair_rejection_writes_jsonl_under_state_dir() {
+        // P0.2: silent fails must leave a trace. This is what `wire doctor`
+        // (P1.6) will surface. If the file isn't written, `wire doctor`
+        // can't see the problem — same silent-fail class we're fixing.
+        config::test_support::with_temp_home(|| {
+            super::record_pair_rejection(
+                "slancha-spark",
+                "pair_drop_ack_send_failed",
+                "POST returned 502",
+            );
+            let path = config::state_dir().unwrap().join("pair-rejected.jsonl");
+            assert!(
+                path.exists(),
+                "record_pair_rejection must create {path:?}"
+            );
+            let body = std::fs::read_to_string(&path).unwrap();
+            let line = body.lines().last().expect("at least one line");
+            let parsed: Value = serde_json::from_str(line).expect("valid JSON");
+            assert_eq!(parsed["peer"], "slancha-spark");
+            assert_eq!(parsed["code"], "pair_drop_ack_send_failed");
+            assert_eq!(parsed["detail"], "POST returned 502");
+            assert!(parsed["ts"].as_u64().unwrap_or(0) > 0);
+        });
+    }
+
+    #[test]
+    fn record_pair_rejection_appends_multiple_lines() {
+        // Multiple silent fails in one session must each leave a record —
+        // it's append-only, not a single most-recent slot.
+        config::test_support::with_temp_home(|| {
+            super::record_pair_rejection("a", "code_a", "detail_a");
+            super::record_pair_rejection("b", "code_b", "detail_b");
+            super::record_pair_rejection("c", "code_c", "detail_c");
+            let path = config::state_dir().unwrap().join("pair-rejected.jsonl");
+            let body = std::fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = body.lines().collect();
+            assert_eq!(lines.len(), 3, "expected 3 entries, got {}", lines.len());
+            for (i, peer) in ["a", "b", "c"].iter().enumerate() {
+                let parsed: Value = serde_json::from_str(lines[i]).unwrap();
+                assert_eq!(parsed["peer"], *peer);
+            }
+        });
+    }
+}
