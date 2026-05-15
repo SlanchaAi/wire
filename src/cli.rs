@@ -62,13 +62,24 @@ pub enum Command {
         json: bool,
     },
     /// Sign and queue an event to a peer.
+    ///
+    /// Forms (P0.S 0.5.11):
+    ///   wire send <peer> <body>              # kind defaults to "claim"
+    ///   wire send <peer> <kind> <body>       # explicit kind (back-compat)
+    ///   wire send <peer> -                   # body from stdin (kind=claim)
+    ///   wire send <peer> @/path/to/body.json # body from file
     Send {
         /// Peer handle (without `did:wire:` prefix).
         peer: String,
-        /// Event kind name (`decision`, `claim`, etc.) or numeric kind id.
-        kind: String,
-        /// Event body — free-form text or `@/path/to/body.json` to load from file.
-        body: String,
+        /// When `<body>` is omitted, this is the event body (kind defaults
+        /// to `claim`). When both this and `<body>` are given, this is the
+        /// event kind (`decision`, `claim`, etc., or numeric kind id) and
+        /// the next positional is the body.
+        kind_or_body: String,
+        /// Event body — free-form text, `@/path/to/body.json` to load from
+        /// a file, or `-` to read from stdin. Optional; omit to use
+        /// `<kind_or_body>` as the body with kind=`claim`.
+        body: Option<String>,
         /// Advisory deadline: duration (`30m`, `2h`, `1d`) or RFC3339 timestamp.
         #[arg(long)]
         deadline: Option<String>,
@@ -603,11 +614,19 @@ pub fn run() -> Result<()> {
         Command::Peers { json } => cmd_peers(json),
         Command::Send {
             peer,
-            kind,
+            kind_or_body,
             body,
             deadline,
             json,
-        } => cmd_send(&peer, &kind, &body, deadline.as_deref(), json),
+        } => {
+            // P0.S: smart-positional API. `wire send peer body` =
+            // kind=claim. `wire send peer kind body` = explicit kind.
+            let (kind, body) = match body {
+                Some(real_body) => (kind_or_body, real_body),
+                None => ("claim".to_string(), kind_or_body),
+            };
+            cmd_send(&peer, &kind, &body, deadline.as_deref(), json)
+        }
         Command::Tail { peer, json, limit } => cmd_tail(peer.as_deref(), json, limit),
         Command::Monitor {
             peer,
@@ -1486,8 +1505,20 @@ fn cmd_send(
         .ok_or_else(|| anyhow!("agent-card missing verify_keys[*].key"))?;
     let pk_bytes = crate::signing::b64decode(pk_b64)?;
 
-    // Body: literal string, or @/path/to/body.json
-    let body_value: Value = if let Some(path) = body_arg.strip_prefix('@') {
+    // Body: literal string, `@/path/to/body.json`, or `-` for stdin.
+    // P0.S (0.5.11): stdin support lets shells pipe in long content
+    // without quoting/escaping ceremony, and supports heredocs naturally:
+    //   wire send peer - <<EOF ... EOF
+    let body_value: Value = if body_arg == "-" {
+        use std::io::Read;
+        let mut raw = String::new();
+        std::io::stdin()
+            .read_to_string(&mut raw)
+            .with_context(|| "reading body from stdin")?;
+        // Try parsing as JSON first; fall back to string literal for
+        // plain-text bodies.
+        serde_json::from_str(raw.trim_end()).unwrap_or(Value::String(raw))
+    } else if let Some(path) = body_arg.strip_prefix('@') {
         let raw =
             std::fs::read_to_string(path).with_context(|| format!("reading body file {path:?}"))?;
         serde_json::from_str(&raw).unwrap_or(Value::String(raw))
