@@ -71,6 +71,7 @@ pub struct Relay {
 struct RelayCounters {
     boot_unix: u64,
     handle_claims_total: AtomicU64,
+    handle_first_claims_total: AtomicU64,
     slot_allocations_total: AtomicU64,
     pair_opens_total: AtomicU64,
     events_posted_total: AtomicU64,
@@ -79,6 +80,7 @@ struct RelayCounters {
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct CountersSnapshot {
     handle_claims_total: u64,
+    handle_first_claims_total: u64,
     slot_allocations_total: u64,
     pair_opens_total: u64,
     events_posted_total: u64,
@@ -250,6 +252,7 @@ impl Relay {
             counters: Arc::new(RelayCounters {
                 boot_unix,
                 handle_claims_total: AtomicU64::new(snap.handle_claims_total),
+                handle_first_claims_total: AtomicU64::new(snap.handle_first_claims_total),
                 slot_allocations_total: AtomicU64::new(snap.slot_allocations_total),
                 pair_opens_total: AtomicU64::new(snap.pair_opens_total),
                 events_posted_total: AtomicU64::new(snap.events_posted_total),
@@ -347,6 +350,10 @@ impl Relay {
     pub async fn persist_counters(&self) -> Result<()> {
         let snap = CountersSnapshot {
             handle_claims_total: self.counters.handle_claims_total.load(Ordering::Relaxed),
+            handle_first_claims_total: self
+                .counters
+                .handle_first_claims_total
+                .load(Ordering::Relaxed),
             slot_allocations_total: self.counters.slot_allocations_total.load(Ordering::Relaxed),
             pair_opens_total: self.counters.pair_opens_total.load(Ordering::Relaxed),
             events_posted_total: self.counters.events_posted_total.load(Ordering::Relaxed),
@@ -436,6 +443,7 @@ async fn stats(State(relay): State<Relay>) -> impl IntoResponse {
         "pair_slots_open": inner.pair_slots.len(),
         "streams_active": streams_active,
         "handle_claims_total": relay.counters.handle_claims_total.load(Ordering::Relaxed),
+        "handle_first_claims_total": relay.counters.handle_first_claims_total.load(Ordering::Relaxed),
         "slot_allocations_total": relay.counters.slot_allocations_total.load(Ordering::Relaxed),
         "pair_opens_total": relay.counters.pair_opens_total.load(Ordering::Relaxed),
         "events_posted_total": relay.counters.events_posted_total.load(Ordering::Relaxed),
@@ -913,22 +921,24 @@ async fn handle_claim(
     };
 
     // FCFS check.
-    {
+    let first_claim = {
         let inner = relay.inner.lock().await;
-        if let Some(existing) = inner.handles.get(&req.nick)
-            && existing.did != did
-        {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": "phyllis: this line's already taken by someone else — pick another handle or buzz the rightful owner",
-                    "nick": req.nick,
-                    "claimed_by": existing.did,
-                })),
-            )
-                .into_response();
+        match inner.handles.get(&req.nick) {
+            Some(existing) if existing.did != did => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "phyllis: this line's already taken by someone else — pick another handle or buzz the rightful owner",
+                        "nick": req.nick,
+                        "claimed_by": existing.did,
+                    })),
+                )
+                    .into_response();
+            }
+            Some(_) => false,
+            None => true,
         }
-    }
+    };
 
     let now = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -972,12 +982,18 @@ async fn handle_claim(
         .counters
         .handle_claims_total
         .fetch_add(1, Ordering::Relaxed);
+    if first_claim {
+        relay
+            .counters
+            .handle_first_claims_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
     (
         StatusCode::CREATED,
         Json(json!({
             "nick": req.nick,
             "did": did,
-            "status": "claimed",
+            "status": if first_claim { "claimed" } else { "re-claimed" },
         })),
     )
         .into_response()

@@ -586,3 +586,80 @@ async fn a2a_agent_card_uses_slancha_extension_uri() {
         "https://slancha.ai/wire/ext/v0.5"
     );
 }
+
+#[tokio::test]
+async fn stats_split_first_claims_from_reclaims() {
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir).await;
+    let client = reqwest::Client::new();
+    let alloc: Value = client
+        .post(format!("{base}/v1/slot/allocate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let slot_id = alloc["slot_id"].as_str().unwrap();
+    let slot_token = alloc["slot_token"].as_str().unwrap();
+    let (private_key, public_key) = wire::signing::generate_keypair();
+    let card = wire::agent_card::sign_agent_card(
+        &wire::agent_card::build_agent_card("alice", &public_key, None, None, None),
+        &private_key,
+    );
+
+    let first: Value = client
+        .post(format!("{base}/v1/handle/claim"))
+        .bearer_auth(slot_token)
+        .json(&json!({
+            "nick": "alice",
+            "slot_id": slot_id,
+            "relay_url": base,
+            "card": card,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first["status"], "claimed");
+    let stats1: Value = client
+        .get(format!("{base}/stats"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stats1["handle_claims_total"], 1);
+    assert_eq!(stats1["handle_first_claims_total"], 1);
+
+    let reclaim: Value = client
+        .post(format!("{base}/v1/handle/claim"))
+        .bearer_auth(slot_token)
+        .json(&json!({
+            "nick": "alice",
+            "slot_id": slot_id,
+            "relay_url": base,
+            "card": card,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reclaim["status"], "re-claimed");
+    let stats2: Value = client
+        .get(format!("{base}/stats"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stats2["handle_claims_total"], 2);
+    assert_eq!(stats2["handle_first_claims_total"], 1);
+}
