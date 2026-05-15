@@ -353,6 +353,7 @@ impl Relay {
             .route("/stats", get(stats))
             .route("/stats.html", get(landing_stats_html))
             .route("/stats.history", get(stats_history))
+            .route("/phonebook.html", get(landing_phonebook_html))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
             .route("/v1/slot/:slot_id/state", get(slot_state))
             .route(
@@ -583,6 +584,18 @@ async fn landing_stats_html() -> impl IntoResponse {
             (axum::http::header::CACHE_CONTROL, "public, max-age=60"),
         ],
         STATS_HTML,
+    )
+}
+
+async fn landing_phonebook_html() -> impl IntoResponse {
+    static PHONEBOOK_HTML: &[u8] = include_bytes!("../landing/phonebook.html");
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=60"),
+        ],
+        PHONEBOOK_HTML,
     )
 }
 
@@ -1184,6 +1197,13 @@ async fn handles_directory(
     let mut eligible = Vec::new();
     for rec in records {
         if cursor.is_some_and(|c| rec.nick.as_str() <= c) {
+            continue;
+        }
+        // Hygiene: hide test-shaped nicks from the public directory. Records
+        // remain claimed (FCFS protection persists), they just don't surface
+        // in the phone book. `demo-` is reserved for asciinema-cast handles,
+        // `test-` for integration runs.
+        if rec.nick.starts_with("demo-") || rec.nick.starts_with("test-") {
             continue;
         }
         let profile = rec.card.get("profile").cloned().unwrap_or(Value::Null);

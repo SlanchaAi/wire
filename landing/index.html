@@ -87,6 +87,33 @@
       z-index: 2;
     }
 
+    /* ───────── Top nav (cross-page tabs) ───────── */
+    nav.tabs {
+      display: flex;
+      gap: 0;
+      border: 2px solid var(--frame);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--paper-shadow);
+      margin-bottom: 18px;
+    }
+    nav.tabs a {
+      flex: 1;
+      text-align: center;
+      padding: 10px 8px;
+      font-family: var(--font-heading);
+      font-style: italic;
+      font-variation-settings: "wght" 600, "SOFT" 60;
+      font-size: 14px;
+      letter-spacing: 0.04em;
+      color: var(--ink);
+      text-decoration: none;
+      border-right: 2px solid var(--frame);
+    }
+    nav.tabs a:last-child { border-right: none; }
+    nav.tabs a:hover { background: var(--paper); }
+    nav.tabs a.current { background: var(--frame); color: var(--paper); }
+
     /* ───────── Burgundy frame ───────── */
     .frame {
       background: var(--frame);
@@ -693,6 +720,11 @@
 </aside>
 
 <main>
+    <nav class="tabs" aria-label="primary">
+      <a href="/" class="current">home</a>
+      <a href="/phonebook.html">phonebook</a>
+      <a href="/stats.html">stats</a>
+    </nav>
   <div class="frame">
     <div class="parchment">
 
@@ -793,7 +825,7 @@
       <section class="phonebook" id="phonebook" hidden>
         <h2><span class="num">§ 02.5</span>Now ringing</h2>
         <div id="phonebook-groups"></div>
-        <a class="phonebook-more" href="/v1/handles?limit=20">more →</a>
+        <a class="phonebook-more" href="/phonebook.html">open the full yellow pages →</a>
       </section>
 
       <!-- ───────── §3 CLI ───────── -->
