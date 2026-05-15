@@ -110,6 +110,8 @@ struct Inner {
     pair_slots: HashMap<String, PairSlot>,
     /// nick -> registered handle directory entry (v0.5).
     handles: HashMap<String, HandleRecord>,
+    /// slot_id -> latest operator-published auto-responder health record (R3).
+    responder_health: HashMap<String, ResponderHealthRecord>,
 }
 
 /// One entry in the relay's handle directory (v0.5 — agentic hotline).
@@ -123,6 +125,16 @@ struct HandleRecord {
     pub slot_id: String,
     pub relay_url: Option<String>,
     pub claimed_at: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ResponderHealthRecord {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_success_at: Option<String>,
+    pub set_at: String,
 }
 
 #[derive(Clone, Debug)]
@@ -179,6 +191,7 @@ impl Relay {
     pub async fn new(state_dir: PathBuf) -> Result<Self> {
         tokio::fs::create_dir_all(state_dir.join("slots")).await?;
         tokio::fs::create_dir_all(state_dir.join("handles")).await?;
+        tokio::fs::create_dir_all(state_dir.join("responder-health")).await?;
         let mut inner = Inner {
             slots: HashMap::new(),
             tokens: HashMap::new(),
@@ -188,6 +201,7 @@ impl Relay {
             pair_lookup: HashMap::new(),
             pair_slots: HashMap::new(),
             handles: HashMap::new(),
+            responder_health: HashMap::new(),
         };
         // Reload tokens
         let token_path = state_dir.join("tokens.json");
@@ -233,6 +247,24 @@ impl Relay {
                 let body = tokio::fs::read_to_string(&path).await.unwrap_or_default();
                 if let Ok(rec) = serde_json::from_str::<HandleRecord>(&body) {
                     inner.handles.insert(rec.nick.clone(), rec);
+                }
+            }
+        }
+        // Reload responder health records (R3).
+        let responder_health_dir = state_dir.join("responder-health");
+        if responder_health_dir.exists() {
+            let mut rd = tokio::fs::read_dir(&responder_health_dir).await?;
+            while let Some(entry) = rd.next_entry().await? {
+                let path = entry.path();
+                if path.extension().and_then(|x| x.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(slot_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let body = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+                if let Ok(rec) = serde_json::from_str::<ResponderHealthRecord>(&body) {
+                    inner.responder_health.insert(slot_id.to_string(), rec);
                 }
             }
         }
@@ -297,6 +329,10 @@ impl Relay {
             .route("/stats", get(stats))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
             .route("/v1/slot/:slot_id/state", get(slot_state))
+            .route(
+                "/v1/slot/:slot_id/responder-health",
+                post(responder_health_set),
+            )
             .route("/v1/events/:slot_id/stream", get(stream_events))
             .route("/v1/pair/:pair_id", get(pair_get))
             .route("/v1/handle/claim", post(handle_claim))
@@ -1348,15 +1384,56 @@ async fn slot_state(
     let inner = relay.inner.lock().await;
     let event_count = inner.slots.get(&slot_id).map(|v| v.len()).unwrap_or(0);
     let last_pull_at_unix = inner.last_pull_at_unix.get(&slot_id).copied();
+    let responder_health = inner.responder_health.get(&slot_id).cloned();
     (
         StatusCode::OK,
         Json(json!({
             "slot_id": slot_id,
             "event_count": event_count,
             "last_pull_at_unix": last_pull_at_unix,
+            "responder_health": responder_health,
         })),
     )
         .into_response()
+}
+
+async fn responder_health_set(
+    State(relay): State<Relay>,
+    Path(slot_id): Path<String>,
+    headers: HeaderMap,
+    Json(record): Json<ResponderHealthRecord>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_token(&relay, &headers, &slot_id).await {
+        return resp;
+    }
+    let path = relay
+        .state_dir
+        .join("responder-health")
+        .join(format!("{slot_id}.json"));
+    let body = match serde_json::to_vec_pretty(&record) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("serialize failed: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    if let Err(e) = tokio::fs::write(&path, body).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("persist failed: {e}")})),
+        )
+            .into_response();
+    }
+    {
+        let mut inner = relay.inner.lock().await;
+        inner
+            .responder_health
+            .insert(slot_id.clone(), record.clone());
+    }
+    (StatusCode::OK, Json(record)).into_response()
 }
 
 async fn check_token(

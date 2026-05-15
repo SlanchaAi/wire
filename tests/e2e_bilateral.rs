@@ -254,3 +254,45 @@ async fn pull_rejects_event_with_unknown_signer() {
         "expected 'not in trust' rejection, got: {reason}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responder_health_cli_set_get_roundtrip() {
+    let relay_dir = fresh_dir("relay-responder");
+    let relay = wire::relay_server::Relay::new(relay_dir).await.unwrap();
+    let app = relay.router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let relay_url = format!("http://{addr}");
+
+    let paul_home = fresh_dir("paul-responder");
+    assert!(wire(&paul_home, &["init", "paul"]).status.success());
+    assert!(
+        wire(&paul_home, &["bind-relay", &relay_url])
+            .status
+            .success()
+    );
+
+    let set = wire(
+        &paul_home,
+        &[
+            "responder",
+            "set",
+            "offline",
+            "--reason",
+            "OAuth expired",
+            "--json",
+        ],
+    );
+    assert!(set.status.success(), "set failed");
+    let set_json: Value = serde_json::from_slice(&set.stdout).unwrap();
+    assert_eq!(set_json["status"], "offline");
+    assert_eq!(set_json["reason"], "OAuth expired");
+
+    let get = wire(&paul_home, &["responder", "get", "--json"]);
+    assert!(get.status.success(), "get failed");
+    let get_json: Value = serde_json::from_slice(&get.stdout).unwrap();
+    assert_eq!(get_json["responder_health"]["status"], "offline");
+    assert_eq!(get_json["responder_health"]["reason"], "OAuth expired");
+}

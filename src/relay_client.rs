@@ -136,6 +136,51 @@ impl RelayClient {
         Ok((count, last))
     }
 
+    pub fn responder_health_set(
+        &self,
+        slot_id: &str,
+        slot_token: &str,
+        record: &Value,
+    ) -> Result<Value> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/v1/slot/{slot_id}/responder-health",
+                self.base_url
+            ))
+            .bearer_auth(slot_token)
+            .json(record)
+            .send()
+            .with_context(|| {
+                format!("POST {}/v1/slot/{slot_id}/responder-health", self.base_url)
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().unwrap_or_default();
+            return Err(anyhow!("responder_health_set failed: {status}: {detail}"));
+        }
+        Ok(resp.json()?)
+    }
+
+    pub fn responder_health_get(&self, slot_id: &str, slot_token: &str) -> Result<Value> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/slot/{slot_id}/state", self.base_url))
+            .bearer_auth(slot_token)
+            .send()
+            .with_context(|| format!("GET {}/v1/slot/{slot_id}/state", self.base_url))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().unwrap_or_default();
+            return Err(anyhow!("responder_health_get failed: {status}: {detail}"));
+        }
+        let state: Value = resp.json()?;
+        Ok(state
+            .get("responder_health")
+            .cloned()
+            .unwrap_or(Value::Null))
+    }
+
     pub fn healthz(&self) -> Result<bool> {
         let resp = self
             .client

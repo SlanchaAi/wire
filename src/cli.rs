@@ -144,6 +144,11 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Publish or inspect auto-responder health for this slot.
+    Responder {
+        #[command(subcommand)]
+        command: ResponderCommand,
+    },
     /// Pin a peer's signed agent-card from a file. (Manual out-of-band pairing
     /// — fallback path; the magic-wormhole flow is `pair-host` / `pair-join`.)
     Pin {
@@ -495,6 +500,29 @@ pub enum Command {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum ResponderCommand {
+    /// Publish this agent's auto-responder health.
+    Set {
+        /// One of: online, offline, oauth_locked, rate_limited, degraded.
+        status: String,
+        /// Optional operator-facing reason.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read responder health for self, or for a paired peer.
+    Get {
+        /// Optional peer handle; omitted means this agent's own slot.
+        peer: Option<String>,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ProfileAction {
     /// Set a profile field. Field names: display_name, emoji, motto, vibe,
     /// pronouns, avatar_url, handle, now. Values are strings except `vibe`
@@ -540,6 +568,14 @@ pub fn run() -> Result<()> {
         } => cmd_send(&peer, &kind, &body, deadline.as_deref(), json),
         Command::Tail { peer, json, limit } => cmd_tail(peer.as_deref(), json, limit),
         Command::Verify { path, json } => cmd_verify(&path, json),
+        Command::Responder { command } => match command {
+            ResponderCommand::Set {
+                status,
+                reason,
+                json,
+            } => cmd_responder_set(&status, reason.as_deref(), json),
+            ResponderCommand::Get { peer, json } => cmd_responder_get(peer.as_deref(), json),
+        },
         Command::Mcp => cmd_mcp(),
         Command::RelayServer { bind } => cmd_relay_server(&bind),
         Command::BindRelay { url, json } => cmd_bind_relay(&url, json),
@@ -966,6 +1002,121 @@ fn scan_jsonl_dir(dir: &std::path::Path) -> Result<Value> {
         }
     }
     Ok(json!({"files": files, "events": events}))
+}
+
+// ---------- responder health ----------
+
+fn responder_status_allowed(status: &str) -> bool {
+    matches!(
+        status,
+        "online" | "offline" | "oauth_locked" | "rate_limited" | "degraded"
+    )
+}
+
+fn relay_slot_for(peer: Option<&str>) -> Result<(String, String, String, String)> {
+    let state = config::read_relay_state()?;
+    let (label, slot_info) = match peer {
+        Some(peer) => (
+            peer.to_string(),
+            state
+                .get("peers")
+                .and_then(|p| p.get(peer))
+                .ok_or_else(|| anyhow!("unknown peer {peer:?} in relay state"))?,
+        ),
+        None => (
+            "self".to_string(),
+            state.get("self").filter(|v| !v.is_null()).ok_or_else(|| {
+                anyhow!("self slot not bound — run `wire bind-relay <url>` first")
+            })?,
+        ),
+    };
+    let relay_url = slot_info["relay_url"]
+        .as_str()
+        .ok_or_else(|| anyhow!("{label} relay_url missing"))?
+        .to_string();
+    let slot_id = slot_info["slot_id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("{label} slot_id missing"))?
+        .to_string();
+    let slot_token = slot_info["slot_token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("{label} slot_token missing"))?
+        .to_string();
+    Ok((label, relay_url, slot_id, slot_token))
+}
+
+fn cmd_responder_set(status: &str, reason: Option<&str>, as_json: bool) -> Result<()> {
+    if !responder_status_allowed(status) {
+        bail!("status must be one of: online, offline, oauth_locked, rate_limited, degraded");
+    }
+    let (_label, relay_url, slot_id, slot_token) = relay_slot_for(None)?;
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+    let mut record = json!({
+        "status": status,
+        "set_at": now,
+    });
+    if let Some(reason) = reason {
+        record["reason"] = json!(reason);
+    }
+    if status == "online" {
+        record["last_success_at"] = json!(now);
+    }
+    let client = crate::relay_client::RelayClient::new(&relay_url);
+    let saved = client.responder_health_set(&slot_id, &slot_token, &record)?;
+    if as_json {
+        println!("{}", serde_json::to_string(&saved)?);
+    } else {
+        let reason = saved
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(|r| format!(" — {r}"))
+            .unwrap_or_default();
+        println!(
+            "responder {}{}",
+            saved
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or(status),
+            reason
+        );
+    }
+    Ok(())
+}
+
+fn cmd_responder_get(peer: Option<&str>, as_json: bool) -> Result<()> {
+    let (label, relay_url, slot_id, slot_token) = relay_slot_for(peer)?;
+    let client = crate::relay_client::RelayClient::new(&relay_url);
+    let health = client.responder_health_get(&slot_id, &slot_token)?;
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "target": label,
+                "responder_health": health,
+            }))?
+        );
+    } else if health.is_null() {
+        println!("{label}: responder health not reported");
+    } else {
+        let status = health
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let reason = health
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(|r| format!(" — {r}"))
+            .unwrap_or_default();
+        let last_success = health
+            .get("last_success_at")
+            .and_then(Value::as_str)
+            .map(|t| format!(" (last_success: {t})"))
+            .unwrap_or_default();
+        println!("{label}: {status}{reason}{last_success}");
+    }
+    Ok(())
 }
 
 // (Old cmd_join stub removed — superseded by cmd_pair_join below.)

@@ -441,6 +441,71 @@ async fn slot_state_rejects_wrong_token() {
 }
 
 #[tokio::test]
+async fn responder_health_roundtrip_auth_and_persistence() {
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir.clone()).await;
+    let client = reqwest::Client::new();
+    let alloc: Value = client
+        .post(format!("{base}/v1/slot/allocate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let slot_id = alloc["slot_id"].as_str().unwrap().to_string();
+    let slot_token = alloc["slot_token"].as_str().unwrap().to_string();
+    let record = json!({
+        "status": "offline",
+        "reason": "OAuth expired",
+        "last_success_at": "2026-05-15T20:14:00Z",
+        "set_at": "2026-05-15T20:15:00Z",
+    });
+
+    let wrong = client
+        .post(format!("{base}/v1/slot/{slot_id}/responder-health"))
+        .bearer_auth("wrong-token")
+        .json(&record)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), 403);
+
+    let set = client
+        .post(format!("{base}/v1/slot/{slot_id}/responder-health"))
+        .bearer_auth(&slot_token)
+        .json(&record)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(set.status(), 200);
+
+    let state: Value = client
+        .get(format!("{base}/v1/slot/{slot_id}/state"))
+        .bearer_auth(&slot_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(state["responder_health"], record);
+
+    let base2 = spawn_relay(dir).await;
+    let state2: Value = client
+        .get(format!("{base2}/v1/slot/{slot_id}/state"))
+        .bearer_auth(&slot_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(state2["responder_health"], record);
+}
+
+#[tokio::test]
 async fn sse_stream_pushes_event_to_subscriber() {
     let dir = fresh_state_dir();
     let base = spawn_relay(dir).await;
