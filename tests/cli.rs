@@ -38,7 +38,10 @@ fn version_flag_prints_semver() {
     let out = run(&home, &["--version"]);
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
-    assert!(s.contains("0.5.9"), "got: {s}");
+    // Track Cargo.toml version automatically so the test doesn't need a manual
+    // bump on every release.
+    let expected = env!("CARGO_PKG_VERSION");
+    assert!(s.contains(expected), "got: {s} (expected to contain {expected})");
 }
 
 #[test]
