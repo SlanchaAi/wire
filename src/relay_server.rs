@@ -387,6 +387,7 @@ impl Relay {
             .route("/demo.cast", get(landing_demo_cast))
             .route("/install", get(landing_install_sh))
             .route("/install.sh", get(landing_install_sh))
+            .route("/openshell-policy.sh", get(landing_openshell_policy_sh))
             .route("/healthz", get(healthz))
             .route("/stats", get(stats_root))
             .route("/stats.json", get(stats_json))
@@ -741,6 +742,21 @@ async fn landing_install_sh() -> impl IntoResponse {
             (axum::http::header::CACHE_CONTROL, "public, max-age=300"),
         ],
         INSTALL_SH,
+    )
+}
+
+async fn landing_openshell_policy_sh() -> impl IntoResponse {
+    static POLICY_SH: &[u8] = include_bytes!("../landing/openshell-policy.sh");
+    (
+        StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/x-shellscript; charset=utf-8",
+            ),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=300"),
+        ],
+        POLICY_SH,
     )
 }
 
