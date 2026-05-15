@@ -646,10 +646,7 @@ async fn landing_phonebook_html() -> impl IntoResponse {
 /// includes text/html) and JSON to everything else (curl, scripts, scrapers).
 /// Keeps the JSON contract intact while letting humans land on the page at
 /// the short URL.
-async fn stats_root(
-    State(relay): State<Relay>,
-    headers: HeaderMap,
-) -> axum::response::Response {
+async fn stats_root(State(relay): State<Relay>, headers: HeaderMap) -> axum::response::Response {
     let wants_html = headers
         .get(axum::http::header::ACCEPT)
         .and_then(|v| v.to_str().ok())

@@ -3147,9 +3147,7 @@ fn cmd_invite(relay: &str, ttl: u64, uses: u32, share: bool, as_json: bool) -> R
         println!("{}", serde_json::to_string(&out)?);
     } else if let Some(s) = share_payload {
         let curl = s.get("curl").and_then(Value::as_str).unwrap_or("");
-        eprintln!(
-            "# One-curl onboarding. Share this single line — installs wire if missing,"
-        );
+        eprintln!("# One-curl onboarding. Share this single line — installs wire if missing,");
         eprintln!("# accepts the invite, pairs both sides. TTL: {ttl}s. Uses: {uses}.");
         println!("{curl}");
     } else {
@@ -3173,10 +3171,7 @@ fn cmd_accept(url: &str, as_json: bool) -> Result<()> {
             .send()
             .with_context(|| format!("GET {resolve_url}"))?;
         if !resp.status().is_success() {
-            bail!(
-                "could not resolve short URL {url} (HTTP {})",
-                resp.status()
-            );
+            bail!("could not resolve short URL {url} (HTTP {})", resp.status());
         }
         let body = resp.text().unwrap_or_default().trim().to_string();
         if !body.starts_with("wire://pair?") {
