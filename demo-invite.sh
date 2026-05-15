@@ -74,7 +74,10 @@ esac
 echo "→ willard accepts URL (one paste)"
 ACCEPT_JSON=$(WIRE_HOME="$WILLARD_HOME" "$WIRE" accept "$INVITE_URL" --json)
 PAIRED_WITH=$(echo "$ACCEPT_JSON" | jq -r '.paired_with')
-[ "$PAIRED_WITH" = "did:wire:paul" ] || { echo "    FAIL: paired_with=$PAIRED_WITH"; exit 1; }
+case "$PAIRED_WITH" in
+    "did:wire:paul-"*) ;;
+    *) echo "    FAIL: paired_with=$PAIRED_WITH (expected did:wire:paul-<hex>)"; exit 1 ;;
+esac
 echo "    willard pinned paul. drop sent to paul's slot."
 
 echo "→ paul pulls (consumes pair_drop → pins willard)"

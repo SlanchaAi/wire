@@ -288,6 +288,7 @@ pub fn verify_message_v31(msg: &Value, trust: &Value) -> Result<(), VerifyError>
         .map_err(|_| VerifyError::SignatureRejected)
 }
 
+#[allow(dead_code)] // kept for v0.6 — once a caller exists, drop the allow.
 fn strip_did_wire(s: &str) -> &str {
     s.strip_prefix("did:wire:").unwrap_or(s)
 }
