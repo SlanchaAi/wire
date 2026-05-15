@@ -2639,6 +2639,7 @@ dependencies = [
  "futures",
  "hex",
  "hkdf",
+ "hmac",
  "hostname",
  "proptest",
  "rand 0.8.6",

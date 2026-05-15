@@ -45,6 +45,7 @@ tower_governor = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "stream"] }
 spake2 = "0.4"
 hkdf = "0.12"
+hmac = "0.12"
 chacha20poly1305 = "0.10"
 
 [dev-dependencies]

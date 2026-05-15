@@ -103,6 +103,14 @@ signature, and not itself an execution grant.
 Wire v0.5.9 does not implement `requested_authority` or receiver-side policy
 enforcement. That belongs in v0.6 after the operator UX is clearer.
 
+## Speculative Scaffold
+
+The standalone `src/macaroon.rs` module sketches the macaroon-style path as a
+research artifact: mint, verify, serialize, and deserialize a scoped token with
+sender, recipient, kind, expiry, and max-rate caveats. It is not used by the
+relay, CLI, or event envelope in v0.5.9. Its job is to make the alternative
+concrete enough to evaluate later without changing production consent behavior.
+
 ## What Would Change This
 
 Macaroon-style delegation should move from alternative to primary if more than
