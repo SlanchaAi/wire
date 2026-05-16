@@ -21,7 +21,7 @@ use crate::{
     agent_card::{build_agent_card, sign_agent_card},
     config,
     signing::{fingerprint, generate_keypair, make_key_id, sign_message_v31, verify_message_v31},
-    trust::{add_self_to_trust, empty_trust, get_tier},
+    trust::{add_self_to_trust, empty_trust},
 };
 
 /// Top-level CLI.
@@ -472,6 +472,14 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Install / inspect / remove a launchd plist (macOS) or systemd
+    /// user unit (linux) that runs `wire daemon` on login + restarts
+    /// on crash. Replaces today's "background it with tmux/&/systemd
+    /// as you prefer" footgun.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
     /// Claim a nick on a relay's handle directory. Anyone can then reach
     /// this agent by `<nick>@<relay-domain>` via the relay's
     /// `.well-known/wire/agent` endpoint. FCFS; same-DID re-claims allowed.
@@ -586,6 +594,28 @@ pub enum Command {
         /// Suppress the OS notification call; print one JSON line per event to
         /// stdout instead (for piping into other tooling or smoke-testing
         /// without a desktop session).
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServiceAction {
+    /// Write the launchd plist (macOS) or systemd user unit (linux) and
+    /// load it. Idempotent — re-running re-bootstraps an existing service.
+    Install {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Unload + delete the service unit. Daemon keeps running until the
+    /// next reboot or `wire upgrade`; this only changes the boot-time
+    /// behaviour.
+    Uninstall {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report whether the unit is installed + active.
+    Status {
         #[arg(long)]
         json: bool,
     },
@@ -809,6 +839,7 @@ pub fn run() -> Result<()> {
             recent_rejections,
         } => cmd_doctor(json, recent_rejections),
         Command::Upgrade { check, json } => cmd_upgrade(check, json),
+        Command::Service { action } => cmd_service(action),
         Command::Claim {
             nick,
             relay,
@@ -3888,6 +3919,26 @@ fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Res
         println!(
             "→ resolved {handle_arg} (did={peer_did})\n→ pinned peer locally\n→ intro dropped to {peer_relay}\nawaiting pair_drop_ack from {peer_handle} to complete bilateral pin."
         );
+    }
+    Ok(())
+}
+
+// ---------- service (install / uninstall / status) ----------
+
+fn cmd_service(action: ServiceAction) -> Result<()> {
+    let (report, as_json) = match action {
+        ServiceAction::Install { json } => (crate::service::install()?, json),
+        ServiceAction::Uninstall { json } => (crate::service::uninstall()?, json),
+        ServiceAction::Status { json } => (crate::service::status()?, json),
+    };
+    if as_json {
+        println!("{}", serde_json::to_string(&report)?);
+    } else {
+        println!("wire service {}", report.action);
+        println!("  platform:  {}", report.platform);
+        println!("  unit:      {}", report.unit_path);
+        println!("  status:    {}", report.status);
+        println!("  detail:    {}", report.detail);
     }
     Ok(())
 }

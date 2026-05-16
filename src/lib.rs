@@ -27,6 +27,7 @@ pub mod pull;
 pub mod relay_client;
 pub mod relay_server;
 pub mod sas;
+pub mod service;
 pub mod signing;
 pub mod trust;
 
