@@ -994,14 +994,17 @@ fn cmd_status(as_json: bool) -> Result<()> {
         summary["outbox"] = json!(scan_jsonl_dir(&outbox)?);
         summary["inbox"] = json!(scan_jsonl_dir(&inbox)?);
 
-        // Daemon liveness — check daemon.pid (written by pending_pair::cleanup_on_startup).
-        let daemon_pid_path = config::state_dir()?.join("daemon.pid");
-        let mut daemon = json!({"running": false, "pid": Value::Null});
-        if daemon_pid_path.exists()
-            && let Ok(s) = std::fs::read_to_string(&daemon_pid_path)
-            && let Ok(pid) = s.trim().parse::<u32>()
-        {
-            let alive = {
+        // P1.7 (0.5.11): daemon liveness now consults the structured
+        // pidfile (P0.4) AND `pgrep -f "wire daemon"` to detect orphans
+        // that the pidfile didn't record. Today's debug had a 4-day-old
+        // 0.2.4 daemon (PID 54017) running while the pidfile pointed at
+        // an unrelated dead PID — wire status said `daemon: DOWN` while
+        // the box was actually full of stale-daemon-eating-events
+        // behaviour. Catch THAT class here.
+        let record = crate::ensure_up::read_pid_record("daemon");
+        let pidfile_pid = record.pid();
+        let pidfile_alive = pidfile_pid
+            .map(|pid| {
                 #[cfg(target_os = "linux")]
                 {
                     std::path::Path::new(&format!("/proc/{pid}")).exists()
@@ -1014,8 +1017,53 @@ fn cmd_status(as_json: bool) -> Result<()> {
                         .map(|o| o.status.success())
                         .unwrap_or(false)
                 }
-            };
-            daemon = json!({"running": alive, "pid": pid});
+            })
+            .unwrap_or(false);
+
+        // Cross-check with pgrep — surfaces orphan daemons not in pidfile.
+        let pgrep_pids: Vec<u32> = std::process::Command::new("pgrep")
+            .args(["-f", "wire daemon"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .split_whitespace()
+                    .filter_map(|s| s.parse::<u32>().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let orphan_pids: Vec<u32> = pgrep_pids
+            .iter()
+            .filter(|p| Some(**p) != pidfile_pid)
+            .copied()
+            .collect();
+
+        let mut daemon = json!({
+            "running": pidfile_alive,
+            "pid": pidfile_pid,
+            "all_running_pids": pgrep_pids,
+            "orphans": orphan_pids,
+        });
+        if let crate::ensure_up::PidRecord::Json(d) = &record {
+            daemon["version"] = json!(d.version);
+            daemon["bin_path"] = json!(d.bin_path);
+            daemon["did"] = json!(d.did);
+            daemon["relay_url"] = json!(d.relay_url);
+            daemon["started_at"] = json!(d.started_at);
+            daemon["schema"] = json!(d.schema);
+            if d.version != env!("CARGO_PKG_VERSION") {
+                daemon["version_mismatch"] = json!({
+                    "daemon": d.version.clone(),
+                    "cli": env!("CARGO_PKG_VERSION"),
+                });
+            }
+        } else if matches!(record, crate::ensure_up::PidRecord::LegacyInt(_)) {
+            daemon["pidfile_form"] = json!("legacy-int");
+            daemon["version_mismatch"] = json!({
+                "daemon": "<pre-0.5.11>",
+                "cli": env!("CARGO_PKG_VERSION"),
+            });
         }
         summary["daemon"] = daemon;
 
@@ -1077,11 +1125,41 @@ fn cmd_status(as_json: bool) -> Result<()> {
             .as_u64()
             .map(|p| p.to_string())
             .unwrap_or_else(|| "—".to_string());
+        let daemon_version = summary["daemon"]["version"].as_str().unwrap_or("");
+        let version_suffix = if !daemon_version.is_empty() {
+            format!(" v{daemon_version}")
+        } else {
+            String::new()
+        };
         println!(
-            "daemon:        {} (pid {})",
+            "daemon:        {} (pid {}{})",
             if daemon_running { "running" } else { "DOWN" },
-            daemon_pid
+            daemon_pid,
+            version_suffix,
         );
+        // P1.7: surface version mismatch + orphan procs loudly.
+        if let Some(mm) = summary["daemon"].get("version_mismatch") {
+            println!(
+                "               !! version mismatch: daemon={} CLI={}. \
+                 run `wire upgrade` to swap atomically.",
+                mm["daemon"].as_str().unwrap_or("?"),
+                mm["cli"].as_str().unwrap_or("?"),
+            );
+        }
+        if let Some(orphans) = summary["daemon"]["orphans"].as_array()
+            && !orphans.is_empty()
+        {
+            let pids: Vec<String> = orphans
+                .iter()
+                .filter_map(|v| v.as_u64().map(|p| p.to_string()))
+                .collect();
+            println!(
+                "               !! orphan daemon process(es): pids {}. \
+                 pgrep saw them but pidfile didn't — likely stale process from \
+                 prior install. Multiple daemons race the relay cursor.",
+                pids.join(", ")
+            );
+        }
         let pending_total = summary["pending_pairs"]["total"].as_u64().unwrap_or(0);
         if pending_total > 0 {
             print!("pending pairs: {pending_total}");
@@ -3729,6 +3807,7 @@ fn cmd_doctor(as_json: bool, recent_rejections: usize) -> Result<()> {
     let mut checks: Vec<DoctorCheck> = Vec::new();
 
     checks.push(check_daemon_health());
+    checks.push(check_daemon_pid_consistency());
     checks.push(check_relay_reachable());
     checks.push(check_pair_rejections(recent_rejections));
     checks.push(check_cursor_progress());
@@ -3809,6 +3888,93 @@ fn check_daemon_health() -> DoctorCheck {
                 "kill all-but-one: `pkill -f \"wire daemon\"; wire daemon &`. P0.4 versioned-pidfile (0.5.11 spark side) will detect this automatically."
             ),
         ),
+    }
+}
+
+/// Check: structured pidfile matches running daemon. Spark's P0.4 5th
+/// check. Surfaces version mismatch (daemon running old binary text in
+/// memory under a current symlink — today's exact bug class), schema
+/// drift (future format bumps), and identity contamination (daemon's
+/// recorded DID doesn't match this box's configured DID).
+fn check_daemon_pid_consistency() -> DoctorCheck {
+    let record = crate::ensure_up::read_pid_record("daemon");
+    match record {
+        crate::ensure_up::PidRecord::Missing => DoctorCheck::pass(
+            "daemon_pid_consistency",
+            "no daemon.pid yet — fresh box or daemon never started",
+        ),
+        crate::ensure_up::PidRecord::Corrupt(reason) => DoctorCheck::warn(
+            "daemon_pid_consistency",
+            format!("daemon.pid is corrupt: {reason}"),
+            "delete state/wire/daemon.pid; next `wire daemon &` will rewrite",
+        ),
+        crate::ensure_up::PidRecord::LegacyInt(pid) => DoctorCheck::warn(
+            "daemon_pid_consistency",
+            format!(
+                "daemon.pid is legacy-int form (pid={pid}, no version/bin_path metadata). \
+                 Daemon was started by a pre-0.5.11 binary."
+            ),
+            "run `wire upgrade` to kill the old daemon and start a fresh one with the JSON pidfile",
+        ),
+        crate::ensure_up::PidRecord::Json(d) => {
+            let mut issues: Vec<String> = Vec::new();
+            if d.schema != crate::ensure_up::DAEMON_PID_SCHEMA {
+                issues.push(format!(
+                    "schema={} (expected {})",
+                    d.schema,
+                    crate::ensure_up::DAEMON_PID_SCHEMA
+                ));
+            }
+            let cli_version = env!("CARGO_PKG_VERSION");
+            if d.version != cli_version {
+                issues.push(format!(
+                    "version daemon={} cli={cli_version}",
+                    d.version
+                ));
+            }
+            if !std::path::Path::new(&d.bin_path).exists() {
+                issues.push(format!("bin_path {} missing on disk", d.bin_path));
+            }
+            // Cross-check DID + relay against current config (best-effort).
+            if let Ok(card) = config::read_agent_card()
+                && let Some(current_did) = card.get("did").and_then(Value::as_str)
+                && let Some(recorded_did) = &d.did
+                && recorded_did != current_did
+            {
+                issues.push(format!(
+                    "did daemon={recorded_did} config={current_did} — identity drift"
+                ));
+            }
+            if let Ok(state) = config::read_relay_state()
+                && let Some(current_relay) = state
+                    .get("self")
+                    .and_then(|s| s.get("relay_url"))
+                    .and_then(Value::as_str)
+                && let Some(recorded_relay) = &d.relay_url
+                && recorded_relay != current_relay
+            {
+                issues.push(format!(
+                    "relay_url daemon={recorded_relay} config={current_relay} — relay-migration drift"
+                ));
+            }
+            if issues.is_empty() {
+                DoctorCheck::pass(
+                    "daemon_pid_consistency",
+                    format!(
+                        "daemon v{} bound to {} as {}",
+                        d.version,
+                        d.relay_url.as_deref().unwrap_or("?"),
+                        d.did.as_deref().unwrap_or("?")
+                    ),
+                )
+            } else {
+                DoctorCheck::warn(
+                    "daemon_pid_consistency",
+                    format!("daemon pidfile drift: {}", issues.join("; ")),
+                    "`wire upgrade` to atomically restart daemon with current config".to_string(),
+                )
+            }
+        }
     }
 }
 
