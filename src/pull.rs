@@ -51,6 +51,44 @@ pub struct PullResult {
     pub blocked: bool,
 }
 
+/// Check whether a peer inbox file already contains an event with this
+/// `event_id`. Scan-based — O(file_size) — but inbox files are small and
+/// only the write path consults this (a few times per pull). Avoids
+/// pulling in a separate index file.
+///
+/// Returns false if the file doesn't exist yet, so the first write to a
+/// new peer's inbox is a no-op check.
+fn inbox_already_contains(path: &std::path::Path, event_id: &str) -> bool {
+    if event_id.is_empty() {
+        return false;
+    }
+    let body = match std::fs::read_to_string(path) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    // Quick substring screen first — if event_id isn't anywhere in the
+    // file, no point parsing every line. event_id appears once per event
+    // as a JSON string value, so the substring is a strong signal.
+    let needle = format!("\"event_id\":\"{event_id}\"");
+    if !body.contains(&needle) {
+        return false;
+    }
+    // Confirm by line-parse — defensive against an event_id substring
+    // appearing inside a body field. JSON parsing rejects that case.
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(trimmed)
+            && v.get("event_id").and_then(Value::as_str) == Some(event_id)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Is `kind` known to THIS binary? Used by P0.1 to refuse silent cursor
 /// advance past events from a future protocol version.
 ///
@@ -175,6 +213,25 @@ pub fn process_events(
                     .map(|s| crate::agent_card::display_handle_from_did(s).to_string())
                     .unwrap_or_else(|| "unknown".to_string());
                 let path = inbox_dir.join(format!("{from}.jsonl"));
+
+                // P0.X (0.5.11): dedupe-on-write. Spark reported 3 duplicate
+                // pair_drop_ack events landing in their inbox same second,
+                // same event_id. Relay double-store or push retry-after-
+                // success can re-deliver. Inbox should be content-unique by
+                // event_id.
+                if inbox_already_contains(&path, &event_id) {
+                    rejected.push(json!({
+                        "event_id": event_id,
+                        "reason": "duplicate event_id already in inbox",
+                        "blocks_cursor": false,
+                        "transient": false,
+                    }));
+                    if first_block_idx.is_none() {
+                        last_advanced = Some(event_id.clone());
+                    }
+                    continue;
+                }
+
                 use std::io::Write;
                 let mut f = std::fs::OpenOptions::new()
                     .create(true)
@@ -290,6 +347,57 @@ mod tests {
             );
             assert!(result.blocked);
         });
+    }
+
+    #[test]
+    fn inbox_dedupe_skips_duplicate_event_id() {
+        // P0.X smoke: spark's bug — same event_id arriving twice in the
+        // same inbox file produces only ONE inbox line. The pull result
+        // surfaces the duplicate as rejected[] with a clear reason so
+        // operators see what's happening (vs silently dropping).
+        let tmp = std::env::temp_dir().join(format!(
+            "wire-dedupe-test-{}-{}",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let event_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let existing_line = json!({
+            "event_id": event_id,
+            "from": "did:wire:peer",
+            "type": "claim",
+            "body": "first occurrence",
+        });
+        let path = tmp.join("peer.jsonl");
+        std::fs::write(&path, format!("{existing_line}\n")).unwrap();
+        assert!(inbox_already_contains(&path, event_id));
+        assert!(!inbox_already_contains(&path, "different-event-id"));
+        assert!(!inbox_already_contains(&path, ""));
+    }
+
+    #[test]
+    fn inbox_dedupe_substring_in_body_is_not_false_positive() {
+        // Adversarial: event_id substring inside a body field shouldn't
+        // count as the event already being present.
+        let tmp = std::env::temp_dir().join(format!(
+            "wire-dedupe-substring-{}-{}",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let target_eid = "deadbeefcafebabe";
+        // Existing line has the target eid AS A STRING INSIDE the body,
+        // NOT as the event_id field.
+        let existing_line = json!({
+            "event_id": "different",
+            "from": "did:wire:peer",
+            "body": format!("the user mentioned event_id deadbeefcafebabe in passing"),
+        });
+        let path = tmp.join("peer.jsonl");
+        std::fs::write(&path, format!("{existing_line}\n")).unwrap();
+        // Substring screen sees the eid in the body, but the line-parse
+        // confirmation rejects it.
+        assert!(!inbox_already_contains(&path, target_eid));
     }
 
     #[test]
