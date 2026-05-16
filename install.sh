@@ -13,7 +13,10 @@
 #   4. Installs to $PREFIX/wire (default: $HOME/.local/bin/wire if it exists
 #      and is on $PATH, else /usr/local/bin/wire — with sudo if needed).
 #   5. If pre-built binary unavailable AND `cargo` is on $PATH, falls back
-#      to `cargo install --git <repo>`. (Source-build path; takes ~2 min.)
+#      to `cargo install slancha-wire` from crates.io. (Source-build path;
+#      takes ~2 min. The package is named `slancha-wire` on crates.io
+#      because the bare `wire` name is squatted by an unrelated 2014 crate;
+#      the installed binary is still `wire`.)
 #
 # What it does NOT do:
 #   - install systemd / launchd units (use `wire daemonize` opt-in)
@@ -110,12 +113,18 @@ if curl -fsSL "$binary_url" -o "$tmp"; then
         sudo mv "$tmp" "$target"
     fi
 elif command -v cargo >/dev/null 2>&1; then
-    echo "pre-built binary unavailable — building from source via cargo (this takes ~2 min)" >&2
-    cargo install --git "$REPO_URL" --root "$(dirname "$PREFIX")" --bin wire
+    echo "pre-built binary unavailable — building from source via cargo install slancha-wire (~2 min)" >&2
+    # Prefer crates.io (slancha-wire) over git pin so users get pinned-version semantics.
+    # If that fails (offline / mirror down), fall back to the git path.
+    if ! cargo install slancha-wire --root "$(dirname "$PREFIX")"; then
+        echo "crates.io install failed — falling back to git source build" >&2
+        cargo install --git "$REPO_URL" --root "$(dirname "$PREFIX")" --bin wire
+    fi
 else
     echo "FATAL: pre-built binary unavailable and cargo not found." >&2
     echo "Install Rust from https://rustup.rs/ and re-run this script, or" >&2
-    echo "git clone $REPO_URL && cd wire && cargo build --release" >&2
+    echo "  cargo install slancha-wire    (after rustup)" >&2
+    echo "  git clone $REPO_URL && cd wire && cargo build --release" >&2
     exit 1
 fi
 

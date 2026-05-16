@@ -14,8 +14,8 @@
 #
 # Honesty:
 #   - This script trusts GitHub's HTTPS + the SHA-256s in the release.
-#     If you'd rather build from source: `cargo install --git
-#     https://github.com/SlanchaAi/wire wire`.
+#     If you'd rather build from source: `cargo install slancha-wire`
+#     (crates.io package name; the binary it installs is still `wire`).
 #   - It WILL NOT modify your shell rc files. If ~/.local/bin isn't on
 #     your PATH, the script will tell you the export line to add.
 
@@ -52,7 +52,7 @@ case "$uname_s" in
             x86_64)
                 echo "Intel Mac binary not published in v0.5 (queue-time issue on" >&2
                 echo "GitHub macos-13 runners). Fall back to:" >&2
-                echo "  cargo install --git https://github.com/${REPO} wire" >&2
+                echo "  cargo install slancha-wire" >&2
                 exit 1
                 ;;
             *) echo "unsupported macOS arch: $uname_m" >&2; exit 1 ;;
@@ -64,7 +64,7 @@ case "$uname_s" in
         ;;
     *)
         echo "unsupported OS: $uname_s" >&2
-        echo "fall back: cargo install --git https://github.com/${REPO} wire" >&2
+        echo "fall back: cargo install slancha-wire" >&2
         exit 1
         ;;
 esac

@@ -255,22 +255,35 @@ If those make sense, we probably do too.
 
 ## Install
 
-**v0.2.0 — shipped.** Pre-built binaries on [GitHub Releases](https://github.com/SlanchaAi/wire/releases) for 6 platforms (linux x86_64/aarch64 gnu+musl, darwin aarch64, windows x86_64).
+**v0.5.11 — shipped.** Three paths:
 
 ```bash
+# 1. install.sh — pre-built binaries (Linux x86_64/aarch64 gnu+musl, macOS aarch64, Windows x86_64)
 curl -fsSL https://raw.githubusercontent.com/SlanchaAi/wire/main/install.sh | sh
-```
 
-Or from source:
+# 2. crates.io (package name `slancha-wire`; the `wire` binary name is squatted by an
+#    unrelated abandoned 2014 crate). Installs a `wire` executable to $CARGO_HOME/bin.
+cargo install slancha-wire
 
-```bash
+# 3. from source
 git clone https://github.com/SlanchaAi/wire
 cd wire
 cargo build --release
-cargo test                  # 134 tests, ~3s
+cargo test                  # 140 tests, ~3s
 ```
 
-Requires Rust 1.88+ (edition 2024) for source builds. Install Rust via [rustup](https://rustup.rs).
+Requires Rust 1.88+ (edition 2024) for source / cargo-install builds. Install Rust via [rustup](https://rustup.rs).
+
+After install:
+
+```bash
+wire up <nick>@wireup.net    # full bootstrap: init + bind-relay + claim + daemon
+wire pair <peer>@wireup.net  # zero-shot bilateral pin
+wire send <peer> "hi"        # default kind=claim
+wire monitor                 # live tail of inbox events
+wire doctor                  # single-command health check
+wire upgrade                 # atomic stale-daemon swap on version bump
+```
 
 ---
 
