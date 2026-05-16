@@ -395,6 +395,7 @@ pub fn accept_invite(url: &str) -> Result<Value> {
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
     let event = json!({
+        "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
         "timestamp": now,
         "from": our_did,
         "to": payload.did,
@@ -631,6 +632,7 @@ fn send_pair_drop_ack(
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
     let event = json!({
+        "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
         "timestamp": now,
         "from": our_did,
         "to": format!("did:wire:{peer_handle}"),

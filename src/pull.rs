@@ -139,6 +139,33 @@ pub fn process_events(
             .to_string();
         let kind = event.get("kind").and_then(Value::as_u64).unwrap_or(0) as u32;
 
+        // P0.Z (0.5.11): if the event declares a schema_version, its major
+        // must match ours. Absent field = legacy event (pre-0.5.11), accept
+        // — we can't retroactively stamp old traffic. Mismatched major =
+        // hard reject with both incoming + supported versions in reason.
+        // Format locked with spark: `schema_mismatch=<received> binary_supports=<ours>`.
+        if let Some(declared) = event
+            .get("schema_version")
+            .and_then(Value::as_str)
+        {
+            let ours = signing::EVENT_SCHEMA_VERSION;
+            if signing::schema_major(declared) != signing::schema_major(ours) {
+                rejected.push(json!({
+                    "event_id": event_id,
+                    "reason": format!(
+                        "schema_mismatch={declared} binary_supports={ours}"
+                    ),
+                    "blocks_cursor": true,
+                    "transient": true,
+                    "schema_version": declared,
+                }));
+                if first_block_idx.is_none() {
+                    first_block_idx = Some(idx);
+                }
+                continue;
+            }
+        }
+
         // P0.1: unknown kind → transient, block cursor, fail loud.
         if !is_known_kind(kind) {
             let reason = format!(
@@ -346,6 +373,83 @@ mod tests {
                 "cursor advanced past unknown kind — silent drop regression"
             );
             assert!(result.blocked);
+        });
+    }
+
+    #[test]
+    fn schema_mismatch_blocks_cursor_with_reason_shape() {
+        // P0.Z lock-in: format of the rejection reason. Spark + I agreed on
+        // exact shape `schema_mismatch=v3.2 binary_supports=v3.1` so an
+        // operator running `wire pull --json | jq` can grep for it.
+        // Wrong major (v4 vs v3) -> reject.
+        crate::config::test_support::with_temp_home(|| {
+            crate::config::ensure_dirs().unwrap();
+            let inbox = crate::config::inbox_dir().unwrap();
+            let event = json!({
+                "event_id": "future-binary",
+                "schema_version": "v4.0",
+                "kind": 1000u32,
+                "type": "decision",
+                "from": "did:wire:future",
+            });
+            let result = process_events(&[event], Some("prior".to_string()), &inbox)
+                .unwrap();
+            assert_eq!(result.rejected.len(), 1);
+            let reason = result.rejected[0]["reason"].as_str().unwrap();
+            assert!(reason.contains("schema_mismatch=v4.0"));
+            assert!(reason.contains("binary_supports=v3.1"));
+            assert_eq!(result.rejected[0]["blocks_cursor"], true);
+            assert_eq!(result.advance_cursor_to, Some("prior".to_string()));
+        });
+    }
+
+    #[test]
+    fn schema_minor_bump_within_same_major_is_accepted() {
+        // v3.2 from a slightly-newer peer is still v3 major — must NOT be
+        // rejected just because the minor differs. Otherwise we lock the
+        // protocol to whoever shipped first.
+        crate::config::test_support::with_temp_home(|| {
+            crate::config::ensure_dirs().unwrap();
+            let inbox = crate::config::inbox_dir().unwrap();
+            let event = json!({
+                "event_id": "minor-bump",
+                "schema_version": "v3.2",
+                "kind": 1000u32,
+                "type": "decision",
+                "from": "did:wire:peer-not-in-trust",
+            });
+            let result = process_events(&[event], Some("prior".to_string()), &inbox)
+                .unwrap();
+            // Schema check passes, falls through to verify which rejects
+            // for trust reasons (transient blocks_cursor=true). Either way,
+            // the reason must NOT be a schema_mismatch.
+            let reason = result.rejected[0]["reason"].as_str().unwrap();
+            assert!(
+                !reason.contains("schema_mismatch"),
+                "minor bump should not be schema_mismatch: {reason}"
+            );
+        });
+    }
+
+    #[test]
+    fn legacy_event_without_schema_version_field_is_accepted() {
+        // Pre-0.5.11 events have no schema_version. Reject on absence
+        // would lock us out from every pre-existing inbox + every peer
+        // that hasn't upgraded yet. Absent field = accept (transient
+        // verify-rejection later is fine, just not a schema rejection).
+        crate::config::test_support::with_temp_home(|| {
+            crate::config::ensure_dirs().unwrap();
+            let inbox = crate::config::inbox_dir().unwrap();
+            let event = json!({
+                "event_id": "legacy",
+                "kind": 1000u32,
+                "type": "decision",
+                "from": "did:wire:legacy-peer",
+            });
+            let result = process_events(&[event], Some("prior".to_string()), &inbox)
+                .unwrap();
+            let reason = result.rejected[0]["reason"].as_str().unwrap();
+            assert!(!reason.contains("schema_mismatch"));
         });
     }
 

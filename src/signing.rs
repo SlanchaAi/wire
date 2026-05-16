@@ -22,6 +22,30 @@ use thiserror::Error;
 
 use crate::canonical::canonical;
 
+// ---------- event schema version ----------
+
+/// Schema version tag stamped on every signed event by 0.5.11+. Pull-side
+/// verification rejects events whose schema_version's *major* component
+/// disagrees with this — see `pull::process_events`.
+///
+/// Legacy events without this field are accepted (we can't retroactively
+/// stamp 0.5.10 traffic), so the field's *absence* is fine; only its
+/// *presence with a wrong major* is a hard reject.
+pub const EVENT_SCHEMA_VERSION: &str = "v3.1";
+
+/// Major component of a `v<major>.<minor>` schema_version. Used to decide
+/// whether a received event is wire-compatible.
+///
+/// Today: every Wire schema is v3.x; major == "v3". A 0.5.12 binary might
+/// start emitting v4.0 events; older 0.5.x binaries see major=v4 and bail
+/// instead of attempting to decode an incompatible shape.
+pub fn schema_major(schema_version: &str) -> &str {
+    schema_version
+        .split('.')
+        .next()
+        .unwrap_or(schema_version)
+}
+
 // ---------- kind ranges ----------
 
 /// Disjoint kind-id ranges. Mirrors v3 protocol; v0.1 ships a strict subset.

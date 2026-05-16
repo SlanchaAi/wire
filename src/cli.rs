@@ -1710,6 +1710,7 @@ fn cmd_send(
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
 
     let mut event = json!({
+        "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
         "timestamp": now,
         "from": did,
         "to": format!("did:wire:{peer}"),
@@ -2554,6 +2555,7 @@ fn cmd_rotate_slot(no_announce: bool, as_json: bool) -> Result<()> {
         let peers = state["peers"].as_object().cloned().unwrap_or_default();
         for (peer_handle, _peer_info) in peers.iter() {
             let event = json!({
+                "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
                 "timestamp": now.clone(),
                 "from": did,
                 "to": format!("did:wire:{peer_handle}"),
@@ -3846,6 +3848,7 @@ fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Res
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
     let event = json!({
+        "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
         "timestamp": now,
         "from": our_did,
         "to": peer_did,
