@@ -294,7 +294,45 @@ pub fn cleanup_on_startup() -> Result<()> {
     if let Some(parent) = pid_file.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let _ = std::fs::write(&pid_file, my_pid.to_string());
+    // P0.4 (0.5.11): daemon writes the versioned JSON pidfile shape, not
+    // a raw int. ensure_up::ensure_background also writes one when it
+    // spawns the daemon, but the daemon's own startup path runs through
+    // cleanup_on_startup too — so this side must also write the new shape
+    // or we'd silently regress to legacy-int on every daemon restart.
+    let bin_path = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let started_at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let did = crate::config::read_agent_card()
+        .ok()
+        .and_then(|card| {
+            card.get("did")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+    let relay_url = crate::config::read_relay_state()
+        .ok()
+        .and_then(|state| {
+            state
+                .get("self")
+                .and_then(|s| s.get("relay_url"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+    let record = crate::ensure_up::DaemonPid {
+        schema: crate::ensure_up::DAEMON_PID_SCHEMA.to_string(),
+        pid: my_pid,
+        bin_path,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        started_at,
+        did,
+        relay_url,
+    };
+    if let Ok(body) = serde_json::to_vec_pretty(&record) {
+        let _ = std::fs::write(&pid_file, body);
+    }
     Ok(())
 }
 

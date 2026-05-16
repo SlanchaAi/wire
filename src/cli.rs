@@ -460,6 +460,18 @@ pub enum Command {
         #[arg(long, default_value_t = 5)]
         recent_rejections: usize,
     },
+    /// Atomic upgrade: kill every `wire daemon` process, spawn a fresh
+    /// one from the current binary, write a new pidfile. Eliminates the
+    /// "stale binary text in memory under a fresh symlink" bug class that
+    /// burned 30 minutes today.
+    Upgrade {
+        /// Report drift without taking action (lists processes that would
+        /// be killed + the version of each).
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Claim a nick on a relay's handle directory. Anyone can then reach
     /// this agent by `<nick>@<relay-domain>` via the relay's
     /// `.well-known/wire/agent` endpoint. FCFS; same-DID re-claims allowed.
@@ -796,6 +808,7 @@ pub fn run() -> Result<()> {
             json,
             recent_rejections,
         } => cmd_doctor(json, recent_rejections),
+        Command::Upgrade { check, json } => cmd_upgrade(check, json),
         Command::Claim {
             nick,
             relay,
@@ -3753,6 +3766,170 @@ fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Res
         );
     }
     Ok(())
+}
+
+// ---------- upgrade (atomic daemon swap) ----------
+
+/// `wire upgrade` — kill all running `wire daemon` processes, spawn a
+/// fresh one from the currently-installed binary, write a new versioned
+/// pidfile. The fix for today's exact failure mode: a daemon process that
+/// kept running OLD binary text in memory under a symlink that had since
+/// been repointed at a NEW binary on disk.
+///
+/// Idempotent. If no stale daemon is running, just starts a fresh one
+/// (same as `wire daemon &` but with the wait-until-alive guard from
+/// ensure_up::ensure_daemon_running).
+///
+/// `--check` mode reports drift without acting — lists the processes
+/// that WOULD be killed and the binary version of each.
+fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
+    // 1. Identify all `wire daemon` processes.
+    let pgrep_out = std::process::Command::new("pgrep")
+        .args(["-f", "wire daemon"])
+        .output();
+    let running_pids: Vec<u32> = match pgrep_out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .split_whitespace()
+            .filter_map(|s| s.parse::<u32>().ok())
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    // 2. Read pidfile to surface what the daemon THINKS it is.
+    let record = crate::ensure_up::read_pid_record("daemon");
+    let recorded_version: Option<String> = match &record {
+        crate::ensure_up::PidRecord::Json(d) => Some(d.version.clone()),
+        crate::ensure_up::PidRecord::LegacyInt(_) => Some("<pre-0.5.11>".to_string()),
+        _ => None,
+    };
+    let cli_version = env!("CARGO_PKG_VERSION").to_string();
+
+    if check_only {
+        let report = json!({
+            "running_pids": running_pids,
+            "pidfile_version": recorded_version,
+            "cli_version": cli_version,
+            "would_kill": running_pids,
+        });
+        if as_json {
+            println!("{}", serde_json::to_string(&report)?);
+        } else {
+            println!("wire upgrade --check");
+            println!("  cli version:      {cli_version}");
+            println!("  pidfile version:  {}", recorded_version.as_deref().unwrap_or("(missing)"));
+            if running_pids.is_empty() {
+                println!("  running daemons:  none");
+            } else {
+                let pids: Vec<String> = running_pids.iter().map(|p| p.to_string()).collect();
+                println!("  running daemons:  pids {}", pids.join(", "));
+                println!("  would kill all + spawn fresh");
+            }
+        }
+        return Ok(());
+    }
+
+    // 3. Kill every running wire daemon. Use SIGTERM first, then SIGKILL
+    // after a brief grace period.
+    let mut killed: Vec<u32> = Vec::new();
+    for pid in &running_pids {
+        // SIGTERM (15).
+        let _ = std::process::Command::new("kill")
+            .args(["-15", &pid.to_string()])
+            .status();
+        killed.push(*pid);
+    }
+    // Wait up to ~2s for graceful exit.
+    if !killed.is_empty() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let still_alive: Vec<u32> = killed
+                .iter()
+                .copied()
+                .filter(|p| process_alive_pid(*p))
+                .collect();
+            if still_alive.is_empty() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                // SIGKILL hold-outs.
+                for pid in still_alive {
+                    let _ = std::process::Command::new("kill")
+                        .args(["-9", &pid.to_string()])
+                        .status();
+                }
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    // 4. Remove stale pidfile so ensure_daemon_running doesn't think the
+    //    old daemon is still owning it.
+    let pidfile = config::state_dir()?.join("daemon.pid");
+    if pidfile.exists() {
+        let _ = std::fs::remove_file(&pidfile);
+    }
+
+    // 5. Spawn fresh daemon via ensure_up — atomically waits for
+    //    process_alive + writes the versioned pidfile.
+    let spawned = crate::ensure_up::ensure_daemon_running()?;
+
+    let new_record = crate::ensure_up::read_pid_record("daemon");
+    let new_pid = new_record.pid();
+    let new_version: Option<String> = if let crate::ensure_up::PidRecord::Json(d) = &new_record {
+        Some(d.version.clone())
+    } else {
+        None
+    };
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "killed": killed,
+                "spawned_fresh_daemon": spawned,
+                "new_pid": new_pid,
+                "new_version": new_version,
+                "cli_version": cli_version,
+            }))?
+        );
+    } else {
+        if killed.is_empty() {
+            println!("wire upgrade: no stale daemons running");
+        } else {
+            println!("wire upgrade: killed {} daemon(s) (pids {})",
+                killed.len(),
+                killed.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "));
+        }
+        if spawned {
+            println!(
+                "wire upgrade: spawned fresh daemon (pid {} v{})",
+                new_pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string()),
+                new_version.as_deref().unwrap_or(&cli_version),
+            );
+        } else {
+            println!("wire upgrade: daemon was already running on current binary");
+        }
+    }
+    Ok(())
+}
+
+fn process_alive_pid(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 }
 
 // ---------- doctor (single-command diagnostic) ----------
