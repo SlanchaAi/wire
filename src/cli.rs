@@ -971,15 +971,20 @@ fn cmd_status(as_json: bool) -> Result<()> {
             .unwrap_or_else(|| json!([]));
 
         let trust = config::read_trust()?;
+        let relay_state_for_tier = config::read_relay_state().unwrap_or_else(|_| json!({"peers": {}}));
         let mut peers = Vec::new();
         if let Some(agents) = trust.get("agents").and_then(Value::as_object) {
-            for (peer_handle, agent) in agents {
+            for (peer_handle, _agent) in agents {
                 if peer_handle == &handle {
                     continue; // self
                 }
+                // P0.Y (0.5.11): use effective tier — surfaces PENDING_ACK
+                // for peers we've pinned but never received a pair_drop_ack
+                // from, so the operator sees the "we can't send to them yet"
+                // state instead of seeing a misleading VERIFIED.
                 peers.push(json!({
                     "handle": peer_handle,
-                    "tier": agent.get("tier").and_then(Value::as_str).unwrap_or("UNTRUSTED"),
+                    "tier": effective_peer_tier(&trust, &relay_state_for_tier, peer_handle),
                 }));
             }
         }
@@ -1486,6 +1491,36 @@ fn cmd_whoami(as_json: bool) -> Result<()> {
 
 // ---------- peers ----------
 
+/// P0.Y (0.5.11): effective tier shown to operators. `wire add` pins a
+/// peer's card into trust at VERIFIED immediately, but the bilateral pin
+/// isn't complete until that peer's `pair_drop_ack` arrives carrying their
+/// slot_token. Until then we CAN'T send to them. Displaying VERIFIED is
+/// misleading — spark observed this in real usage.
+///
+/// Effective rules:
+///   trust.tier == VERIFIED + relay_state.peers[h].slot_token empty -> "PENDING_ACK"
+///   otherwise -> raw trust tier (UNTRUSTED / VERIFIED / etc.)
+///
+/// Strictly a display concern — trust state machine itself is untouched
+/// so existing promote/demote logic still works.
+fn effective_peer_tier(trust: &Value, relay_state: &Value, handle: &str) -> String {
+    let raw = crate::trust::get_tier(trust, handle);
+    if raw != "VERIFIED" {
+        return raw.to_string();
+    }
+    let token = relay_state
+        .get("peers")
+        .and_then(|p| p.get(handle))
+        .and_then(|p| p.get("slot_token"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if token.is_empty() {
+        "PENDING_ACK".to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
 fn cmd_peers(as_json: bool) -> Result<()> {
     let trust = config::read_trust()?;
     let agents = trust
@@ -1493,6 +1528,7 @@ fn cmd_peers(as_json: bool) -> Result<()> {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let relay_state = config::read_relay_state().unwrap_or_else(|_| json!({"peers": {}}));
 
     let mut self_did: Option<String> = None;
     if let Ok(card) = config::read_agent_card() {
@@ -1509,7 +1545,7 @@ fn cmd_peers(as_json: bool) -> Result<()> {
         if Some(did.as_str()) == self_did.as_deref() {
             continue; // skip self-attestation
         }
-        let tier = get_tier(&trust, handle);
+        let tier = effective_peer_tier(&trust, &relay_state, handle);
         let capabilities = agent
             .get("card")
             .and_then(|c| c.get("capabilities"))
@@ -1934,6 +1970,91 @@ fn cmd_monitor(
             std::io::stdout().flush().ok();
         }
         std::thread::sleep(sleep_dur);
+    }
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn trust_with(handle: &str, tier: &str) -> Value {
+        json!({
+            "version": 1,
+            "agents": {
+                handle: {
+                    "tier": tier,
+                    "did": format!("did:wire:{handle}"),
+                    "card": {"capabilities": ["wire/v3.1"]}
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn pending_ack_when_verified_but_no_slot_token() {
+        // P0.Y rule: after `wire add`, trust says VERIFIED but the peer's
+        // slot_token hasn't arrived yet. Display PENDING_ACK so the
+        // operator knows wire send won't work yet.
+        let trust = trust_with("willard", "VERIFIED");
+        let relay_state = json!({
+            "peers": {
+                "willard": {
+                    "relay_url": "https://relay",
+                    "slot_id": "abc",
+                    "slot_token": "",
+                }
+            }
+        });
+        assert_eq!(
+            effective_peer_tier(&trust, &relay_state, "willard"),
+            "PENDING_ACK"
+        );
+    }
+
+    #[test]
+    fn verified_when_slot_token_present() {
+        let trust = trust_with("willard", "VERIFIED");
+        let relay_state = json!({
+            "peers": {
+                "willard": {
+                    "relay_url": "https://relay",
+                    "slot_id": "abc",
+                    "slot_token": "tok123",
+                }
+            }
+        });
+        assert_eq!(
+            effective_peer_tier(&trust, &relay_state, "willard"),
+            "VERIFIED"
+        );
+    }
+
+    #[test]
+    fn raw_tier_passes_through_for_non_verified() {
+        // PENDING_ACK should ONLY decorate VERIFIED. UNTRUSTED stays
+        // UNTRUSTED regardless of slot_token state.
+        let trust = trust_with("willard", "UNTRUSTED");
+        let relay_state = json!({
+            "peers": {"willard": {"slot_token": ""}}
+        });
+        assert_eq!(
+            effective_peer_tier(&trust, &relay_state, "willard"),
+            "UNTRUSTED"
+        );
+    }
+
+    #[test]
+    fn pending_ack_when_relay_state_missing_peer() {
+        // After wire add, trust gets updated BEFORE relay_state.peers does.
+        // If relay_state has no entry for the peer at all, the operator
+        // still hasn't completed the bilateral pin — show PENDING_ACK.
+        let trust = trust_with("willard", "VERIFIED");
+        let relay_state = json!({"peers": {}});
+        assert_eq!(
+            effective_peer_tier(&trust, &relay_state, "willard"),
+            "PENDING_ACK"
+        );
     }
 }
 
