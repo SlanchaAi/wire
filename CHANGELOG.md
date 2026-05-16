@@ -6,6 +6,42 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.11 — silent-fail eradication + one-command surface
+
+A 30-minute debug session on 2026-05-15 ate four `pair_drop` events because an old `wire daemon` process (PID 54017, started Monday, never restarted) was running stale 0.2.4 binary text in memory under a symlink that had since been repointed at 0.5.10. Cursor advanced past the new-protocol events the old code couldn't process, no log, no rejected entry, no diag. Today's exact pain became this release.
+
+**Six-command public surface.** What 0.5.10 took multiple steps + a manual debug, 0.5.11 does in one command:
+
+- `wire up <nick@relay>` — fresh box to ready-to-pair. Replaces init + bind-relay + claim + daemon-background + remember-to-restart-on-login.
+- `wire pair <nick@relay>` — bilateral pin, blocks until VERIFIED or hard-error with cause. Replaces add + poll + wait + verify cycle.
+- `wire send <peer> "msg"` — kind defaults to `claim`. Stdin form via `-`. Replaces send-with-mandatory-kind-arg.
+- `wire monitor` — long-running line-per-event stream of new inbox events, handshake filtered by default. Replaces `tail -F inbox/*.jsonl | python parse | grep -v pair_drop`.
+- `wire doctor` — single diagnostic across daemon + pidfile + relay + pair-rejections + cursor. Replaces 30-minute manual debug.
+- `wire upgrade` — kill stale daemons, spawn fresh from current binary, write new versioned pidfile. The fix for today's exact failure mode.
+
+**Silent-fail eradication (the load-bearing fix).**
+
+- **P0.1** — `wire pull` refuses to advance the relay cursor past events the binary can't process (unknown kind, transient verify failures like sender-not-in-trust). Same blocking event surfaces on every retry with `unknown_kind=<N> binary_version=<v>` reason. Today's exact bug class made visible.
+- **P0.2** — every `let _ = ...` and `.ok()` drop in pair/relay/push paths replaced with structured warn + a record in new `pair-rejected.jsonl` for `wire doctor` to surface. The bilateral-pin-stalls-invisibly class.
+- **P0.3** — `flock` on `relay.json` via new `config::update_relay_state(modifier)`. Multiple wire processes can no longer race the cursor — RMW transactions serialise through the lock.
+- **P0.4** — daemon pidfile becomes a versioned JSON record: `{schema, pid, bin_path, version, started_at, did, relay_url}`. CLI compares its own version against the daemon's on every invocation. Mismatch = loud warn. Tolerant reader handles legacy raw-int form for one transition cycle.
+- **P0.Z** — every signed event now carries a `schema_version: "v3.1"` field. Pull rejects mismatched-major with locked reason shape `schema_mismatch=<received> binary_supports=<ours>`. Absent field accepted (pre-0.5.11 compat).
+- **P0.X** — inbox dedupe on `event_id`. Three duplicate `pair_drop_ack` deliveries no longer produce three inbox lines.
+
+**Operator-visible UX.**
+
+- **P0.M** — `wire monitor` plus an AGENT_INTEGRATION.md recipe + MCP server's `instructions` field tells every agent harness to arm a persistent stream-watcher on session start. Catches "agent didn't notice your message" silently before it happens.
+- **P0.Y** — `wire peers` / `wire status` show `PENDING_ACK` for peers we've pinned but haven't received an ack from. No more misleading `VERIFIED` before bilateral pin completes.
+- **P0.S** — `wire send` drops mandatory kind arg + accepts `-` stdin / heredoc.
+- **P1.6** — `wire doctor` with five checks (daemon, daemon_pid_consistency, relay reachable, pair rejections, cursor).
+- **P1.7** — `wire status` cross-checks pidfile with `pgrep -f "wire daemon"`; surfaces orphan daemon processes the pidfile didn't record + version drift loudly.
+- **P1.9** — `wire service install` writes the launchd plist (macOS) or systemd user unit (linux) that auto-starts the daemon on login + restarts on crash. Eliminates the "background it with tmux/&/systemd as you prefer" footgun.
+- **P2.10** — optional structured diagnostic trace at `$WIRE_HOME/state/wire/diag.jsonl`. `wire diag tail` replays. Off by default; enable per-process via `WIRE_DIAG=1` or per-machine via `wire diag enable`.
+
+**By the numbers.** 14 atomic commits, 140 lib tests passing (was 105 at 0.5.10), one pre-existing integration failure on `detached_pair_full_e2e_with_real_daemons` (fails on the v0.5.10 base commit too — unrelated to this release). Every fix above has an adversarial test that asserts the silent failure is loud, per spark's E. rule. The whole release was paired with `slancha-spark@wireup.net` over wire/v3.1 itself — feedback shaped P0.4 pidfile schema (added `did` + `relay_url`), the schema_mismatch reason shape, and the verified=null monitor-filter guard.
+
+Co-developed with slancha-spark@wireup.net via wire/v3.1.
+
 ### v0.5.10 — launch-surface polish + real bug fixes
 
 Pile of small wins from launch-day real-world testing. Server-side new
