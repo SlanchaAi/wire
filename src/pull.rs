@@ -297,12 +297,28 @@ pub fn process_events(
         }
     }
 
-    Ok(PullResult {
-        written,
-        rejected,
-        advance_cursor_to: last_advanced,
+    let result = PullResult {
+        written: written.clone(),
+        rejected: rejected.clone(),
+        advance_cursor_to: last_advanced.clone(),
         blocked: first_block_idx.is_some(),
-    })
+    };
+
+    // P2.10: structured trace. No-op when WIRE_DIAG is not set; one line
+    // per pull when it is. Enough signal for `wire diag tail` to replay
+    // a session.
+    crate::diag::emit(
+        "pull",
+        json!({
+            "events_in": events.len(),
+            "written": result.written.len(),
+            "rejected": result.rejected.len(),
+            "blocked": result.blocked,
+            "advance_to": result.advance_cursor_to,
+        }),
+    );
+
+    Ok(result)
 }
 
 #[cfg(test)]

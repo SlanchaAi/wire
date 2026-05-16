@@ -480,6 +480,14 @@ pub enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Inspect or toggle the structured diagnostic trace
+    /// (`$WIRE_HOME/state/wire/diag.jsonl`). Off by default. Enable per
+    /// process via `WIRE_DIAG=1`, or per-machine via `wire diag enable`
+    /// (writes the file knob a running daemon picks up automatically).
+    Diag {
+        #[command(subcommand)]
+        action: DiagAction,
+    },
     /// Claim a nick on a relay's handle directory. Anyone can then reach
     /// this agent by `<nick>@<relay-domain>` via the relay's
     /// `.well-known/wire/agent` endpoint. FCFS; same-DID re-claims allowed.
@@ -594,6 +602,27 @@ pub enum Command {
         /// Suppress the OS notification call; print one JSON line per event to
         /// stdout instead (for piping into other tooling or smoke-testing
         /// without a desktop session).
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DiagAction {
+    /// Tail the last N entries from diag.jsonl.
+    Tail {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Flip the file-based knob ON. Running daemons pick this up on
+    /// the next emit call without restart.
+    Enable,
+    /// Flip the file-based knob OFF.
+    Disable,
+    /// Report whether diag is currently enabled + the file's size.
+    Status {
         #[arg(long)]
         json: bool,
     },
@@ -840,6 +869,7 @@ pub fn run() -> Result<()> {
         } => cmd_doctor(json, recent_rejections),
         Command::Upgrade { check, json } => cmd_upgrade(check, json),
         Command::Service { action } => cmd_service(action),
+        Command::Diag { action } => cmd_diag(action),
         Command::Claim {
             nick,
             relay,
@@ -3919,6 +3949,67 @@ fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Res
         println!(
             "→ resolved {handle_arg} (did={peer_did})\n→ pinned peer locally\n→ intro dropped to {peer_relay}\nawaiting pair_drop_ack from {peer_handle} to complete bilateral pin."
         );
+    }
+    Ok(())
+}
+
+// ---------- diag (structured trace) ----------
+
+fn cmd_diag(action: DiagAction) -> Result<()> {
+    let state = config::state_dir()?;
+    let knob = state.join("diag.enabled");
+    let log_path = state.join("diag.jsonl");
+    match action {
+        DiagAction::Tail { limit, json } => {
+            let entries = crate::diag::tail(limit);
+            if json {
+                for e in entries {
+                    println!("{}", serde_json::to_string(&e)?);
+                }
+            } else if entries.is_empty() {
+                println!("wire diag: no entries (diag may be disabled — `wire diag enable`)");
+            } else {
+                for e in entries {
+                    let ts = e["ts"].as_u64().unwrap_or(0);
+                    let ty = e["type"].as_str().unwrap_or("?");
+                    let pid = e["pid"].as_u64().unwrap_or(0);
+                    let payload = e["payload"].to_string();
+                    println!("[{ts}] pid={pid} {ty} {payload}");
+                }
+            }
+        }
+        DiagAction::Enable => {
+            config::ensure_dirs()?;
+            std::fs::write(&knob, "1")?;
+            println!("wire diag: enabled at {knob:?}");
+        }
+        DiagAction::Disable => {
+            if knob.exists() {
+                std::fs::remove_file(&knob)?;
+            }
+            println!("wire diag: disabled (env WIRE_DIAG may still flip it on per-process)");
+        }
+        DiagAction::Status { json } => {
+            let enabled = crate::diag::is_enabled();
+            let size = std::fs::metadata(&log_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "enabled": enabled,
+                        "log_path": log_path,
+                        "log_size_bytes": size,
+                    }))?
+                );
+            } else {
+                println!("wire diag status");
+                println!("  enabled:    {enabled}");
+                println!("  log:        {log_path:?}");
+                println!("  log size:   {size} bytes");
+            }
+        }
     }
     Ok(())
 }

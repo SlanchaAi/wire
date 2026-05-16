@@ -14,6 +14,7 @@ pub mod canonical;
 pub mod cli;
 pub mod config;
 pub mod daemon_stream;
+pub mod diag;
 pub mod ensure_up;
 pub mod inbox_watch;
 pub mod macaroon;
