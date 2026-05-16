@@ -1,5 +1,5 @@
 [package]
-name = "wire"
+name = "slancha-wire"
 version = "0.5.11"
 edition = "2024"
 rust-version = "1.88"
