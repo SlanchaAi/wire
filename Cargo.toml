@@ -12,6 +12,14 @@ repository = "https://github.com/SlanchaAi/wire"
 documentation = "https://github.com/SlanchaAi/wire#readme"
 keywords = ["agent", "p2p", "ed25519", "wormhole", "mailbox"]
 categories = ["command-line-utilities", "cryptography", "network-programming"]
+exclude = [
+    "CLAUDE.md",
+    "AGENTS.md",
+    ".claude/",
+    ".gitnexus/",
+    ".planning/",
+    "SESSION_LOG_*.md",
+]
 
 [lib]
 name = "wire"
