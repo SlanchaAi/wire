@@ -6,6 +6,14 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.12 — metadata hygiene
+
+Patch release pinning the `slancha-wire` crate rename + repointing crate metadata to live URLs.
+
+- **Cargo.toml `name`** stayed `slancha-wire` (from post-`v0.5.11` rename commit). `v0.5.11` tag predated the rename, so the tag did not match the published artifact on crates.io. `v0.5.12` is the first tag that pins the renamed-and-published state.
+- **`homepage` + `documentation`** repointed from `https://wire.slancha.ai` (DNS not yet provisioned — `wire` subdomain doesn't resolve) to the GitHub repo. The previous values shipped a broken link in crates.io metadata.
+- No code changes. `wire --version` reports `0.5.12`.
+
 ### v0.5.11 — silent-fail eradication + one-command surface
 
 A 30-minute debug session on 2026-05-15 ate four `pair_drop` events because an old `wire daemon` process (PID 54017, started Monday, never restarted) was running stale 0.2.4 binary text in memory under a symlink that had since been repointed at 0.5.10. Cursor advanced past the new-protocol events the old code couldn't process, no log, no rejected entry, no diag. Today's exact pain became this release.
