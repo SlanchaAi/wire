@@ -81,13 +81,23 @@ fn connect_and_read(wake_tx: &Sender<()>) -> Result<()> {
     }
 
     let stream_url = format!("{url}/v1/events/{slot_id}/stream");
-    let client = reqwest::blocking::Client::builder()
-        // No total timeout: stream is expected to stay open indefinitely.
-        // TCP keepalive catches a hung connection (server crashed, network
-        // black hole) — the BufReader::lines loop returns Err and the
-        // outer reconnect-with-backoff kicks in.
-        .tcp_keepalive(Some(Duration::from_secs(60)))
-        .build()?;
+    // v0.5.13: honor WIRE_INSECURE_SKIP_TLS_VERIFY on the stream sub too,
+    // matching the rest of the wire HTTPS surface (issue #6).
+    let client = {
+        let mut b = reqwest::blocking::Client::builder()
+            // No total timeout: stream is expected to stay open indefinitely.
+            // TCP keepalive catches a hung connection (server crashed, network
+            // black hole) — the BufReader::lines loop returns Err and the
+            // outer reconnect-with-backoff kicks in.
+            .tcp_keepalive(Some(Duration::from_secs(60)));
+        if std::env::var(crate::relay_client::INSECURE_SKIP_TLS_ENV)
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+        {
+            b = b.danger_accept_invalid_certs(true);
+        }
+        b.build()?
+    };
 
     let resp = client
         .get(&stream_url)

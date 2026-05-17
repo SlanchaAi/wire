@@ -26,12 +26,113 @@ pub struct PostEventResponse {
     pub status: String,
 }
 
+/// Env var: when set to a truthy value (`1`, `true`, `yes`), every TLS
+/// verification check on every wire HTTPS client is disabled. Intended
+/// as an emergency-only operator override for environments behind a
+/// TLS-intercepting middlebox (corporate proxy, AV product like Avast
+/// re-signing certs with its own root, captive portal). Prints a loud
+/// stderr banner on every send when active. **Do not set this in
+/// production.** Documented in THREAT_MODEL.md + README.
+pub const INSECURE_SKIP_TLS_ENV: &str = "WIRE_INSECURE_SKIP_TLS_VERIFY";
+
+fn insecure_skip_tls_verify() -> bool {
+    matches!(
+        std::env::var(INSECURE_SKIP_TLS_ENV)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// v0.5.13: emit the loud-fail banner exactly once per process so we
+/// don't spam a hundred lines per `wire push`. Per-process `OnceLock`
+/// guards the emission. The banner goes to stderr; never stdout (we
+/// must not corrupt the `--json` machine-readable contract).
+fn maybe_emit_insecure_banner() {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if insecure_skip_tls_verify() {
+        ONCE.get_or_init(|| {
+            eprintln!(
+                "\x1b[1;31mwire: WARNING\x1b[0m {INSECURE_SKIP_TLS_ENV}=1 is set; TLS verification is DISABLED for all relay traffic. \
+                 MITM attacks against the relay path are undetectable in this mode. Unset to restore default trust validation."
+            );
+        });
+    }
+}
+
+/// Centralized builder for blocking HTTPS clients across wire. Loads
+/// the OS native trust store (rustls-tls-native-roots) so corporate
+/// proxies, AV cert-resign products, and on-prem CAs validate. Honors
+/// the [`INSECURE_SKIP_TLS_ENV`] escape hatch for the corporate-proxy
+/// emergency case.
+pub fn build_blocking_client(
+    timeout: Option<std::time::Duration>,
+) -> Result<reqwest::blocking::Client> {
+    let mut b = reqwest::blocking::Client::builder();
+    if let Some(t) = timeout {
+        b = b.timeout(t);
+    }
+    if insecure_skip_tls_verify() {
+        maybe_emit_insecure_banner();
+        b = b.danger_accept_invalid_certs(true);
+    }
+    b.build()
+        .with_context(|| "constructing reqwest blocking client")
+}
+
+/// Flatten an `anyhow::Error` source chain into a single human-readable
+/// transport-error line for the `reason` field in `wire push --json` and
+/// for stderr surfaces. Classifies the topmost cause (`TLS error`,
+/// `DNS error`, `connect timeout`, `read timeout`, `HTTP error`) so a
+/// silent failure no longer leaks past the user as a bare URL.
+///
+/// v0.5.13 rule 1 of the network-resilience doctrine — see issue #6.
+pub fn format_transport_error(err: &anyhow::Error) -> String {
+    let mut parts: Vec<String> = err.chain().map(|c| c.to_string()).collect();
+    // Heuristic classification — search the chain for the lowest-level
+    // descriptor and prefix the message so the reader sees the kind
+    // even when the topmost context is just the URL.
+    let lower = parts
+        .iter()
+        .map(|p| p.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let class = if lower.iter().any(|p| {
+        p.contains("invalid peer certificate")
+            || p.contains("certificate verification")
+            || p.contains("unknownissuer")
+            || p.contains("certificate is not valid")
+            || p.contains("tls handshake")
+    }) {
+        Some("TLS error")
+    } else if lower
+        .iter()
+        .any(|p| p.contains("dns error") || p.contains("nodename nor servname") || p.contains("failed to lookup address"))
+    {
+        Some("DNS error")
+    } else if lower
+        .iter()
+        .any(|p| p.contains("operation timed out") || p.contains("deadline has elapsed"))
+    {
+        Some("timeout")
+    } else if lower
+        .iter()
+        .any(|p| p.contains("connection refused") || p.contains("connection reset"))
+    {
+        Some("connect error")
+    } else {
+        None
+    };
+    if let Some(c) = class {
+        parts.insert(0, c.to_string());
+    }
+    parts.join(": ")
+}
+
 impl RelayClient {
     pub fn new(base_url: &str) -> Self {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("reqwest client construction is infallible with default config");
+        let client = build_blocking_client(Some(std::time::Duration::from_secs(30)))
+            .expect("reqwest client construction is infallible with rustls + native roots");
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             client,
@@ -412,5 +513,88 @@ mod tests {
         assert_eq!(c.base_url, "http://example.com");
         let c = RelayClient::new("http://example.com");
         assert_eq!(c.base_url, "http://example.com");
+    }
+
+    #[test]
+    fn format_transport_error_classifies_tls() {
+        // Simulate the Avast/corp-proxy class from issue #6: reqwest wraps
+        // a rustls UnknownIssuer inside a hyper error inside a context URL.
+        let inner = anyhow!("invalid peer certificate: UnknownIssuer");
+        let middle: anyhow::Error = inner.context("hyper send");
+        let top = middle.context("POST https://relay.example/v1/events/abc");
+        let formatted = format_transport_error(&top);
+        assert!(
+            formatted.starts_with("TLS error:"),
+            "expected TLS class prefix, got: {formatted}"
+        );
+        assert!(formatted.contains("UnknownIssuer"), "lost root cause: {formatted}");
+        assert!(
+            formatted.contains("POST https://relay.example"),
+            "lost context URL: {formatted}"
+        );
+    }
+
+    #[test]
+    fn format_transport_error_classifies_timeout() {
+        let inner = anyhow!("operation timed out");
+        let top = inner.context("POST https://relay.example/v1/events/abc");
+        let formatted = format_transport_error(&top);
+        assert!(formatted.starts_with("timeout:"), "got: {formatted}");
+    }
+
+    #[test]
+    fn format_transport_error_classifies_dns() {
+        let inner = anyhow!("dns error: failed to lookup address");
+        let top = inner.context("POST https://relay.example/v1/events/abc");
+        let formatted = format_transport_error(&top);
+        assert!(formatted.starts_with("DNS error:"), "got: {formatted}");
+    }
+
+    #[test]
+    fn format_transport_error_falls_back_to_chain_join() {
+        // Unknown class → no prefix, just the joined chain. Behavior MUST
+        // still surface every cause (this is the loud-fail invariant).
+        let inner = anyhow!("Refused to connect for non-standard reason xyz");
+        let top = inner.context("POST https://relay.example/v1/events/abc");
+        let formatted = format_transport_error(&top);
+        assert!(formatted.contains("Refused to connect"));
+        assert!(formatted.contains("POST https://relay.example"));
+    }
+
+    #[test]
+    fn insecure_env_recognizes_truthy_values_and_default_off() {
+        // Process-global env var → must be one test, not two (otherwise
+        // parallel cargo-test threads race). Single test owns the var's
+        // lifecycle from "unset" through truthy values back to "unset".
+        use std::sync::{Mutex, OnceLock};
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        let _lock = GUARD.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        // SAFETY: env mutation here is serialized by the GUARD mutex;
+        // other tests in this module do not touch INSECURE_SKIP_TLS_ENV.
+        unsafe {
+            std::env::remove_var(INSECURE_SKIP_TLS_ENV);
+        }
+        assert!(!insecure_skip_tls_verify(), "default must be secure");
+
+        for v in ["1", "true", "yes", "on", "TRUE", "Yes"] {
+            unsafe {
+                std::env::set_var(INSECURE_SKIP_TLS_ENV, v);
+            }
+            assert!(insecure_skip_tls_verify(), "value {v:?} should be truthy");
+        }
+        // Falsy / unset round-trip back to secure.
+        for v in ["0", "false", "no", "off", ""] {
+            unsafe {
+                std::env::set_var(INSECURE_SKIP_TLS_ENV, v);
+            }
+            assert!(
+                !insecure_skip_tls_verify(),
+                "value {v:?} must not enable insecure mode"
+            );
+        }
+        unsafe {
+            std::env::remove_var(INSECURE_SKIP_TLS_ENV);
+        }
     }
 }

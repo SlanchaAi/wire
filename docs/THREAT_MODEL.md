@@ -274,6 +274,22 @@ The example unit at `examples/systemd/wire-relay-server.service` includes `Prote
 - **Forensics on the operator's filesystem** — config and inbox/outbox files are not encrypted at rest.
 - **Side-channel attacks on the cryptographic primitives** — relies on `ed25519-dalek` and `chacha20poly1305` from RustCrypto; their threat models apply.
 
+## Network-resilience doctrine (v0.5.13)
+
+Wire's HTTPS surface (relay POST/GET, `/stream` long-poll, well-known fetches) consults Mozilla webpki roots + the OS native trust store via `rustls-tls-native-roots`. Three rules cover the "corporate AV/proxy is MITM-ing every TLS connection" failure class surfaced in issue #6:
+
+1. **Loud transport error class.** Every transport failure surfaces the full `anyhow::Error` source chain with a leading class label (`TLS error:`, `DNS error:`, `timeout:`, `connect error:`). `wire push --json` returns the formatted reason in the `reason` field. No silent `"skipped: 23, reason: POST https://…"` — the real cause (`invalid peer certificate: UnknownIssuer`, `failed to lookup address`) is always visible.
+
+2. **OS native trust store.** macOS Keychain, Linux `/etc/ssl/certs`, Windows certificate store are all consulted. Corporate / on-prem CAs work without code-side configuration. `SSL_CERT_FILE` is honored by rustls when set.
+
+3. **`WIRE_INSECURE_SKIP_TLS_VERIFY` escape hatch.** Setting the env var to a truthy value (`1`, `true`, `yes`, `on`) disables TLS verification for every wire HTTPS client AND prints a loud red stderr banner on the first send each process. Intended for the corporate-network "AV product re-signs every cert, no other choice" case. **MITM attacks against the relay path are undetectable in this mode** — only the wire envelope (Ed25519 over canonical JSON) keeps protecting message integrity; the relay can fully see and tamper with metadata. Never default-on; loud-failed if used.
+
+### Operator workflow when `wire push` fails with a TLS error
+
+1. Inspect: `wire push --json | jq '.skipped[].reason'` shows the full TLS chain.
+2. If your environment trusts a corporate CA: install it in the OS trust store; wire picks it up next run.
+3. If you cannot install the CA (managed device, etc.): `WIRE_INSECURE_SKIP_TLS_VERIFY=1 wire push` once to confirm. Then escalate to your IT to install the CA properly; do not leave the env var set as a permanent workaround.
+
 ## Defense in depth
 
 The pieces that compose:

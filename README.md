@@ -255,7 +255,7 @@ If those make sense, we probably do too.
 
 ## Install
 
-**v0.5.12 — shipped.** Three paths:
+**v0.5.13 — shipped.** Three paths:
 
 ```bash
 # 1. install.sh — pre-built binaries (Linux x86_64/aarch64 gnu+musl, macOS aarch64, Windows x86_64)

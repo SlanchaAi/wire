@@ -57,6 +57,21 @@ pub fn did_for(handle: &str) -> String {
     }
 }
 
+/// Strip the federation suffix (`@relay.example`) from a handle, returning
+/// the bare local-part. This is the canonical on-disk form: outbox/inbox
+/// files are keyed by bare handle (`paul-mac.jsonl`), and the pinned-peers
+/// map in `relay_state.json` is keyed by bare handle.
+///
+/// Why this exists (v0.5.13): `wire send paul-mac@wireup.net "..."` used
+/// to write the outbox to `paul-mac@wireup.net.jsonl`, but `wire push`
+/// only enumerated bare-handle filenames. Events stuck silently for 25
+/// minutes (issue #2). Normalizing here makes the on-disk contract the
+/// single source of truth — accepts both `paul-mac` and `paul-mac@host`,
+/// always writes to `paul-mac.jsonl`.
+pub fn bare_handle(handle: &str) -> &str {
+    handle.split_once('@').map(|(n, _)| n).unwrap_or(handle)
+}
+
 /// Extract the display-friendly handle from a DID. Handles both legacy
 /// (`did:wire:paul`) and v0.5.7+ (`did:wire:paul-abc12345`) forms. The
 /// v0.5.7 trailing `-<8-hex>` suffix is stripped when present.

@@ -909,6 +909,7 @@ fn tool_send(args: &Value) -> Result<Value, String> {
         .get("peer")
         .and_then(Value::as_str)
         .ok_or("missing 'peer'")?;
+    let peer = crate::agent_card::bare_handle(peer);
     let kind = args
         .get("kind")
         .and_then(Value::as_str)

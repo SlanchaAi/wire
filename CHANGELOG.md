@@ -6,6 +6,24 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.13 — silent-fail eradication round 2 + network resilience
+
+Three threads landed together in response to issues #2 and #6 against v0.5.12:
+
+**A. Issue #2 — outbox + doctor silent-fail bugs.**
+
+- **`P0.A1` outbox filename normalization.** `wire send paul-mac@wireup.net "..."` used to write `outbox/paul-mac@wireup.net.jsonl`, but `wire push` only enumerates files matching pinned peer handles (`paul-mac.jsonl`). 4 events stuck silently for 25 minutes in the field report. New `agent_card::bare_handle` helper strips `@<relay>` at the `cmd_send` and `tool_send` boundaries; on-disk contract (`outbox/<bare_handle>.jsonl`) is now the single source of truth. Adversarial test: `send_with_fqdn_peer_normalizes_to_bare_handle_outbox` asserts FQDN-suffixed file is never created.
+- **`P0.A2` outbox orphan-file warning.** `wire push` now scans the outbox dir for `.jsonl` files whose stem isn't a pinned peer; if the bare handle of the stem matches a pinned peer, prints a loud stderr line with the exact `cat … >> …` recovery command. Catches the upgrade path where stale pre-v0.5.13 FQDN files sit on disk.
+- **`P0.A3` doctor/status agreement.** Pre-v0.5.13 `wire doctor` ran a pure pgrep count and PASSed "one daemon running" even when that one daemon was an orphan and the pidfile's recorded daemon was dead — `wire status` correctly reported DOWN in the same state. 25 minutes of disagreement before the operator caught it. `check_daemon_health` now consults both pgrep AND the structured pidfile, with explicit FAIL verdicts for the orphan-only and orphan-alongside-pidfile states. Status and doctor cannot disagree on liveness.
+
+**B. Issue #6 — network resilience doctrine.** Three-rule policy now in code:
+
+- **Rule 1: loud transport error class.** New `relay_client::format_transport_error` flattens the `anyhow::Error` source chain and prefixes a class label (`TLS error:`, `DNS error:`, `timeout:`, `connect error:`). `wire push --json` now surfaces the full `invalid peer certificate: UnknownIssuer` instead of the bare URL that hid the TLS failure in Avast/corp-proxy environments. Unit tests cover TLS / DNS / timeout / fallback paths.
+- **Rule 2: OS native trust store.** Cargo.toml `reqwest` feature flag `rustls-tls` → `rustls-tls-native-roots`. Both blocking client builders (`relay_client.rs`, `daemon_stream.rs`) now load OS native CAs via `rustls-native-certs`, so corporate proxies, AV cert-resign products, and on-prem CAs validate without manual trust-store gymnastics. No code-side opt-in needed; works on macOS / Linux / Windows.
+- **Rule 3: documented escape hatch.** New `WIRE_INSECURE_SKIP_TLS_VERIFY` env var (recognized values: `1` / `true` / `yes` / `on`). When set, builds reqwest clients with `danger_accept_invalid_certs(true)` AND prints a loud red stderr banner exactly once per process. Last-resort operator override for `--insecure` MITM-accepted environments. Documented in THREAT_MODEL.md.
+
+**C. No protocol or schema changes.** v3.1 event envelope unchanged; all existing peers stay paired across the upgrade.
+
 ### v0.5.12 — metadata hygiene
 
 Patch release pinning the `slancha-wire` crate rename + repointing crate metadata to live URLs.

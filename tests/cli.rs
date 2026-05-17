@@ -170,6 +170,44 @@ fn send_writes_to_outbox() {
 }
 
 #[test]
+fn send_with_fqdn_peer_normalizes_to_bare_handle_outbox() {
+    // Regression for issue #2 Bug B (v0.5.13). Operators and the
+    // AGENT_INTEGRATION recipe both showed `wire send <handle>@<relay>`
+    // form. Before v0.5.13 that wrote to `<handle>@<relay>.jsonl`,
+    // but `wire push` only enumerated bare-handle filenames — events
+    // stuck silently for 25 min in the field report. Bare-handle
+    // normalization at send time is the on-disk-contract enforcement.
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul"]);
+    let out = run(
+        &home,
+        &[
+            "send",
+            "willard@wireup.net",
+            "claim",
+            "fqdn-peer test",
+            "--json",
+        ],
+    );
+    assert!(out.status.success(), "send failed: {:?}", out);
+    let s = String::from_utf8(out.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(parsed["peer"], "willard", "peer field must be bare handle");
+    // Bare-handle file MUST exist; FQDN-suffixed file MUST NOT.
+    let bare = home.join("state/wire/outbox/willard.jsonl");
+    let fqdn = home.join("state/wire/outbox/willard@wireup.net.jsonl");
+    assert!(bare.exists(), "bare-handle outbox missing: {bare:?}");
+    assert!(
+        !fqdn.exists(),
+        "fqdn-suffixed outbox MUST NOT be created: {fqdn:?}"
+    );
+    // Event `to` field uses bare handle in the constructed DID — not the FQDN.
+    let body = std::fs::read_to_string(&bare).unwrap();
+    let event: serde_json::Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+    assert_eq!(event["to"], "did:wire:willard");
+}
+
+#[test]
 fn send_deadline_writes_signed_time_sensitive_until() {
     let home = fresh_home();
     let _ = run(&home, &["init", "paul"]);

@@ -1730,6 +1730,7 @@ fn cmd_send(
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
     }
+    let peer = crate::agent_card::bare_handle(peer);
     let sk_seed = config::read_private_key()?;
     let card = config::read_agent_card()?;
     let did = card.get("did").and_then(Value::as_str).unwrap_or("");
@@ -2375,6 +2376,38 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
         );
     }
     let outbox_dir = config::outbox_dir()?;
+    // v0.5.13 loud-fail: warn on outbox files that don't match a pinned peer.
+    // Pre-v0.5.13 `wire send peer@relay` wrote to `peer@relay.jsonl` while
+    // push only enumerated bare-handle files. After upgrade, stale FQDN-named
+    // files sit on disk forever; warn so operator can `cat fqdn.jsonl >> handle.jsonl`.
+    if outbox_dir.exists() {
+        let pinned: std::collections::HashSet<String> = peers.keys().cloned().collect();
+        for entry in std::fs::read_dir(&outbox_dir)?.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if pinned.contains(&stem) {
+                continue;
+            }
+            // Try the bare-handle of the orphaned stem — if THAT matches a
+            // pinned peer, the stem is a stale FQDN-suffixed file.
+            let bare = crate::agent_card::bare_handle(&stem);
+            if pinned.contains(bare) {
+                eprintln!(
+                    "wire push: WARN stale outbox file `{}.jsonl` not enumerated (pinned peer is `{bare}`). \
+                     Merge with: `cat {} >> {}` then delete the FQDN file.",
+                    stem,
+                    path.display(),
+                    outbox_dir.join(format!("{bare}.jsonl")).display(),
+                );
+            }
+        }
+    }
     if !outbox_dir.exists() {
         if as_json {
             println!(
@@ -2430,8 +2463,12 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
                     }
                 }
                 Err(e) => {
+                    // v0.5.13: flatten the anyhow chain so TLS / DNS / timeout
+                    // errors aren't hidden behind the topmost-context URL string.
+                    // Issue #6 highest-impact silent-fail fix.
+                    let reason = crate::relay_client::format_transport_error(&e);
                     skipped.push(
-                        json!({"peer": peer_handle, "event_id": event_id, "reason": e.to_string()}),
+                        json!({"peer": peer_handle, "event_id": event_id, "reason": reason}),
                     );
                 }
             }
@@ -2931,8 +2968,12 @@ fn run_sync_push() -> Result<Value> {
                     }
                 }
                 Err(e) => {
+                    // v0.5.13: flatten the anyhow chain so TLS / DNS / timeout
+                    // errors aren't hidden behind the topmost-context URL string.
+                    // Issue #6 highest-impact silent-fail fix.
+                    let reason = crate::relay_client::format_transport_error(&e);
                     skipped.push(
-                        json!({"peer": peer_handle, "event_id": event_id, "reason": e.to_string()}),
+                        json!({"peer": peer_handle, "event_id": event_id, "reason": reason}),
                     );
                 }
             }
@@ -4303,33 +4344,101 @@ fn cmd_doctor(as_json: bool, recent_rejections: usize) -> Result<()> {
 /// `wire doctor` must catch THIS class: multiple daemons running, OR
 /// pid-file claims daemon down while a process is actually up.
 fn check_daemon_health() -> DoctorCheck {
+    // v0.5.13 (issue #2 bug A): doctor PASSed on orphan-only state while
+    // `wire status` reported DOWN, disagreeing for 25 min. Doctor used
+    // pgrep alone; status cross-checked the pidfile. Doctor now consults
+    // BOTH so the two surfaces never disagree.
     let output = std::process::Command::new("pgrep")
         .args(["-f", "wire daemon"])
         .output();
-    let pids: Vec<String> = match output {
+    let pgrep_pids: Vec<u32> = match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .split_whitespace()
-            .map(str::to_string)
+            .filter_map(|s| s.parse::<u32>().ok())
             .collect(),
         _ => Vec::new(),
     };
+    let pidfile_pid = crate::ensure_up::read_pid_record("daemon").pid();
+    // Is the pidfile-claimed daemon actually alive?
+    let pidfile_alive = pidfile_pid
+        .map(|pid| {
+            #[cfg(target_os = "linux")]
+            {
+                std::path::Path::new(&format!("/proc/{pid}")).exists()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                std::process::Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+            }
+        })
+        .unwrap_or(false);
+    let orphan_pids: Vec<u32> = pgrep_pids
+        .iter()
+        .filter(|p| Some(**p) != pidfile_pid)
+        .copied()
+        .collect();
 
-    match pids.len() {
-        0 => DoctorCheck::fail(
+    let fmt_pids = |xs: &[u32]| -> String {
+        xs.iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    match (pgrep_pids.len(), pidfile_alive, orphan_pids.is_empty()) {
+        (0, _, _) => DoctorCheck::fail(
             "daemon",
             "no `wire daemon` process running — nothing pulling inbox or pushing outbox",
             "`wire daemon &` to start, or re-run `wire up <handle>@<relay>` to bootstrap",
         ),
-        1 => DoctorCheck::pass("daemon", format!("one daemon running (pid {})", pids[0])),
-        n => DoctorCheck::warn(
+        // Single daemon AND it matches the pidfile → healthy.
+        (1, true, true) => DoctorCheck::pass(
             "daemon",
             format!(
-                "{n} `wire daemon` processes running (pids: {}). Multiple daemons race the relay cursor — one writes, another overwrites. Today's exact bug class.",
-                pids.join(", ")
+                "one daemon running (pid {}, matches pidfile)",
+                pgrep_pids[0]
             ),
+        ),
+        // Pidfile is alive but pgrep ALSO sees orphan processes.
+        (n, true, false) => DoctorCheck::fail(
+            "daemon",
             format!(
-                "kill all-but-one: `pkill -f \"wire daemon\"; wire daemon &`. P0.4 versioned-pidfile (0.5.11 spark side) will detect this automatically."
+                "{n} `wire daemon` processes running (pids: {}); pidfile claims pid {} but pgrep also sees orphan(s): {}. \
+                 The orphans race the relay cursor — they advance past events your current binary can't process. \
+                 (Issue #2 exact class.)",
+                fmt_pids(&pgrep_pids),
+                pidfile_pid.unwrap(),
+                fmt_pids(&orphan_pids),
             ),
+            "`wire upgrade` kills all orphans and spawns a fresh daemon with a clean pidfile",
+        ),
+        // Pidfile is dead but processes ARE running → all are orphans.
+        (n, false, _) => DoctorCheck::fail(
+            "daemon",
+            format!(
+                "{n} `wire daemon` process(es) running (pids: {}) but pidfile {} — \
+                 every running daemon is an orphan, advancing the cursor without coordinating with the current CLI. \
+                 (Issue #2 exact class: doctor previously PASSed this state while `wire status` said DOWN.)",
+                fmt_pids(&pgrep_pids),
+                match pidfile_pid {
+                    Some(p) => format!("claims pid {p} which is dead"),
+                    None => "is missing".to_string(),
+                },
+            ),
+            "`wire upgrade` to kill the orphan(s) and spawn a fresh daemon",
+        ),
+        // Multiple daemons all matching … impossible by construction; fall back to warn.
+        (n, true, true) => DoctorCheck::warn(
+            "daemon",
+            format!(
+                "{n} `wire daemon` processes running (pids: {}). Multiple daemons race the relay cursor.",
+                fmt_pids(&pgrep_pids)
+            ),
+            "kill all-but-one: `pkill -f \"wire daemon\"; wire daemon &`",
         ),
     }
 }
