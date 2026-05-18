@@ -6,6 +6,25 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.18 — dual-slot integration tests + `pair_drop_ack` carries endpoints[]
+
+Companion to v0.5.17. The ship report explicitly flagged dual-slot routing as "code-review-only, not automated-tested" — this release closes that gap. Three new integration tests (`tests/e2e_dual_slot.rs`) spin up an in-process federation relay AND an in-process `--local-only` relay (different ports on `127.0.0.1`) to exercise the real routing decisions end-to-end.
+
+**Real bug caught and fixed.** `send_pair_drop_ack` (the responder's reply during bilateral pair) only emitted the legacy top-level `relay_url`/`slot_id`/`slot_token` — no `endpoints[]`. The initiator pulling the ack thus only learned the responder's federation endpoint via back-compat synthesis, never their local endpoint. Routing decisions on the initiator side always picked federation even when both sides had a local relay.
+
+- **Fix in `pair_invite.rs::send_pair_drop_ack`** — now reads `self.endpoints[]` via `crate::endpoints::self_endpoints` and includes the full array in the ack body alongside the legacy fields. Pure additive — v0.5.16-and-earlier readers still parse the legacy fields unchanged.
+- **Fix in `pair_invite.rs::maybe_consume_pair_drop_ack`** — parses `body.endpoints[]` when present and routes through `crate::endpoints::pin_peer_endpoints` so all endpoints get pinned in `relay_state.peers[handle].endpoints[]`. Back-compat: ack without `endpoints[]` falls back to synthesizing a single federation entry from the legacy fields.
+
+**Three new integration tests** in `tests/e2e_dual_slot.rs`:
+
+1. **`dual_slot_send_prefers_local_endpoint`** — Alice + Bob both have dual slots; after bilateral pair, Alice's `wire push --json` MUST report `scope: "local"` for the delivered event.
+2. **`dual_slot_send_falls_back_to_federation_on_local_failure`** — Alice + Bob both have dual slots, but Alice's view of Bob's local endpoint is patched to a closed port. Local POST fails, daemon transparently retries on federation; push --json reports `scope: "federation"`.
+3. **`dual_slot_back_compat_v0_5_16_peer_routes_via_federation`** — Alice has dual slots, Bob is federation-only (simulating a v0.5.16 peer). Alice's view of Bob has only the federation endpoint; sends route through federation. Old peers still work cleanly.
+
+**Test count: 156 lib + 35 CLI + 3 new dual-slot e2e** (was 156 + 35 in v0.5.17). Total 194 across the suite.
+
+No protocol or schema changes. Pure correctness fix + integration coverage of the v0.5.17 surface.
+
 ### v0.5.17 — dual-slot sessions + local-only relay (OSS coordination layer)
 
 The strategic pair to v0.5.16's per-session identity: **a within-machine transport layer** so sister-Claudes (and sister-Cursors, sister-Aiders, sister-any-agent) coordinate at sub-millisecond latency without going through a public relay. Same-machine traffic stays on the box. Federation through `wireup.net` keeps working unchanged for cross-box traffic. Sessions can hold up to two slots — one federation, one local — and the daemon prefers local when both peers share a local relay.

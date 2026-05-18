@@ -685,6 +685,18 @@ pub fn send_pair_drop_ack(
     let now = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
+    // v0.5.17: also advertise our endpoints[] in the ack so the peer can
+    // pin both our federation and local endpoints. Back-compat: top-level
+    // legacy fields above stay populated for v0.5.16-and-earlier readers.
+    let our_endpoints = crate::endpoints::self_endpoints(&relay_state);
+    let mut body = json!({
+        "relay_url": our_relay,
+        "slot_id": our_slot_id,
+        "slot_token": our_slot_token,
+    });
+    if !our_endpoints.is_empty() {
+        body["endpoints"] = serde_json::to_value(&our_endpoints).unwrap_or(json!([]));
+    }
     let event = json!({
         "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
         "timestamp": now,
@@ -692,11 +704,7 @@ pub fn send_pair_drop_ack(
         "to": format!("did:wire:{peer_handle}"),
         "type": "pair_drop_ack",
         "kind": 1101u32,
-        "body": {
-            "relay_url": our_relay,
-            "slot_id": our_slot_id,
-            "slot_token": our_slot_token,
-        },
+        "body": body,
     });
     let signed = crate::signing::sign_message_v31(&event, &sk_seed, &pk_bytes, &our_handle)?;
     let client = crate::relay_client::RelayClient::new(peer_relay);
@@ -730,12 +738,26 @@ pub fn maybe_consume_pair_drop_ack(event: &Value) -> Result<bool> {
     if peer_relay.is_empty() || peer_slot_id.is_empty() || peer_slot_token.is_empty() {
         bail!("pair_drop_ack body missing relay_url/slot_id/slot_token");
     }
+    // v0.5.17: parse endpoints[] if present (peer ran v0.5.17+ and has
+    // dual slots); fall back to a single federation entry synthesized
+    // from the legacy fields for v0.5.16-and-earlier acks.
+    let peer_endpoints: Vec<crate::endpoints::Endpoint> = body
+        .get("endpoints")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| serde_json::from_value::<crate::endpoints::Endpoint>(e.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            vec![crate::endpoints::Endpoint::federation(
+                peer_relay.to_string(),
+                peer_slot_id.to_string(),
+                peer_slot_token.to_string(),
+            )]
+        });
     let mut relay_state = config::read_relay_state()?;
-    relay_state["peers"][&peer_handle] = json!({
-        "relay_url": peer_relay,
-        "slot_id": peer_slot_id,
-        "slot_token": peer_slot_token,
-    });
+    crate::endpoints::pin_peer_endpoints(&mut relay_state, &peer_handle, &peer_endpoints)?;
     config::write_relay_state(&relay_state)?;
     crate::os_notify::toast(
         &format!("wire — pair complete with {peer_handle}"),
