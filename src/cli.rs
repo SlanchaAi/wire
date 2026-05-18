@@ -154,9 +154,22 @@ pub enum Command {
         local_only: bool,
     },
     /// Allocate a slot on a relay; bind it to this agent's identity.
+    ///
+    /// v0.5.19 (issue #7): if any peers are pinned to this agent's
+    /// current slot, this command refuses by default — silent migration
+    /// silently black-holes their inbound messages. Pass
+    /// `--migrate-pinned` to acknowledge the risk and proceed, or use
+    /// `wire rotate-slot` (which emits a `wire_close` event to peers)
+    /// for safe rotation.
     BindRelay {
         /// Relay base URL, e.g. `http://127.0.0.1:8770`.
         url: String,
+        /// Acknowledge that pinned peers will black-hole until they
+        /// re-pin manually. Required when `state.peers` is non-empty;
+        /// ignored on fresh boxes. Use `wire rotate-slot` instead for
+        /// the supported same-relay rotation path.
+        #[arg(long)]
+        migrate_pinned: bool,
         #[arg(long)]
         json: bool,
     },
@@ -885,7 +898,11 @@ pub fn run() -> Result<()> {
         },
         Command::Mcp => cmd_mcp(),
         Command::RelayServer { bind, local_only } => cmd_relay_server(&bind, local_only),
-        Command::BindRelay { url, json } => cmd_bind_relay(&url, json),
+        Command::BindRelay {
+            url,
+            migrate_pinned,
+            json,
+        } => cmd_bind_relay(&url, migrate_pinned, json),
         Command::AddPeerSlot {
             handle,
             url,
@@ -2468,7 +2485,7 @@ fn validate_loopback_bind(bind: &str) -> Result<()> {
 
 // ---------- bind-relay ----------
 
-fn cmd_bind_relay(url: &str, as_json: bool) -> Result<()> {
+fn cmd_bind_relay(url: &str, migrate_pinned: bool, as_json: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
     }
@@ -2476,11 +2493,54 @@ fn cmd_bind_relay(url: &str, as_json: bool) -> Result<()> {
     let did = card.get("did").and_then(Value::as_str).unwrap_or("");
     let handle = crate::agent_card::display_handle_from_did(did).to_string();
 
+    // v0.5.19 (issue #7): refuse silent migration that would black-hole
+    // pinned peers. The peer's relay-state still points at our OLD slot;
+    // they will keep POSTing successfully to a slot we no longer read,
+    // and their messages disappear. Pre-fix this command silently
+    // replaced state.self, the incident report logged 26 events lost
+    // over 2 days.
+    let existing = config::read_relay_state().unwrap_or_else(|_| json!({}));
+    let pinned: Vec<String> = existing
+        .get("peers")
+        .and_then(|p| p.as_object())
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    if !pinned.is_empty() && !migrate_pinned {
+        let list = pinned.join(", ");
+        bail!(
+            "bind-relay would silently black-hole {n} pinned peer(s): {list}. \
+             They are pinned to your CURRENT slot; without coordination they will keep \
+             pushing to a slot you no longer read.\n\n\
+             SAFE PATHS:\n\
+             • `wire rotate-slot` — rotates slot on the SAME relay and emits a \
+             wire_close event to every pinned peer so their daemons drop the stale \
+             coords cleanly. This is the supported migration path.\n\
+             • `wire bind-relay {url} --migrate-pinned` — acknowledges that pinned \
+             peers will need to re-pin manually (you must notify them out-of-band, \
+             via a fresh `wire add` from each peer or a re-shared invite). Use this \
+             only when the current slot is unreachable so rotate-slot can't ack.\n\n\
+             Issue #7 (silent black-hole on relay change) caught this — proceed only \
+             if you understand the consequences.",
+            n = pinned.len(),
+        );
+    }
+
     let normalized = url.trim_end_matches('/');
     let client = crate::relay_client::RelayClient::new(normalized);
     client.check_healthz()?;
     let alloc = client.allocate_slot(Some(&handle))?;
-    let mut state = config::read_relay_state()?;
+    let mut state = existing;
+    if !pinned.is_empty() {
+        // We're committing to the migration. Surface a final stderr
+        // banner naming the peers operators must notify out-of-band so
+        // there's a record in their shell history.
+        eprintln!(
+            "wire bind-relay: migrating with {n} pinned peer(s) — they will black-hole \
+             until they re-pin: {peers}",
+            n = pinned.len(),
+            peers = pinned.join(", "),
+        );
+    }
     state["self"] = json!({
         "relay_url": url,
         "slot_id": alloc.slot_id,
@@ -5907,7 +5967,9 @@ fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
         .to_string();
     if bound_relay.is_empty() {
         // Identity exists but never bound to a relay — bind now.
-        cmd_bind_relay(&relay_url, /* as_json */ false)?;
+        // Fresh box (no pinned peers yet) — migrate_pinned irrelevant.
+        // Pass `false` so the safety check kicks in if state was non-empty.
+        cmd_bind_relay(&relay_url, /* migrate_pinned */ false, /* as_json */ false)?;
         step("bind-relay", format!("bound to {relay_url}"));
     } else if bound_relay != relay_url {
         step(
