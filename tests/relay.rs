@@ -823,3 +823,197 @@ async fn handles_directory_paginates_filters_vibe_and_respects_listed_false() {
         .collect();
     assert_eq!(nicks, vec!["alice", "carol"]);
 }
+
+/// v0.5.19 (#9.1): `discoverable: false` claims are absent from the
+/// public `/v1/handles` directory, but the `.well-known/wire/agent`
+/// direct-lookup endpoint still resolves them so out-of-band sharing
+/// continues to work.
+#[tokio::test]
+async fn handle_claim_with_discoverable_false_is_hidden_from_directory_v0_5_19() {
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir).await;
+    let client = reqwest::Client::new();
+
+    // Allocate slot + claim 'alice' as DISCOVERABLE (default).
+    let alloc_alice: Value = client
+        .post(format!("{base}/v1/slot/allocate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let alice_slot_id = alloc_alice["slot_id"].as_str().unwrap().to_string();
+    let alice_token = alloc_alice["slot_token"].as_str().unwrap().to_string();
+    let (alice_sk, alice_pk) = wire::signing::generate_keypair();
+    let alice_card = wire::agent_card::sign_agent_card(
+        &wire::agent_card::build_agent_card("alice", &alice_pk, None, None, None),
+        &alice_sk,
+    );
+    let resp = client
+        .post(format!("{base}/v1/handle/claim"))
+        .bearer_auth(&alice_token)
+        .json(&json!({
+            "nick": "alice",
+            "slot_id": alice_slot_id,
+            "relay_url": base,
+            "card": alice_card,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // Allocate slot + claim 'shadow' as HIDDEN (discoverable: false).
+    let alloc_shadow: Value = client
+        .post(format!("{base}/v1/slot/allocate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let shadow_slot_id = alloc_shadow["slot_id"].as_str().unwrap().to_string();
+    let shadow_token = alloc_shadow["slot_token"].as_str().unwrap().to_string();
+    let (shadow_sk, shadow_pk) = wire::signing::generate_keypair();
+    let shadow_card = wire::agent_card::sign_agent_card(
+        &wire::agent_card::build_agent_card("shadow", &shadow_pk, None, None, None),
+        &shadow_sk,
+    );
+    let resp = client
+        .post(format!("{base}/v1/handle/claim"))
+        .bearer_auth(&shadow_token)
+        .json(&json!({
+            "nick": "shadow",
+            "slot_id": shadow_slot_id,
+            "relay_url": base,
+            "card": shadow_card,
+            "discoverable": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // Bulk directory: must list alice, must NOT list shadow.
+    let directory: Value = client
+        .get(format!("{base}/v1/handles"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let nicks: Vec<_> = directory["handles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|h| h["nick"].as_str())
+        .collect();
+    assert!(nicks.contains(&"alice"), "alice missing: {nicks:?}");
+    assert!(
+        !nicks.contains(&"shadow"),
+        "shadow should be hidden from bulk listing: {nicks:?}"
+    );
+
+    // Direct .well-known lookup: must still resolve shadow by handle.
+    let direct: Value = client
+        .get(format!("{base}/.well-known/agent-card.json?handle=shadow"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // The card embeds the wire extension when handle is known.
+    let did = direct["extensions"][0]["params"]["did"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        did.starts_with("did:wire:shadow"),
+        "direct .well-known lookup must still resolve hidden handle, got: {direct}"
+    );
+}
+
+/// v0.5.19 (#9.1): re-claim without `discoverable` preserves the existing
+/// flag — important so a v0.5.18 client doing a profile-update re-claim
+/// against a v0.5.19 relay doesn't accidentally re-publish a hidden
+/// handle.
+#[tokio::test]
+async fn handle_reclaim_preserves_discoverable_when_omitted_v0_5_19() {
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir).await;
+    let client = reqwest::Client::new();
+
+    let alloc: Value = client
+        .post(format!("{base}/v1/slot/allocate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let slot_id = alloc["slot_id"].as_str().unwrap().to_string();
+    let token = alloc["slot_token"].as_str().unwrap().to_string();
+    let (sk, pk) = wire::signing::generate_keypair();
+    let card = wire::agent_card::sign_agent_card(
+        &wire::agent_card::build_agent_card("ghost", &pk, None, None, None),
+        &sk,
+    );
+
+    // First claim: hidden.
+    let resp = client
+        .post(format!("{base}/v1/handle/claim"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "nick": "ghost",
+            "slot_id": slot_id,
+            "relay_url": base,
+            "card": card,
+            "discoverable": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // Re-claim with the SAME DID, NO `discoverable` field — simulates
+    // an older client doing a profile-update re-claim. Relay must
+    // preserve the existing `discoverable: false`, NOT default to true.
+    let resp = client
+        .post(format!("{base}/v1/handle/claim"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "nick": "ghost",
+            "slot_id": slot_id,
+            "relay_url": base,
+            "card": card,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "re-claim failed: {resp:?}");
+
+    // Bulk directory still must not list ghost.
+    let directory: Value = client
+        .get(format!("{base}/v1/handles"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let nicks: Vec<_> = directory["handles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|h| h["nick"].as_str())
+        .collect();
+    assert!(
+        !nicks.contains(&"ghost"),
+        "ghost should remain hidden after re-claim that omitted `discoverable`: {nicks:?}"
+    );
+}

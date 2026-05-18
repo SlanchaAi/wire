@@ -165,6 +165,22 @@ struct HandleRecord {
     pub slot_id: String,
     pub relay_url: Option<String>,
     pub claimed_at: String,
+    /// v0.5.19 (#9.1): if false, this handle is omitted from the
+    /// `/v1/handles` directory listing — operator opted out of bulk
+    /// discovery. The `.well-known/wire/agent?handle=X` direct lookup
+    /// still resolves so existing peers + out-of-band sharing continue
+    /// to work. Default `None` = discoverable (back-compat for records
+    /// claimed pre-v0.5.19).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discoverable: Option<bool>,
+}
+
+impl HandleRecord {
+    /// Effective discoverability: defaults to true when the field is
+    /// absent (pre-v0.5.19 records).
+    fn is_discoverable(&self) -> bool {
+        self.discoverable.unwrap_or(true)
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -1140,6 +1156,12 @@ pub struct HandleClaimRequest {
     /// Claimant's full signed agent-card (includes DID + verify_keys +
     /// optional profile).
     pub card: Value,
+    /// v0.5.19 (#9.1): set false to opt out of `/v1/handles` bulk listing.
+    /// Direct `.well-known/wire/agent` lookup by handle still works. The
+    /// default (None / absent) is discoverable, for back-compat with
+    /// pre-v0.5.19 clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discoverable: Option<bool>,
 }
 
 /// `POST /v1/handle/claim` — claim or update a `nick@<relay-domain>` handle.
@@ -1188,7 +1210,12 @@ async fn handle_claim(
         }
     };
 
-    // FCFS check.
+    // FCFS check. Also snapshot the existing record (clone) so the
+    // re-claim path below can preserve fields the client didn't include
+    // in the request (notably `discoverable` from v0.5.19, so an old
+    // client doing a profile-update re-claim doesn't accidentally
+    // re-publish a hidden handle).
+    let prior_record: Option<HandleRecord>;
     let first_claim = {
         let inner = relay.inner.lock().await;
         match inner.handles.get(&req.nick) {
@@ -1203,14 +1230,36 @@ async fn handle_claim(
                 )
                     .into_response();
             }
-            Some(_) => false,
-            None => true,
+            Some(prev) => {
+                prior_record = Some(prev.clone());
+                false
+            }
+            None => {
+                prior_record = None;
+                true
+            }
         }
     };
 
+    // v0.5.19 (#9.5): round claimed_at to whole seconds. Nanosecond
+    // precision served no client purpose (display only) and acted as a
+    // cross-tab fingerprint correlating one operator's multiple handles
+    // claimed in the same session. Truncate before formatting.
     let now = time::OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
+    // v0.5.19 (#9.1): preserve `discoverable` across re-claims. If the
+    // request doesn't set it explicitly, keep whatever the existing
+    // record had so a profile-update re-claim doesn't accidentally
+    // re-publish a hidden handle. Default for first-time claim is None
+    // (= discoverable, back-compat).
+    let discoverable = match (req.discoverable, &prior_record) {
+        (Some(d), _) => Some(d),
+        (None, Some(prev)) => prev.discoverable,
+        (None, None) => None,
+    };
     let record = HandleRecord {
         nick: req.nick.clone(),
         did: did.clone(),
@@ -1218,6 +1267,7 @@ async fn handle_claim(
         slot_id: req.slot_id.clone(),
         relay_url: req.relay_url.clone(),
         claimed_at: now,
+        discoverable,
     };
 
     // Persist to disk first (durable), then update in-memory.
@@ -1512,6 +1562,12 @@ async fn handles_directory(
         // in the phone book. `demo-` is reserved for asciinema-cast handles,
         // `test-` for integration runs.
         if rec.nick.starts_with("demo-") || rec.nick.starts_with("test-") {
+            continue;
+        }
+        // v0.5.19 (#9.1): operator opt-out — hidden handles skip the
+        // bulk directory but still resolve via `.well-known/wire/agent?
+        // handle=X` for out-of-band sharing.
+        if !rec.is_discoverable() {
             continue;
         }
         let profile = rec.card.get("profile").cloned().unwrap_or(Value::Null);

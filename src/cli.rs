@@ -567,6 +567,15 @@ pub enum Command {
         /// Public URL the relay should advertise to resolvers (default = relay).
         #[arg(long)]
         public_url: Option<String>,
+        /// v0.5.19 (#9.1): opt out of the relay's bulk `/v1/handles`
+        /// directory listing. The handle stays claimed (FCFS still
+        /// applies) and direct `.well-known/wire/agent?handle=X` lookup
+        /// still resolves, so peers you share the handle with out-of-band
+        /// can still pair. Bulk scrapers / phonebook crawlers will not
+        /// see the nick. Use this for handles meant for known-peer
+        /// pairing only — see issue #9.
+        #[arg(long)]
+        hidden: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1030,8 +1039,15 @@ pub fn run() -> Result<()> {
             nick,
             relay,
             public_url,
+            hidden,
             json,
-        } => cmd_claim(&nick, relay.as_deref(), public_url.as_deref(), json),
+        } => cmd_claim(
+            &nick,
+            relay.as_deref(),
+            public_url.as_deref(),
+            hidden,
+            json,
+        ),
         Command::Profile { action } => cmd_profile(action),
         Command::Setup { apply } => cmd_setup(apply),
         Command::Reactor {
@@ -4255,6 +4271,41 @@ fn print_resolved_profile(resolved: &Value) {
 /// peer relay's `/v1/handle/intro/<nick>` endpoint (no slot_token needed).
 /// Peer's daemon completes the bilateral pin on its next pull and emits a
 /// pair_drop_ack carrying their slot_token so we can send back.
+/// Extract just the host portion from `https://host:port/path` → `host`.
+/// Returns empty string if the URL is malformed.
+fn host_of_url(url: &str) -> String {
+    let no_scheme = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    no_scheme
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// v0.5.19 (#9.4): is this relay domain on the known-good list, or the
+/// operator's own relay? Used to suppress the cross-relay phishing
+/// warning in `wire add` for the happy path.
+fn is_known_relay_domain(peer_domain: &str, our_relay_url: &str) -> bool {
+    // Hard-coded known-good list. wireup.net is the default relay.
+    const KNOWN_GOOD: &[&str] = &["wireup.net", "wire.laulpogan.com"];
+    let peer_domain = peer_domain.trim().to_ascii_lowercase();
+    if KNOWN_GOOD.iter().any(|k| *k == peer_domain) {
+        return true;
+    }
+    // Operator's OWN relay is implicitly trusted — they're already
+    // bound to it; pairing same-relay peers is the common case.
+    let our_host = host_of_url(our_relay_url).to_ascii_lowercase();
+    if !our_host.is_empty() && our_host == peer_domain {
+        return true;
+    }
+    false
+}
+
 fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Result<()> {
     let parsed = crate::pair_profile::parse_handle(handle_arg)?;
 
@@ -4285,6 +4336,45 @@ fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Res
             &our_slot_token,
             as_json,
         );
+    }
+
+    // v0.5.19 (#9.4): cross-relay phishing guardrail.
+    //
+    // Threat: operator wants to add `boss@wireup.net` but types
+    // `boss@evil-relay.example` (typo, malicious link, look-alike domain).
+    // The .well-known resolution returns whoever claimed the nick on the
+    // *typo* relay, the bilateral gate still completes (the attacker
+    // accepts the pair on their side), and the operator pins the
+    // attacker as "boss". v0.5.14 bilateral gate doesn't catch this —
+    // there's no asymmetry to detect when the attacker WANTS to be
+    // paired.
+    //
+    // Mitigation: warn loudly when the peer's relay domain is novel
+    // (not the operator's own relay, not in a small known-good set).
+    // Doesn't block — operators have legitimate reasons to pair across
+    // relays. The signal lands in shell history so a phished operator
+    // can find it in retrospect.
+    if !is_known_relay_domain(&parsed.domain, &our_relay) {
+        eprintln!(
+            "wire add: WARN unfamiliar relay domain `{}`.",
+            parsed.domain
+        );
+        eprintln!(
+            "  This is NOT `wireup.net` (the default), NOT your own relay (`{}`), "
+            ,
+            host_of_url(&our_relay)
+        );
+        eprintln!(
+            "  and not on the known-good list. If you meant `{}@wireup.net`, "
+            ,
+            parsed.nick
+        );
+        eprintln!(
+            "  run `wire add {}@wireup.net` instead. Otherwise verify with your",
+            parsed.nick
+        );
+        eprintln!("  peer out-of-band that they actually run a relay at this domain");
+        eprintln!("  before relying on the pair. (See issue #9.4.)");
     }
 
     // 2. Resolve peer via .well-known on their relay.
@@ -5985,7 +6075,7 @@ fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
 
     // 3. Claim nick on the relay's handle directory. Idempotent — same-DID
     // re-claims are accepted by the relay.
-    match cmd_claim(&nick, Some(&relay_url), None, /* as_json */ false) {
+    match cmd_claim(&nick, Some(&relay_url), None, /* hidden */ false, /* as_json */ false) {
         Ok(()) => step("claim", format!("{nick}@{} claimed", strip_proto(&relay_url))),
         Err(e) => step(
             "claim",
@@ -6126,6 +6216,7 @@ fn cmd_claim(
     nick: &str,
     relay_override: Option<&str>,
     public_url: Option<&str>,
+    hidden: bool,
     as_json: bool,
 ) -> Result<()> {
     if !crate::pair_profile::is_valid_nick(nick) {
@@ -6140,7 +6231,18 @@ fn cmd_claim(
     let card = config::read_agent_card()?;
 
     let client = crate::relay_client::RelayClient::new(&relay_url);
-    let resp = client.handle_claim(nick, &slot_id, &slot_token, public_url, &card)?;
+    // v0.5.19 (#9.1): forward the `discoverable` flag. None for default
+    // (back-compat); Some(false) for `--hidden`. Relays older than
+    // v0.5.19 ignore the field, so this is safe to always send.
+    let discoverable = if hidden { Some(false) } else { None };
+    let resp = client.handle_claim_v2(
+        nick,
+        &slot_id,
+        &slot_token,
+        public_url,
+        &card,
+        discoverable,
+    )?;
 
     if as_json {
         println!(

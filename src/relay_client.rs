@@ -404,6 +404,9 @@ impl RelayClient {
 
     /// Claim a `nick@<this-relay-domain>` handle (v0.5). Caller must hold
     /// the bearer token for `slot_id`. FCFS on nick; same-DID re-claims OK.
+    ///
+    /// Back-compat wrapper around `handle_claim_v2` that omits the
+    /// `discoverable` field (relay defaults to discoverable on absence).
     pub fn handle_claim(
         &self,
         nick: &str,
@@ -412,12 +415,32 @@ impl RelayClient {
         relay_url: Option<&str>,
         card: &Value,
     ) -> Result<Value> {
-        let body = serde_json::json!({
+        self.handle_claim_v2(nick, slot_id, slot_token, relay_url, card, None)
+    }
+
+    /// v0.5.19 (#9.1) variant accepting the optional `discoverable`
+    /// flag. `None` = relay default (= true, back-compat).
+    /// `Some(false)` = opt out of `/v1/handles` bulk listing while
+    /// keeping direct `.well-known/wire/agent` resolution working.
+    /// Relays older than v0.5.19 ignore the field — safe to always send.
+    pub fn handle_claim_v2(
+        &self,
+        nick: &str,
+        slot_id: &str,
+        slot_token: &str,
+        relay_url: Option<&str>,
+        card: &Value,
+        discoverable: Option<bool>,
+    ) -> Result<Value> {
+        let mut body = serde_json::json!({
             "nick": nick,
             "slot_id": slot_id,
             "relay_url": relay_url,
             "card": card,
         });
+        if let Some(d) = discoverable {
+            body["discoverable"] = serde_json::json!(d);
+        }
         let resp = self
             .client
             .post(format!("{}/v1/handle/claim", self.base_url))
