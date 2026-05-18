@@ -725,6 +725,15 @@ pub enum SessionCommand {
         #[arg(long)]
         json: bool,
     },
+    /// List sister sessions reachable via a same-machine local relay
+    /// (v0.5.17 dual-slot). Groups sessions by the local-relay URL they
+    /// share. Sessions without a Local-scope endpoint are listed
+    /// separately so the operator can tell which are federation-only.
+    /// Read-only — does not probe any relay or touch daemons.
+    ListLocal {
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the `export WIRE_HOME=...` line for a session, so a shell
     /// can `eval $(wire session env <name>)` to activate it. With no
     /// name, resolves the cwd through the registry.
@@ -4555,6 +4564,7 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
             json,
         ),
         SessionCommand::List { json } => cmd_session_list(json),
+        SessionCommand::ListLocal { json } => cmd_session_list_local(json),
         SessionCommand::Env { name, json } => cmd_session_env(name.as_deref(), json),
         SessionCommand::Current { json } => cmd_session_current(json),
         SessionCommand::Destroy { name, force, json } => cmd_session_destroy(&name, force, json),
@@ -4969,6 +4979,77 @@ fn cmd_session_list(as_json: bool) -> Result<()> {
             if s.daemon_running { "running" } else { "down" },
             s.cwd.as_deref().unwrap_or("(no cwd registered)"),
         );
+    }
+    Ok(())
+}
+
+/// v0.5.19: `wire session list-local` — sister-session discovery.
+///
+/// For each on-disk session, read its `relay-state.json` and surface
+/// the ones that have a Local-scope endpoint (allocated via
+/// `wire session new --with-local`). Group by the local-relay URL so
+/// the operator can see at a glance which sessions are mutually
+/// reachable over the same loopback relay.
+///
+/// Read-only, no daemon contact. Useful as the prelude to teaming /
+/// pairing same-box sister claudes (see also `wire session
+/// pair-all-local` once implemented).
+fn cmd_session_list_local(as_json: bool) -> Result<()> {
+    let listing = crate::session::list_local_sessions()?;
+    if as_json {
+        println!("{}", serde_json::to_string(&listing)?);
+        return Ok(());
+    }
+
+    if listing.local.is_empty() && listing.federation_only.is_empty() {
+        println!(
+            "no sessions on this machine. `wire session new --with-local` to create one \
+             with a local-relay endpoint (start the relay first: \
+             `wire relay-server --bind 127.0.0.1:8771 --local-only`)."
+        );
+        return Ok(());
+    }
+
+    if listing.local.is_empty() {
+        println!(
+            "no sister sessions reachable via a local relay. \
+             Re-run `wire session new --with-local` to add a Local endpoint, or \
+             start a local relay with `wire relay-server --bind 127.0.0.1:8771 --local-only`."
+        );
+    } else {
+        // Stable iteration order: sort the relay URLs.
+        let mut keys: Vec<&String> = listing.local.keys().collect();
+        keys.sort();
+        for relay_url in keys {
+            let group = &listing.local[relay_url];
+            println!("LOCAL RELAY: {relay_url}");
+            println!(
+                "  {:<24} {:<32} {:<10} CWD",
+                "NAME", "HANDLE", "DAEMON"
+            );
+            for s in group {
+                println!(
+                    "  {:<24} {:<32} {:<10} {}",
+                    s.name,
+                    s.handle.as_deref().unwrap_or("?"),
+                    if s.daemon_running { "running" } else { "down" },
+                    s.cwd.as_deref().unwrap_or("(no cwd registered)"),
+                );
+            }
+            println!();
+        }
+    }
+
+    if !listing.federation_only.is_empty() {
+        println!("federation-only (no local endpoint):");
+        for s in &listing.federation_only {
+            println!(
+                "  {:<24} {:<32} {}",
+                s.name,
+                s.handle.as_deref().unwrap_or("?"),
+                s.cwd.as_deref().unwrap_or("(no cwd registered)"),
+            );
+        }
     }
     Ok(())
 }

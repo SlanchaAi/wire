@@ -29,9 +29,12 @@
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use crate::endpoints::{Endpoint, EndpointScope, self_endpoints};
 
 /// Root directory under which all session WIRE_HOMEs live.
 ///
@@ -295,6 +298,131 @@ fn is_process_live(pid: u32) -> bool {
     }
 }
 
+/// Read a session's `relay-state.json` and return its `self.endpoints[]`
+/// array (v0.5.17 dual-slot). Empty Vec on any read/parse error — this
+/// is a best-effort discovery helper, not a verification tool. A pre-
+/// v0.5.17 session writes only the legacy flat fields; `self_endpoints`
+/// promotes those to a federation-only Endpoint, so the result is
+/// still meaningful for legacy sessions.
+pub fn read_session_endpoints(session_home: &Path) -> Vec<Endpoint> {
+    let path = session_home
+        .join("config")
+        .join("wire")
+        .join("relay-state.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
+    let val: Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    self_endpoints(&val)
+}
+
+/// Stripped view of a Local endpoint for tooling output. Drops
+/// `slot_token` because it is a bearer credential — exposing it
+/// through `wire session list-local --json` would risk accidental
+/// leak via logs, screenshots, or piped output. Routing code uses
+/// the full `Endpoint` from `relay-state.json` directly; this type
+/// is for human/JSON observation only.
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalEndpointView {
+    pub relay_url: String,
+    pub slot_id: String,
+}
+
+/// One row of `wire session list-local` output: a session that has a
+/// Local-scope endpoint plus metadata to render it.
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalSessionView {
+    pub name: String,
+    pub handle: Option<String>,
+    pub did: Option<String>,
+    pub cwd: Option<String>,
+    pub home_dir: PathBuf,
+    pub daemon_running: bool,
+    /// All Local-scope endpoints this session advertises (token redacted).
+    /// Most sessions have exactly one; multiple is permitted for multi-
+    /// relay setups.
+    pub local_endpoints: Vec<LocalEndpointView>,
+}
+
+/// Sessions with no Local endpoint — shown separately so the operator
+/// knows they exist but are federation-only.
+#[derive(Debug, Clone, Serialize)]
+pub struct FederationOnlySessionView {
+    pub name: String,
+    pub handle: Option<String>,
+    pub cwd: Option<String>,
+}
+
+/// Result shape for `wire session list-local`. `local` is grouped by
+/// the local-relay URL so output can render each cluster of mutually-
+/// reachable sister sessions together. `federation_only` lists the rest.
+#[derive(Debug, Clone, Serialize)]
+pub struct LocalSessionListing {
+    pub local: HashMap<String, Vec<LocalSessionView>>,
+    pub federation_only: Vec<FederationOnlySessionView>,
+}
+
+/// Build the listing for `wire session list-local` from current on-disk
+/// state. Read-only; no daemon contact, no relay probe.
+pub fn list_local_sessions() -> Result<LocalSessionListing> {
+    let sessions = list_sessions()?;
+    let mut local: HashMap<String, Vec<LocalSessionView>> = HashMap::new();
+    let mut federation_only: Vec<FederationOnlySessionView> = Vec::new();
+
+    for s in sessions {
+        let endpoints = read_session_endpoints(&s.home_dir);
+        let local_eps: Vec<Endpoint> = endpoints
+            .into_iter()
+            .filter(|e| matches!(e.scope, EndpointScope::Local))
+            .collect();
+        if local_eps.is_empty() {
+            federation_only.push(FederationOnlySessionView {
+                name: s.name.clone(),
+                handle: s.handle.clone(),
+                cwd: s.cwd.clone(),
+            });
+            continue;
+        }
+        // Redacted view: drop slot_token before exposing through CLI.
+        let redacted: Vec<LocalEndpointView> = local_eps
+            .iter()
+            .map(|e| LocalEndpointView {
+                relay_url: e.relay_url.clone(),
+                slot_id: e.slot_id.clone(),
+            })
+            .collect();
+        // Group by relay_url. A session with two Local endpoints (rare —
+        // would mean two loopback relays) appears under each.
+        for ep in &local_eps {
+            local
+                .entry(ep.relay_url.clone())
+                .or_default()
+                .push(LocalSessionView {
+                    name: s.name.clone(),
+                    handle: s.handle.clone(),
+                    did: s.did.clone(),
+                    cwd: s.cwd.clone(),
+                    home_dir: s.home_dir.clone(),
+                    daemon_running: s.daemon_running,
+                    local_endpoints: redacted.clone(),
+                });
+        }
+    }
+    // Sort each group by session name so output is deterministic.
+    for group in local.values_mut() {
+        group.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    federation_only.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(LocalSessionListing {
+        local,
+        federation_only,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +463,65 @@ mod tests {
             "wire-special"
         );
     }
+
+    #[test]
+    fn read_session_endpoints_handles_missing_relay_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No relay-state.json under <home>/config/wire/ — should yield empty.
+        let endpoints = read_session_endpoints(tmp.path());
+        assert!(endpoints.is_empty());
+    }
+
+    #[test]
+    fn read_session_endpoints_parses_dual_slot_form() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("config").join("wire");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let body = serde_json::json!({
+            "self": {
+                "relay_url": "https://wireup.net",
+                "slot_id": "fed-slot",
+                "slot_token": "fed-tok",
+                "endpoints": [
+                    {
+                        "relay_url": "https://wireup.net",
+                        "slot_id": "fed-slot",
+                        "slot_token": "fed-tok",
+                        "scope": "federation"
+                    },
+                    {
+                        "relay_url": "http://127.0.0.1:8771",
+                        "slot_id": "loop-slot",
+                        "slot_token": "loop-tok",
+                        "scope": "local"
+                    }
+                ]
+            }
+        });
+        std::fs::write(cfg.join("relay-state.json"), serde_json::to_vec(&body).unwrap())
+            .unwrap();
+        let endpoints = read_session_endpoints(tmp.path());
+        assert_eq!(endpoints.len(), 2);
+        let local_count = endpoints
+            .iter()
+            .filter(|e| matches!(e.scope, EndpointScope::Local))
+            .count();
+        assert_eq!(local_count, 1);
+        let local = endpoints
+            .iter()
+            .find(|e| matches!(e.scope, EndpointScope::Local))
+            .unwrap();
+        assert_eq!(local.relay_url, "http://127.0.0.1:8771");
+        assert_eq!(local.slot_id, "loop-slot");
+    }
+
+    // NOTE: list_local_sessions is integration-tested via tests/cli.rs
+    // using a subprocess that sets WIRE_HOME per-process. We do not test
+    // it in-module because env mutation races other parallel unit tests
+    // (Rust 2024 marks std::env::set_var unsafe for that reason). The
+    // grouping logic is straightforward enough that the integration
+    // test plus the read_session_endpoints unit tests above provide
+    // adequate coverage.
 
     #[test]
     fn derive_name_appends_path_hash_when_basename_collides() {

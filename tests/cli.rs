@@ -413,6 +413,106 @@ fn session_destroy_with_force_removes_state_and_registry_entry_v0_5_16() {
     );
 }
 
+/// Attach a v0.5.17 dual-slot `relay-state.json` to an existing fixture
+/// so `wire session list-local` sees a Local-scope endpoint for it.
+fn write_local_endpoint(
+    session_home: &std::path::Path,
+    local_relay: &str,
+    slot_id: &str,
+) {
+    let cfg = session_home.join("config").join("wire");
+    let body = serde_json::json!({
+        "self": {
+            "relay_url": "https://wireup.net",
+            "slot_id": format!("{slot_id}-fed"),
+            "slot_token": "fed-tok",
+            "endpoints": [
+                {
+                    "relay_url": "https://wireup.net",
+                    "slot_id": format!("{slot_id}-fed"),
+                    "slot_token": "fed-tok",
+                    "scope": "federation"
+                },
+                {
+                    "relay_url": local_relay,
+                    "slot_id": format!("{slot_id}-loop"),
+                    "slot_token": "loop-tok",
+                    "scope": "local"
+                }
+            ]
+        }
+    });
+    std::fs::write(
+        cfg.join("relay-state.json"),
+        serde_json::to_vec_pretty(&body).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn session_list_local_reports_empty_state_v0_5_19() {
+    let home = fresh_home();
+    let out = run(&home, &["session", "list-local"]);
+    assert!(out.status.success(), "list-local failed: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("no sessions on this machine"),
+        "expected empty hint, got: {stdout}"
+    );
+}
+
+#[test]
+fn session_list_local_groups_by_local_relay_url_v0_5_19() {
+    let home = fresh_home();
+    let alpha = write_session_fixture(&home, "alpha", Some("/Users/paul/Source/alpha"));
+    let beta = write_session_fixture(&home, "beta", Some("/Users/paul/Source/beta"));
+    let _legacy = write_session_fixture(&home, "legacy", Some("/Users/paul/Source/legacy"));
+    write_local_endpoint(&alpha, "http://127.0.0.1:8771", "alpha");
+    write_local_endpoint(&beta, "http://127.0.0.1:8771", "beta");
+    // legacy intentionally has no relay-state.json — should land in federation_only.
+
+    let out = run(&home, &["session", "list-local", "--json"]);
+    assert!(out.status.success(), "list-local --json failed: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let local_group = parsed["local"]["http://127.0.0.1:8771"]
+        .as_array()
+        .expect("expected one local-relay group");
+    let names: std::collections::HashSet<&str> = local_group
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    assert!(names.contains("alpha"), "alpha missing: {stdout}");
+    assert!(names.contains("beta"), "beta missing: {stdout}");
+    assert!(!names.contains("legacy"), "legacy must NOT be in local group: {stdout}");
+
+    let fed_only = parsed["federation_only"].as_array().expect("federation_only array");
+    let fed_names: std::collections::HashSet<&str> = fed_only
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    assert!(fed_names.contains("legacy"), "legacy should be federation-only: {stdout}");
+}
+
+#[test]
+fn session_list_local_redacts_slot_token_in_json_v0_5_19() {
+    let home = fresh_home();
+    let alpha = write_session_fixture(&home, "alpha", None);
+    write_local_endpoint(&alpha, "http://127.0.0.1:8771", "alpha");
+
+    let out = run(&home, &["session", "list-local", "--json"]);
+    assert!(out.status.success(), "list-local --json failed: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !stdout.contains("loop-tok"),
+        "slot_token must be redacted from list-local --json: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\"slot_token\""),
+        "the slot_token field name must not appear: {stdout}"
+    );
+}
+
 #[test]
 fn pair_accept_errors_cleanly_when_no_pending_request_v0_5_14() {
     // `wire pair-accept <peer>` must fail loudly when there's no pending-
