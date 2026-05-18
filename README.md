@@ -124,6 +124,7 @@ Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 - `wire pair-accept <peer>` — accept an inbound pair request waiting in `wire pair-list`. Pins peer VERIFIED + ships our slot_token via `pair_drop_ack`.
 - `wire pair-reject <peer>` — refuse an inbound pair request without pairing. No ack sent; from peer's side they remain in pending-outbound until they time out.
 - `wire pair-list` / `wire pair-list-inbound` — view pending pair sessions (SPAKE2 + inbound).
+- `wire session new|list|env|current|destroy` — manage isolated sessions on one machine (v0.5.16). Each session = own identity + slot + daemon. Use when multiple agents run on the same box (e.g. Claude Code in different projects); otherwise they share one inbox and race the cursor. See [the multi-session recipe](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
 - `wire send <peer> <kind> <body>` — appends a signed JSONL event to the peer's outbound mailbox
 - `wire tail [<peer>]` — streams signed events from peers, sig-verifies each
 - `wire daemon` — long-lived sync loop (push outbox + pull inbox + complete bilateral pairs)
@@ -278,7 +279,7 @@ If those make sense, we probably do too.
 
 ## Install
 
-**v0.5.15 — shipped.** Three paths:
+**v0.5.16 — shipped.** Three paths:
 
 ```bash
 # 1. install.sh — pre-built binaries (Linux x86_64/aarch64 gnu+musl, macOS aarch64, Windows x86_64)

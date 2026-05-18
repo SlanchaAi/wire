@@ -87,6 +87,65 @@ The agent never touches digits 7→8 except as a passthrough. Step 6's instructi
 
 The MCP server's `instructions` field reminds connecting agents of this on every connect. See also THREAT_MODEL.md "Network-resilience doctrine" + the v0.5.14 changelog entry.
 
+### Multi-session on one machine (v0.5.16)
+
+When multiple agent sessions run on the same machine — e.g. one Claude Code in `~/Source/wire`, another in `~/Source/slancha-mesh` — they share one `WIRE_HOME` by default, which means they share one DID, one slot, one inbox JSONL, and one daemon. Peers can't address a specific session, and cursor advances by either session drain events the other never sees.
+
+Fix: give each session its own isolated `WIRE_HOME`. The `wire session` subcommand wraps the bootstrap:
+
+```bash
+# In ~/Source/wire (or any project):
+$ wire session new
+session created
+  name:   wire
+  handle: wire
+  did:    did:wire:wire-a1b2c3d4
+  home:   /Users/paul/.local/state/wire/sessions/wire
+
+activate with:
+  export WIRE_HOME=/Users/paul/.local/state/wire/sessions/wire
+```
+
+Each session = own identity + own relay slot + own session-local daemon + own inbox/outbox. Sessions pair with each other through `wireup.net` (or any relay) like any other peer — the bilateral-pair gate from v0.5.14 still applies in both directions.
+
+**Stable per-project identity.** Names are derived from `basename(cwd)` and cached in `~/.local/state/wire/sessions/registry.json`, so reopening the same project reuses the same identity instead of generating a fresh DID each time. Different cwds with the same basename get a 4-char path-hash suffix.
+
+**Activation patterns.**
+
+```bash
+# Per-shell activation:
+$ eval $(wire session env)              # uses cwd to look up the session name
+$ eval $(wire session env wire)         # explicit name
+
+# Per-process (subprocess gets isolated WIRE_HOME, parent doesn't):
+$ WIRE_HOME=$(wire session env wire --json | jq -r .home_dir) wire status
+
+# Inside an MCP server config (project-local .mcp.json):
+{
+  "mcpServers": {
+    "wire": {
+      "command": "wire",
+      "args": ["mcp"],
+      "env": {
+        "WIRE_HOME": "/Users/paul/.local/state/wire/sessions/wire"
+      }
+    }
+  }
+}
+```
+
+The project-local `.mcp.json` pattern is the recommended Claude Code setup: each project's `.mcp.json` points wire at that project's session. New Claude Code sessions in the same project all share that session's identity; sessions in different projects stay isolated.
+
+**Lifecycle.**
+
+```bash
+$ wire session list           # enumerate all sessions on this box
+$ wire session current        # which session does this cwd map to?
+$ wire session destroy <name> --force   # remove (irrecoverable)
+```
+
+**Don't share sessions across operators.** A session's keypair lives on disk under that machine's `~/.local/state/wire/sessions/<name>/config/wire/private.key`. Copying the session dir to another machine shares the identity — only do this intentionally (e.g. moving your laptop's identity to a new laptop). Otherwise: one session = one machine + one project.
+
 ---
 
 ## Path 2 — CLI subcommands (Bash-tool agents)

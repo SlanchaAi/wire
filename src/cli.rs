@@ -426,6 +426,17 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Manage isolated wire sessions on this machine (v0.5.16).
+    ///
+    /// Each session = its own DID + handle + relay slot + daemon + inbox/
+    /// outbox tree. Use when multiple agents (e.g. Claude Code sessions
+    /// in different projects) run on the same machine — without sessions
+    /// they all share one identity and race the inbox cursor.
+    ///
+    /// Names are derived from `basename(cwd)` and cached in a registry,
+    /// so re-entering the same project reuses the same identity.
+    #[command(subcommand)]
+    Session(SessionCommand),
     /// Detect known MCP host config locations (Claude Desktop, Claude Code,
     /// Cursor, project-local) and either print or auto-merge the wire MCP
     /// server entry. Default prints; pass `--apply` to actually modify config
@@ -664,6 +675,64 @@ pub enum DiagAction {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum SessionCommand {
+    /// Bootstrap a new isolated session in this machine's sessions root.
+    /// With no name, derives one from `basename(cwd)` and caches it in
+    /// the registry so re-running from the same project reuses it.
+    /// Runs `init` + `claim` + spawns a session-local daemon, all inside
+    /// the new session's WIRE_HOME. Output includes the `export
+    /// WIRE_HOME=...` line operators paste into their shell to activate
+    /// it.
+    New {
+        /// Optional session name. Default = derived from `basename(cwd)`.
+        name: Option<String>,
+        /// Relay URL for the session's slot allocation + handle claim.
+        #[arg(long, default_value = "https://wireup.net")]
+        relay: String,
+        /// Skip spawning the session-local daemon. Use when you want
+        /// to drive sync explicitly from the agent or test rig.
+        #[arg(long)]
+        no_daemon: bool,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List all sessions on this machine with their handle, DID,
+    /// daemon liveness, and the cwd they're associated with.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the `export WIRE_HOME=...` line for a session, so a shell
+    /// can `eval $(wire session env <name>)` to activate it. With no
+    /// name, resolves the cwd through the registry.
+    Env {
+        /// Session name. Default = derived from cwd via the registry.
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Identify which session the current cwd maps to in the registry.
+    /// Prints `(none)` if cwd isn't registered — `wire session new`
+    /// would create one.
+    Current {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Tear down a session: kills its daemon (if running), deletes its
+    /// state directory, and removes it from the registry. Requires
+    /// `--force` because state loss is unrecoverable (keypair gone).
+    Destroy {
+        name: String,
+        /// Confirm state-deleting operation.
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ServiceAction {
     /// Write the launchd plist (macOS) or systemd user unit (linux) and
     /// load it. Idempotent — re-running re-bootstraps an existing service.
@@ -878,6 +947,7 @@ pub fn run() -> Result<()> {
         Command::PairAccept { peer, json } => cmd_pair_accept(&peer, json),
         Command::PairReject { peer, json } => cmd_pair_reject(&peer, json),
         Command::PairListInbound { json } => cmd_pair_list_inbound(json),
+        Command::Session(cmd) => cmd_session(cmd),
         Command::Invite {
             relay,
             ttl,
@@ -4251,6 +4321,414 @@ fn cmd_pair_reject(peer_nick: &str, as_json: bool) -> Result<()> {
         println!("→ rejected pending pair from {nick}\n→ pending-inbound record deleted; no ack sent.");
     } else {
         println!("no pending pair from {nick} — nothing to reject");
+    }
+    Ok(())
+}
+
+// ---------- session (v0.5.16) ----------
+//
+// Multi-session wire on one machine. See src/session.rs for the storage
+// layout + naming rules. The CLI dispatcher here orchestrates child
+// `wire` invocations with `WIRE_HOME` overridden to the session's dir;
+// each session-local `init` / `claim` / `daemon` runs in its own world
+// without cross-contamination via env vars in this process.
+
+fn cmd_session(cmd: SessionCommand) -> Result<()> {
+    match cmd {
+        SessionCommand::New {
+            name,
+            relay,
+            no_daemon,
+            json,
+        } => cmd_session_new(name.as_deref(), &relay, no_daemon, json),
+        SessionCommand::List { json } => cmd_session_list(json),
+        SessionCommand::Env { name, json } => cmd_session_env(name.as_deref(), json),
+        SessionCommand::Current { json } => cmd_session_current(json),
+        SessionCommand::Destroy { name, force, json } => cmd_session_destroy(&name, force, json),
+    }
+}
+
+fn resolve_session_name(name: Option<&str>) -> Result<String> {
+    if let Some(n) = name {
+        return Ok(crate::session::sanitize_name(n));
+    }
+    let cwd = std::env::current_dir().with_context(|| "reading cwd")?;
+    let registry = crate::session::read_registry().unwrap_or_default();
+    Ok(crate::session::derive_name_from_cwd(&cwd, &registry))
+}
+
+fn cmd_session_new(
+    name_arg: Option<&str>,
+    relay: &str,
+    no_daemon: bool,
+    as_json: bool,
+) -> Result<()> {
+    let cwd = std::env::current_dir().with_context(|| "reading cwd")?;
+    let mut registry = crate::session::read_registry().unwrap_or_default();
+    let name = match name_arg {
+        Some(n) => crate::session::sanitize_name(n),
+        None => crate::session::derive_name_from_cwd(&cwd, &registry),
+    };
+    let session_home = crate::session::session_dir(&name)?;
+
+    let already_exists = session_home.exists()
+        && session_home
+            .join("config")
+            .join("wire")
+            .join("agent-card.json")
+            .exists();
+    if already_exists {
+        // Idempotent: re-register the cwd (if not already), refresh the
+        // daemon if requested, surface the env-var line. Do not re-init
+        // identity — that would clobber the keypair.
+        registry
+            .by_cwd
+            .insert(cwd.to_string_lossy().into_owned(), name.clone());
+        crate::session::write_registry(&registry)?;
+        let info = render_session_info(&name, &session_home, &cwd)?;
+        emit_session_new_result(&info, "already_exists", as_json)?;
+        if !no_daemon {
+            ensure_session_daemon(&session_home)?;
+        }
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&session_home)
+        .with_context(|| format!("creating session dir {session_home:?}"))?;
+
+    // Phase 1: init identity in the new session's WIRE_HOME.
+    let init_status = run_wire_with_home(
+        &session_home,
+        &["init", &name, "--relay", relay],
+    )?;
+    if !init_status.success() {
+        bail!(
+            "`wire init {name} --relay {relay}` failed inside session dir {session_home:?}"
+        );
+    }
+
+    // Phase 2: claim the handle on the relay. If FCFS rejects the name
+    // (another machine has it), fall back to `<name>-<2hex>` until success
+    // or 5 attempts exhausted. Failure here is fatal — the session is
+    // unreachable without a claim.
+    let mut claim_attempt = 0u32;
+    let mut effective_handle = name.clone();
+    loop {
+        claim_attempt += 1;
+        let status = run_wire_with_home(
+            &session_home,
+            &["claim", &effective_handle, "--relay", relay],
+        )?;
+        if status.success() {
+            break;
+        }
+        if claim_attempt >= 5 {
+            bail!(
+                "5 failed attempts to claim a handle on {relay} for session {name}. \
+                 Try `wire session destroy {name} --force` and re-run with a different name."
+            );
+        }
+        // Use a fresh random-ish suffix on each retry. We piggyback on the
+        // path-hash logic but mix in the attempt counter to avoid getting
+        // stuck on the same colliding suffix.
+        let attempt_path = cwd.join(format!("__attempt_{claim_attempt}"));
+        let suffix = crate::session::derive_name_from_cwd(&attempt_path, &registry);
+        // suffix here is the full derived name for attempt_path; we just
+        // want a short token, so take the trailing hash if it has one,
+        // else hash the attempt-path ourselves.
+        let token = suffix
+            .rsplit('-')
+            .next()
+            .filter(|t| t.len() == 4)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{claim_attempt}"));
+        effective_handle = format!("{name}-{token}");
+    }
+
+    // Persist the cwd → name mapping NOW so subsequent invocations from
+    // this directory short-circuit to the "already_exists" branch.
+    registry
+        .by_cwd
+        .insert(cwd.to_string_lossy().into_owned(), name.clone());
+    crate::session::write_registry(&registry)?;
+
+    if !no_daemon {
+        ensure_session_daemon(&session_home)?;
+    }
+
+    let info = render_session_info(&name, &session_home, &cwd)?;
+    emit_session_new_result(&info, "created", as_json)
+}
+
+fn render_session_info(
+    name: &str,
+    session_home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Result<serde_json::Value> {
+    let card_path = session_home.join("config").join("wire").join("agent-card.json");
+    let (did, handle) = if card_path.exists() {
+        let card: Value = serde_json::from_slice(&std::fs::read(&card_path)?)?;
+        let did = card
+            .get("did")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let handle = card
+            .get("handle")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                crate::agent_card::display_handle_from_did(&did).to_string()
+            });
+        (did, handle)
+    } else {
+        (String::new(), String::new())
+    };
+    Ok(json!({
+        "name": name,
+        "home_dir": session_home.to_string_lossy(),
+        "cwd": cwd.to_string_lossy(),
+        "did": did,
+        "handle": handle,
+        "export": format!("export WIRE_HOME={}", session_home.to_string_lossy()),
+    }))
+}
+
+fn emit_session_new_result(
+    info: &serde_json::Value,
+    status: &str,
+    as_json: bool,
+) -> Result<()> {
+    if as_json {
+        let mut obj = info.clone();
+        obj["status"] = json!(status);
+        println!("{}", serde_json::to_string(&obj)?);
+    } else {
+        let name = info["name"].as_str().unwrap_or("?");
+        let handle = info["handle"].as_str().unwrap_or("?");
+        let home = info["home_dir"].as_str().unwrap_or("?");
+        let did = info["did"].as_str().unwrap_or("?");
+        let export = info["export"].as_str().unwrap_or("?");
+        let prefix = if status == "already_exists" {
+            "session already exists (re-registered cwd)"
+        } else {
+            "session created"
+        };
+        println!(
+            "{prefix}\n  name:   {name}\n  handle: {handle}\n  did:    {did}\n  home:   {home}\n\nactivate with:\n  {export}"
+        );
+    }
+    Ok(())
+}
+
+fn run_wire_with_home(
+    session_home: &std::path::Path,
+    args: &[&str],
+) -> Result<std::process::ExitStatus> {
+    let bin = std::env::current_exe().with_context(|| "locating self exe")?;
+    let status = std::process::Command::new(&bin)
+        .env("WIRE_HOME", session_home)
+        .env_remove("RUST_LOG")
+        .args(args)
+        .status()
+        .with_context(|| format!("spawning `wire {}`", args.join(" ")))?;
+    Ok(status)
+}
+
+fn ensure_session_daemon(session_home: &std::path::Path) -> Result<()> {
+    // Check if a daemon is already alive in this session's WIRE_HOME.
+    // If so, no-op (let the existing process keep running).
+    let pidfile = session_home
+        .join("state")
+        .join("wire")
+        .join("daemon.pid");
+    if pidfile.exists() {
+        let bytes = std::fs::read(&pidfile).unwrap_or_default();
+        let pid: Option<u32> =
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                v.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32)
+            } else {
+                String::from_utf8_lossy(&bytes).trim().parse::<u32>().ok()
+            };
+        if let Some(p) = pid {
+            let alive = {
+                #[cfg(target_os = "linux")]
+                {
+                    std::path::Path::new(&format!("/proc/{p}")).exists()
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    std::process::Command::new("kill")
+                        .args(["-0", &p.to_string()])
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false)
+                }
+            };
+            if alive {
+                return Ok(());
+            }
+        }
+    }
+
+    // Spawn `wire daemon` detached. The existing `cmd_daemon` writes the
+    // versioned pidfile; we just kick it off and return.
+    let bin = std::env::current_exe().with_context(|| "locating self exe")?;
+    let log_path = session_home.join("state").join("wire").join("daemon.log");
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("opening daemon log {log_path:?}"))?;
+    let log_err = log_file.try_clone()?;
+    std::process::Command::new(&bin)
+        .env("WIRE_HOME", session_home)
+        .env_remove("RUST_LOG")
+        .args(["daemon", "--interval", "5"])
+        .stdout(log_file)
+        .stderr(log_err)
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| "spawning session-local `wire daemon`")?;
+    Ok(())
+}
+
+fn cmd_session_list(as_json: bool) -> Result<()> {
+    let items = crate::session::list_sessions()?;
+    if as_json {
+        println!("{}", serde_json::to_string(&items)?);
+        return Ok(());
+    }
+    if items.is_empty() {
+        println!("no sessions on this machine. `wire session new` to create one.");
+        return Ok(());
+    }
+    println!(
+        "{:<24} {:<24} {:<10} CWD",
+        "NAME", "HANDLE", "DAEMON"
+    );
+    for s in items {
+        println!(
+            "{:<24} {:<24} {:<10} {}",
+            s.name,
+            s.handle.as_deref().unwrap_or("?"),
+            if s.daemon_running { "running" } else { "down" },
+            s.cwd.as_deref().unwrap_or("(no cwd registered)"),
+        );
+    }
+    Ok(())
+}
+
+fn cmd_session_env(name_arg: Option<&str>, as_json: bool) -> Result<()> {
+    let name = resolve_session_name(name_arg)?;
+    let session_home = crate::session::session_dir(&name)?;
+    if !session_home.exists() {
+        bail!(
+            "no session named {name:?} on this machine. `wire session list` to enumerate, \
+             `wire session new {name}` to create."
+        );
+    }
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "name": name,
+                "home_dir": session_home.to_string_lossy(),
+                "export": format!("export WIRE_HOME={}", session_home.to_string_lossy()),
+            }))?
+        );
+    } else {
+        println!("export WIRE_HOME={}", session_home.to_string_lossy());
+    }
+    Ok(())
+}
+
+fn cmd_session_current(as_json: bool) -> Result<()> {
+    let cwd = std::env::current_dir().with_context(|| "reading cwd")?;
+    let registry = crate::session::read_registry().unwrap_or_default();
+    let cwd_key = cwd.to_string_lossy().into_owned();
+    let name = registry.by_cwd.get(&cwd_key).cloned();
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "cwd": cwd_key,
+                "session": name,
+            }))?
+        );
+    } else if let Some(n) = name {
+        println!("{n}");
+    } else {
+        println!("(no session registered for this cwd)");
+    }
+    Ok(())
+}
+
+fn cmd_session_destroy(name_arg: &str, force: bool, as_json: bool) -> Result<()> {
+    let name = crate::session::sanitize_name(name_arg);
+    let session_home = crate::session::session_dir(&name)?;
+    if !session_home.exists() {
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "name": name,
+                    "destroyed": false,
+                    "reason": "no such session",
+                }))?
+            );
+        } else {
+            println!("no session named {name:?} — nothing to destroy.");
+        }
+        return Ok(());
+    }
+    if !force {
+        bail!(
+            "destroying session {name:?} would delete its keypair + state irrecoverably. \
+             Pass --force to confirm."
+        );
+    }
+
+    // Kill the session-local daemon if alive.
+    let pidfile = session_home
+        .join("state")
+        .join("wire")
+        .join("daemon.pid");
+    if let Ok(bytes) = std::fs::read(&pidfile) {
+        let pid: Option<u32> =
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                v.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32)
+            } else {
+                String::from_utf8_lossy(&bytes).trim().parse::<u32>().ok()
+            };
+        if let Some(p) = pid {
+            let _ = std::process::Command::new("kill")
+                .args(["-TERM", &p.to_string()])
+                .output();
+        }
+    }
+
+    std::fs::remove_dir_all(&session_home)
+        .with_context(|| format!("removing session dir {session_home:?}"))?;
+
+    // Strip from registry.
+    let mut registry = crate::session::read_registry().unwrap_or_default();
+    registry.by_cwd.retain(|_, v| v != &name);
+    crate::session::write_registry(&registry)?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "name": name,
+                "destroyed": true,
+            }))?
+        );
+    } else {
+        println!("destroyed session {name:?}.");
     }
     Ok(())
 }

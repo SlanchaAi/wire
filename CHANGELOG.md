@@ -6,6 +6,26 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.16 — `wire session` for multi-agent-per-machine
+
+When multiple agent sessions ran on the same box (e.g. one Claude Code in `~/Source/wire`, another in `~/Source/slancha-mesh`) they shared a single `WIRE_HOME` — one DID, one slot, one inbox JSONL, one daemon. Peers had no way to address a specific session and cursor advances by either session drained events the other never saw.
+
+**`wire session` subcommand.** Bootstraps isolated per-session `WIRE_HOME` trees under `~/.local/state/wire/sessions/<name>/`. Each session = own identity + own relay slot + own session-local daemon + own inbox/outbox. Sessions pair with each other through any relay (`wireup.net` by default) like any other peer — the bilateral-pair gate from v0.5.14 still applies.
+
+- `wire session new [name]` — bootstrap. With no name, derives one from `basename(cwd)` and caches it in a registry so re-entering the same project reuses the same identity instead of generating a fresh DID each time. Runs `init` + `claim` + spawns the session-local daemon. Outputs the `export WIRE_HOME=…` line for shell activation.
+- `wire session list [--json]` — enumerate sessions with handle, DID, daemon liveness, and registered cwd.
+- `wire session env [name]` — emit the export line; `eval $(wire session env)` activates the cwd's session.
+- `wire session current` — which session does this cwd map to?
+- `wire session destroy <name> --force` — kill the daemon + delete state + remove from registry. Irrecoverable (keypair gone).
+
+**Stable per-project identity.** Registry at `~/.local/state/wire/sessions/registry.json` maps `cwd → session_name`. Different cwds with the same basename get a 4-char SHA-256 path-hash suffix.
+
+**Recommended Claude Code setup.** Project-local `.mcp.json` points wire at that project's session via `env.WIRE_HOME=…`. New Claude Code sessions in the same project all share that session's identity; sessions in different projects stay isolated. See `docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516` for the full recipe.
+
+**New module + tests.** `src/session.rs` with path/registry logic + name derivation. **149 lib + 35 CLI tests passing** (+4 session unit tests, +6 session integration tests).
+
+No protocol or schema changes. No relay-side changes. Backwards-compatible: operators who don't use `wire session` keep their existing single-session WIRE_HOME behavior unchanged.
+
 ### v0.5.15 — operator-friendly accept surface
 
 Companion patch to v0.5.14. Same bilateral-pair design intent; surfaces the *accept* gesture explicitly across CLI, MCP, README, AGENT_INTEGRATION.md, and the landing page so operators don't have to remember the overloaded `wire add <peer>@<their-relay>` form.

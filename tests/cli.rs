@@ -270,6 +270,149 @@ fn pair_reject_deletes_pending_inbound_v0_5_14() {
     assert!(parsed2.as_array().unwrap().is_empty());
 }
 
+// ---------- v0.5.16 session tests ----------
+//
+// `wire session new` calls `claim` against the relay, so a fully-offline
+// test of the bootstrap flow would need to stand up the in-process relay
+// (see tests/e2e_*.rs). Here we exercise the OFFLINE surface — list, env,
+// current, destroy — by pre-populating a session dir + registry as the
+// `new` command would. This keeps the test fast (no network) while
+// asserting the operator-facing UX contract.
+
+fn write_session_fixture(
+    home: &std::path::Path,
+    session_name: &str,
+    cwd_key: Option<&str>,
+) -> std::path::PathBuf {
+    let sessions_root = home.join("sessions");
+    let session_home = sessions_root.join(session_name);
+    let card_dir = session_home.join("config").join("wire");
+    std::fs::create_dir_all(&card_dir).unwrap();
+    let card = serde_json::json!({
+        "did": format!("did:wire:{session_name}-deadbeef"),
+        "handle": session_name,
+        "verify_keys": {
+            format!("ed25519:{session_name}:deadbeef"): {
+                "active": true,
+                "alg": "ed25519",
+                "key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            }
+        }
+    });
+    std::fs::write(
+        card_dir.join("agent-card.json"),
+        serde_json::to_vec_pretty(&card).unwrap(),
+    )
+    .unwrap();
+    if let Some(cwd) = cwd_key {
+        let registry = serde_json::json!({
+            "by_cwd": {cwd: session_name}
+        });
+        std::fs::write(
+            sessions_root.join("registry.json"),
+            serde_json::to_vec_pretty(&registry).unwrap(),
+        )
+        .unwrap();
+    } else {
+        // Ensure sessions root exists even when no registry is requested.
+        std::fs::create_dir_all(&sessions_root).unwrap();
+    }
+    session_home
+}
+
+#[test]
+fn session_list_empty_reports_no_sessions_v0_5_16() {
+    let home = fresh_home();
+    let out = run(&home, &["session", "list"]);
+    assert!(out.status.success(), "session list failed: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("no sessions on this machine"),
+        "expected empty hint, got: {stdout}"
+    );
+}
+
+#[test]
+fn session_list_enumerates_on_disk_sessions_v0_5_16() {
+    let home = fresh_home();
+    write_session_fixture(&home, "wire", Some("/Users/paul/Source/wire"));
+    write_session_fixture(&home, "slancha-mesh", Some("/Users/paul/Source/slancha-mesh"));
+
+    let out = run(&home, &["session", "list", "--json"]);
+    assert!(out.status.success(), "session list --json failed: {:?}", out);
+    let s = String::from_utf8(out.stdout).unwrap();
+    let arr: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let items = arr.as_array().expect("flat array");
+    assert_eq!(items.len(), 2);
+    let names: std::collections::HashSet<&str> = items
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    assert!(names.contains("wire"));
+    assert!(names.contains("slancha-mesh"));
+    // Daemon liveness false for a fixture with no pidfile.
+    for item in items {
+        assert_eq!(item["daemon_running"], false);
+    }
+}
+
+#[test]
+fn session_env_emits_export_line_for_named_session_v0_5_16() {
+    let home = fresh_home();
+    write_session_fixture(&home, "wire", None);
+    let out = run(&home, &["session", "env", "wire"]);
+    assert!(out.status.success(), "session env failed: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.starts_with("export WIRE_HOME="), "got: {stdout}");
+    assert!(stdout.contains("/sessions/wire"), "got: {stdout}");
+}
+
+#[test]
+fn session_env_errors_cleanly_for_missing_session_v0_5_16() {
+    let home = fresh_home();
+    let out = run(&home, &["session", "env", "ghost"]);
+    assert!(!out.status.success(), "expected failure: {:?}", out);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("no session named"), "stderr: {stderr}");
+    assert!(stderr.contains("wire session list") || stderr.contains("wire session new"), "should hint: {stderr}");
+}
+
+#[test]
+fn session_destroy_requires_force_flag_v0_5_16() {
+    let home = fresh_home();
+    let session_home = write_session_fixture(&home, "wire", None);
+    let out = run(&home, &["session", "destroy", "wire"]);
+    assert!(!out.status.success(), "destroy without --force must fail: {:?}", out);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("--force"), "stderr: {stderr}");
+    // State must still be on disk.
+    assert!(session_home.exists(), "session dir should not be deleted");
+}
+
+#[test]
+fn session_destroy_with_force_removes_state_and_registry_entry_v0_5_16() {
+    let home = fresh_home();
+    let session_home = write_session_fixture(&home, "wire", Some("/Users/paul/Source/wire"));
+    let registry_path = home.join("sessions").join("registry.json");
+    assert!(registry_path.exists());
+
+    let out = run(&home, &["session", "destroy", "wire", "--force", "--json"]);
+    assert!(out.status.success(), "destroy failed: {:?}", out);
+    let s = String::from_utf8(out.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(parsed["destroyed"], true);
+    assert!(!session_home.exists(), "session dir should be gone");
+
+    // Registry entry for that cwd should be cleaned up.
+    let registry_bytes = std::fs::read(&registry_path).unwrap();
+    let registry: serde_json::Value = serde_json::from_slice(&registry_bytes).unwrap();
+    let by_cwd = registry["by_cwd"].as_object().unwrap();
+    assert!(
+        !by_cwd.values().any(|v| v == "wire"),
+        "registry must not reference destroyed session"
+    );
+}
+
 #[test]
 fn pair_accept_errors_cleanly_when_no_pending_request_v0_5_14() {
     // `wire pair-accept <peer>` must fail loudly when there's no pending-
