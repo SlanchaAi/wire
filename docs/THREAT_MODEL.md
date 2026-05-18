@@ -290,6 +290,30 @@ Wire's HTTPS surface (relay POST/GET, `/stream` long-poll, well-known fetches) c
 2. If your environment trusts a corporate CA: install it in the OS trust store; wire picks it up next run.
 3. If you cannot install the CA (managed device, etc.): `WIRE_INSECURE_SKIP_TLS_VERIFY=1 wire push` once to confirm. Then escalate to your IT to install the CA properly; do not leave the env var set as a permanent workaround.
 
+## Within-machine local relay (v0.5.17)
+
+`wire relay-server --bind 127.0.0.1:8771 --local-only` adds a within-machine transport that sister-Claudes (and any other agent on the box) prefer over the federation relay when both sides advertise a local endpoint. The trade-off space below documents what the local-relay path does and does NOT defend against.
+
+### What the local relay assumes
+
+- **Same-machine processes are mutually trusted at OS level.** Any process on the box that can `connect(127.0.0.1, 8771)` can attempt to deposit a pair_drop. This is mitigated by the v0.5.14 bilateral-pair gate (no auto-pin, no auto-ack — operator consent is still required on both sides), so a malicious local process can deposit one pending-inbound request per session but can't get authenticated write capability without the operator's `wire pair-accept`. Same defense surface as the federation path; the attack is just cheaper to attempt.
+- **Loopback ≠ secret on a multi-user box.** Other users on the same machine can also bind 127.0.0.1 sockets and probe / connect. On a shared box you'd want socket-permission hardening (Unix-domain socket with `0600` mode, or per-user firewall rules). v0.5.17 ships HTTP-over-loopback only; Unix-socket transport is a v0.5.18+ open follow-up.
+- **No TLS on the local relay.** Bytes travel cleartext over loopback. Acceptable on single-user laptops (same as every other localhost HTTP service); document explicitly so operators don't extrapolate "wire uses TLS everywhere" to the local case. Event integrity is still protected by Ed25519 signatures on every envelope.
+
+### What the local relay does provide
+
+- **Zero metadata exposure to the federation relay.** Sister-session traffic (Claude A → Claude B on the same box) routes through `127.0.0.1` and never touches `wireup.net`. The federation relay logs slot_id / IP / timing of every event it sees; the local-only relay log stays on the operator's box.
+- **Offline coordination.** Sister-Claudes keep coordinating even when the internet is down. Same protocol envelope, same crypto invariants — just the transport is local. Demos, airplane mode, locked-down corporate networks.
+- **Sub-millisecond round-trip.** Loopback latency vs ~100ms federation. For tight agent-to-agent coordination this is the difference between "task-cadence handoff" and "conversation-cadence handoff."
+
+### Implicit operator agreement
+
+Running a local-only relay means the operator implicitly trusts every process on their box at the OS level. This is roughly the same trust assumption every desktop app makes (any process can read your Documents folder, etc.) and is appropriate for single-user development laptops. For multi-user servers or environments where untrusted code runs in the same uid, **do not enable the local-only relay** until v0.5.18+ adds Unix-socket transport with file-permission gating.
+
+### Public-bind guardrail
+
+`wire relay-server --local-only` refuses to bind any address that resolves outside `127.0.0.0/8` or `[::1]`. If you try `--local-only --bind 0.0.0.0:8771`, startup fails with an explicit error rather than silently exposing a phonebook-stripped relay to the public internet. This is the v0.5.17 "fail loud at startup" mitigation against the "wait, did I just publish this?" mistake.
+
 ## Defense in depth
 
 The pieces that compose:

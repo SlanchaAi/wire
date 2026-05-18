@@ -522,6 +522,26 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
         bail!("pair_drop body missing relay_url/slot_id/slot_token");
     }
 
+    // v0.5.17: peer may advertise multiple endpoints (federation +
+    // optional local). Parse `body.endpoints[]` if present. Falls back
+    // to a single federation endpoint from the legacy fields above for
+    // v0.5.16-and-earlier senders.
+    let peer_endpoints: Vec<crate::endpoints::Endpoint> = body
+        .get("endpoints")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| serde_json::from_value::<crate::endpoints::Endpoint>(e.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            vec![crate::endpoints::Endpoint::federation(
+                peer_relay.to_string(),
+                peer_slot_id.to_string(),
+                peer_slot_token.to_string(),
+            )]
+        });
+
     // ---------- v0.5.14 bilateral-required split ----------
     //
     // SPAKE2 invite-URL path (`pair_nonce` present): the operator already
@@ -543,11 +563,10 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
         // ----- SPAKE2 invite-URL path (unchanged) -----
         config::write_trust(&tmp_trust)?;
         let mut relay_state = config::read_relay_state()?;
-        relay_state["peers"][&peer_handle] = json!({
-            "relay_url": peer_relay,
-            "slot_id": peer_slot_id,
-            "slot_token": peer_slot_token,
-        });
+        // v0.5.17: pin all advertised endpoints (federation + optional
+        // local). Top-level legacy fields still point at the federation
+        // endpoint for back-compat readers.
+        crate::endpoints::pin_peer_endpoints(&mut relay_state, &peer_handle, &peer_endpoints)?;
         config::write_relay_state(&relay_state)?;
 
         // Consume invite (single-use default; decrement uses for multi-use).
@@ -593,6 +612,7 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
         peer_relay_url: peer_relay.to_string(),
         peer_slot_id: peer_slot_id.to_string(),
         peer_slot_token: peer_slot_token.to_string(),
+        peer_endpoints: peer_endpoints.clone(),
         event_id,
         event_timestamp,
         received_at: now_iso,

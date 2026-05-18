@@ -354,6 +354,10 @@ impl Relay {
     }
 
     pub fn router(self) -> Router {
+        self.router_with_mode(ServerMode::default())
+    }
+
+    pub fn router_with_mode(self, mode: ServerMode) -> Router {
         // Rate limit applied to write endpoints that create new state (slots,
         // pair-sessions, bootstraps). 10 req/sec sustained, 50 req burst.
         // v0.1 uses the GLOBAL key extractor (single bucket for all callers) —
@@ -380,21 +384,10 @@ impl Relay {
             .route("/v1/pair/abandon", post(pair_abandon))
             .layer(governor_layer);
 
-        Router::new()
-            .route("/", get(landing_index))
-            .route("/favicon.svg", get(landing_favicon))
-            .route("/og.png", get(landing_og))
-            .route("/demo.cast", get(landing_demo_cast))
-            .route("/install", get(landing_install_sh))
-            .route("/install.sh", get(landing_install_sh))
-            .route("/openshell-policy.sh", get(landing_openshell_policy_sh))
+        // Core data-plane routes: events, pair, slots, healthz. Always
+        // present, in both federation and local-only modes.
+        let mut router = Router::new()
             .route("/healthz", get(healthz))
-            .route("/stats", get(stats_root))
-            .route("/stats.json", get(stats_json))
-            .route("/stats.html", get(landing_stats_html))
-            .route("/stats.history", get(stats_history))
-            .route("/phonebook", get(landing_phonebook_html))
-            .route("/phonebook.html", get(landing_phonebook_html))
             .route("/v1/events/:slot_id", post(post_event).get(list_events))
             .route("/v1/slot/:slot_id/state", get(slot_state))
             .route(
@@ -403,18 +396,47 @@ impl Relay {
             )
             .route("/v1/events/:slot_id/stream", get(stream_events))
             .route("/v1/pair/:pair_id", get(pair_get))
-            .route("/v1/handle/claim", post(handle_claim))
-            .route("/v1/handle/intro/:nick", post(handle_intro))
-            .route("/v1/handles", get(handles_directory))
-            .route("/v1/invite/register", post(invite_register))
-            .route("/i/:token", get(invite_script))
-            .route("/.well-known/wire/agent", get(well_known_agent))
-            .route(
-                "/.well-known/agent-card.json",
-                get(well_known_agent_card_a2a),
-            )
-            .merge(hot_writes)
-            .with_state(self)
+            .route("/v1/handle/intro/:nick", post(handle_intro));
+
+        // Discovery + landing surfaces: phonebook, well-known agent cards,
+        // landing page, stats, invite landing. In `--local-only` mode we
+        // skip all of these — the relay becomes invisible from the outside
+        // (and from other agents on the same box that might enumerate it).
+        // This is the v0.5.17 within-machine privacy guarantee.
+        if !mode.local_only {
+            router = router
+                .route("/", get(landing_index))
+                .route("/favicon.svg", get(landing_favicon))
+                .route("/og.png", get(landing_og))
+                .route("/demo.cast", get(landing_demo_cast))
+                .route("/install", get(landing_install_sh))
+                .route("/install.sh", get(landing_install_sh))
+                .route("/openshell-policy.sh", get(landing_openshell_policy_sh))
+                .route("/stats", get(stats_root))
+                .route("/stats.json", get(stats_json))
+                .route("/stats.html", get(landing_stats_html))
+                .route("/stats.history", get(stats_history))
+                .route("/phonebook", get(landing_phonebook_html))
+                .route("/phonebook.html", get(landing_phonebook_html))
+                .route("/v1/handle/claim", post(handle_claim))
+                .route("/v1/handles", get(handles_directory))
+                .route("/v1/invite/register", post(invite_register))
+                .route("/i/:token", get(invite_script))
+                .route("/.well-known/wire/agent", get(well_known_agent))
+                .route(
+                    "/.well-known/agent-card.json",
+                    get(well_known_agent_card_a2a),
+                );
+        } else {
+            // Local-only mode still needs handle_claim for in-process
+            // session bootstrap (`wire session new` allocates a local
+            // slot AND claims a handle on the local relay so peers can
+            // resolve it). The claim is gated to loopback-only callers
+            // by the bind, not by the route.
+            router = router.route("/v1/handle/claim", post(handle_claim));
+        }
+
+        router.merge(hot_writes).with_state(self)
     }
 
     /// Evict pair-slots that have been idle past `PAIR_SLOT_TTL_SECS`.
@@ -2012,14 +2034,29 @@ fn random_hex(n_bytes: usize) -> String {
 
 /// Run the relay until SIGINT/SIGTERM.
 pub async fn serve(bind: &str, state_dir: PathBuf) -> Result<()> {
+    serve_with_mode(bind, state_dir, ServerMode::default()).await
+}
+
+/// v0.5.17: server-mode-aware entry point. Same as `serve` but with the
+/// `--local-only` toggle exposed so the binary can refuse to publish
+/// phonebook + well-known surfaces on within-machine relays.
+pub async fn serve_with_mode(
+    bind: &str,
+    state_dir: PathBuf,
+    mode: ServerMode,
+) -> Result<()> {
     let relay = Relay::new(state_dir).await?;
     relay.spawn_pair_sweeper();
     relay.spawn_counter_persister();
-    let app = relay.clone().router();
+    let app = relay.clone().router_with_mode(mode);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
-    eprintln!("wire relay-server listening on {bind}");
+    if mode.local_only {
+        eprintln!("wire relay-server (LOCAL-ONLY) listening on {bind} — phonebook + well-known endpoints disabled");
+    } else {
+        eprintln!("wire relay-server listening on {bind}");
+    }
     let shutdown_relay = relay.clone();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -2031,6 +2068,19 @@ pub async fn serve(bind: &str, state_dir: PathBuf) -> Result<()> {
         })
         .await?;
     Ok(())
+}
+
+/// v0.5.17: relay-server mode toggles. Default = full federation
+/// (current behavior). `local_only` strips phonebook + well-known
+/// surfaces so the relay is invisible from off-box and from any
+/// directory-scraping agent on the same box.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ServerMode {
+    /// When true, skip phonebook listing + `.well-known/wire/agent` +
+    /// `.well-known/agent-card.json` + landing/stats pages. Pair this
+    /// with a loopback bind (`--local-only` enforces this at the CLI
+    /// layer) for genuinely within-machine traffic.
+    pub local_only: bool,
 }
 
 #[cfg(test)]

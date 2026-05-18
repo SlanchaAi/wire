@@ -41,6 +41,14 @@ pub struct PendingInboundPair {
     /// back. Holding this without acting on it is intentional: capability
     /// only flows when operator runs `wire add` to accept.
     pub peer_slot_token: String,
+    /// v0.5.17: full set of endpoints the peer advertised (federation +
+    /// optional local). When the operator accepts via `wire pair-accept`,
+    /// every endpoint here gets pinned into relay_state via
+    /// `endpoints::pin_peer_endpoints`. Absent on records written by
+    /// v0.5.16-and-earlier code paths; downstream code synthesizes a
+    /// single federation entry from the legacy fields in that case.
+    #[serde(default)]
+    pub peer_endpoints: Vec<crate::endpoints::Endpoint>,
     /// Original pair_drop event_id (SHA-256 over canonical body). Used to
     /// dedupe repeated drops from the same key.
     pub event_id: String,

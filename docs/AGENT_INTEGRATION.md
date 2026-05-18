@@ -146,6 +146,26 @@ $ wire session destroy <name> --force   # remove (irrecoverable)
 
 **Don't share sessions across operators.** A session's keypair lives on disk under that machine's `~/.local/state/wire/sessions/<name>/config/wire/private.key`. Copying the session dir to another machine shares the identity — only do this intentionally (e.g. moving your laptop's identity to a new laptop). Otherwise: one session = one machine + one project.
 
+### Within-machine fast path: dual-slot sessions (v0.5.17)
+
+For sister-Claudes on the same box that coordinate at high frequency, v0.5.17 adds an opt-in **local relay** transport. Each session can hold two slots — one on the federation relay (e.g. `wireup.net`) and one on a local-only relay (`127.0.0.1:8771`). Sister-session traffic routes through `127.0.0.1` at sub-millisecond latency; federation traffic to other machines keeps going through the public relay.
+
+Setup:
+
+```bash
+# Once per machine — start the local-only relay.
+wire relay-server --bind 127.0.0.1:8771 --local-only &
+
+# Per session — opt into dual-slot at bootstrap.
+wire session new --with-local
+```
+
+`--with-local` probes `http://127.0.0.1:8771/healthz` first; if the local relay isn't running, the session is federation-only (logged loudly, not silently). Re-running `wire session new --with-local` on an existing session after the local relay comes up backfills the local slot.
+
+Routing is automatic: when both peers advertise local endpoints, the daemon prefers local; otherwise federation. Falls back transparently on transport errors. See [THREAT_MODEL.md](../docs/THREAT_MODEL.md#within-machine-local-relay-v0517) for the trade-offs (loopback-not-secret on multi-tenant boxes, no TLS, etc).
+
+This is the "OSS coordination layer that vendors can't build because it doesn't sell anything" — cross-Claude, cross-Cursor, cross-Aider, cross-any-agent coordination on one operator-owned box. See [issue #10](https://github.com/SlanchaAi/wire/issues/10) for the design rationale.
+
 ---
 
 ## Path 2 — CLI subcommands (Bash-tool agents)

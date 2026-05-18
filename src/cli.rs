@@ -143,6 +143,15 @@ pub enum Command {
         /// Bind address (e.g. `127.0.0.1:8770`).
         #[arg(long, default_value = "127.0.0.1:8770")]
         bind: String,
+        /// v0.5.17: refuse non-loopback binds, skip phonebook listing,
+        /// skip `.well-known/wire/agent` serving. The relay becomes
+        /// invisible from outside the box — only same-machine processes
+        /// can pair through it. Right call for within-machine agent
+        /// coordination where you don't want metadata leaking to a
+        /// public relay. Pair this with `wire session new` which probes
+        /// `127.0.0.1:8771` and allocates a local slot automatically.
+        #[arg(long)]
+        local_only: bool,
     },
     /// Allocate a slot on a relay; bind it to this agent's identity.
     BindRelay {
@@ -689,6 +698,19 @@ pub enum SessionCommand {
         /// Relay URL for the session's slot allocation + handle claim.
         #[arg(long, default_value = "https://wireup.net")]
         relay: String,
+        /// v0.5.17: also allocate a second slot on a same-machine local
+        /// relay (defaults to `http://127.0.0.1:8771`). Within-machine
+        /// sister-session traffic prefers this path: zero round-trip
+        /// latency, zero metadata exposure to the public relay. Probes
+        /// `<local-relay>/healthz` first; silently skips if the local
+        /// relay isn't running.
+        #[arg(long)]
+        with_local: bool,
+        /// v0.5.17: override the local relay URL probed by `--with-local`.
+        /// Default is `http://127.0.0.1:8771` to match
+        /// `wire relay-server --bind 127.0.0.1:8771 --local-only`.
+        #[arg(long, default_value = "http://127.0.0.1:8771")]
+        local_relay: String,
         /// Skip spawning the session-local daemon. Use when you want
         /// to drive sync explicitly from the agent or test rig.
         #[arg(long)]
@@ -853,7 +875,7 @@ pub fn run() -> Result<()> {
             ResponderCommand::Get { peer, json } => cmd_responder_get(peer.as_deref(), json),
         },
         Command::Mcp => cmd_mcp(),
-        Command::RelayServer { bind } => cmd_relay_server(&bind),
+        Command::RelayServer { bind, local_only } => cmd_relay_server(&bind, local_only),
         Command::BindRelay { url, json } => cmd_bind_relay(&url, json),
         Command::AddPeerSlot {
             handle,
@@ -2402,11 +2424,19 @@ fn cmd_mcp() -> Result<()> {
     crate::mcp::run()
 }
 
-fn cmd_relay_server(bind: &str) -> Result<()> {
+fn cmd_relay_server(bind: &str, local_only: bool) -> Result<()> {
+    // v0.5.17: --local-only refuses non-loopback binds. Catches the
+    // "wait did I just bind a publicly-reachable local-only relay" mistake
+    // at startup rather than discovering it via an empty phonebook later.
+    if local_only {
+        validate_loopback_bind(bind)?;
+    }
     // Default state dir for the relay process: $WIRE_HOME/state/wire-relay
     // (or `dirs::state_dir()/wire-relay`). Distinct from the CLI's state dir
     // so a single user can run both client and server on one machine.
-    let state_dir = if let Ok(home) = std::env::var("WIRE_HOME") {
+    // For --local-only, suffix with /local so a single operator can run
+    // both a federation relay and a local-only relay without state collision.
+    let base = if let Ok(home) = std::env::var("WIRE_HOME") {
         std::path::PathBuf::from(home)
             .join("state")
             .join("wire-relay")
@@ -2416,10 +2446,54 @@ fn cmd_relay_server(bind: &str) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("could not resolve XDG_STATE_HOME — set WIRE_HOME"))?
             .join("wire-relay")
     };
+    let state_dir = if local_only { base.join("local") } else { base };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(crate::relay_server::serve(bind, state_dir))
+    runtime.block_on(crate::relay_server::serve_with_mode(
+        bind,
+        state_dir,
+        crate::relay_server::ServerMode { local_only },
+    ))
+}
+
+/// v0.5.17 loopback-bind guard. Refuses any address whose host portion
+/// resolves to something outside `127.0.0.0/8` or `::1`. Specifically
+/// rejects `0.0.0.0`, `::`, `0:0:0:0:0:0:0:0`, and any non-loopback
+/// IPv4/IPv6 literal. Hostname-form addresses (e.g. `localhost`) are
+/// accepted only if they resolve to a loopback address.
+fn validate_loopback_bind(bind: &str) -> Result<()> {
+    // Split host:port. IPv6 literals use `[::]:port` form.
+    let host = if let Some(stripped) = bind.strip_prefix('[') {
+        let close = stripped
+            .find(']')
+            .ok_or_else(|| anyhow::anyhow!("malformed IPv6 bind {bind:?}"))?;
+        stripped[..close].to_string()
+    } else {
+        bind.rsplit_once(':')
+            .map(|(h, _)| h.to_string())
+            .unwrap_or_else(|| bind.to_string())
+    };
+    use std::net::ToSocketAddrs;
+    let probe = format!("{host}:0");
+    let resolved: Vec<_> = probe
+        .to_socket_addrs()
+        .with_context(|| format!("resolving bind host {host:?}"))?
+        .collect();
+    if resolved.is_empty() {
+        bail!("--local-only: bind host {host:?} resolved to no addresses");
+    }
+    for addr in &resolved {
+        if !addr.ip().is_loopback() {
+            bail!(
+                "--local-only refuses non-loopback bind: {host:?} resolves to {} \
+                 which is not in 127.0.0.0/8 or [::1]. Remove --local-only to bind \
+                 publicly, or use 127.0.0.1 / [::1] / localhost.",
+                addr.ip()
+            );
+        }
+    }
+    Ok(())
 }
 
 // ---------- bind-relay ----------
@@ -2560,7 +2634,12 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
     let mut pushed = Vec::new();
     let mut skipped = Vec::new();
 
-    for (peer_handle, slot_info) in peers.iter() {
+    // v0.5.17: walk each peer's pinned endpoints in priority order (local
+    // first if we share a local relay, federation second). Try POST on the
+    // first endpoint; on transport failure, fall through to the next.
+    // Falls back to the v0.5.16 legacy single-endpoint code path when the
+    // peer record carries no `endpoints[]` array (back-compat).
+    for (peer_handle, _) in peers.iter() {
         if let Some(want) = peer_filter
             && peer_handle != want
         {
@@ -2570,16 +2649,33 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
         if !outbox.exists() {
             continue;
         }
-        let url = slot_info["relay_url"]
-            .as_str()
-            .ok_or_else(|| anyhow!("peer {peer_handle} missing relay_url"))?;
-        let slot_id = slot_info["slot_id"]
-            .as_str()
-            .ok_or_else(|| anyhow!("peer {peer_handle} missing slot_id"))?;
-        let slot_token = slot_info["slot_token"]
-            .as_str()
-            .ok_or_else(|| anyhow!("peer {peer_handle} missing slot_token"))?;
-        let client = crate::relay_client::RelayClient::new(url);
+        let ordered_endpoints =
+            crate::endpoints::peer_endpoints_in_priority_order(&state, peer_handle);
+        if ordered_endpoints.is_empty() {
+            // Unreachable peer (no federation endpoint AND our local
+            // relay doesn't match the peer's). Skip with a loud reason
+            // rather than silently dropping events.
+            for line in std::fs::read_to_string(&outbox)
+                .unwrap_or_default()
+                .lines()
+            {
+                let event: Value = match serde_json::from_str(line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let event_id = event
+                    .get("event_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                skipped.push(json!({
+                    "peer": peer_handle,
+                    "event_id": event_id,
+                    "reason": "no reachable endpoint pinned for peer",
+                }));
+            }
+            continue;
+        }
         let body = std::fs::read_to_string(&outbox)?;
         for line in body.lines() {
             let event: Value = match serde_json::from_str(line) {
@@ -2591,23 +2687,48 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            match client.post_event(slot_id, slot_token, &event) {
-                Ok(resp) => {
-                    if resp.status == "duplicate" {
-                        skipped.push(json!({"peer": peer_handle, "event_id": event_id, "reason": "duplicate"}));
-                    } else {
-                        pushed.push(json!({"peer": peer_handle, "event_id": event_id}));
+
+            let mut delivered = false;
+            let mut last_err_reason: Option<String> = None;
+            for endpoint in &ordered_endpoints {
+                let client = crate::relay_client::RelayClient::new(&endpoint.relay_url);
+                match client.post_event(&endpoint.slot_id, &endpoint.slot_token, &event) {
+                    Ok(resp) => {
+                        if resp.status == "duplicate" {
+                            skipped.push(json!({
+                                "peer": peer_handle,
+                                "event_id": event_id,
+                                "reason": "duplicate",
+                                "endpoint": endpoint.relay_url,
+                                "scope": serde_json::to_value(endpoint.scope).unwrap_or(json!("?")),
+                            }));
+                        } else {
+                            pushed.push(json!({
+                                "peer": peer_handle,
+                                "event_id": event_id,
+                                "endpoint": endpoint.relay_url,
+                                "scope": serde_json::to_value(endpoint.scope).unwrap_or(json!("?")),
+                            }));
+                        }
+                        delivered = true;
+                        break;
+                    }
+                    Err(e) => {
+                        // Local-first endpoint failed; record reason and
+                        // try the next endpoint silently (operator sees
+                        // the federation success). If every endpoint
+                        // fails, the last reason is what gets reported.
+                        last_err_reason =
+                            Some(crate::relay_client::format_transport_error(&e));
                     }
                 }
-                Err(e) => {
-                    // v0.5.13: flatten the anyhow chain so TLS / DNS / timeout
-                    // errors aren't hidden behind the topmost-context URL string.
-                    // Issue #6 highest-impact silent-fail fix.
-                    let reason = crate::relay_client::format_transport_error(&e);
-                    skipped.push(
-                        json!({"peer": peer_handle, "event_id": event_id, "reason": reason}),
-                    );
-                }
+            }
+            if !delivered {
+                skipped.push(json!({
+                    "peer": peer_handle,
+                    "event_id": event_id,
+                    "reason": last_err_reason.unwrap_or_else(|| "all endpoints failed".to_string()),
+                }));
             }
         }
     }
@@ -2640,43 +2761,93 @@ fn cmd_pull(as_json: bool) -> Result<()> {
     if self_state.is_null() {
         bail!("self slot not bound — run `wire bind-relay <url>` first");
     }
-    let url = self_state["relay_url"]
-        .as_str()
-        .ok_or_else(|| anyhow!("self.relay_url missing"))?;
-    let slot_id = self_state["slot_id"]
-        .as_str()
-        .ok_or_else(|| anyhow!("self.slot_id missing"))?;
-    let slot_token = self_state["slot_token"]
-        .as_str()
-        .ok_or_else(|| anyhow!("self.slot_token missing"))?;
-    let last_event_id = self_state
-        .get("last_pulled_event_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
 
-    let client = crate::relay_client::RelayClient::new(url);
-    let events = client.list_events(slot_id, slot_token, last_event_id.as_deref(), Some(1000))?;
+    // v0.5.17: pull from every endpoint in self.endpoints (federation +
+    // optional local). Each endpoint has its own per-scope cursor so we
+    // don't re-pull events we've already seen on that path. Events from
+    // all endpoints feed into the same inbox JSONL via process_events;
+    // dedup by event_id is the last line of defense.
+    // Falls back to a single federation endpoint synthesized from the
+    // top-level legacy fields when self.endpoints is absent (v0.5.16
+    // back-compat).
+    let endpoints = crate::endpoints::self_endpoints(&state);
+    if endpoints.is_empty() {
+        bail!("self.relay_url / slot_id / slot_token missing in relay_state.json");
+    }
 
     let inbox_dir = config::inbox_dir()?;
     config::ensure_dirs()?;
 
-    // P0.1 (0.5.11): cursor advancement now blocks on unknown kinds and
-    // transient verify errors. See `pull::process_events`.
-    let result = crate::pull::process_events(&events, last_event_id, &inbox_dir)?;
+    let mut total_seen = 0usize;
+    let mut all_written: Vec<Value> = Vec::new();
+    let mut all_rejected: Vec<Value> = Vec::new();
+    let mut all_blocked = false;
+    let mut all_advance_cursor_to: Option<String> = None;
 
-    // P0.3 (0.5.11): cursor write goes through update_relay_state, which
-    // takes an exclusive flock on relay.lock for the whole RMW. Concurrent
-    // wire processes (multi-daemon, CLI vs daemon, CLI vs MCP) serialise
-    // through the lock — no more racing the cursor like today's debug.
-    if let Some(eid) = &result.advance_cursor_to {
-        let eid = eid.clone();
-        config::update_relay_state(|state| {
-            if let Some(self_obj) = state.get_mut("self").and_then(Value::as_object_mut) {
-                self_obj.insert("last_pulled_event_id".into(), Value::String(eid));
+    for endpoint in &endpoints {
+        let cursor_key = endpoint_cursor_key(endpoint.scope);
+        let last_event_id = self_state
+            .get(&cursor_key)
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let client = crate::relay_client::RelayClient::new(&endpoint.relay_url);
+        let events = match client.list_events(
+            &endpoint.slot_id,
+            &endpoint.slot_token,
+            last_event_id.as_deref(),
+            Some(1000),
+        ) {
+            Ok(ev) => ev,
+            Err(e) => {
+                // One endpoint's failure shouldn't kill the whole pull.
+                // The local-relay-down case in particular needs to
+                // gracefully continue against federation.
+                eprintln!(
+                    "wire pull: endpoint {} ({:?}) errored: {}; continuing",
+                    endpoint.relay_url,
+                    endpoint.scope,
+                    crate::relay_client::format_transport_error(&e),
+                );
+                continue;
             }
-            Ok(())
-        })?;
+        };
+        total_seen += events.len();
+        let result = crate::pull::process_events(&events, last_event_id.clone(), &inbox_dir)?;
+        all_written.extend(result.written.iter().cloned());
+        all_rejected.extend(result.rejected.iter().cloned());
+        if result.blocked {
+            all_blocked = true;
+        }
+        // Advance per-endpoint cursor. The cursor key is scope-specific
+        // so federation and local don't trample each other.
+        if let Some(eid) = result.advance_cursor_to.clone() {
+            if endpoint.scope == crate::endpoints::EndpointScope::Federation {
+                all_advance_cursor_to = Some(eid.clone());
+            }
+            let key = cursor_key.clone();
+            config::update_relay_state(|state| {
+                if let Some(self_obj) = state.get_mut("self").and_then(Value::as_object_mut) {
+                    self_obj.insert(key, Value::String(eid));
+                }
+                Ok(())
+            })?;
+        }
     }
+
+    // Compatibility shim for the legacy single-cursor code paths below:
+    // `result` used to come from one process_events call; we now have
+    // per-endpoint results aggregated into the all_* accumulators.
+    // Reconstruct a synthetic result for the remaining display logic.
+    let result = crate::pull::PullResult {
+        written: all_written,
+        rejected: all_rejected,
+        blocked: all_blocked,
+        advance_cursor_to: all_advance_cursor_to,
+    };
+    let events_len = total_seen;
+
+    // Cursor advance happened per-endpoint above; no aggregate cursor
+    // write needed here.
 
     if as_json {
         println!(
@@ -2684,7 +2855,7 @@ fn cmd_pull(as_json: bool) -> Result<()> {
             serde_json::to_string(&json!({
                 "written": result.written,
                 "rejected": result.rejected,
-                "total_seen": events.len(),
+                "total_seen": events_len,
                 "cursor_blocked": result.blocked,
                 "cursor_advanced_to": result.advance_cursor_to,
             }))?
@@ -2698,7 +2869,7 @@ fn cmd_pull(as_json: bool) -> Result<()> {
         if blocking > 0 {
             println!(
                 "pulled {} event(s); wrote {}; rejected {} ({} BLOCKING cursor — see `wire pull --json`)",
-                events.len(),
+                events_len,
                 result.written.len(),
                 result.rejected.len(),
                 blocking,
@@ -2706,13 +2877,24 @@ fn cmd_pull(as_json: bool) -> Result<()> {
         } else {
             println!(
                 "pulled {} event(s); wrote {}; rejected {}",
-                events.len(),
+                events_len,
                 result.written.len(),
                 result.rejected.len(),
             );
         }
     }
     Ok(())
+}
+
+/// v0.5.17: cursor key for an endpoint's per-scope read position.
+/// Federation keeps the v0.5.16 legacy key `last_pulled_event_id` for
+/// back-compat with on-disk relay_state files; local uses a
+/// `_local` suffix.
+fn endpoint_cursor_key(scope: crate::endpoints::EndpointScope) -> String {
+    match scope {
+        crate::endpoints::EndpointScope::Federation => "last_pulled_event_id".to_string(),
+        crate::endpoints::EndpointScope::Local => "last_pulled_event_id_local".to_string(),
+    }
 }
 
 // ---------- rotate-slot ----------
@@ -4134,6 +4316,21 @@ fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Res
     let now = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
+    // v0.5.17: advertise all our endpoints (federation + optional local)
+    // to the peer in the pair_drop body. Back-compat: top-level
+    // relay_url/slot_id/slot_token still point at the federation
+    // endpoint so v0.5.16-and-earlier peers ingest unchanged.
+    let our_relay_state = config::read_relay_state().unwrap_or_else(|_| json!({}));
+    let our_endpoints = crate::endpoints::self_endpoints(&our_relay_state);
+    let mut body = json!({
+        "card": our_card,
+        "relay_url": our_relay,
+        "slot_id": our_slot_id,
+        "slot_token": our_slot_token,
+    });
+    if !our_endpoints.is_empty() {
+        body["endpoints"] = serde_json::to_value(&our_endpoints).unwrap_or(json!([]));
+    }
     let event = json!({
         "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
         "timestamp": now,
@@ -4141,12 +4338,7 @@ fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Res
         "to": peer_did,
         "type": "pair_drop",
         "kind": 1100u32,
-        "body": {
-            "card": our_card,
-            "relay_url": our_relay,
-            "slot_id": our_slot_id,
-            "slot_token": our_slot_token,
-        },
+        "body": body,
     });
     let signed = crate::signing::sign_message_v31(&event, &sk_seed, &pk_bytes, &our_handle)?;
 
@@ -4202,12 +4394,24 @@ fn cmd_add_accept_pending(
 
     // 2. Record peer's relay coords + slot_token (already shipped to us in
     //    the original drop body; held back until now).
+    // v0.5.17: pin all advertised endpoints (federation + optional local).
+    // Falls back to a single federation entry when the record was written
+    // by v0.5.16-era code that didn't carry endpoints[].
     let mut relay_state = config::read_relay_state()?;
-    relay_state["peers"][&pending.peer_handle] = json!({
-        "relay_url": pending.peer_relay_url,
-        "slot_id": pending.peer_slot_id,
-        "slot_token": pending.peer_slot_token,
-    });
+    let endpoints_to_pin = if pending.peer_endpoints.is_empty() {
+        vec![crate::endpoints::Endpoint::federation(
+            pending.peer_relay_url.clone(),
+            pending.peer_slot_id.clone(),
+            pending.peer_slot_token.clone(),
+        )]
+    } else {
+        pending.peer_endpoints.clone()
+    };
+    crate::endpoints::pin_peer_endpoints(
+        &mut relay_state,
+        &pending.peer_handle,
+        &endpoints_to_pin,
+    )?;
     config::write_relay_state(&relay_state)?;
 
     // 3. Ship our slot_token to peer via pair_drop_ack so they can write back.
@@ -4338,9 +4542,18 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
         SessionCommand::New {
             name,
             relay,
+            with_local,
+            local_relay,
             no_daemon,
             json,
-        } => cmd_session_new(name.as_deref(), &relay, no_daemon, json),
+        } => cmd_session_new(
+            name.as_deref(),
+            &relay,
+            with_local,
+            &local_relay,
+            no_daemon,
+            json,
+        ),
         SessionCommand::List { json } => cmd_session_list(json),
         SessionCommand::Env { name, json } => cmd_session_env(name.as_deref(), json),
         SessionCommand::Current { json } => cmd_session_current(json),
@@ -4360,6 +4573,8 @@ fn resolve_session_name(name: Option<&str>) -> Result<String> {
 fn cmd_session_new(
     name_arg: Option<&str>,
     relay: &str,
+    with_local: bool,
+    local_relay: &str,
     no_daemon: bool,
     as_json: bool,
 ) -> Result<()> {
@@ -4452,12 +4667,148 @@ fn cmd_session_new(
         .insert(cwd.to_string_lossy().into_owned(), name.clone());
     crate::session::write_registry(&registry)?;
 
+    // v0.5.17: --with-local probes the local relay and, if it's
+    // reachable, allocates a second slot there. The session's
+    // relay_state.json grows a `self.endpoints[]` array carrying both
+    // endpoints; routing layer (cmd_push) prefers local for sister-
+    // session peers that also have a local slot.
+    if with_local {
+        try_allocate_local_slot(&session_home, &effective_handle, relay, local_relay);
+    }
+
     if !no_daemon {
         ensure_session_daemon(&session_home)?;
     }
 
     let info = render_session_info(&name, &session_home, &cwd)?;
     emit_session_new_result(&info, "created", as_json)
+}
+
+/// v0.5.17: probe the named local relay; if `/healthz` returns ok within
+/// a short timeout, allocate a slot there and update the session's
+/// `relay_state.json` `self.endpoints[]` to advertise both endpoints.
+///
+/// Failure to reach the local relay is NOT fatal — the session stays
+/// federation-only. Logs to stderr on failure so operators can tell
+/// the local relay isn't running, but doesn't abort the bootstrap.
+fn try_allocate_local_slot(
+    session_home: &std::path::Path,
+    handle: &str,
+    federation_relay: &str,
+    local_relay: &str,
+) {
+    // Probe healthz with a tight timeout. Use a fresh client (don't
+    // share the daemon-wide one) so the timeout is local to this call.
+    let probe = match crate::relay_client::build_blocking_client(Some(
+        std::time::Duration::from_millis(500),
+    )) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("wire session new: cannot build probe client for {local_relay}: {e:#}");
+            return;
+        }
+    };
+    let healthz_url = format!("{}/healthz", local_relay.trim_end_matches('/'));
+    match probe.get(&healthz_url).send() {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => {
+            eprintln!(
+                "wire session new: local relay probe at {healthz_url} returned {} — staying federation-only",
+                resp.status()
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!(
+                "wire session new: local relay at {local_relay} unreachable ({}) — staying federation-only. \
+                 Start one with `wire relay-server --bind 127.0.0.1:8771 --local-only`.",
+                crate::relay_client::format_transport_error(&anyhow::Error::new(e))
+            );
+            return;
+        }
+    };
+
+    // Allocate a slot on the local relay.
+    let local_client = crate::relay_client::RelayClient::new(local_relay);
+    let alloc = match local_client.allocate_slot(Some(handle)) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!(
+                "wire session new: local relay slot allocation failed: {e:#} — staying federation-only"
+            );
+            return;
+        }
+    };
+
+    // Merge into the session's relay_state.json. We invoke wire via
+    // run_wire_with_home for federation calls (subprocess isolation),
+    // but the relay_state.json is a simple file we can edit directly
+    // — and need to, because there's no `wire bind-relay --add-local`
+    // command yet (could add later; out of scope for v0.5.17 MVP).
+    let state_path = session_home
+        .join("config")
+        .join("wire")
+        .join("relay-state.json");
+    let mut state: serde_json::Value = std::fs::read(&state_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    // Read the existing federation self info (already written by
+    // `wire init` + `wire bind-relay` path during session bootstrap).
+    let fed_endpoint = state
+        .get("self")
+        .and_then(|s| {
+            let url = s.get("relay_url").and_then(serde_json::Value::as_str)?;
+            let slot_id = s.get("slot_id").and_then(serde_json::Value::as_str)?;
+            let slot_token = s.get("slot_token").and_then(serde_json::Value::as_str)?;
+            Some(crate::endpoints::Endpoint::federation(
+                url.to_string(),
+                slot_id.to_string(),
+                slot_token.to_string(),
+            ))
+        });
+
+    let local_endpoint = crate::endpoints::Endpoint::local(
+        local_relay.trim_end_matches('/').to_string(),
+        alloc.slot_id.clone(),
+        alloc.slot_token.clone(),
+    );
+
+    let mut endpoints: Vec<crate::endpoints::Endpoint> = Vec::new();
+    if let Some(f) = fed_endpoint.clone() {
+        endpoints.push(f);
+    }
+    endpoints.push(local_endpoint);
+
+    let self_obj = state
+        .as_object_mut()
+        .expect("relay_state root is an object")
+        .entry("self")
+        .or_insert_with(|| {
+            serde_json::json!({
+                "relay_url": federation_relay,
+            })
+        });
+    if let Some(obj) = self_obj.as_object_mut() {
+        obj.insert(
+            "endpoints".into(),
+            serde_json::to_value(&endpoints).unwrap_or(serde_json::Value::Null),
+        );
+    }
+
+    if let Err(e) = std::fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&state).unwrap_or_default(),
+    ) {
+        eprintln!(
+            "wire session new: persisting dual-slot relay_state at {state_path:?} failed: {e}"
+        );
+        return;
+    }
+    eprintln!(
+        "wire session new: local slot allocated on {local_relay} (slot_id={})",
+        alloc.slot_id
+    );
 }
 
 fn render_session_info(
