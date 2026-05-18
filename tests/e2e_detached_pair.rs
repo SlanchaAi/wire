@@ -225,22 +225,29 @@ async fn detached_pair_full_e2e_with_real_daemons() {
         .success()
     );
 
-    // Push outbox + pull inbox via explicit cycles (daemon also does this on
-    // its own ticks, but explicit cycles make the test deterministic without
-    // waiting on the daemon's 1s interval).
+    // Push outbox + pull inbox via explicit cycles. The willard daemon is
+    // also running with --interval 1, so it races the CLI pull: when the
+    // daemon wins, the explicit `wire pull` finds the event already in
+    // willard's inbox and dedupes it as `rejected` with reason
+    // "duplicate event_id already in inbox", leaving `written` empty.
+    // That's correct behavior (idempotent dedup), so we don't assert on
+    // `written.len()` — `wire tail` is the user-visible source of truth
+    // and works regardless of which path put the event in the inbox.
     assert!(wire(&paul, &["push", "--json"]).status.success());
-    let pull_out = wire(&willard, &["pull", "--json"]);
-    assert!(pull_out.status.success());
-    let pull: Value = serde_json::from_slice(&pull_out.stdout).unwrap_or_default();
-    let written = pull["written"]
-        .as_array()
-        .map(|a| a.len())
-        .unwrap_or_default();
-    assert!(written >= 1, "willard should have pulled at least 1 event");
+    assert!(wire(&willard, &["pull", "--json"]).status.success());
 
-    // Verify it shows up in tail.
-    let tail_out = wire(&willard, &["tail"]);
-    let tail_str = String::from_utf8_lossy(&tail_out.stdout);
+    // Verify it shows up in tail. Allow a couple of retries to absorb the
+    // daemon's tick: if the CLI pull deduped against an in-flight daemon
+    // write, the inbox file may briefly be open for append.
+    let mut tail_str = String::new();
+    for _ in 0..10 {
+        let tail_out = wire(&willard, &["tail"]);
+        tail_str = String::from_utf8_lossy(&tail_out.stdout).into_owned();
+        if tail_str.contains("hello from detached e2e") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
     assert!(
         tail_str.contains("hello from detached e2e"),
         "willard tail must contain the sent event, got: {tail_str}"
