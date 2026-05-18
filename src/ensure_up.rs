@@ -124,6 +124,81 @@ fn pid_file(name: &str) -> Result<PathBuf> {
     Ok(crate::config::state_dir()?.join(format!("{name}.pid")))
 }
 
+/// Snapshot of daemon liveness state read through ONE consistent
+/// view. Consumed by `wire status`, `wire doctor`'s `daemon` check,
+/// and `daemon_pid_consistency` so all three surfaces agree by
+/// construction — issue #2 root cause was three call sites that
+/// each computed liveness independently and disagreed for 25 min.
+#[derive(Debug, Clone)]
+pub struct DaemonLiveness {
+    /// PID claimed by `daemon.pid` (None if missing/corrupt).
+    pub pidfile_pid: Option<u32>,
+    /// True iff `pidfile_pid` is currently a live process.
+    pub pidfile_alive: bool,
+    /// Every PID matching `pgrep -f "wire daemon"`. Empty if pgrep is
+    /// unavailable (non-Unix systems, missing util) — the consumer
+    /// must not treat empty as "no daemons" without considering this.
+    pub pgrep_pids: Vec<u32>,
+    /// PIDs in `pgrep_pids` that do NOT match `pidfile_pid`. These are
+    /// orphan daemons racing the cursor with the pidfile-recorded one.
+    pub orphan_pids: Vec<u32>,
+    /// Full parsed pidfile record (Json / LegacyInt / Missing / Corrupt).
+    pub record: PidRecord,
+}
+
+/// True iff `pid` is currently a live OS process. Linux: `/proc/<pid>`.
+/// Other Unix: `kill -0`. Returns false on any error.
+pub fn pid_is_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+}
+
+/// Read the daemon pid file + pgrep in one shot, producing a snapshot
+/// every caller can interpret identically. The point of this helper
+/// is that three independent callers used to compute liveness three
+/// different ways (#2): pidfile-pid-alive (cmd_status), pgrep-only
+/// (early check_daemon_health), neither (check_daemon_pid_consistency).
+/// Now all three flow through the same `DaemonLiveness`.
+pub fn daemon_liveness() -> DaemonLiveness {
+    let record = read_pid_record("daemon");
+    let pidfile_pid = record.pid();
+    let pidfile_alive = pidfile_pid.map(pid_is_alive).unwrap_or(false);
+    let pgrep_pids: Vec<u32> = std::process::Command::new("pgrep")
+        .args(["-f", "wire daemon"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .filter_map(|s| s.parse::<u32>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let orphan_pids: Vec<u32> = pgrep_pids
+        .iter()
+        .filter(|p| Some(**p) != pidfile_pid)
+        .copied()
+        .collect();
+    DaemonLiveness {
+        pidfile_pid,
+        pidfile_alive,
+        pgrep_pids,
+        orphan_pids,
+        record,
+    }
+}
+
 /// Read a pid file, tolerating both JSON and legacy-int forms. Never
 /// panics — corrupt input becomes `PidRecord::Corrupt`.
 pub fn read_pid_record(name: &str) -> PidRecord {

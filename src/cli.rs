@@ -1212,58 +1212,19 @@ fn cmd_status(as_json: bool) -> Result<()> {
         summary["outbox"] = json!(scan_jsonl_dir(&outbox)?);
         summary["inbox"] = json!(scan_jsonl_dir(&inbox)?);
 
-        // P1.7 (0.5.11): daemon liveness now consults the structured
-        // pidfile (P0.4) AND `pgrep -f "wire daemon"` to detect orphans
-        // that the pidfile didn't record. Today's debug had a 4-day-old
-        // 0.2.4 daemon (PID 54017) running while the pidfile pointed at
-        // an unrelated dead PID — wire status said `daemon: DOWN` while
-        // the box was actually full of stale-daemon-eating-events
-        // behaviour. Catch THAT class here.
-        let record = crate::ensure_up::read_pid_record("daemon");
-        let pidfile_pid = record.pid();
-        let pidfile_alive = pidfile_pid
-            .map(|pid| {
-                #[cfg(target_os = "linux")]
-                {
-                    std::path::Path::new(&format!("/proc/{pid}")).exists()
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    std::process::Command::new("kill")
-                        .args(["-0", &pid.to_string()])
-                        .output()
-                        .map(|o| o.status.success())
-                        .unwrap_or(false)
-                }
-            })
-            .unwrap_or(false);
-
-        // Cross-check with pgrep — surfaces orphan daemons not in pidfile.
-        let pgrep_pids: Vec<u32> = std::process::Command::new("pgrep")
-            .args(["-f", "wire daemon"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .split_whitespace()
-                    .filter_map(|s| s.parse::<u32>().ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let orphan_pids: Vec<u32> = pgrep_pids
-            .iter()
-            .filter(|p| Some(**p) != pidfile_pid)
-            .copied()
-            .collect();
-
+        // v0.5.19: liveness snapshot through a single helper so this
+        // surface and `wire doctor` agree by construction. Issue #2:
+        // doctor PASSed while status said DOWN for 25 min because each
+        // computed liveness independently. ensure_up::daemon_liveness
+        // is the only path now.
+        let snap = crate::ensure_up::daemon_liveness();
         let mut daemon = json!({
-            "running": pidfile_alive,
-            "pid": pidfile_pid,
-            "all_running_pids": pgrep_pids,
-            "orphans": orphan_pids,
+            "running": snap.pidfile_alive,
+            "pid": snap.pidfile_pid,
+            "all_running_pids": snap.pgrep_pids,
+            "orphans": snap.orphan_pids,
         });
-        if let crate::ensure_up::PidRecord::Json(d) = &record {
+        if let crate::ensure_up::PidRecord::Json(d) = &snap.record {
             daemon["version"] = json!(d.version);
             daemon["bin_path"] = json!(d.bin_path);
             daemon["did"] = json!(d.did);
@@ -1276,7 +1237,7 @@ fn cmd_status(as_json: bool) -> Result<()> {
                     "cli": env!("CARGO_PKG_VERSION"),
                 });
             }
-        } else if matches!(record, crate::ensure_up::PidRecord::LegacyInt(_)) {
+        } else if matches!(snap.record, crate::ensure_up::PidRecord::LegacyInt(_)) {
             daemon["pidfile_form"] = json!("legacy-int");
             daemon["version_mismatch"] = json!({
                 "daemon": "<pre-0.5.11>",
@@ -5516,42 +5477,15 @@ fn cmd_doctor(as_json: bool, recent_rejections: usize) -> Result<()> {
 /// pid-file claims daemon down while a process is actually up.
 fn check_daemon_health() -> DoctorCheck {
     // v0.5.13 (issue #2 bug A): doctor PASSed on orphan-only state while
-    // `wire status` reported DOWN, disagreeing for 25 min. Doctor used
-    // pgrep alone; status cross-checked the pidfile. Doctor now consults
-    // BOTH so the two surfaces never disagree.
-    let output = std::process::Command::new("pgrep")
-        .args(["-f", "wire daemon"])
-        .output();
-    let pgrep_pids: Vec<u32> = match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .split_whitespace()
-            .filter_map(|s| s.parse::<u32>().ok())
-            .collect(),
-        _ => Vec::new(),
-    };
-    let pidfile_pid = crate::ensure_up::read_pid_record("daemon").pid();
-    // Is the pidfile-claimed daemon actually alive?
-    let pidfile_alive = pidfile_pid
-        .map(|pid| {
-            #[cfg(target_os = "linux")]
-            {
-                std::path::Path::new(&format!("/proc/{pid}")).exists()
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                std::process::Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-            }
-        })
-        .unwrap_or(false);
-    let orphan_pids: Vec<u32> = pgrep_pids
-        .iter()
-        .filter(|p| Some(**p) != pidfile_pid)
-        .copied()
-        .collect();
+    // `wire status` reported DOWN, disagreeing for 25 min. v0.5.19 (#2
+    // hardening): every surface routes through ensure_up::daemon_liveness
+    // so they share one view of the world. No more parallel liveness
+    // logic to drift out of sync.
+    let snap = crate::ensure_up::daemon_liveness();
+    let pgrep_pids = &snap.pgrep_pids;
+    let pidfile_pid = snap.pidfile_pid;
+    let pidfile_alive = snap.pidfile_alive;
+    let orphan_pids = &snap.orphan_pids;
 
     let fmt_pids = |xs: &[u32]| -> String {
         xs.iter()
@@ -5619,9 +5553,15 @@ fn check_daemon_health() -> DoctorCheck {
 /// memory under a current symlink — today's exact bug class), schema
 /// drift (future format bumps), and identity contamination (daemon's
 /// recorded DID doesn't match this box's configured DID).
+///
+/// v0.5.19 (#2 hardening): also surfaces stale pidfiles — a well-formed
+/// JSON pid record whose recorded `pid` is no longer a live OS process.
+/// Pre-hardening this check PASSed in that state (it only validated
+/// content, not liveness), letting `wire status: DOWN` and
+/// `wire doctor: PASS` disagree for 25 min in incident #2.
 fn check_daemon_pid_consistency() -> DoctorCheck {
-    let record = crate::ensure_up::read_pid_record("daemon");
-    match record {
+    let snap = crate::ensure_up::daemon_liveness();
+    match &snap.record {
         crate::ensure_up::PidRecord::Missing => DoctorCheck::pass(
             "daemon_pid_consistency",
             "no daemon.pid yet — fresh box or daemon never started",
@@ -5631,15 +5571,48 @@ fn check_daemon_pid_consistency() -> DoctorCheck {
             format!("daemon.pid is corrupt: {reason}"),
             "delete state/wire/daemon.pid; next `wire daemon &` will rewrite",
         ),
-        crate::ensure_up::PidRecord::LegacyInt(pid) => DoctorCheck::warn(
-            "daemon_pid_consistency",
-            format!(
-                "daemon.pid is legacy-int form (pid={pid}, no version/bin_path metadata). \
-                 Daemon was started by a pre-0.5.11 binary."
-            ),
-            "run `wire upgrade` to kill the old daemon and start a fresh one with the JSON pidfile",
-        ),
+        crate::ensure_up::PidRecord::LegacyInt(pid) => {
+            // Legacy pidfile: still surface liveness so a dead legacy pid
+            // doesn't quietly PASS this check while status says DOWN.
+            let pid = *pid;
+            if !crate::ensure_up::pid_is_alive(pid) {
+                return DoctorCheck::warn(
+                    "daemon_pid_consistency",
+                    format!(
+                        "daemon.pid (legacy-int) points at pid {pid} which is not running. \
+                         Stale pidfile from a crashed pre-0.5.11 daemon. \
+                         (Issue #2: this surface used to PASS while `wire status` said DOWN.)"
+                    ),
+                    "`wire upgrade` (kills any orphan + spawns a fresh daemon with JSON pidfile)",
+                );
+            }
+            DoctorCheck::warn(
+                "daemon_pid_consistency",
+                format!(
+                    "daemon.pid is legacy-int form (pid={pid}, no version/bin_path metadata). \
+                     Daemon was started by a pre-0.5.11 binary."
+                ),
+                "run `wire upgrade` to kill the old daemon and start a fresh one with the JSON pidfile",
+            )
+        }
         crate::ensure_up::PidRecord::Json(d) => {
+            // v0.5.19 liveness gate: if the recorded pid is dead, the
+            // pidfile is stale and the rest of the content drift checks
+            // are moot — `wire upgrade` is the answer regardless.
+            if !snap.pidfile_alive {
+                return DoctorCheck::warn(
+                    "daemon_pid_consistency",
+                    format!(
+                        "daemon.pid records pid {pid} (v{version}) but that process is not running — \
+                         pidfile is stale. `wire status` will report DOWN, but pre-v0.5.19 doctor \
+                         silently PASSed this state and ignored any live orphan daemons (#2 root cause).",
+                        pid = d.pid,
+                        version = d.version,
+                    ),
+                    "`wire upgrade` to clean up the stale pidfile + spawn a fresh daemon \
+                     (kills any orphan daemon advancing the cursor without coordination)",
+                );
+            }
             let mut issues: Vec<String> = Vec::new();
             if d.schema != crate::ensure_up::DAEMON_PID_SCHEMA {
                 issues.push(format!(

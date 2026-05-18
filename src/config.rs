@@ -96,9 +96,20 @@ fn outbox_lock(path: &Path) -> Arc<Mutex<()>> {
 /// `record_bytes` should be the full canonical JSON of the signed event,
 /// without trailing newline (the helper appends it). All bytes are written
 /// in one `write_all` while the lock is held.
+///
+/// The `peer` arg is normalized to its bare handle (`bob@relay.example` →
+/// `bob`) so the outbox filename is always `<bare_handle>.jsonl`. This is
+/// the canonical form the push enumerator and daemon reader expect; the
+/// normalization at this chokepoint guarantees correctness for every
+/// future caller, even if they forget to `bare_handle()` first. The
+/// original silent-fail of v0.5.11 was a caller that passed the FQDN
+/// form (issue #2 — 25-minute message-loss incident, surface fix in
+/// v0.5.13). This defense-in-depth makes the on-disk contract self-
+/// enforcing instead of caller-policed.
 pub fn append_outbox_record(peer: &str, record_bytes: &[u8]) -> Result<PathBuf> {
     ensure_dirs()?;
-    let path = outbox_dir()?.join(format!("{peer}.jsonl"));
+    let normalized = crate::agent_card::bare_handle(peer);
+    let path = outbox_dir()?.join(format!("{normalized}.jsonl"));
     let lock = outbox_lock(&path);
     let _g = lock.lock().expect("outbox per-path mutex poisoned");
     let mut f = fs::OpenOptions::new()
@@ -448,6 +459,36 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn append_outbox_record_normalizes_fqdn_to_bare_handle() {
+        // Regression for issue #2 (v0.5.11 silent-fail): if a caller
+        // passes the FQDN form (`bob@relay.example`), the file MUST
+        // still land at `bob.jsonl` so `wire push` enumerates it.
+        with_temp_home(|| {
+            let path_fqdn = append_outbox_record(
+                "bob@wireup.net",
+                b"{\"kind\":1100}",
+            )
+            .unwrap();
+            let path_bare = append_outbox_record("bob", b"{\"kind\":1100}").unwrap();
+            // Both calls must land in the SAME file — the bare handle one.
+            assert_eq!(path_fqdn, path_bare, "FQDN form should normalize to bare");
+            assert!(
+                path_fqdn.file_name().unwrap().to_string_lossy() == "bob.jsonl",
+                "expected bob.jsonl, got {path_fqdn:?}"
+            );
+            // And the FQDN-named file MUST NOT exist.
+            let outbox = outbox_dir().unwrap();
+            assert!(
+                !outbox.join("bob@wireup.net.jsonl").exists(),
+                "FQDN-named file must not be created"
+            );
+            // The bare file should have BOTH writes.
+            let body = std::fs::read_to_string(&path_bare).unwrap();
+            assert_eq!(body.matches("kind").count(), 2, "got: {body}");
+        });
+    }
+
     #[test]
     fn private_key_is_mode_0600() {
         use std::os::unix::fs::PermissionsExt;
