@@ -271,6 +271,27 @@ fn pair_reject_deletes_pending_inbound_v0_5_14() {
 }
 
 #[test]
+fn pair_accept_errors_cleanly_when_no_pending_request_v0_5_14() {
+    // `wire pair-accept <peer>` must fail loudly when there's no pending-
+    // inbound record for that peer — never silently succeed. The error
+    // must point the operator at wire pair-list-inbound + wire add as
+    // the correct paths instead.
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul"]);
+    let out = run(&home, &["pair-accept", "ghost"]);
+    assert!(!out.status.success(), "expected failure: {:?}", out);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("no pending pair request from ghost"),
+        "stderr should explain the missing record: {stderr}"
+    );
+    assert!(
+        stderr.contains("wire pair-list-inbound") || stderr.contains("wire add"),
+        "stderr should hint at the right command: {stderr}"
+    );
+}
+
+#[test]
 fn pair_reject_idempotent_on_missing_peer_v0_5_14() {
     // No-op reject for an unknown peer returns success with rejected=false,
     // not an error. This keeps operator scripts simple.

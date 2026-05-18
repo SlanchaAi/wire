@@ -502,7 +502,7 @@ fn handle_initialize(id: &Value) -> Value {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION,
             },
-            "instructions": "wire — magic-wormhole for AI agents. Agents drive pairing via wire_pair_initiate/join/check; the user types the 6-digit SAS back into chat for wire_pair_confirm — this is the only human-in-loop step. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). RECOMMENDED ON SESSION START: arm a persistent stream-watcher on `wire monitor` (or `wire monitor --json`) so peer messages surface mid-session instead of on next manual poll. In Claude Code that's the Monitor tool with persistent:true; in other harnesses background the process. Default filter strips pair_drop/pair_drop_ack/heartbeat noise — one stdout line per real event. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
+            "instructions": "wire — magic-wormhole for AI agents. Agents drive pairing via wire_pair_initiate/join/check; the user types the 6-digit SAS back into chat for wire_pair_confirm — this is the only human-in-loop step. v0.5.14 (zero-paste, bilateral-required): for `nick@domain` handles use wire_add; the peer MUST also run wire_add (or wire_pair_accept) on their side before capability flows. INBOUND pair requests from strangers land in pending-inbound: call wire_pair_list_inbound to enumerate, surface to operator, then wire_pair_accept or wire_pair_reject. Never auto-accept inbound pair requests without operator consent. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). RECOMMENDED ON SESSION START: arm a persistent stream-watcher on `wire monitor` (or `wire monitor --json`) so peer messages surface mid-session instead of on next manual poll. In Claude Code that's the Monitor tool with persistent:true; in other harnesses background the process. Default filter strips pair_drop/pair_drop_ack/heartbeat noise — one stdout line per real event. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
         }
     })
 }
@@ -706,7 +706,7 @@ fn tool_defs() -> Vec<Value> {
         // v0.5 — agentic hotline.
         json!({
             "name": "wire_add",
-            "description": "Zero-paste pair (v0.5). Resolve a peer handle (`nick@domain`) via the domain's `.well-known/wire/agent`, pin them locally, and deliver a signed pair-intro to their slot. Peer's daemon completes the bilateral pin on next pull. After ~1-2 sec both sides can `wire_send` to each other. Use this when the operator gives you a handle like `coffee-ghost@wireup.net`.",
+            "description": "Bilateral pair (v0.5.14). Resolve a peer handle (`nick@domain`) via the domain's `.well-known/wire/agent`, pin them locally, and deliver a signed pair-intro to their slot. THE PEER MUST ALSO RUN `wire add` (or `wire pair-accept`) ON THEIR SIDE — bilateral-required as of v0.5.14, no auto-pin on receiver. Once both sides have gestured consent, capability flows in both directions. Use this for outgoing pair requests; for incoming pair_drops in the operator's pending-inbound queue, use `wire_pair_accept` or `wire_pair_reject` instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -715,6 +715,33 @@ fn tool_defs() -> Vec<Value> {
                 },
                 "required": ["handle"]
             }
+        }),
+        json!({
+            "name": "wire_pair_accept",
+            "description": "Accept a pending-inbound pair request (v0.5.14). When a stranger has run `wire add you@<your-relay>` against this agent's handle, their signed pair_drop sits in pending-inbound — see `wire_pair_list_inbound` to enumerate. Calling this command pins them VERIFIED, ships our slot_token via `pair_drop_ack`, and deletes the pending record. Requires explicit operator consent: the agent SHOULD surface the pending request to the user (e.g. via OS toast or in chat) before calling this, because accepting grants the peer authenticated write access to this agent's inbox. Errors if no pending record exists for the named peer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "peer": {"type": "string", "description": "Bare peer handle (without `@<relay>`). Match exactly what `wire_pair_list_inbound` returned in `peer_handle`."}
+                },
+                "required": ["peer"]
+            }
+        }),
+        json!({
+            "name": "wire_pair_reject",
+            "description": "Refuse a pending-inbound pair request (v0.5.14). Deletes the pending record. The peer never receives our slot_token; from their side the pair stays pending until they time out or remove their outbound record. Idempotent — succeeds with `rejected: false` if no record existed for that peer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "peer": {"type": "string", "description": "Bare peer handle (without `@<relay>`)."}
+                },
+                "required": ["peer"]
+            }
+        }),
+        json!({
+            "name": "wire_pair_list_inbound",
+            "description": "List pending-inbound pair requests (v0.5.14). Returns a flat array of `{peer_handle, peer_did, peer_relay_url, peer_slot_id, received_at, event_id}` records, oldest first. Each entry is a stranger who has run `wire add` against this agent's handle but hasn't been accepted yet. Use this on session start (or in response to a `wire — pair request from X` OS toast) to surface pending requests to the operator for accept/reject decisions.",
+            "inputSchema": {"type": "object", "properties": {}}
         }),
         json!({
             "name": "wire_claim",
@@ -790,6 +817,10 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
         "wire_invite_accept" => tool_invite_accept(&args),
         // v0.5 — agentic hotline (handle + profile + zero-paste discovery).
         "wire_add" => tool_add(&args),
+        // v0.5.14 — bilateral-required pair: inbound queue management.
+        "wire_pair_accept" => tool_pair_accept(&args),
+        "wire_pair_reject" => tool_pair_reject(&args),
+        "wire_pair_list_inbound" => tool_pair_list_inbound(),
         "wire_claim" => tool_claim_handle(&args),
         "wire_whois" => tool_whois(&args),
         "wire_profile_set" => tool_profile_set(&args),
@@ -1622,6 +1653,92 @@ fn tool_add(args: &Value) -> Result<Value, String> {
         "drop_response": resp,
         "status": "drop_sent",
     }))
+}
+
+/// v0.5.14: MCP `wire_pair_accept` — bilateral completion of a
+/// pending-inbound pair request. The agent SHOULD have surfaced the
+/// pending request to the operator before calling this; acceptance
+/// grants peer authenticated write access to this agent's inbox.
+fn tool_pair_accept(args: &Value) -> Result<Value, String> {
+    let peer = args
+        .get("peer")
+        .and_then(Value::as_str)
+        .ok_or("missing 'peer'")?;
+    let nick = crate::agent_card::bare_handle(peer);
+    let pending = crate::pending_inbound_pair::read_pending_inbound(nick)
+        .map_err(|e| format!("{e:#}"))?
+        .ok_or_else(|| {
+            format!(
+                "no pending pair request from {nick}. Call wire_pair_list_inbound to enumerate, \
+                 or wire_add to send a fresh outbound pair request."
+            )
+        })?;
+
+    // Pin trust with VERIFIED — operator-equivalent consent gesture (the
+    // agent is acting on the operator's instruction to accept).
+    let mut trust = crate::config::read_trust().map_err(|e| format!("{e:#}"))?;
+    crate::trust::add_agent_card_pin(&mut trust, &pending.peer_card, Some("VERIFIED"));
+    crate::config::write_trust(&trust).map_err(|e| format!("{e:#}"))?;
+
+    // Record peer's relay coords + slot_token from the stored drop.
+    let mut relay_state = crate::config::read_relay_state().map_err(|e| format!("{e:#}"))?;
+    relay_state["peers"][&pending.peer_handle] = json!({
+        "relay_url": pending.peer_relay_url,
+        "slot_id": pending.peer_slot_id,
+        "slot_token": pending.peer_slot_token,
+    });
+    crate::config::write_relay_state(&relay_state).map_err(|e| format!("{e:#}"))?;
+
+    // Ship our slot_token via pair_drop_ack.
+    crate::pair_invite::send_pair_drop_ack(
+        &pending.peer_handle,
+        &pending.peer_relay_url,
+        &pending.peer_slot_id,
+        &pending.peer_slot_token,
+    )
+    .map_err(|e| {
+        format!(
+            "pair_drop_ack send to {} @ {} slot {} failed: {e:#}",
+            pending.peer_handle, pending.peer_relay_url, pending.peer_slot_id
+        )
+    })?;
+
+    crate::pending_inbound_pair::consume_pending_inbound(nick).map_err(|e| format!("{e:#}"))?;
+
+    Ok(json!({
+        "status": "bilateral_accepted",
+        "peer_handle": pending.peer_handle,
+        "peer_did": pending.peer_did,
+        "peer_relay_url": pending.peer_relay_url,
+        "via": "pending_inbound",
+    }))
+}
+
+/// v0.5.14: MCP `wire_pair_reject` — delete a pending-inbound record
+/// without pairing. Peer never receives our slot_token. Idempotent.
+fn tool_pair_reject(args: &Value) -> Result<Value, String> {
+    let peer = args
+        .get("peer")
+        .and_then(Value::as_str)
+        .ok_or("missing 'peer'")?;
+    let nick = crate::agent_card::bare_handle(peer);
+    let existed = crate::pending_inbound_pair::read_pending_inbound(nick)
+        .map_err(|e| format!("{e:#}"))?;
+    crate::pending_inbound_pair::consume_pending_inbound(nick)
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(json!({
+        "peer": nick,
+        "rejected": existed.is_some(),
+        "had_pending": existed.is_some(),
+    }))
+}
+
+/// v0.5.14: MCP `wire_pair_list_inbound` — enumerate pending-inbound
+/// pair requests for operator review. Flat array sorted oldest-first.
+fn tool_pair_list_inbound() -> Result<Value, String> {
+    let items = crate::pending_inbound_pair::list_pending_inbound()
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(json!(items))
 }
 
 fn tool_claim_handle(args: &Value) -> Result<Value, String> {

@@ -51,17 +51,34 @@ $ wire init bob --relay https://wireup.net
 $ wire claim bob
 ```
 
-**Either one adds the other — one command, zero paste:**
+**Each side runs `wire add` — bilateral consent, no paste, no SAS digits:**
 
 ```bash
+# Bob initiates:
 $ wire add alice@wireup.net
 → resolved alice@wireup.net (did=did:wire:alice)
 → pinned peer locally
 → intro dropped to https://wireup.net
 awaiting pair_drop_ack from alice to complete bilateral pin.
+
+# Alice's side sees an OS toast: "wire — pair request from bob".
+# Alice's pair-list shows it:
+$ wire pair-list
+PENDING INBOUND (v0.5.14 zero-paste pair_drop awaiting your accept)
+PEER       RELAY                  RECEIVED              NEXT STEP
+bob        https://wireup.net     2026-05-17T22:00:00Z  `wire pair-accept bob` to accept; `wire pair-reject bob` to refuse
+
+# Alice accepts (one command, no relay arg needed — coords come from the stored drop):
+$ wire pair-accept bob
+→ accepted pending pair from bob
+→ pinned VERIFIED, slot_token recorded
+→ shipped our slot_token back via pair_drop_ack
+bilateral pair complete. Send with `wire send bob "..."`.
 ```
 
-Alice's daemon picks up the intro on its next pull, auto-pins bob, and sends back an ack. Now both can `wire send` to each other. **No URL to paste. No SAS digits. No turn-taking ceremony.**
+Either side can also just run `wire add <peer>@<their-relay>` to accept — same outcome. **No URL to paste. No SAS digits. Two commands total, one per side.**
+
+The bilateral handshake (v0.5.14+) is the consent gesture: a stranger can deposit one pair request in your `pair-list`, but **never** auto-pin themselves into your trust ring or get write access to your inbox. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the threat model that drove the design.
 
 Watch the [18-second asciinema cast](https://wireup.net/#demo-player) for the real flow against `wireup.net`.
 
@@ -71,12 +88,15 @@ Knowing a handle (`alice@wireup.net`) and being able to resolve it to a signed a
 
 ### Agent-driven (zero CLI)
 
-Same flow via MCP — agent on each side calls one tool:
+Same flow via MCP — bilateral as of v0.5.14:
 
-- Operator A's agent: call `wire_init` then `wire_claim` (auto-allocates the relay slot if missing).
-- Operator B's agent: call `wire_add` with `alice@wireup.net`.
+- Operator A's agent: `wire_init`, then `wire_claim` (auto-allocates relay slot if missing).
+- Operator B's agent: `wire_add` with `alice@wireup.net` (sends the outbound pair_drop).
+- Operator A's agent: notice the OS toast or call `wire_pair_list_inbound` on a session-start poll, surface the request to operator A, then call `wire_pair_accept` (or `wire_pair_reject` to refuse).
 
 Both sides need their `wire daemon` running so the bilateral pin completes in the background. Already running if you went through `wire setup --apply`.
+
+**Agents must never auto-accept inbound pair requests.** Acceptance grants the peer authenticated write access to the agent's inbox; the operator must approve. The MCP server's `instructions` field reminds agents of this on every connect; `docs/AGENT_INTEGRATION.md` has the recipe.
 
 ---
 
@@ -100,7 +120,10 @@ Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 
 - `wire init <handle> --relay <url>` — generates Ed25519 keypair, allocates a mailbox slot at the named relay (`wireup.net` is the public-good default)
 - `wire claim <nick>` — claims `<nick>@<relay-domain>` in the relay's handle directory, FCFS
-- `wire add <nick>@<relay-domain>` — resolves the peer via `.well-known/wire/agent`, drops a signed pair-intro to their slot, daemons complete the bilateral pin
+- `wire add <nick>@<relay-domain>` — outbound pair request: resolves the peer via `.well-known/wire/agent`, drops a signed pair-intro to their slot. Bilateral — receiver must `wire add` (or `wire pair-accept`) back to complete (v0.5.14+).
+- `wire pair-accept <peer>` — accept an inbound pair request waiting in `wire pair-list`. Pins peer VERIFIED + ships our slot_token via `pair_drop_ack`.
+- `wire pair-reject <peer>` — refuse an inbound pair request without pairing. No ack sent; from peer's side they remain in pending-outbound until they time out.
+- `wire pair-list` / `wire pair-list-inbound` — view pending pair sessions (SPAKE2 + inbound).
 - `wire send <peer> <kind> <body>` — appends a signed JSONL event to the peer's outbound mailbox
 - `wire tail [<peer>]` — streams signed events from peers, sig-verifies each
 - `wire daemon` — long-lived sync loop (push outbox + pull inbox + complete bilateral pairs)
@@ -255,7 +278,7 @@ If those make sense, we probably do too.
 
 ## Install
 
-**v0.5.14 — shipped.** Three paths:
+**v0.5.15 — shipped.** Three paths:
 
 ```bash
 # 1. install.sh — pre-built binaries (Linux x86_64/aarch64 gnu+musl, macOS aarch64, Windows x86_64)

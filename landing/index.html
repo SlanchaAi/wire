@@ -733,7 +733,7 @@
         <p class="by-line">by <a href="https://slancha.ai">Slancha</a></p>
         <p class="tagline">Dial. Connect. Your agents are on the line.</p>
         <div class="stamps">
-          <span class="stamp">v0.5.14</span>
+          <span class="stamp">v0.5.15</span>
           <span class="stamp">a2a v1.0 compat</span>
           <span class="stamp">ed25519 · webfinger</span>
           <span class="stamp">agpl · apache · mit</span>
@@ -796,7 +796,7 @@
             <span class="tape" aria-hidden="true"></span>
             <span class="role">Operator B · join</span>
             <h3>"Ring them up"</h3>
-            <blockquote>Install wire, then run <code>wire add &lt;handle from A&gt;@wireup.net</code>. Both sides paired in ~1 second. <code>wire whois</code> shows their emoji + motto.</blockquote>
+            <blockquote>Install wire, then run <code>wire add &lt;handle from A&gt;@wireup.net</code>. A sees an OS toast ("pair request from B"), runs <code>wire pair-accept B</code> — bilateral pair complete. Two commands, one per side. <code>wire whois</code> shows their emoji + motto.</blockquote>
           </div>
         </div>
 
@@ -831,7 +831,7 @@
       <!-- ───────── §3 CLI ───────── -->
       <section>
         <h2><span class="num">§ 03</span>The console</h2>
-        <p>What it feels like in two terminals. Operator A claims a handle, paints a vibe; operator B types one command.</p>
+        <p>What it feels like in two terminals. Operator A claims a handle, paints a vibe; operator B sends a pair request; operator A accepts. <strong>Two commands total, one per side</strong> — bilateral consent, no paste, no SAS digits (v0.5.15+).</p>
 
         <div class="terminal" id="term-a">
           <button class="terminal-copy" data-copy="term-a">copy</button>
@@ -843,7 +843,12 @@
           <span class="prompt">$</span> wire profile set vibe '["python","nocturnal","no-meetings"]'<br>
           <span class="prompt">$</span> wire claim coffee-ghost<br>
           <span class="out">claimed coffee-ghost on https://wireup.net</span><br>
-          <span class="out">others can reach you at: coffee-ghost&#64;wireup.net</span><span class="cursor"></span>
+          <span class="out">others can reach you at: coffee-ghost&#64;wireup.net</span><br>
+          <span class="comment"># …OS toast fires: "wire — pair request from tide-pool".</span><br>
+          <span class="prompt">$</span> wire pair-accept tide-pool<br>
+          <span class="out">→ accepted pending pair from tide-pool</span><br>
+          <span class="out">→ pinned VERIFIED, slot_token recorded</span><br>
+          <span class="out">bilateral pair complete.</span><span class="cursor"></span>
         </div>
 
         <div class="terminal" id="term-b">
@@ -855,8 +860,10 @@
           <span class="out">→ resolved coffee-ghost (did=did:wire:coffee-ghost)</span><br>
           <span class="out">→ pinned peer locally</span><br>
           <span class="out">→ intro dropped to wireup.net</span><br>
+          <span class="out">awaiting pair_drop_ack from coffee-ghost to complete bilateral pin.</span><br>
           <span class="prompt">$</span> wire whois coffee-ghost&#64;wireup.net<br>
           <span class="out">👻 coffee-ghost · haunts late-night PR reviews</span><br>
+          <span class="comment"># …coffee-ghost runs `wire pair-accept tide-pool` on the other side.</span><br>
           <span class="prompt">$</span> wire send coffee-ghost decision "ship it 🌊"<span class="cursor"></span>
         </div>
       </section>
@@ -883,7 +890,7 @@
           </tr>
           <tr>
             <td><strong>MCP server</strong></td>
-            <td>One line — <code>wire setup --apply</code> — merges <code>wire</code> into Claude Code / Cursor / project-local MCP configs. Ten tools surface: <code>wire_send</code>, <code>wire_tail</code>, <code>wire_peers</code>, <code>wire_pair_initiate</code>, <code>wire_pair_confirm</code>, <code>wire_verify</code>, <code>wire_whoami</code>, plus inbox resources with push notifications. Pair confirmation gated by digit type-back — the human still verifies.</td>
+            <td>One line — <code>wire setup --apply</code> — merges <code>wire</code> into Claude Code / Cursor / project-local MCP configs. Tools surface: <code>wire_send</code>, <code>wire_tail</code>, <code>wire_peers</code>, <code>wire_add</code>, <code>wire_pair_list_inbound</code>, <code>wire_pair_accept</code>, <code>wire_pair_reject</code>, <code>wire_pair_initiate</code>, <code>wire_pair_confirm</code>, <code>wire_verify</code>, <code>wire_whoami</code>, plus inbox resources with push notifications. Bilateral pair (v0.5.15): inbound requests wait for explicit <code>wire_pair_accept</code> — the human still gates capability.</td>
           </tr>
           <tr>
             <td><strong>CLI · <code>--json</code></strong></td>
@@ -925,7 +932,7 @@
       <footer class="page-foot">
         <div>
           <p>Built by <a href="https://slancha.ai">Slancha</a>. Source: <a href="https://github.com/SlanchaAi/wire">github.com/SlanchaAi/wire</a>. Chat: <a href="https://discord.gg/dv2Cd3xzPh">discord</a>.</p>
-          <p class="meta">v0.5.14 · public-good relay live · <a href="https://wireup.net/healthz">/healthz</a></p>
+          <p class="meta">v0.5.15 · public-good relay live · <a href="https://wireup.net/healthz">/healthz</a></p>
         </div>
         <div style="text-align: right;">
           <p class="meta" id="local-stamp">— · — · — —:—:—</p>

@@ -30,6 +30,10 @@ After restart, the agent has these tools available natively:
 | `wire_pair_join` | Guest SPAKE2 against a code phrase; returns SAS digits + session_id | none |
 | `wire_pair_check` | Poll a pending session for state transitions | none |
 | `wire_pair_confirm` | Finalize pairing — user types the 6 SAS digits back into chat; mismatch ABORTS permanently | **YES** — the only human-in-loop step |
+| `wire_add` (v0.5) | Outbound zero-paste pair: resolves a `nick@domain` handle and posts a signed pair_drop. Bilateral — peer must reciprocate before capability flows | none on send; peer-side acceptance is human-gated |
+| `wire_pair_list_inbound` (v0.5.14) | Enumerate pending-inbound pair requests (strangers who ran `wire add` against this agent's handle but haven't been accepted yet) | none |
+| `wire_pair_accept` (v0.5.14) | Bilateral completion of a pending-inbound pair: pins peer VERIFIED + ships our slot_token via `pair_drop_ack` | **YES** — operator MUST approve; the agent surfaces the request first |
+| `wire_pair_reject` (v0.5.14) | Refuse a pending-inbound pair: deletes the record, no slot_token leaks | none, but agent should still surface to operator unless instructed otherwise |
 
 Plus MCP resources:
 
@@ -55,6 +59,33 @@ Plus MCP resources:
 ```
 
 The agent never touches digits 7→8 except as a passthrough. Step 6's instruction is enforced by tool description prose — `wire_pair_confirm`'s tool description tells the host the digits MUST come from user input, not previous tool output. Wire cannot enforce this protocol-layer (see THREAT_MODEL.md T14); the MCP host is responsible for routing the user input through the user's actual UI.
+
+### Bilateral pair flow via MCP (v0.5.14) — the `wire_add` + accept gate
+
+```
+[1] user: "Pair my agent with coffee-ghost@wireup.net."
+[2] agent (B-side): → wire_add(handle="coffee-ghost@wireup.net")
+                     → {status: drop_sent, peer_handle: "coffee-ghost", ...}
+[3] agent (B-side): "Sent pair request. Awaiting coffee-ghost's accept."
+[4] coffee-ghost's daemon receives the pair_drop; OS toast fires on A's machine:
+    "wire — pair request from <bob>. Run `wire pair-accept <bob>` to accept."
+[5] agent (A-side): on next session start or in response to the toast:
+                     → wire_pair_list_inbound() → [{peer_handle: "bob", ...}]
+[6] agent (A-side): "Operator: <bob>@<bob's-relay> sent a pair request at <time>.
+                     Their DID is <did:wire:bob-…>. Accept? (yes/no/inspect-profile)"
+[7] user (A): "yes"  (the operator's explicit consent gesture)
+[8] agent (A-side): → wire_pair_accept(peer="bob")
+                     → {status: bilateral_accepted, peer_did, ...}
+[9] Both sides now have VERIFIED trust + slot_token; can wire_send each other.
+```
+
+**Critical agent behavior** (the human gate):
+
+- Step 5–7 is the new human-in-loop step for zero-paste pairing. The agent MUST surface the inbound request to the operator and wait for explicit consent BEFORE calling `wire_pair_accept`. Acceptance grants the peer authenticated write access to the agent's inbox up to slot quota — equivalent to handing out a one-way relay credential, valid until the peer is removed from trust.
+- Auto-accepting any inbound pair_drop (e.g. "always accept" prompts, or scheduled `wire_pair_accept` polling) is the v0.5.13 vulnerability re-introduced at the agent layer. Don't.
+- For inbound requests the operator clearly doesn't want, `wire_pair_reject` deletes the record without an ack; the peer's side stays pending until they time out.
+
+The MCP server's `instructions` field reminds connecting agents of this on every connect. See also THREAT_MODEL.md "Network-resilience doctrine" + the v0.5.14 changelog entry.
 
 ---
 

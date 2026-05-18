@@ -391,6 +391,18 @@ pub enum Command {
         #[arg(long, default_value = "https://wireup.net")]
         relay: String,
     },
+    /// Accept a pending-inbound pair request (v0.5.14). Explicit alias for
+    /// the bilateral-completion path that `wire add <peer>@<relay>` also
+    /// drives — but doesn't require remembering the peer's relay domain
+    /// (the relay coords come from the stored pair_drop). Errors if no
+    /// pending-inbound record exists for that peer.
+    PairAccept {
+        /// Bare peer handle (without `@<relay>`).
+        peer: String,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Reject a pending pair request (v0.5.14). When someone runs `wire add
     /// you@<your-relay>` against your handle, their signed pair_drop lands
     /// in pending-inbound — visible via `wire pair-list`. Run `wire pair-reject
@@ -863,6 +875,7 @@ pub fn run() -> Result<()> {
             }
         }
         Command::PairAbandon { code_phrase, relay } => cmd_pair_abandon(&code_phrase, &relay),
+        Command::PairAccept { peer, json } => cmd_pair_accept(&peer, json),
         Command::PairReject { peer, json } => cmd_pair_reject(&peer, json),
         Command::PairListInbound { json } => cmd_pair_list_inbound(json),
         Command::Invite {
@@ -1305,7 +1318,7 @@ fn cmd_status(as_json: bool) -> Result<()> {
                 })
                 .unwrap_or_default();
             println!(
-                "inbound pair requests ({inbound_count}): {} — `wire pair-list` to inspect, `wire add <peer>@<relay>` to accept, `wire pair-reject <peer>` to refuse",
+                "inbound pair requests ({inbound_count}): {} — `wire pair-list` to inspect, `wire pair-accept <peer>` to accept, `wire pair-reject <peer>` to refuse",
                 handles.join(", "),
             );
         }
@@ -3537,16 +3550,11 @@ fn cmd_pair_list(as_json: bool, watch: bool, watch_interval_secs: u64) -> Result
         );
         for p in &inbound_items {
             println!(
-                "{:<20} {:<35} {:<25} `wire add {peer}@{relay_host}` to accept; `wire pair-reject {peer}` to refuse",
+                "{:<20} {:<35} {:<25} `wire pair-accept {peer}` to accept; `wire pair-reject {peer}` to refuse",
                 p.peer_handle,
                 p.peer_relay_url,
                 p.received_at,
                 peer = p.peer_handle,
-                relay_host = p
-                    .peer_relay_url
-                    .trim_start_matches("https://")
-                    .trim_start_matches("http://")
-                    .trim_end_matches('/'),
             );
         }
         println!();
@@ -4169,6 +4177,34 @@ fn cmd_add_accept_pending(
     Ok(())
 }
 
+/// v0.5.14: explicit `wire pair-accept <peer>` — bilateral-completion path
+/// for a pending-inbound pair request. Pin trust, write relay_state from the
+/// stored pair_drop, send `pair_drop_ack` with our slot_token, delete the
+/// pending record. Equivalent to running `wire add <peer>@<their-relay>`
+/// when a pending-inbound record exists, but without needing to remember
+/// the peer's relay domain.
+fn cmd_pair_accept(peer_nick: &str, as_json: bool) -> Result<()> {
+    let nick = crate::agent_card::bare_handle(peer_nick);
+    let pending = crate::pending_inbound_pair::read_pending_inbound(nick)?.ok_or_else(|| {
+        anyhow!(
+            "no pending pair request from {nick}. Run `wire pair-list-inbound` to see who is waiting, \
+             or use `wire add <peer>@<relay>` to send a fresh outbound pair request."
+        )
+    })?;
+    let (_our_did, our_relay, our_slot_id, our_slot_token) =
+        crate::pair_invite::ensure_self_with_relay(None)?;
+    let handle_arg = format!("{}@{}", pending.peer_handle, pending.peer_relay_url);
+    cmd_add_accept_pending(
+        &handle_arg,
+        nick,
+        &pending,
+        &our_relay,
+        &our_slot_id,
+        &our_slot_token,
+        as_json,
+    )
+}
+
 /// v0.5.14: programmatic access to pending-inbound for scripts.
 /// `wire pair-list-inbound --json` returns a flat array of records.
 fn cmd_pair_list_inbound(as_json: bool) -> Result<()> {
@@ -4189,7 +4225,7 @@ fn cmd_pair_list_inbound(as_json: bool) -> Result<()> {
         );
     }
     println!(
-        "→ accept with `wire add <peer>@<relay-host>`; refuse with `wire pair-reject <peer>`."
+        "→ accept with `wire pair-accept <peer>`; refuse with `wire pair-reject <peer>`."
     );
     Ok(())
 }

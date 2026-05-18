@@ -601,7 +601,7 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
     crate::os_notify::toast(
         &format!("wire — pair request from {peer_handle}"),
         &format!(
-            "run `wire add {peer_handle}@{peer_relay}` to accept, or `wire pair-reject {peer_handle}` to refuse",
+            "run `wire pair-accept {peer_handle}` (or `wire add {peer_handle}@{peer_relay}`) to accept, or `wire pair-reject {peer_handle}` to refuse",
         ),
     );
 
