@@ -6,6 +6,35 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.14 — bilateral-required `wire add` (security)
+
+Closes the v0.5.13-and-earlier **phonebook-scrape pairing vulnerability**: a malicious actor could enumerate the public handle directory, run `wire add <each-handle>@<relay>` against every entry, and have their key auto-pinned at `VERIFIED` tier on every wire user's machine — receiving each victim's `slot_token` via the `pair_drop_ack`, which granted authenticated write access to the victim's slot up to the 64 MB quota.
+
+This release restores the design intent: **`wire add` must fire on both sides before the pair completes.** The receiver's daemon no longer auto-promotes a stranger's signed pair_drop; it lands in a new pending-inbound queue, surfaces via `wire pair-list` + OS toast, and waits for an explicit operator gesture.
+
+**Receiver-side gate (the root fix).** `maybe_consume_pair_drop` was bifurcated:
+
+- *SPAKE2 invite-URL path* (pair_drop carries a pre-shared `pair_nonce`): unchanged. Possession of the invite-URL nonce IS the consent gesture; pin trust, write relay_state, send ack as before.
+- *Handle path* (zero-paste `wire add`, no nonce): write to new `state/wire/pending-inbound-pairs/<handle>.json` store. **Do NOT pin trust. Do NOT write our slot_token back. Do NOT advertise relay coords.** OS toast prompts the operator to run `wire add <peer>@<their-relay>` to accept or `wire pair-reject <peer>` to refuse.
+
+**Operator-side completion.** `cmd_add` now checks pending-inbound on every invocation:
+
+- If a pending-inbound record exists for the target handle: bilateral completion. Pin peer as `VERIFIED` with stored coords, send `pair_drop_ack` carrying our slot_token, delete the pending record.
+- Otherwise: outbound path (unchanged) — emit signed pair_drop via `/v1/handle/intro/<nick>`, await reciprocal `wire add` from peer.
+
+**New surface.**
+
+- `wire pair-reject <peer>` — drop a pending-inbound record without pairing. Idempotent.
+- `wire pair-list-inbound [--json]` — programmatic enumeration of pending-inbound records (flat array, matching the v0.5.13-and-earlier `pair-list --json` shape for SPAKE2 sessions).
+- `wire pair-list` — human-readable output now shows a `PENDING INBOUND` section first with `→ accept with…` action hints, followed by the SPAKE2 session table. **JSON shape unchanged** for back-compat (flat array of SPAKE2 records); inbound items remain accessible via the new commands above.
+- `wire status` — `pending_pairs.inbound_count` + `inbound_handles` JSON fields. Human-readable line: `inbound pair requests (N): alice, bob — …` with action hints.
+
+**Attack surface after v0.5.14.** An attacker scraping the phonebook and spraying pair_drops produces N records in N victims' pending-inbound queues, **zero VERIFIED pins, zero slot_token leaks, zero spam capability**. Each victim sees one OS toast per attacker; victims who don't manually `wire add` back are fully protected. Inviting a friend zero-paste still works in exactly two commands (one from each side), preserving the v0.5 magic-pair UX.
+
+**Tests:** 145 lib + 28 CLI tests passing (+4 new pending-inbound tests in `tests/cli.rs` — `pair_list_inbound_surfaces_pending_v0_5_14`, `status_reports_pending_inbound_count_v0_5_14`, `pair_reject_deletes_pending_inbound_v0_5_14`, `pair_reject_idempotent_on_missing_peer_v0_5_14`).
+
+**Threat-model addendum:** see THREAT_MODEL.md for the bilateral-pair doctrine + remaining residual windows (third-leg ack race documented in [issue #5](https://github.com/SlanchaAi/wire/issues/5)).
+
 ### v0.5.13 — silent-fail eradication round 2 + network resilience
 
 Three threads landed together in response to issues #2 and #6 against v0.5.12:

@@ -169,6 +169,120 @@ fn send_writes_to_outbox() {
     assert!(event.get("event_id").is_some());
 }
 
+/// Helper: write a fixture pending-inbound record directly into the
+/// temp HOME's pending-inbound dir. Mimics what `maybe_consume_pair_drop`
+/// would produce when a stranger's pair_drop lands on the receiver side.
+fn write_pending_inbound_fixture(home: &std::path::Path, peer_handle: &str) {
+    let dir = home.join("state/wire/pending-inbound-pairs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = serde_json::json!({
+        "peer_handle": peer_handle,
+        "peer_did": format!("did:wire:{peer_handle}-abcdef12"),
+        "peer_card": {"did": format!("did:wire:{peer_handle}-abcdef12")},
+        "peer_relay_url": "https://relay.example",
+        "peer_slot_id": "slot-xyz",
+        "peer_slot_token": "token-xyz",
+        "event_id": "evt-1",
+        "event_timestamp": "2026-05-17T20:00:00Z",
+        "received_at": "2026-05-17T20:00:01Z",
+    });
+    std::fs::write(
+        dir.join(format!("{peer_handle}.json")),
+        serde_json::to_vec_pretty(&body).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn pair_list_inbound_surfaces_pending_v0_5_14() {
+    // v0.5.14: zero-paste pair_drops from strangers land in pending-inbound
+    // and surface programmatically via `wire pair-list-inbound --json`.
+    // Receiver auto-pin was the v0.5.13 spam vector; this test asserts the
+    // record is enumerable + the back-compat `pair-list --json` shape is
+    // preserved for existing scripts.
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul"]);
+    write_pending_inbound_fixture(&home, "stranger");
+    let out = run(&home, &["pair-list-inbound", "--json"]);
+    assert!(out.status.success(), "pair-list-inbound failed: {:?}", out);
+    let s = String::from_utf8(out.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let arr = parsed.as_array().expect("flat array of pending-inbound");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["peer_handle"], "stranger");
+    assert_eq!(arr[0]["peer_slot_token"], "token-xyz");
+
+    // Back-compat: `pair-list --json` MUST still emit a flat SPAKE2 array
+    // (empty here, no SPAKE2 session active). Scripts pinning the v0.5.13-
+    // and-earlier shape stay working.
+    let out2 = run(&home, &["pair-list", "--json"]);
+    assert!(out2.status.success());
+    let s2 = String::from_utf8(out2.stdout).unwrap();
+    let parsed2: serde_json::Value = serde_json::from_str(&s2).unwrap();
+    assert!(parsed2.as_array().expect("flat array").is_empty());
+}
+
+#[test]
+fn status_reports_pending_inbound_count_v0_5_14() {
+    // `wire status --json` must surface inbound_count separately from
+    // SPAKE2 pending_pairs.total so monitoring + dashboards can distinguish
+    // "stranger requests awaiting accept" from "active SPAKE2 sessions".
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul"]);
+    write_pending_inbound_fixture(&home, "alice");
+    write_pending_inbound_fixture(&home, "bob");
+    let out = run(&home, &["status", "--json"]);
+    assert!(out.status.success(), "status failed: {:?}", out);
+    let s = String::from_utf8(out.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(parsed["pending_pairs"]["inbound_count"], 2);
+    let mut handles: Vec<&str> = parsed["pending_pairs"]["inbound_handles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    handles.sort();
+    assert_eq!(handles, vec!["alice", "bob"]);
+}
+
+#[test]
+fn pair_reject_deletes_pending_inbound_v0_5_14() {
+    // `wire pair-reject <peer>` removes the pending record. After reject,
+    // pair-list MUST NOT show the peer and the on-disk file MUST be gone.
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul"]);
+    write_pending_inbound_fixture(&home, "spammer");
+    let path = home.join("state/wire/pending-inbound-pairs/spammer.json");
+    assert!(path.exists(), "fixture file should exist pre-reject");
+
+    let out = run(&home, &["pair-reject", "spammer", "--json"]);
+    assert!(out.status.success(), "pair-reject failed: {:?}", out);
+    let s = String::from_utf8(out.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(parsed["rejected"], true);
+    assert!(!path.exists(), "pending file should be deleted after reject");
+
+    // pair-list-inbound is now empty.
+    let out2 = run(&home, &["pair-list-inbound", "--json"]);
+    let s2 = String::from_utf8(out2.stdout).unwrap();
+    let parsed2: serde_json::Value = serde_json::from_str(&s2).unwrap();
+    assert!(parsed2.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn pair_reject_idempotent_on_missing_peer_v0_5_14() {
+    // No-op reject for an unknown peer returns success with rejected=false,
+    // not an error. This keeps operator scripts simple.
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul"]);
+    let out = run(&home, &["pair-reject", "ghost", "--json"]);
+    assert!(out.status.success(), "pair-reject failed: {:?}", out);
+    let s = String::from_utf8(out.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(parsed["rejected"], false);
+}
+
 #[test]
 fn send_with_fqdn_peer_normalizes_to_bare_handle_outbox() {
     // Regression for issue #2 Bug B (v0.5.13). Operators and the

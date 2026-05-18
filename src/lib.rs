@@ -23,6 +23,7 @@ pub mod os_notify;
 pub mod pair_invite;
 pub mod pair_profile;
 pub mod pair_session;
+pub mod pending_inbound_pair;
 pub mod pending_pair;
 pub mod pull;
 pub mod relay_client;

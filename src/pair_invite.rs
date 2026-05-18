@@ -500,80 +500,110 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
         .to_string();
     let peer_handle = crate::agent_card::display_handle_from_did(&peer_did).to_string();
 
-    // Verify the event signature now that we have peer's pubkey.
+    // Verify the event signature against the peer's embedded pubkey. We need
+    // a transient trust pin to drive the verifier, but for the handle path
+    // (no nonce) this is the ONLY trust-write we'd make and we throw it away
+    // immediately — see the bilateral-required branch below.
     let mut tmp_trust = config::read_trust()?;
     crate::trust::add_agent_card_pin(&mut tmp_trust, &peer_card, Some("VERIFIED"));
     crate::signing::verify_message_v31(event, &tmp_trust)
         .map_err(|e| anyhow!("pair_drop event sig verify failed: {e}"))?;
 
-    // Pin peer in trust + relay-state.
-    config::write_trust(&tmp_trust)?;
-    let peer_relay = body.get("relay_url").and_then(Value::as_str).unwrap_or("");
+    let peer_relay = body
+        .get("relay_url")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let peer_slot_id = body.get("slot_id").and_then(Value::as_str).unwrap_or("");
-    let peer_slot_token = body.get("slot_token").and_then(Value::as_str).unwrap_or("");
+    let peer_slot_token = body
+        .get("slot_token")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     if peer_relay.is_empty() || peer_slot_id.is_empty() || peer_slot_token.is_empty() {
         bail!("pair_drop body missing relay_url/slot_id/slot_token");
     }
-    let mut relay_state = config::read_relay_state()?;
-    relay_state["peers"][&peer_handle] = json!({
-        "relay_url": peer_relay,
-        "slot_id": peer_slot_id,
-        "slot_token": peer_slot_token,
-    });
-    config::write_relay_state(&relay_state)?;
 
-    // Consume invite (single-use default; decrement uses for multi-use).
-    // Skipped entirely for handle-initiated pair_drops (no pending record).
-    if let (Some(pending), Some(invite_path)) = (pending, invite_path) {
-        if pending.uses_remaining <= 1 {
-            // P0.2: warn — leaking single-use invite files lets them get
-            // accidentally re-consumed if the file timestamp parser glitches
-            // or a backup tool reverts state. Not fatal but worth flagging.
-            if let Err(e) = std::fs::remove_file(&invite_path) {
-                eprintln!(
-                    "wire: could not delete consumed invite {invite_path:?}: {e}"
-                );
-            }
-        } else {
-            let mut updated = pending.clone();
-            updated.uses_remaining -= 1;
-            updated.accepted_by.push(peer_did.clone());
-            std::fs::write(&invite_path, serde_json::to_vec_pretty(&updated)?)?;
-        }
-    }
-
-    crate::os_notify::toast(
-        &format!("wire — paired with {peer_handle}"),
-        "Invite accepted. Ready to send + receive.",
-    );
-
-    // v0.5: if this was a handle-initiated drop (no nonce), the sender doesn't
-    // know OUR slot_token yet — they can post to our `/v1/handle/intro/<nick>`
-    // but they can't `wire send` back through the normal slot endpoint until
-    // they have it. Send a `pair_drop_ack` event back carrying our slot_token.
+    // ---------- v0.5.14 bilateral-required split ----------
     //
-    // P0.2 (0.5.11): NOT silent anymore. The bilateral pin only completes if
-    // this POST succeeds — if we drop the error, the peer never gets our
-    // slot_token and sits forever in PENDING_ACK from their side, with no
-    // visible failure on either side. That was the 30-min-debug failure mode
-    // earlier today. Log loudly + record to pair-rejected so `wire doctor`
-    // can surface it.
-    if nonce_opt.is_none() {
-        if let Err(e) =
-            send_pair_drop_ack(&peer_handle, peer_relay, peer_slot_id, peer_slot_token)
-        {
-            eprintln!(
-                "wire: pair_drop_ack send to {peer_handle} @ {peer_relay} slot {peer_slot_id} FAILED: {e}. \
-                 inbound pin succeeded but peer cannot bilateral-pin without our slot_token. \
-                 retry with `wire add {peer_handle}@<their-relay>` or have peer re-add us."
-            );
-            record_pair_rejection(
-                &peer_handle,
-                "pair_drop_ack_send_failed",
-                &e.to_string(),
-            );
+    // SPAKE2 invite-URL path (`pair_nonce` present): the operator already
+    // gave the sender an invite-URL out-of-band; possession of the nonce IS
+    // the consent gesture. Pin trust, write relay_state, send the ack —
+    // unchanged from v0.5.13.
+    //
+    // Handle path (no nonce, zero-paste `wire add`): the sender knows
+    // nothing more than the public phonebook entry. Receiver consent has
+    // not been gestured. **Do NOT pin trust. Do NOT write our slot_token
+    // back. Do NOT advertise relay coords.** Stash the request in pending-
+    // inbound and prompt the operator. Bilateral pin completes only when
+    // the operator runs `wire add <peer>@<their-relay>` to accept.
+    //
+    // This closes the v0.5.13 phonebook-scrape spam vector: an attacker
+    // can deposit one entry in N victims' `wire pair-list --pending`, but
+    // no slot_token leaks and no message-write capability accrues.
+    if nonce_opt.is_some() {
+        // ----- SPAKE2 invite-URL path (unchanged) -----
+        config::write_trust(&tmp_trust)?;
+        let mut relay_state = config::read_relay_state()?;
+        relay_state["peers"][&peer_handle] = json!({
+            "relay_url": peer_relay,
+            "slot_id": peer_slot_id,
+            "slot_token": peer_slot_token,
+        });
+        config::write_relay_state(&relay_state)?;
+
+        // Consume invite (single-use default; decrement uses for multi-use).
+        if let (Some(pending), Some(invite_path)) = (pending, invite_path) {
+            if pending.uses_remaining <= 1 {
+                if let Err(e) = std::fs::remove_file(&invite_path) {
+                    eprintln!(
+                        "wire: could not delete consumed invite {invite_path:?}: {e}"
+                    );
+                }
+            } else {
+                let mut updated = pending.clone();
+                updated.uses_remaining -= 1;
+                updated.accepted_by.push(peer_did.clone());
+                std::fs::write(&invite_path, serde_json::to_vec_pretty(&updated)?)?;
+            }
         }
+        crate::os_notify::toast(
+            &format!("wire — paired with {peer_handle}"),
+            "Invite accepted. Ready to send + receive.",
+        );
+        return Ok(Some(peer_did));
     }
+
+    // ----- Handle path: stash in pending-inbound, no capability flows -----
+    let now_iso = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let event_id = event
+        .get("event_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let event_timestamp = event
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let pending_inbound = crate::pending_inbound_pair::PendingInboundPair {
+        peer_handle: peer_handle.clone(),
+        peer_did: peer_did.clone(),
+        peer_card: peer_card.clone(),
+        peer_relay_url: peer_relay.to_string(),
+        peer_slot_id: peer_slot_id.to_string(),
+        peer_slot_token: peer_slot_token.to_string(),
+        event_id,
+        event_timestamp,
+        received_at: now_iso,
+    };
+    crate::pending_inbound_pair::write_pending_inbound(&pending_inbound)?;
+    crate::os_notify::toast(
+        &format!("wire — pair request from {peer_handle}"),
+        &format!(
+            "run `wire add {peer_handle}@{peer_relay}` to accept, or `wire pair-reject {peer_handle}` to refuse",
+        ),
+    );
 
     Ok(Some(peer_did))
 }
@@ -583,7 +613,11 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
 /// zero-paste bidirectional pin. Best-effort: errors are logged but don't
 /// propagate, since the inbound pair_drop pin already succeeded and the
 /// operator can retry from either side.
-fn send_pair_drop_ack(
+/// Send a `pair_drop_ack` (kind=1101) carrying our slot_token to a peer.
+/// Used by the SPAKE2 invite-URL path (auto-called) and by the bilateral
+/// completion path in `cmd_add` (operator-driven). Failures propagate so
+/// the caller can surface the failure loudly.
+pub fn send_pair_drop_ack(
     peer_handle: &str,
     peer_relay: &str,
     peer_slot_id: &str,

@@ -391,6 +391,29 @@ pub enum Command {
         #[arg(long, default_value = "https://wireup.net")]
         relay: String,
     },
+    /// Reject a pending pair request (v0.5.14). When someone runs `wire add
+    /// you@<your-relay>` against your handle, their signed pair_drop lands
+    /// in pending-inbound — visible via `wire pair-list`. Run `wire pair-reject
+    /// <peer>` to delete the record without pairing. The peer never receives
+    /// our slot_token; from their side the pair stays pending until they
+    /// time out.
+    PairReject {
+        /// Bare peer handle (without `@<relay>`).
+        peer: String,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Programmatic-shape list of pending-inbound pair requests (v0.5.14).
+    /// `--json` returns a flat array (matching the v0.5.13-and-earlier
+    /// `pair-list --json` shape but for inbound). Use this in scripts that
+    /// need to enumerate inbound pair requests without parsing the SPAKE2
+    /// table format from `wire pair-list`.
+    PairListInbound {
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Detect known MCP host config locations (Claude Desktop, Claude Code,
     /// Cursor, project-local) and either print or auto-merge the wire MCP
     /// server entry. Default prints; pass `--apply` to actually modify config
@@ -840,6 +863,8 @@ pub fn run() -> Result<()> {
             }
         }
         Command::PairAbandon { code_phrase, relay } => cmd_pair_abandon(&code_phrase, &relay),
+        Command::PairReject { peer, json } => cmd_pair_reject(&peer, json),
+        Command::PairListInbound { json } => cmd_pair_list_inbound(json),
         Command::Invite {
             relay,
             ttl,
@@ -1152,9 +1177,18 @@ fn cmd_status(as_json: bool) -> Result<()> {
         for p in &pending {
             *counts.entry(p.status.clone()).or_default() += 1;
         }
+        // v0.5.14: pending-inbound zero-paste pair_drops awaiting accept.
+        let pending_inbound =
+            crate::pending_inbound_pair::list_pending_inbound().unwrap_or_default();
+        let inbound_handles: Vec<&str> = pending_inbound
+            .iter()
+            .map(|p| p.peer_handle.as_str())
+            .collect();
         summary["pending_pairs"] = json!({
             "total": pending.len(),
             "by_status": counts,
+            "inbound_count": pending_inbound.len(),
+            "inbound_handles": inbound_handles,
         });
     }
 
@@ -1240,6 +1274,9 @@ fn cmd_status(as_json: bool) -> Result<()> {
             );
         }
         let pending_total = summary["pending_pairs"]["total"].as_u64().unwrap_or(0);
+        let inbound_count = summary["pending_pairs"]["inbound_count"]
+            .as_u64()
+            .unwrap_or(0);
         if pending_total > 0 {
             print!("pending pairs: {pending_total}");
             if let Some(obj) = summary["pending_pairs"]["by_status"].as_object() {
@@ -1252,8 +1289,25 @@ fn cmd_status(as_json: bool) -> Result<()> {
                 }
             }
             println!();
-        } else {
+        } else if inbound_count == 0 {
             println!("pending pairs: none");
+        }
+        // v0.5.14: separate line for pending-inbound zero-paste requests.
+        // Loud because each one is awaiting an operator gesture and the
+        // capability hasn't flowed yet.
+        if inbound_count > 0 {
+            let handles: Vec<String> = summary["pending_pairs"]["inbound_handles"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            println!(
+                "inbound pair requests ({inbound_count}): {} — `wire pair-list` to inspect, `wire add <peer>@<relay>` to accept, `wire pair-reject <peer>` to refuse",
+                handles.join(", "),
+            );
         }
     }
     Ok(())
@@ -3459,34 +3513,66 @@ fn cmd_pair_list(as_json: bool, watch: bool, watch_interval_secs: u64) -> Result
     if watch {
         return cmd_pair_list_watch(watch_interval_secs);
     }
-    let items = crate::pending_pair::list_pending()?;
+    let spake2_items = crate::pending_pair::list_pending()?;
+    let inbound_items = crate::pending_inbound_pair::list_pending_inbound()?;
     if as_json {
-        println!("{}", serde_json::to_string(&items)?);
+        // Backwards-compat: flat SPAKE2 array (the shape every existing
+        // script + e2e test parses since v0.5.x). v0.5.14 inbound items
+        // surface programmatically via `wire pair-list-inbound --json`
+        // and via `wire status --json` `pending_pairs.inbound_*` fields.
+        println!("{}", serde_json::to_string(&spake2_items)?);
         return Ok(());
     }
-    if items.is_empty() {
+    if spake2_items.is_empty() && inbound_items.is_empty() {
         println!("no pending pair sessions.");
         return Ok(());
     }
-    println!(
-        "{:<15} {:<8} {:<18} {:<10} NOTE",
-        "CODE", "ROLE", "STATUS", "SAS"
-    );
-    for p in items {
-        let sas = p
-            .sas
-            .as_ref()
-            .map(|d| format!("{}-{}", &d[..3], &d[3..]))
-            .unwrap_or_else(|| "—".to_string());
-        let note = p
-            .last_error
-            .as_deref()
-            .or(p.peer_did.as_deref())
-            .unwrap_or("");
+    // v0.5.14: inbound section first — these need operator action right now.
+    // SPAKE2 sessions are typically already mid-flow.
+    if !inbound_items.is_empty() {
+        println!("PENDING INBOUND (v0.5.14 zero-paste pair_drop awaiting your accept)");
         println!(
-            "{:<15} {:<8} {:<18} {:<10} {}",
-            p.code, p.role, p.status, sas, note
+            "{:<20} {:<35} {:<25} NEXT STEP",
+            "PEER", "RELAY", "RECEIVED"
         );
+        for p in &inbound_items {
+            println!(
+                "{:<20} {:<35} {:<25} `wire add {peer}@{relay_host}` to accept; `wire pair-reject {peer}` to refuse",
+                p.peer_handle,
+                p.peer_relay_url,
+                p.received_at,
+                peer = p.peer_handle,
+                relay_host = p
+                    .peer_relay_url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .trim_end_matches('/'),
+            );
+        }
+        println!();
+    }
+    if !spake2_items.is_empty() {
+        println!("SPAKE2 SESSIONS");
+        println!(
+            "{:<15} {:<8} {:<18} {:<10} NOTE",
+            "CODE", "ROLE", "STATUS", "SAS"
+        );
+        for p in spake2_items {
+            let sas = p
+                .sas
+                .as_ref()
+                .map(|d| format!("{}-{}", &d[..3], &d[3..]))
+                .unwrap_or_else(|| "—".to_string());
+            let note = p
+                .last_error
+                .as_deref()
+                .or(p.peer_did.as_deref())
+                .unwrap_or("");
+            println!(
+                "{:<15} {:<8} {:<18} {:<10} {}",
+                p.code, p.role, p.status, sas, note
+            );
+        }
     }
     Ok(())
 }
@@ -3890,6 +3976,27 @@ fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Res
         bail!("refusing to add self (handle matches own DID)");
     }
 
+    // v0.5.14 bilateral-completion path: if a pair_drop from this peer is
+    // already sitting in pending-inbound, the operator is now accepting it.
+    // Pin trust, save relay coords + slot_token from the stored drop, ship
+    // our own slot_token back via pair_drop_ack, delete the pending record.
+    //
+    // This branch is the OTHER half of the v0.5.14 fix to maybe_consume_pair_drop:
+    // receiver-side auto-promote was removed there; operator consent flows
+    // through here. After this branch returns, both sides are bilaterally
+    // pinned and capability flows in both directions.
+    if let Some(pending) = crate::pending_inbound_pair::read_pending_inbound(&parsed.nick)? {
+        return cmd_add_accept_pending(
+            handle_arg,
+            &parsed.nick,
+            &pending,
+            &our_relay,
+            &our_slot_id,
+            &our_slot_token,
+            as_json,
+        );
+    }
+
     // 2. Resolve peer via .well-known on their relay.
     let resolved = crate::pair_profile::resolve_handle(&parsed, relay_override)?;
     let peer_card = resolved
@@ -3990,6 +4097,124 @@ fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Res
         println!(
             "→ resolved {handle_arg} (did={peer_did})\n→ pinned peer locally\n→ intro dropped to {peer_relay}\nawaiting pair_drop_ack from {peer_handle} to complete bilateral pin."
         );
+    }
+    Ok(())
+}
+
+/// v0.5.14 bilateral-completion path for `wire add`. Called when the peer's
+/// pair_drop is already sitting in `pending-inbound`. Pin trust, write relay
+/// coords + slot_token from the stored drop, ship our slot_token back via
+/// `pair_drop_ack`, delete the pending record. Symmetric with the SPAKE2
+/// invite-URL path (which is already bilateral by virtue of the pre-shared
+/// nonce).
+fn cmd_add_accept_pending(
+    handle_arg: &str,
+    peer_nick: &str,
+    pending: &crate::pending_inbound_pair::PendingInboundPair,
+    _our_relay: &str,
+    _our_slot_id: &str,
+    _our_slot_token: &str,
+    as_json: bool,
+) -> Result<()> {
+    // 1. Pin peer in trust with VERIFIED — operator gestured consent by running
+    //    `wire add` against this handle while a drop was waiting.
+    let mut trust = config::read_trust()?;
+    crate::trust::add_agent_card_pin(&mut trust, &pending.peer_card, Some("VERIFIED"));
+    config::write_trust(&trust)?;
+
+    // 2. Record peer's relay coords + slot_token (already shipped to us in
+    //    the original drop body; held back until now).
+    let mut relay_state = config::read_relay_state()?;
+    relay_state["peers"][&pending.peer_handle] = json!({
+        "relay_url": pending.peer_relay_url,
+        "slot_id": pending.peer_slot_id,
+        "slot_token": pending.peer_slot_token,
+    });
+    config::write_relay_state(&relay_state)?;
+
+    // 3. Ship our slot_token to peer via pair_drop_ack so they can write back.
+    crate::pair_invite::send_pair_drop_ack(
+        &pending.peer_handle,
+        &pending.peer_relay_url,
+        &pending.peer_slot_id,
+        &pending.peer_slot_token,
+    )
+    .with_context(|| {
+        format!(
+            "pair_drop_ack send to {} @ {} slot {} failed",
+            pending.peer_handle, pending.peer_relay_url, pending.peer_slot_id
+        )
+    })?;
+
+    // 4. Delete the pending-inbound record now that bilateral is complete.
+    crate::pending_inbound_pair::consume_pending_inbound(peer_nick)?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "handle": handle_arg,
+                "paired_with": pending.peer_did,
+                "peer_handle": pending.peer_handle,
+                "status": "bilateral_accepted",
+                "via": "pending_inbound",
+            }))?
+        );
+    } else {
+        println!(
+            "→ accepted pending pair from {peer}\n→ pinned VERIFIED, slot_token recorded\n→ shipped our slot_token back via pair_drop_ack\nbilateral pair complete. Send with `wire send {peer} \"...\"`.",
+            peer = pending.peer_handle,
+        );
+    }
+    Ok(())
+}
+
+/// v0.5.14: programmatic access to pending-inbound for scripts.
+/// `wire pair-list-inbound --json` returns a flat array of records.
+fn cmd_pair_list_inbound(as_json: bool) -> Result<()> {
+    let items = crate::pending_inbound_pair::list_pending_inbound()?;
+    if as_json {
+        println!("{}", serde_json::to_string(&items)?);
+        return Ok(());
+    }
+    if items.is_empty() {
+        println!("no pending inbound pair requests.");
+        return Ok(());
+    }
+    println!("{:<20} {:<35} {:<25} DID", "PEER", "RELAY", "RECEIVED");
+    for p in items {
+        println!(
+            "{:<20} {:<35} {:<25} {}",
+            p.peer_handle, p.peer_relay_url, p.received_at, p.peer_did,
+        );
+    }
+    println!(
+        "→ accept with `wire add <peer>@<relay-host>`; refuse with `wire pair-reject <peer>`."
+    );
+    Ok(())
+}
+
+/// v0.5.14: `wire pair-reject <peer>` — drop a pending-inbound record
+/// without pairing. No event is sent back to the peer; their side stays
+/// pending until they time out or the operator-side data ages out.
+fn cmd_pair_reject(peer_nick: &str, as_json: bool) -> Result<()> {
+    let nick = crate::agent_card::bare_handle(peer_nick);
+    let existed = crate::pending_inbound_pair::read_pending_inbound(nick)?;
+    crate::pending_inbound_pair::consume_pending_inbound(nick)?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "peer": nick,
+                "rejected": existed.is_some(),
+                "had_pending": existed.is_some(),
+            }))?
+        );
+    } else if existed.is_some() {
+        println!("→ rejected pending pair from {nick}\n→ pending-inbound record deleted; no ack sent.");
+    } else {
+        println!("no pending pair from {nick} — nothing to reject");
     }
     Ok(())
 }
