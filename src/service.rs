@@ -84,15 +84,16 @@ impl ServiceKind {
         }
     }
 
-    /// Per-kind log file basename.
-    ///
-    /// macOS: `~/Library/Logs/wire-<kind>.log` — surfaces in
-    /// Console.app so operators can read crash output. Daemon previously
-    /// redirected to /dev/null; v0.5.22 switches to a real log file
-    /// (one-time behavior change, matches typical macOS service ergonomics).
-    ///
-    /// linux: `$XDG_STATE_HOME/wire/<kind>.log` so the location stays
-    /// stable across re-installs.
+    /// Per-kind log file basename. macOS-only — launchd's
+    /// `StandardOutPath` directive redirects daemon stdout/stderr to a
+    /// real file under `~/Library/Logs/`. On Linux the systemd unit
+    /// has no equivalent file redirect (it logs to journald instead,
+    /// which is the idiomatic Linux pattern; `journalctl --user -u
+    /// <unit>` reads it). v0.5.23: stopped reporting a log-file path
+    /// to Linux operators since no file was ever written there —
+    /// previously the install detail message named a phantom location
+    /// in `~/.cache/wire/` that confused anyone who went looking for
+    /// the actual log.
     fn log_basename(self) -> &'static str {
         match self {
             ServiceKind::Daemon => "wire-daemon.log",
@@ -133,8 +134,16 @@ pub fn install_kind(kind: ServiceKind) -> Result<ServiceReport> {
     let exe = std::env::current_exe()?;
     let exe_str = exe.to_string_lossy().to_string();
 
-    let log_path = ensure_log_path(kind)?;
-    let log_str = log_path.to_string_lossy().to_string();
+    // v0.5.23: log path is macOS-only — launchd's StandardOutPath
+    // directive redirects to a file; systemd defaults to journald
+    // and we don't add an explicit file-redirect directive (let
+    // operators use `journalctl --user -u <unit>` which is the
+    // idiomatic Linux read path).
+    let log_str = if cfg!(target_os = "macos") {
+        ensure_macos_log_path(kind)?.to_string_lossy().to_string()
+    } else {
+        String::new()
+    };
 
     if cfg!(target_os = "macos") {
         let plist_path = launchd_plist_path(kind)?;
@@ -222,7 +231,9 @@ pub fn install_kind(kind: ServiceKind) -> Result<ServiceReport> {
             status: if enabled { "enabled".into() } else { "written".into() },
             detail: if enabled {
                 format!(
-                    "unit written + enable --now succeeded; logs at {log_str}{linger_note}"
+                    "unit written + enable --now succeeded; logs via \
+                     `journalctl --user -u {}`{linger_note}",
+                    kind.systemd_unit_name()
                 )
             } else {
                 format!(
@@ -402,27 +413,32 @@ fn launchctl_target_for(kind: ServiceKind) -> String {
     format!("{}/{}", launchctl_user_target(), kind.label())
 }
 
-/// Resolve the log destination for a service kind and ensure the
-/// parent directory exists. Returns the absolute path the service
-/// should write stdout/stderr to.
-fn ensure_log_path(kind: ServiceKind) -> Result<PathBuf> {
+/// Resolve the macOS log destination for a service kind and ensure
+/// the parent directory exists. Returns the absolute path that
+/// launchd's `StandardOutPath` will redirect the service's stdout/
+/// stderr to (`~/Library/Logs/wire-<kind>.log`).
+///
+/// v0.5.23: macOS-only. The previous version had a Linux branch that
+/// computed a path nothing would ever write to, because the Linux
+/// systemd unit logs to journald rather than a file. Caused a
+/// confusing "logs at ~/.cache/wire/..." message on `wire service
+/// install` when no such file ever appeared.
+#[cfg(target_os = "macos")]
+fn ensure_macos_log_path(kind: ServiceKind) -> Result<PathBuf> {
     let home = std::env::var("HOME").map_err(|_| anyhow!("HOME env var unset"))?;
-    let dir = if cfg!(target_os = "macos") {
-        PathBuf::from(&home).join("Library").join("Logs")
-    } else {
-        // Linux: prefer XDG_STATE_HOME/wire/, fall back to ~/.cache/wire/.
-        std::env::var("XDG_STATE_HOME")
-            .ok()
-            .map(|p| PathBuf::from(p).join("wire"))
-            .or_else(|| {
-                std::env::var("XDG_CACHE_HOME")
-                    .ok()
-                    .map(|p| PathBuf::from(p).join("wire"))
-            })
-            .unwrap_or_else(|| PathBuf::from(&home).join(".cache").join("wire"))
-    };
+    let dir = PathBuf::from(&home).join("Library").join("Logs");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating log dir {dir:?}"))?;
     Ok(dir.join(kind.log_basename()))
+}
+
+/// Stub for non-macOS targets so the macOS branch in `install_kind`
+/// type-checks under cross-platform builds. Never called in practice
+/// because the corresponding `cfg!(target_os = "macos")` guard skips
+/// it. Returns an empty path; if you ever see this in a non-macOS
+/// log message, it's a bug.
+#[cfg(not(target_os = "macos"))]
+fn ensure_macos_log_path(_kind: ServiceKind) -> Result<PathBuf> {
+    Ok(PathBuf::new())
 }
 
 fn launchd_plist_xml(kind: ServiceKind, exe: &str, log_path: &str) -> String {

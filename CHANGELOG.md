@@ -6,6 +6,36 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.23 — Linux service log message + linger nag (Spark smoke discoveries)
+
+Two operator-confusion fixes surfaced when v0.5.22 hit a real Linux box for the first time (Spark, DGX GB10, Ubuntu 6.17 ARM64).
+
+**Fix 1: `wire service install` on Linux now reports the correct log path.** v0.5.22's install detail said `logs at ~/.cache/wire/wire-<kind>.log`, but the systemd unit it wrote had no `StandardOutput=` directive — output went to journald per the Linux default. The file path was a phantom location; operators going to read it found nothing. The `~/.cache/wire/` fallback was also the wrong XDG default in the first place (spec says `~/.local/state/` if `XDG_STATE_HOME` is unset). v0.5.23 removes the log-file message entirely on Linux and recommends `journalctl --user -u <unit>` instead — the idiomatic Linux read path. macOS launchd plists still get the `StandardOutPath` redirect to `~/Library/Logs/` because that's the macOS-idiomatic pattern + Console.app reads from there.
+
+**Fix 2: linger nag on linux only fires when off.** New: after a successful `systemctl --user enable --now <unit>`, checks `loginctl show-user $USER --property=Linger`. If linger is OFF, appends a NOTE recommending `sudo loginctl enable-linger $USER` (without which the unit waits for the next console login to start — fine for desktops, broken for headless SSH boxes). If linger is ON (Spark's case — already configured), silent. If detection fails, defaults to nagging.
+
+These together close the "wire service install on Linux looks confused" class. On Spark today:
+
+```
+$ wire service install --local-relay
+wire service install
+  platform:  linux-systemd-user
+  unit:      /home/admin/.config/systemd/user/wire-local-relay.service
+  status:    enabled
+  detail:    unit written + enable --now succeeded; logs via `journalctl --user -u wire-local-relay.service`
+```
+
+**Adjacent: Windows service-install gap filed as #17.** v0.5.22 ships only macOS launchd + Linux systemd-user; Windows bails with `unsupported platform`. The recommended implementation (Task Scheduler XML for user-scope parity) is in the issue. No commitment to ship yet.
+
+**Spark linux smoke result.** End-to-end verification on ARM64 Ubuntu:
+- `install.sh` from `wireup.net` correctly served the `aarch64-unknown-linux-gnu` binary; sha256 verified
+- `wire service install --local-relay` wrote `~/.config/systemd/user/wire-local-relay.service` with `ExecStart=/home/admin/.local/bin/wire relay-server --bind 127.0.0.1:8771 --local-only`
+- After killing a leftover Python `http.server 8771` from a prior dev experiment, the relay bound cleanly and `curl http://127.0.0.1:8771/healthz` returned `ok`
+- `wire session new --with-local --json` wrote a session with both scope=federation + scope=local endpoints to `~/.local/state/wire/sessions/admin/config/wire/relay.json`
+- `wire session list-local` surfaced the session under the local-relay group
+
+Tests: 162 lib + 38 cli + 4 stress + 3 stress-within-system + 20 relay + full e2e — all green.
+
 ### v0.5.22 — `wire service install --local-relay` for persistent within-system transport
 
 Adds the missing piece for the v0.5.17 dual-slot story: a way to keep the local relay running across reboots and terminal sessions without a tmux pane or a hand-rolled plist. `wire service install --local-relay` now writes a launchd plist (macOS) or systemd user unit (linux) that supervises `wire relay-server --bind 127.0.0.1:8771 --local-only` the same way `wire service install` already supervised the daemon.
