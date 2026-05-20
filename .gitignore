@@ -25,3 +25,10 @@ private/
 .wrangler/
 .org-identity/
 .gitnexus
+
+# Agent-local files. Excluded from the published crate via Cargo.toml
+# `exclude`, and intentionally NOT tracked in git either — each
+# contributor's machine has its own. Accidentally committed once in
+# v0.5.22 (via `git add -A`); this entry stops a repeat.
+AGENTS.md
+CLAUDE.md
