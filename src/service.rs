@@ -198,13 +198,32 @@ pub fn install_kind(kind: ServiceKind) -> Result<ServiceReport> {
             .map(|s| s.success())
             .unwrap_or(false);
 
+        // v0.5.23: surface the "user-scope unit only starts after first
+        // login" footgun. systemd user units require `loginctl enable-
+        // linger <user>` to start at boot without a console login
+        // session. Operators logging in via SSH frequently miss this
+        // and discover the service is "down at boot" only later.
+        // Check the current state and only nag if linger is OFF.
+        let linger_note = if enabled && !linger_enabled() {
+            let user = std::env::var("USER").unwrap_or_else(|_| "$USER".into());
+            format!(
+                " NOTE: linger is OFF — service starts at *first login*, \
+                 not at boot. For boot-time start (e.g. headless SSH boxes), \
+                 run `sudo loginctl enable-linger {user}` once."
+            )
+        } else {
+            String::new()
+        };
+
         return Ok(ServiceReport {
             action: "install".into(),
             platform: "linux-systemd-user".into(),
             unit_path: unit_path.to_string_lossy().to_string(),
             status: if enabled { "enabled".into() } else { "written".into() },
             detail: if enabled {
-                format!("unit written + enable --now succeeded; logs at {log_str}")
+                format!(
+                    "unit written + enable --now succeeded; logs at {log_str}{linger_note}"
+                )
             } else {
                 format!(
                     "unit written; `systemctl --user enable --now {}` failed — try manually",
@@ -312,6 +331,40 @@ pub fn status_kind(kind: ServiceKind) -> Result<ServiceReport> {
         });
     }
     bail!("wire service status: unsupported platform")
+}
+
+/// v0.5.23 (linux only): true iff `loginctl show-user --property=Linger`
+/// returns `Linger=yes`. Used to suppress the install-time linger nag
+/// when the operator has already enabled it. Best-effort: returns false
+/// on any error (missing `loginctl`, $USER unset, command failure) so
+/// the nag fires by default rather than silently going missing.
+#[cfg(target_os = "linux")]
+fn linger_enabled() -> bool {
+    let user = match std::env::var("USER") {
+        Ok(u) if !u.is_empty() => u,
+        _ => return false,
+    };
+    Command::new("loginctl")
+        .args(["show-user", &user, "--property=Linger"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).into_owned())
+            } else {
+                None
+            }
+        })
+        .map(|s| s.trim().eq_ignore_ascii_case("Linger=yes"))
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linger_enabled() -> bool {
+    // Non-linux platforms don't have systemd's linger concept.
+    // Compiled but never called from the macOS / Windows / BSD
+    // branches; provided so cross-target unit tests compile.
+    false
 }
 
 fn kind_label(kind: ServiceKind) -> &'static str {
