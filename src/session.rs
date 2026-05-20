@@ -310,17 +310,25 @@ fn is_process_live(pid: u32) -> bool {
     }
 }
 
-/// Read a session's `relay-state.json` and return its `self.endpoints[]`
+/// Read a session's `relay.json` and return its `self.endpoints[]`
 /// array (v0.5.17 dual-slot). Empty Vec on any read/parse error — this
 /// is a best-effort discovery helper, not a verification tool. A pre-
 /// v0.5.17 session writes only the legacy flat fields; `self_endpoints`
 /// promotes those to a federation-only Endpoint, so the result is
 /// still meaningful for legacy sessions.
+///
+/// v0.5.20 BUG FIX: this used to join `relay-state.json`, which is
+/// not the canonical filename (`config::relay_state_path` returns
+/// `relay.json`). The mis-named read silently no-op'd and
+/// `list-local` always returned an empty `local` map as a result.
+/// Companion to the `cli.rs::try_allocate_local_slot` filename fix
+/// in the same release — that helper had the symmetric write-side
+/// bug, so the local endpoint never got persisted in the first place.
 pub fn read_session_endpoints(session_home: &Path) -> Vec<Endpoint> {
     let path = session_home
         .join("config")
         .join("wire")
-        .join("relay-state.json");
+        .join("relay.json");
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(_) => return Vec::new(),
@@ -336,7 +344,7 @@ pub fn read_session_endpoints(session_home: &Path) -> Vec<Endpoint> {
 /// `slot_token` because it is a bearer credential — exposing it
 /// through `wire session list-local --json` would risk accidental
 /// leak via logs, screenshots, or piped output. Routing code uses
-/// the full `Endpoint` from `relay-state.json` directly; this type
+/// the full `Endpoint` from `relay.json` directly; this type
 /// is for human/JSON observation only.
 #[derive(Debug, Clone, Serialize)]
 pub struct LocalEndpointView {
@@ -479,7 +487,7 @@ mod tests {
     #[test]
     fn read_session_endpoints_handles_missing_relay_state() {
         let tmp = tempfile::tempdir().unwrap();
-        // No relay-state.json under <home>/config/wire/ — should yield empty.
+        // No relay.json under <home>/config/wire/ — should yield empty.
         let endpoints = read_session_endpoints(tmp.path());
         assert!(endpoints.is_empty());
     }
@@ -510,7 +518,7 @@ mod tests {
                 ]
             }
         });
-        std::fs::write(cfg.join("relay-state.json"), serde_json::to_vec(&body).unwrap())
+        std::fs::write(cfg.join("relay.json"), serde_json::to_vec(&body).unwrap())
             .unwrap();
         let endpoints = read_session_endpoints(tmp.path());
         assert_eq!(endpoints.len(), 2);

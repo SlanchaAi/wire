@@ -6,6 +6,44 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.21 — within-system was silently broken since v0.5.17 (filename mismatch)
+
+Critical fix shipping on top of v0.5.20. Caught immediately after v0.5.20 published, while attempting to use the within-system stack on the dev laptop for real. Symptom: `wire session new --with-local` prints "local slot allocated on http://127.0.0.1:8771" to stderr, exits 0, and creates the session — but the session's `relay.json` carries only the federation endpoint, no `self.endpoints[]` array. Downstream consequence: `wire session list-local` shows the session WITHOUT its local endpoint; routing logic in `cmd_push` has nothing to prefer; **every single `--with-local` deployment since v0.5.17 silently degraded to federation-only**.
+
+**Root cause:** two callers joined the wrong filename. `try_allocate_local_slot` in `src/cli.rs` and `read_session_endpoints` in `src/session.rs` both used `relay-state.json`, but the canonical filename returned by `config::relay_state_path` is `relay.json`. The mis-named writes succeeded (creating an orphan file nothing else reads); the mis-named reads silently no-op'd. The federation slot allocation went through the correctly-named path via `config::write_relay_state`, so federation appeared to work; the local slot endpoint was the only victim. Test suites passed because every test in `tests/e2e_dual_slot.rs` and `tests/stress_within_system.rs` writes directly to `relay.json` via inline helpers, bypassing both broken sites entirely.
+
+**Why it took so long to notice:** `wire session new` prints "local slot allocated (slot_id=...)" — the slot DOES exist on the relay; the relay-side allocation is correct. The bug is purely in persisting that allocation into the client's session state. The CLI gave operators every reason to believe `--with-local` was working when it wasn't.
+
+**Fixes:**
+- `src/cli.rs::try_allocate_local_slot` — join `relay.json`.
+- `src/session.rs::read_session_endpoints` — join `relay.json`.
+- Updated all in-module + integration test fixtures to use `relay.json` so future tests reflect reality.
+
+**New regression test** (`tests/stress_within_system.rs`): `regression_session_new_with_local_writes_dual_endpoints_v0_5_20`. Runs the full `wire session new --with-local` orchestration via subprocess against a real in-process federation relay + local-only relay, asserts the resulting `relay.json` contains BOTH scope=federation AND scope=local endpoints, asserts the local endpoint URL matches the `--local-relay` arg, and asserts `wire session list-local --json` surfaces the session under the correct local-relay key. If any of the four sites that touch `relay.json` for sessions break again, this test fails loudly with the offending data.
+
+**Verified end-to-end on the dev laptop:**
+
+```
+$ wire session destroy wire --force      # broken v0.5.20 session
+$ wire session new --with-local --json   # rebuild on v0.5.21
+$ cat ~/Library/Application\ Support/wire/sessions/wire/config/wire/relay.json
+{
+  "peers": {},
+  "self": {
+    "endpoints": [
+      {"scope": "federation", "relay_url": "https://wireup.net", "slot_id": "...", "slot_token": "..."},
+      {"scope": "local",      "relay_url": "http://127.0.0.1:8771", "slot_id": "...", "slot_token": "..."}
+    ],
+    ...
+  }
+}
+$ wire session list-local
+LOCAL RELAY: http://127.0.0.1:8771
+  wire                     wire                             running    /Users/laul_pogan/Source/wire
+```
+
+**Tests:** 159 lib + 38 cli + 4 stress + 3 stress-within-system (+1 regression) + 20 relay + full e2e — all green.
+
 ### v0.5.20 — macOS session-root fix + within-system stress harness
 
 Quick patch on top of v0.5.19. Caught while attempting to deploy v0.5.19 on the dev laptop: `wire session list` (and `list-local`) errored with `could not resolve XDG_STATE_HOME — set WIRE_HOME` on macOS because `dirs::state_dir()` returns `None` on darwin (it's a Linux/XDG concept). The main `config::state_dir` already falls back to `dirs::data_local_dir` — `~/Library/Application Support/wire/` on macOS — but `session::sessions_root` didn't carry the same fallback. Within-system sessions were effectively broken without explicit `WIRE_HOME` on every Mac in the install base.

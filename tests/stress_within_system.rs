@@ -230,6 +230,106 @@ fn count_inbox_lines(home: &PathBuf, peer: &str) -> usize {
         .count()
 }
 
+// ---------- TEST 0: regression — wire session new --with-local persists dual endpoints ----------
+
+/// v0.5.20 regression: `try_allocate_local_slot` (cli.rs) and
+/// `read_session_endpoints` (session.rs) both joined the wrong filename
+/// (`relay-state.json` instead of `relay.json`, the canonical name per
+/// `config::relay_state_path`). Result: every `wire session new
+/// --with-local` invocation since v0.5.17 silently degraded to
+/// federation-only despite the "local slot allocated" stderr line,
+/// and `wire session list-local` always returned an empty group.
+///
+/// This test drives the production `wire session new --with-local`
+/// orchestration end-to-end and asserts the session's `relay.json`
+/// carries BOTH scope=federation AND scope=local endpoints, AND that
+/// the local endpoint URL matches what we passed via --local-relay.
+/// If anyone re-introduces the filename bug, this test fails loudly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn regression_session_new_with_local_writes_dual_endpoints_v0_5_20() {
+    let fed_url = spawn_federation_relay().await;
+    let local_url = spawn_local_only_relay().await;
+    let home = fresh_dir("session-new-with-local");
+
+    let out = wire(
+        &home,
+        &[
+            "session",
+            "new",
+            "test-alpha",
+            "--relay",
+            &fed_url,
+            "--with-local",
+            "--local-relay",
+            &local_url,
+            "--no-daemon",
+            "--json",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "wire session new --with-local failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let relay_path = home
+        .join("sessions")
+        .join("test-alpha")
+        .join("config")
+        .join("wire")
+        .join("relay.json");
+    assert!(
+        relay_path.exists(),
+        "session's relay.json missing at {relay_path:?} — bootstrap didn't complete"
+    );
+    let bytes = std::fs::read(&relay_path).expect("read relay.json");
+    let state: Value = serde_json::from_slice(&bytes).expect("relay.json must be valid JSON");
+
+    let endpoints = state["self"]["endpoints"]
+        .as_array()
+        .expect("self.endpoints[] must be present — v0.5.20 fix landed this field");
+    let scopes: Vec<&str> = endpoints
+        .iter()
+        .filter_map(|e| e["scope"].as_str())
+        .collect();
+    assert!(
+        scopes.contains(&"federation"),
+        "expected scope=federation, got: {scopes:?}"
+    );
+    assert!(
+        scopes.contains(&"local"),
+        "expected scope=local (v0.5.20 fix for the silent --with-local regression): {scopes:?}"
+    );
+
+    let local = endpoints
+        .iter()
+        .find(|e| e["scope"].as_str() == Some("local"))
+        .expect("local endpoint not present despite --with-local");
+    assert_eq!(
+        local["relay_url"].as_str().unwrap_or(""),
+        local_url,
+        "local endpoint URL must match --local-relay arg"
+    );
+
+    // And `wire session list-local --json` must surface the session.
+    let list_out = wire(&home, &["session", "list-local", "--json"]);
+    assert!(list_out.status.success(), "list-local failed");
+    let listing: Value =
+        serde_json::from_slice(&list_out.stdout).expect("list-local JSON must parse");
+    let group = &listing["local"][&local_url];
+    let nicks: Vec<&str> = group
+        .as_array()
+        .expect("list-local group must exist")
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    assert!(
+        nicks.contains(&"test-alpha"),
+        "list-local must surface the session we just created: {nicks:?} in group {local_url}"
+    );
+}
+
 // ---------- TEST 1: local-first routing on flood ----------
 
 /// Flood `FLOOD_COUNT` events across the within-system path and assert

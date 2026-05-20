@@ -413,7 +413,7 @@ fn session_destroy_with_force_removes_state_and_registry_entry_v0_5_16() {
     );
 }
 
-/// Attach a v0.5.17 dual-slot `relay-state.json` to an existing fixture
+/// Attach a v0.5.17 dual-slot `relay.json` to an existing fixture
 /// so `wire session list-local` sees a Local-scope endpoint for it.
 fn write_local_endpoint(
     session_home: &std::path::Path,
@@ -443,7 +443,7 @@ fn write_local_endpoint(
         }
     });
     std::fs::write(
-        cfg.join("relay-state.json"),
+        cfg.join("relay.json"),
         serde_json::to_vec_pretty(&body).unwrap(),
     )
     .unwrap();
@@ -469,7 +469,7 @@ fn session_list_local_groups_by_local_relay_url_v0_5_19() {
     let _legacy = write_session_fixture(&home, "legacy", Some("/Users/paul/Source/legacy"));
     write_local_endpoint(&alpha, "http://127.0.0.1:8771", "alpha");
     write_local_endpoint(&beta, "http://127.0.0.1:8771", "beta");
-    // legacy intentionally has no relay-state.json — should land in federation_only.
+    // legacy intentionally has no relay.json — should land in federation_only.
 
     let out = run(&home, &["session", "list-local", "--json"]);
     assert!(out.status.success(), "list-local --json failed: {:?}", out);

@@ -4861,15 +4861,24 @@ fn try_allocate_local_slot(
         }
     };
 
-    // Merge into the session's relay_state.json. We invoke wire via
+    // Merge into the session's relay.json. We invoke wire via
     // run_wire_with_home for federation calls (subprocess isolation),
-    // but the relay_state.json is a simple file we can edit directly
+    // but relay.json is a simple file we can edit directly
     // — and need to, because there's no `wire bind-relay --add-local`
     // command yet (could add later; out of scope for v0.5.17 MVP).
+    //
+    // v0.5.20 BUG FIX: previously joined `relay-state.json` here, which
+    // does not exist (canonical filename is `relay.json` per
+    // `config::relay_state_path`). The mis-named file write succeeded
+    // but landed in a sibling path nothing else reads. Every
+    // `wire session new --with-local` invocation silently degraded to
+    // federation-only despite the "local slot allocated" stderr line.
+    // Caught by deploying v0.5.19 on the dev laptop and inspecting the
+    // session's relay.json — it had only the federation endpoint.
     let state_path = session_home
         .join("config")
         .join("wire")
-        .join("relay-state.json");
+        .join("relay.json");
     let mut state: serde_json::Value = std::fs::read(&state_path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
