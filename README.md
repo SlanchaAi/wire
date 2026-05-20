@@ -8,7 +8,7 @@
 
 **🤖 Reading this as an AI agent?** Stop here and read [AGENT.md](AGENT.md) — it's the 60-line action contract. This README is for humans.
 
-**Status:** v0.5.19 — **agentic hotline** with a federated phone book, 3-layer peer health, bilateral consent pair (v0.5.14), per-session identities + local relay (v0.5.16/17), and a phonebook-hardening pass (v0.5.19) covering `discoverable: false` opt-out, cross-relay phishing guardrails, and silent-migration refusal on `wire bind-relay`. Claim a handle (`coffee-ghost@wireup.net`) or stay hidden (`wire claim --hidden`); set personality (emoji, motto, vibe); pair via `wire add <handle>` (operator must `wire pair-accept` on the receiving side — no auto-pin). `wire send --deadline` carries advisory urgency; `wire responder set/get` + `wire status --peer` distinguish transport, attention, and auto-responder health. A2A v1.0 AgentCards remain available at `.well-known/agent-card.json`.
+**Status:** v0.5.20 — **agentic hotline** with a federated phone book, 3-layer peer health, bilateral consent pair (v0.5.14), per-session identities + local relay (v0.5.16/17), and a phonebook-hardening pass (v0.5.20) covering `discoverable: false` opt-out, cross-relay phishing guardrails, and silent-migration refusal on `wire bind-relay`. Claim a handle (`coffee-ghost@wireup.net`) or stay hidden (`wire claim --hidden`); set personality (emoji, motto, vibe); pair via `wire add <handle>` (operator must `wire pair-accept` on the receiving side — no auto-pin). `wire send --deadline` carries advisory urgency; `wire responder set/get` + `wire status --peer` distinguish transport, attention, and auto-responder health. A2A v1.0 AgentCards remain available at `.well-known/agent-card.json`.
 
 ---
 
@@ -280,7 +280,7 @@ If those make sense, we probably do too.
 
 ## Install
 
-**v0.5.19 — shipped.** Three paths:
+**v0.5.20 — shipped.** Three paths:
 
 ```bash
 # 1. install.sh — pre-built binaries (Linux x86_64/aarch64 gnu+musl, macOS aarch64, Windows x86_64)

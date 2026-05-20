@@ -6,6 +6,21 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.20 — macOS session-root fix + within-system stress harness
+
+Quick patch on top of v0.5.19. Caught while attempting to deploy v0.5.19 on the dev laptop: `wire session list` (and `list-local`) errored with `could not resolve XDG_STATE_HOME — set WIRE_HOME` on macOS because `dirs::state_dir()` returns `None` on darwin (it's a Linux/XDG concept). The main `config::state_dir` already falls back to `dirs::data_local_dir` — `~/Library/Application Support/wire/` on macOS — but `session::sessions_root` didn't carry the same fallback. Within-system sessions were effectively broken without explicit `WIRE_HOME` on every Mac in the install base.
+
+**Fix:** `sessions_root` now mirrors `state_dir`'s fallback chain. Linux still hits the XDG path; macOS lands at `~/Library/Application Support/wire/sessions/`; other Unix without XDG falls through gracefully. Error message updated to name the actual cause rather than blame XDG.
+
+**Within-system stress harness** (`tests/stress_within_system.rs`, 2 tests). The existing `tests/stress.rs` flooded the federation path; this file covers the local-relay path the same way. Spins both an in-process federation relay AND an in-process `--local-only` relay (random ports on `127.0.0.1`), pairs two homes with both endpoints attached, then:
+
+- **`stress_within_system_local_first_routing_v0_5_19`** — floods 50 events alice → bob and asserts every single one was delivered with `scope: "local"`. A single `scope: "federation"` in the push output means the priority logic dropped the local endpoint somewhere; the test fails loudly with the offending event_id. Verified 3× consecutive: 0 leaks across 150 events.
+- **`stress_within_system_failover_to_federation_on_local_death_v0_5_19`** — mid-flood, patches alice's view of bob's local endpoint to a closed port (simulating the local relay crashing while the daemon keeps going). Pre-failover half MUST land via local; post-failover half MUST land via federation; zero events allowed to be skipped with transport errors. Exercises the `cmd_push` "walk endpoints in priority order with transparent retry" promise from v0.5.17.
+
+No protocol or schema changes. Pure platform-correctness fix + integration coverage gap.
+
+**Test count:** 159 lib + 38 cli + 4 stress + 2 stress-within-system + 20 relay + full e2e — all green.
+
 ### v0.5.19 — issue cleanup pass: #2, #5, #7, #9 + stress harness + sister-session discovery
 
 Patch release driven by an open-issue cleanup pass. No protocol changes; one new CLI subcommand (`wire session list-local`), two new CLI flags (`wire bind-relay --migrate-pinned`, `wire claim --hidden`), several operator-visible warnings, and three new test files. **The bind-relay change is a behavior break for the silent-migration case** (it now refuses by default when peers are pinned — see #7 below); the rest is additive.

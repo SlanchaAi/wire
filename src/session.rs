@@ -39,14 +39,26 @@ use crate::endpoints::{Endpoint, EndpointScope, self_endpoints};
 /// Root directory under which all session WIRE_HOMEs live.
 ///
 /// Honors `WIRE_HOME` for testing (sessions root becomes
-/// `$WIRE_HOME/sessions/`); otherwise lives at
-/// `$XDG_STATE_HOME/wire/sessions/`.
+/// `$WIRE_HOME/sessions/`); otherwise:
+///   - Linux: `$XDG_STATE_HOME/wire/sessions/` (typically
+///     `~/.local/state/wire/sessions/`).
+///   - macOS / other Unix without XDG: falls back to
+///     `dirs::data_local_dir() / wire / sessions /`, which on macOS is
+///     `~/Library/Application Support/wire/sessions/`. This mirrors
+///     `config::state_dir`'s fallback so the two surfaces resolve to
+///     compatible roots on every platform.
 pub fn sessions_root() -> Result<PathBuf> {
     if let Ok(home) = std::env::var("WIRE_HOME") {
         return Ok(PathBuf::from(home).join("sessions"));
     }
     let state = dirs::state_dir()
-        .ok_or_else(|| anyhow!("could not resolve XDG_STATE_HOME — set WIRE_HOME"))?;
+        .or_else(dirs::data_local_dir)
+        .ok_or_else(|| {
+            anyhow!(
+                "could not resolve XDG_STATE_HOME (or platform-equivalent local data dir) — \
+                 set WIRE_HOME or run on a platform with `dirs` support"
+            )
+        })?;
     Ok(state.join("wire").join("sessions"))
 }
 
