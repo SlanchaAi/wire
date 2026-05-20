@@ -1,5 +1,5 @@
-//! P1.9 (0.5.11): install + manage an OS service unit that runs
-//! `wire daemon` automatically.
+//! Install + manage OS service units that run wire components
+//! automatically across reboots.
 //!
 //! Today's onboarding tells operators "run `wire daemon &` in a tmux
 //! pane or write a launchd plist yourself" — friction that gets skipped,
@@ -7,10 +7,23 @@
 //! class. Bake the unit install into `wire service install` so it's one
 //! command, idempotent, cross-platform.
 //!
-//! macOS: `~/Library/LaunchAgents/sh.slancha.wire.daemon.plist`
-//! linux: `~/.config/systemd/user/wire-daemon.service`
+//! ## Service kinds (v0.5.22)
 //!
-//! The unit auto-starts on login + restarts on crash. Pair with
+//! - **Daemon** (`wire service install`) — runs `wire daemon --interval 5`.
+//!   Pulls/pushes the operator's own inbox/outbox. ONE per identity.
+//!   Label: `sh.slancha.wire.daemon`.
+//!
+//! - **LocalRelay** (`wire service install --local-relay`) — runs
+//!   `wire relay-server --bind 127.0.0.1:8771 --local-only`. The
+//!   loopback transport for sister-agents on the same box (v0.5.17
+//!   dual-slot). ONE per machine. Label: `sh.slancha.wire.local-relay`.
+//!
+//! ## Unit paths
+//!
+//! - macOS: `~/Library/LaunchAgents/<label>.plist`
+//! - linux: `~/.config/systemd/user/wire-<kind>.service`
+//!
+//! Units auto-start on login + restart on crash. Pair with
 //! `wire upgrade` (P0.5) for atomic version swaps without unit churn.
 
 use std::path::PathBuf;
@@ -18,8 +31,75 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-const LAUNCHD_LABEL: &str = "sh.slancha.wire.daemon";
-const SYSTEMD_UNIT_NAME: &str = "wire-daemon.service";
+/// Which wire service is being managed. Each kind has its own launchd
+/// label / systemd unit name / log path so the two kinds can coexist
+/// on the same machine without colliding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceKind {
+    /// `wire daemon --interval 5`. One per identity. The default.
+    Daemon,
+    /// `wire relay-server --bind 127.0.0.1:8771 --local-only`. One
+    /// per machine — provides the loopback transport that sister
+    /// agents' sessions route through (v0.5.17 dual-slot).
+    LocalRelay,
+}
+
+impl ServiceKind {
+    /// launchd Label / systemd unit base name (without `.service`).
+    fn label(self) -> &'static str {
+        match self {
+            ServiceKind::Daemon => "sh.slancha.wire.daemon",
+            ServiceKind::LocalRelay => "sh.slancha.wire.local-relay",
+        }
+    }
+
+    /// systemd unit filename (`wire-daemon.service` etc.).
+    fn systemd_unit_name(self) -> &'static str {
+        match self {
+            ServiceKind::Daemon => "wire-daemon.service",
+            ServiceKind::LocalRelay => "wire-local-relay.service",
+        }
+    }
+
+    /// Human-readable name for `Description=` / log messages.
+    fn description(self) -> &'static str {
+        match self {
+            ServiceKind::Daemon => "wire — daemon (push/pull sync)",
+            ServiceKind::LocalRelay => "wire — local-only relay (127.0.0.1:8771)",
+        }
+    }
+
+    /// Arguments to pass to the `wire` binary in the ProgramArguments
+    /// / ExecStart line. The first element of the wider arg vector is
+    /// the binary itself, supplied separately by callers.
+    fn binary_args(self) -> &'static [&'static str] {
+        match self {
+            ServiceKind::Daemon => &["daemon", "--interval", "5"],
+            ServiceKind::LocalRelay => &[
+                "relay-server",
+                "--bind",
+                "127.0.0.1:8771",
+                "--local-only",
+            ],
+        }
+    }
+
+    /// Per-kind log file basename.
+    ///
+    /// macOS: `~/Library/Logs/wire-<kind>.log` — surfaces in
+    /// Console.app so operators can read crash output. Daemon previously
+    /// redirected to /dev/null; v0.5.22 switches to a real log file
+    /// (one-time behavior change, matches typical macOS service ergonomics).
+    ///
+    /// linux: `$XDG_STATE_HOME/wire/<kind>.log` so the location stays
+    /// stable across re-installs.
+    fn log_basename(self) -> &'static str {
+        match self {
+            ServiceKind::Daemon => "wire-daemon.log",
+            ServiceKind::LocalRelay => "wire-local-relay.log",
+        }
+    }
+}
 
 /// Outcome of `wire service install` etc., suitable for both human + JSON
 /// rendering.
@@ -30,31 +110,52 @@ pub struct ServiceReport {
     pub unit_path: String,
     pub status: String,
     pub detail: String,
+    /// v0.5.22: which service kind this report is about ("daemon" or
+    /// "local-relay"). Lets JSON consumers distinguish multiple reports.
+    #[serde(default)]
+    pub kind: String,
 }
 
-/// Install a user-scope service unit that runs `wire daemon` and writes
-/// a [P0.4 versioned pidfile](crate::ensure_up::DaemonPid).
+/// Back-compat shim — `wire service install` with no flags installs
+/// the daemon, matching pre-v0.5.22 behavior.
 pub fn install() -> Result<ServiceReport> {
+    install_kind(ServiceKind::Daemon)
+}
+pub fn uninstall() -> Result<ServiceReport> {
+    uninstall_kind(ServiceKind::Daemon)
+}
+pub fn status() -> Result<ServiceReport> {
+    status_kind(ServiceKind::Daemon)
+}
+
+/// Install a user-scope service unit for the given kind.
+pub fn install_kind(kind: ServiceKind) -> Result<ServiceReport> {
     let exe = std::env::current_exe()?;
     let exe_str = exe.to_string_lossy().to_string();
 
+    let log_path = ensure_log_path(kind)?;
+    let log_str = log_path.to_string_lossy().to_string();
+
     if cfg!(target_os = "macos") {
-        let plist_path = launchd_plist_path()?;
+        let plist_path = launchd_plist_path(kind)?;
         if let Some(parent) = plist_path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {parent:?}"))?;
         }
-        let plist = launchd_plist_xml(&exe_str);
+        let plist = launchd_plist_xml(kind, &exe_str, &log_str);
         std::fs::write(&plist_path, plist)
             .with_context(|| format!("writing {plist_path:?}"))?;
 
-        // launchctl load is idempotent — bootout first to avoid the
-        // "service already loaded" error on re-install.
+        // launchctl bootstrap is idempotent if we bootout first.
         let _ = Command::new("launchctl")
-            .args(["bootout", &launchctl_user_target()])
+            .args(["bootout", &launchctl_target_for(kind)])
             .status();
         let load = Command::new("launchctl")
-            .args(["bootstrap", &launchctl_user_target(), plist_path.to_str().unwrap_or("")])
+            .args([
+                "bootstrap",
+                &launchctl_user_target(),
+                plist_path.to_str().unwrap_or(""),
+            ])
             .status();
         let loaded = load.map(|s| s.success()).unwrap_or(false);
 
@@ -64,19 +165,26 @@ pub fn install() -> Result<ServiceReport> {
             unit_path: plist_path.to_string_lossy().to_string(),
             status: if loaded { "loaded".into() } else { "written".into() },
             detail: if loaded {
-                "plist written and bootstrapped via launchctl".into()
+                format!(
+                    "plist written + bootstrapped; logs at {log_str}"
+                )
             } else {
-                "plist written; `launchctl bootstrap` failed — try manually".into()
+                format!(
+                    "plist written; `launchctl bootstrap` failed — try `launchctl bootstrap {} {}` manually",
+                    launchctl_user_target(),
+                    plist_path.display()
+                )
             },
+            kind: kind_label(kind).into(),
         });
     }
     if cfg!(target_os = "linux") {
-        let unit_path = systemd_unit_path()?;
+        let unit_path = systemd_unit_path(kind)?;
         if let Some(parent) = unit_path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {parent:?}"))?;
         }
-        let unit = systemd_unit_text(&exe_str);
+        let unit = systemd_unit_text(kind, &exe_str);
         std::fs::write(&unit_path, unit)
             .with_context(|| format!("writing {unit_path:?}"))?;
 
@@ -85,7 +193,7 @@ pub fn install() -> Result<ServiceReport> {
             .args(["--user", "daemon-reload"])
             .status();
         let enabled = Command::new("systemctl")
-            .args(["--user", "enable", "--now", SYSTEMD_UNIT_NAME])
+            .args(["--user", "enable", "--now", kind.systemd_unit_name()])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -96,20 +204,24 @@ pub fn install() -> Result<ServiceReport> {
             unit_path: unit_path.to_string_lossy().to_string(),
             status: if enabled { "enabled".into() } else { "written".into() },
             detail: if enabled {
-                "service unit written, daemon-reload + enable --now succeeded".into()
+                format!("unit written + enable --now succeeded; logs at {log_str}")
             } else {
-                "unit written; `systemctl --user enable --now` failed — try manually".into()
+                format!(
+                    "unit written; `systemctl --user enable --now {}` failed — try manually",
+                    kind.systemd_unit_name()
+                )
             },
+            kind: kind_label(kind).into(),
         });
     }
     bail!("wire service install: unsupported platform")
 }
 
-pub fn uninstall() -> Result<ServiceReport> {
+pub fn uninstall_kind(kind: ServiceKind) -> Result<ServiceReport> {
     if cfg!(target_os = "macos") {
-        let plist_path = launchd_plist_path()?;
+        let plist_path = launchd_plist_path(kind)?;
         let _ = Command::new("launchctl")
-            .args(["bootout", &launchctl_user_target()])
+            .args(["bootout", &launchctl_target_for(kind)])
             .status();
         let removed = if plist_path.exists() {
             std::fs::remove_file(&plist_path).ok();
@@ -123,12 +235,13 @@ pub fn uninstall() -> Result<ServiceReport> {
             unit_path: plist_path.to_string_lossy().to_string(),
             status: if removed { "removed".into() } else { "absent".into() },
             detail: "launchctl bootout + plist file removed".into(),
+            kind: kind_label(kind).into(),
         });
     }
     if cfg!(target_os = "linux") {
-        let unit_path = systemd_unit_path()?;
+        let unit_path = systemd_unit_path(kind)?;
         let _ = Command::new("systemctl")
-            .args(["--user", "disable", "--now", SYSTEMD_UNIT_NAME])
+            .args(["--user", "disable", "--now", kind.systemd_unit_name()])
             .status();
         let removed = if unit_path.exists() {
             std::fs::remove_file(&unit_path).ok();
@@ -145,19 +258,18 @@ pub fn uninstall() -> Result<ServiceReport> {
             unit_path: unit_path.to_string_lossy().to_string(),
             status: if removed { "removed".into() } else { "absent".into() },
             detail: "systemctl disable --now + unit file removed".into(),
+            kind: kind_label(kind).into(),
         });
     }
     bail!("wire service uninstall: unsupported platform")
 }
 
-pub fn status() -> Result<ServiceReport> {
+pub fn status_kind(kind: ServiceKind) -> Result<ServiceReport> {
     if cfg!(target_os = "macos") {
-        let plist_path = launchd_plist_path()?;
+        let plist_path = launchd_plist_path(kind)?;
         let exists = plist_path.exists();
-        // launchctl print on a user target succeeds if the service is
-        // loaded; failure = not loaded.
         let listed = Command::new("launchctl")
-            .args(["list", LAUNCHD_LABEL])
+            .args(["list", kind.label()])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -173,13 +285,14 @@ pub fn status() -> Result<ServiceReport> {
                 "absent".into()
             },
             detail: format!("plist exists={exists}, launchctl-list-success={listed}"),
+            kind: kind_label(kind).into(),
         });
     }
     if cfg!(target_os = "linux") {
-        let unit_path = systemd_unit_path()?;
+        let unit_path = systemd_unit_path(kind)?;
         let exists = unit_path.exists();
         let active = Command::new("systemctl")
-            .args(["--user", "is-active", SYSTEMD_UNIT_NAME])
+            .args(["--user", "is-active", kind.systemd_unit_name()])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
             .unwrap_or(false);
@@ -195,22 +308,28 @@ pub fn status() -> Result<ServiceReport> {
                 "absent".into()
             },
             detail: format!("unit exists={exists}, is-active={active}"),
+            kind: kind_label(kind).into(),
         });
     }
     bail!("wire service status: unsupported platform")
 }
 
-fn launchd_plist_path() -> Result<PathBuf> {
+fn kind_label(kind: ServiceKind) -> &'static str {
+    match kind {
+        ServiceKind::Daemon => "daemon",
+        ServiceKind::LocalRelay => "local-relay",
+    }
+}
+
+fn launchd_plist_path(kind: ServiceKind) -> Result<PathBuf> {
     let home = std::env::var("HOME").map_err(|_| anyhow!("HOME env var unset"))?;
     Ok(PathBuf::from(home)
         .join("Library")
         .join("LaunchAgents")
-        .join(format!("{LAUNCHD_LABEL}.plist")))
+        .join(format!("{}.plist", kind.label())))
 }
 
 fn launchctl_user_target() -> String {
-    // `gui/<uid>` is the modern domain for user-scope LaunchAgents. Use
-    // `id -u` rather than pulling in libc just for getuid().
     let uid = Command::new("id")
         .args(["-u"])
         .output()
@@ -226,23 +345,52 @@ fn launchctl_user_target() -> String {
     format!("gui/{uid}")
 }
 
-fn launchd_plist_xml(exe: &str) -> String {
-    // Minimal launchd plist. KeepAlive=true keeps the daemon up across
-    // any crash; RunAtLoad=true starts it on launchctl bootstrap +
-    // every login.
+fn launchctl_target_for(kind: ServiceKind) -> String {
+    format!("{}/{}", launchctl_user_target(), kind.label())
+}
+
+/// Resolve the log destination for a service kind and ensure the
+/// parent directory exists. Returns the absolute path the service
+/// should write stdout/stderr to.
+fn ensure_log_path(kind: ServiceKind) -> Result<PathBuf> {
+    let home = std::env::var("HOME").map_err(|_| anyhow!("HOME env var unset"))?;
+    let dir = if cfg!(target_os = "macos") {
+        PathBuf::from(&home).join("Library").join("Logs")
+    } else {
+        // Linux: prefer XDG_STATE_HOME/wire/, fall back to ~/.cache/wire/.
+        std::env::var("XDG_STATE_HOME")
+            .ok()
+            .map(|p| PathBuf::from(p).join("wire"))
+            .or_else(|| {
+                std::env::var("XDG_CACHE_HOME")
+                    .ok()
+                    .map(|p| PathBuf::from(p).join("wire"))
+            })
+            .unwrap_or_else(|| PathBuf::from(&home).join(".cache").join("wire"))
+    };
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating log dir {dir:?}"))?;
+    Ok(dir.join(kind.log_basename()))
+}
+
+fn launchd_plist_xml(kind: ServiceKind, exe: &str, log_path: &str) -> String {
+    let args_xml = kind
+        .binary_args()
+        .iter()
+        .map(|a| format!("        <string>{a}</string>"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let label = kind.label();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{LAUNCHD_LABEL}</string>
+    <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
         <string>{exe}</string>
-        <string>daemon</string>
-        <string>--interval</string>
-        <string>5</string>
+{args_xml}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -251,37 +399,36 @@ fn launchd_plist_xml(exe: &str) -> String {
     <key>ProcessType</key>
     <string>Background</string>
     <key>StandardOutPath</key>
-    <string>/dev/null</string>
+    <string>{log_path}</string>
     <key>StandardErrorPath</key>
-    <string>/dev/null</string>
+    <string>{log_path}</string>
 </dict>
 </plist>
 "#
     )
 }
 
-fn systemd_unit_path() -> Result<PathBuf> {
+fn systemd_unit_path(kind: ServiceKind) -> Result<PathBuf> {
     let home = std::env::var("HOME").map_err(|_| anyhow!("HOME env var unset"))?;
     Ok(PathBuf::from(home)
         .join(".config")
         .join("systemd")
         .join("user")
-        .join(SYSTEMD_UNIT_NAME))
+        .join(kind.systemd_unit_name()))
 }
 
-fn systemd_unit_text(exe: &str) -> String {
-    // User-scope unit. Restart=on-failure + RestartSec=5 keep daemon
-    // alive through transient crashes; Install.WantedBy=default.target
-    // makes it survive logout/login.
+fn systemd_unit_text(kind: ServiceKind, exe: &str) -> String {
+    let args = kind.binary_args().join(" ");
+    let desc = kind.description();
     format!(
         r#"[Unit]
-Description=wire — magic-wormhole for AI agents (daemon)
+Description={desc}
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={exe} daemon --interval 5
+ExecStart={exe} {args}
 Restart=on-failure
 RestartSec=5
 
@@ -296,31 +443,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn launchd_plist_xml_contains_required_keys() {
-        // P1.9: catch the "minimal plist forgot KeepAlive and the daemon
-        // died silently when terminal closed" class.
-        let xml = launchd_plist_xml("/usr/local/bin/wire");
+    fn launchd_plist_xml_for_daemon_contains_required_keys() {
+        let xml = launchd_plist_xml(
+            ServiceKind::Daemon,
+            "/usr/local/bin/wire",
+            "/tmp/wire-daemon.log",
+        );
         assert!(xml.contains("<key>Label</key>"));
-        assert!(xml.contains(LAUNCHD_LABEL));
+        assert!(xml.contains(ServiceKind::Daemon.label()));
         assert!(xml.contains("/usr/local/bin/wire"));
+        assert!(xml.contains("<string>daemon</string>"));
+        assert!(xml.contains("<string>--interval</string>"));
         assert!(xml.contains("<key>KeepAlive</key>"));
         assert!(xml.contains("<key>RunAtLoad</key>"));
-        // <true/> form, not <bool>true</bool>, is the only one launchd
-        // accepts for plist booleans.
         assert!(xml.contains("<true/>"));
+        // v0.5.22: log path is honored, not /dev/null.
+        assert!(xml.contains("/tmp/wire-daemon.log"));
+        assert!(!xml.contains("/dev/null"));
     }
 
     #[test]
-    fn systemd_unit_text_contains_required_directives() {
-        let unit = systemd_unit_text("/usr/local/bin/wire");
+    fn launchd_plist_xml_for_local_relay_uses_correct_args() {
+        let xml = launchd_plist_xml(
+            ServiceKind::LocalRelay,
+            "/usr/local/bin/wire",
+            "/tmp/wire-local-relay.log",
+        );
+        assert!(xml.contains(ServiceKind::LocalRelay.label()));
+        assert!(xml.contains("<string>relay-server</string>"));
+        assert!(xml.contains("<string>--bind</string>"));
+        assert!(xml.contains("<string>127.0.0.1:8771</string>"));
+        assert!(xml.contains("<string>--local-only</string>"));
+        // Must NOT include daemon args.
+        assert!(!xml.contains("<string>daemon</string>"));
+    }
+
+    #[test]
+    fn systemd_unit_text_for_daemon_contains_required_directives() {
+        let unit = systemd_unit_text(ServiceKind::Daemon, "/usr/local/bin/wire");
         assert!(unit.contains("[Unit]"));
         assert!(unit.contains("[Service]"));
         assert!(unit.contains("[Install]"));
-        assert!(unit.contains("/usr/local/bin/wire daemon"));
+        assert!(unit.contains("/usr/local/bin/wire daemon --interval 5"));
         assert!(unit.contains("Restart=on-failure"));
-        // WantedBy must be default.target for user-scope units (not
-        // multi-user.target which is system-scope and unprivileged users
-        // can't enable).
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn systemd_unit_text_for_local_relay_uses_correct_exec() {
+        let unit = systemd_unit_text(ServiceKind::LocalRelay, "/usr/local/bin/wire");
+        assert!(unit.contains(
+            "/usr/local/bin/wire relay-server --bind 127.0.0.1:8771 --local-only"
+        ));
+        assert!(!unit.contains("daemon --interval"));
+    }
+
+    #[test]
+    fn label_and_unit_name_distinct_per_kind() {
+        // Both kinds MUST have distinct identifiers so they can coexist
+        // on the same machine.
+        assert_ne!(
+            ServiceKind::Daemon.label(),
+            ServiceKind::LocalRelay.label()
+        );
+        assert_ne!(
+            ServiceKind::Daemon.systemd_unit_name(),
+            ServiceKind::LocalRelay.systemd_unit_name()
+        );
+        assert_ne!(
+            ServiceKind::Daemon.log_basename(),
+            ServiceKind::LocalRelay.log_basename()
+        );
     }
 }

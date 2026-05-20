@@ -6,6 +6,37 @@ All notable changes since `wire` went open-source.
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.
 
+### v0.5.22 — `wire service install --local-relay` for persistent within-system transport
+
+Adds the missing piece for the v0.5.17 dual-slot story: a way to keep the local relay running across reboots and terminal sessions without a tmux pane or a hand-rolled plist. `wire service install --local-relay` now writes a launchd plist (macOS) or systemd user unit (linux) that supervises `wire relay-server --bind 127.0.0.1:8771 --local-only` the same way `wire service install` already supervised the daemon.
+
+**Changes to `wire service install / uninstall / status`:** all three subcommands gained an optional `--local-relay` flag. Without the flag, behavior is identical to pre-v0.5.22 (acts on the daemon). With the flag, acts on the local relay. The two services have distinct labels (`sh.slancha.wire.daemon` vs `sh.slancha.wire.local-relay`), distinct systemd unit names (`wire-daemon.service` vs `wire-local-relay.service`), and distinct log paths — they're designed to coexist on the same machine.
+
+**One behavior tweak that touches the daemon too:** both services now write stdout/stderr to a real log file (`~/Library/Logs/wire-<kind>.log` on macOS, `$XDG_STATE_HOME/wire/<kind>.log` on linux) rather than `/dev/null`. The daemon used to silently discard crash output; now `tail -F ~/Library/Logs/wire-daemon.log` actually shows what happened. Re-running `wire service install` picks up the new path; existing installs keep their old `/dev/null` redirect until re-installed.
+
+**Why this was missing:** v0.5.17 shipped the dual-slot routing layer; v0.5.20 shipped `list-local`; v0.5.21 fixed the `relay.json` filename bug that had silently disabled the whole story since v0.5.17 (CHANGELOG entry below). After all that landed, the local relay still had to be started by hand every login. Without persistence the deployment story was "make sure to keep a tmux pane open" — which nobody does. This release closes that gap.
+
+**Service install verified end-to-end on the dev laptop:**
+
+```
+$ wire service install --local-relay
+wire service install
+  platform:  macos-launchd
+  unit:      /Users/laul_pogan/Library/LaunchAgents/sh.slancha.wire.local-relay.plist
+  status:    loaded
+  detail:    plist written + bootstrapped; logs at /Users/laul_pogan/Library/Logs/wire-local-relay.log
+
+$ curl -s http://127.0.0.1:8771/healthz
+ok
+
+$ tail -1 ~/Library/Logs/wire-local-relay.log
+wire relay-server (LOCAL-ONLY) listening on 127.0.0.1:8771 — phonebook + well-known endpoints disabled
+```
+
+The session created earlier (`wire`) continues to route via the launchd-managed relay automatically — no session-side change needed.
+
+**Tests:** 162 lib (+3 new service unit tests) + 38 cli + 4 stress + 3 stress-within-system + 20 relay + full e2e — all green.
+
 ### v0.5.21 — within-system was silently broken since v0.5.17 (filename mismatch)
 
 Critical fix shipping on top of v0.5.20. Caught immediately after v0.5.20 published, while attempting to use the within-system stack on the dev laptop for real. Symptom: `wire session new --with-local` prints "local slot allocated on http://127.0.0.1:8771" to stderr, exits 0, and creates the session — but the session's `relay.json` carries only the federation endpoint, no `self.endpoints[]` array. Downstream consequence: `wire session list-local` shows the session WITHOUT its local endpoint; routing logic in `cmd_push` has nothing to prefer; **every single `--with-local` deployment since v0.5.17 silently degraded to federation-only**.

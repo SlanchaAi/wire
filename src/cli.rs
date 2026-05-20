@@ -789,7 +789,17 @@ pub enum SessionCommand {
 pub enum ServiceAction {
     /// Write the launchd plist (macOS) or systemd user unit (linux) and
     /// load it. Idempotent — re-running re-bootstraps an existing service.
+    ///
+    /// v0.5.22: with no flags, installs the `wire daemon` (your sync
+    /// process). Pass `--local-relay` to install the loopback relay
+    /// (`wire relay-server --bind 127.0.0.1:8771 --local-only`) — the
+    /// transport sister-Claudes use to coordinate on the same machine
+    /// (v0.5.17 dual-slot). The two services have distinct labels +
+    /// log files, so you can install both.
     Install {
+        /// Install the local-relay service instead of the daemon.
+        #[arg(long)]
+        local_relay: bool,
         #[arg(long)]
         json: bool,
     },
@@ -797,11 +807,17 @@ pub enum ServiceAction {
     /// next reboot or `wire upgrade`; this only changes the boot-time
     /// behaviour.
     Uninstall {
+        /// Uninstall the local-relay service instead of the daemon.
+        #[arg(long)]
+        local_relay: bool,
         #[arg(long)]
         json: bool,
     },
     /// Report whether the unit is installed + active.
     Status {
+        /// Show status of the local-relay service instead of the daemon.
+        #[arg(long)]
+        local_relay: bool,
         #[arg(long)]
         json: bool,
     },
@@ -5349,10 +5365,23 @@ fn cmd_diag(action: DiagAction) -> Result<()> {
 // ---------- service (install / uninstall / status) ----------
 
 fn cmd_service(action: ServiceAction) -> Result<()> {
+    let kind = |local_relay: bool| {
+        if local_relay {
+            crate::service::ServiceKind::LocalRelay
+        } else {
+            crate::service::ServiceKind::Daemon
+        }
+    };
     let (report, as_json) = match action {
-        ServiceAction::Install { json } => (crate::service::install()?, json),
-        ServiceAction::Uninstall { json } => (crate::service::uninstall()?, json),
-        ServiceAction::Status { json } => (crate::service::status()?, json),
+        ServiceAction::Install { local_relay, json } => {
+            (crate::service::install_kind(kind(local_relay))?, json)
+        }
+        ServiceAction::Uninstall { local_relay, json } => {
+            (crate::service::uninstall_kind(kind(local_relay))?, json)
+        }
+        ServiceAction::Status { local_relay, json } => {
+            (crate::service::status_kind(kind(local_relay))?, json)
+        }
     };
     if as_json {
         println!("{}", serde_json::to_string(&report)?);
