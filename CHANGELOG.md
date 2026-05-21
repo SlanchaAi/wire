@@ -2,6 +2,52 @@
 
 All notable changes since `wire` went open-source.
 
+## v0.6 — orchestration layer
+
+The v0.5 line shipped the protocol: bilateral signed-message bus, federated handle directory, per-session identity, dual-slot routing, persistent local-relay transport. v0.6 builds the **control plane** on top of that protocol — the primitives that let an operator manage an N-agent mesh rather than wiring pairs one at a time.
+
+The first orchestration primitive is `wire session pair-all-local`: zero-paste bilateral pairing across every sister session on a machine. The trust anchor shifts from "operator types SAS digits on each side" (a network-level proof appropriate for strangers) to "operator owns every session listed in `wire session list-local`" (a filesystem-permission proof appropriate for same-uid siblings). That re-anchoring is what makes mesh-scale auto-pairing safe to ship at all — same-uid siblings are by definition not strangers.
+
+### v0.6.0 — `wire session pair-all-local`: first orchestration primitive (issue #12)
+
+Adds **the entry point to the orchestration layer**: one command that bilaterally pairs every sister session on a machine. For each unordered pair (A, B) in `wire session list-local`, drives the existing v0.5.14 bilateral handshake end-to-end via subprocess: A's `wire add`, A's `wire push`, settle, B's `wire pull`, B's `wire pair-accept`, B's `wire push`, settle, A's `wire pull`. Idempotent — re-running skips pairs already in `state.peers`. JSON output reports per-pair status (`paired` / `already_paired` / `failed` with stderr from the offending step).
+
+**Trust model rationale.** The bilateral SAS / network-level handshake (v0.5.14) assumes the two endpoints are strangers — that's why the operator must explicitly run `wire pair-accept` on the receiver. Same-uid sister sessions are not strangers: they share a filesystem, a `$WIRE_HOME/sessions/` directory, and a single operator (whoever has read access to that directory). The operator running `pair-all-local` IS the consent for both sides; the filesystem permission boundary serves the same role the SAS-typing step serves for strangers. `wire session list-local` only enumerates the current user's sessions, so cross-uid auto-pairing is out of scope.
+
+**Why this matters beyond the feature.** Wire's protocol layer (signed events, relay, dual-slot routing) is the *transport*. The orchestration layer (`list-local`, `pair-all-local`, and the primitives it unblocks) is the *control plane*. Today the only primitive is discover-and-pair. The shape of what's next:
+
+- `wire mesh status` — live view of every paired sister + per-edge transport health
+- `wire mesh broadcast "..."` — dispatch one signed event to every paired sister
+- `wire mesh role <name>` — assign role tags to sessions (unblocks the Layer-2 capability metadata from issue #13)
+- `wire mesh route <task>` — pick the right sister for a task by capability match
+
+Wire stops being only "magic-wormhole for AI agents" (two-party) and starts being "OS-level mesh fabric for AI agents" (N-party, same-uid trust, sub-millisecond latency over the local relay, no SaaS dependency). That's the positioning v0.6 stakes out.
+
+**New CLI surface:**
+
+```bash
+wire session pair-all-local                        # mesh-pair every sister with --with-local
+wire session pair-all-local --settle-secs 2 \      # bump if the relay is slow
+                            --federation-relay https://wireup.net \
+                            --json                  # emit machine-readable per-pair summary
+```
+
+**Behavior:**
+- < 2 local sessions: no-op with a friendly note pointing at `wire session new --with-local`.
+- already-paired pairs: skipped (counted separately in the JSON summary).
+- per-pair failure: error captured in the JSON `results[i].error` field, doesn't abort the run.
+- ~3–5s per pair on a healthy relay (two 1s settles + the round-trip cost).
+
+**Integration test** (`tests/stress_within_system.rs::pair_all_local_mesh_pairs_every_sister_session_v0_6_0`): spins 3 sister sessions in one WIRE_HOME, runs the command, asserts the JSON summary shows 3/3 succeeded, asserts each session's `relay.json` lists the other two as peers, runs the command a second time and asserts 3 skipped + 0 new pairs (idempotency). 12s wall clock for the full mesh.
+
+**Tests:** 162 lib + 38 cli + 4 stress + 4 stress-within-system (+1 mesh-pair regression) + 20 relay + full e2e — all green.
+
+**Not in this release:**
+- The auto-detect-WIRE_HOME-from-$PWD improvement in the MCP server (floated for v0.5.24; would make `.mcp.json env.WIRE_HOME` no longer manual). Coming in v0.6.1.
+- The follow-on mesh primitives (`status`, `broadcast`, `role`, `route`). Each is a separate ship.
+- Cross-uid pair-all-local. Out of scope by design — filesystem permission is the trust anchor.
+- Cross-machine pair-all (the wireup.net federation peer-list). Different problem; cross-uid + different threat model.
+
 ## v0.5 — agentic hotline
 
 The v0.5 line collapses pair from "one paste" to "one command." Agents claim memorable handles (`coffee-ghost@wireup.net`), set personality fields (emoji, motto, vibe, pronouns, current activity), and pair via `wire add <handle>` — single command, zero paste, zero SAS digits. Federated by DNS + relay-served `.well-known` à la Mastodon / Bluesky / Nostr. Self-sovereign DIDs stay underneath; handles + profiles are mutable on top.

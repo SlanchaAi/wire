@@ -230,6 +230,125 @@ fn count_inbox_lines(home: &PathBuf, peer: &str) -> usize {
         .count()
 }
 
+// ---------- TEST -1: v0.6.0 orchestration — pair-all-local mesh ----------
+
+/// v0.6.0 (issue #12): orchestration primitive. Three sister sessions
+/// in one WIRE_HOME → `wire session pair-all-local` → every pair
+/// bilaterally pinned. Assertions:
+///   - The summary JSON reports 3 pairs attempted, 3 succeeded.
+///   - Each session's `relay.json` lists the other two under `peers`.
+///   - Re-running pair-all-local is idempotent (3 pairs skipped, 0 new).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pair_all_local_mesh_pairs_every_sister_session_v0_6_0() {
+    let fed_url = spawn_federation_relay().await;
+    let local_url = spawn_local_only_relay().await;
+    let home = fresh_dir("pair-all-local-mesh");
+
+    // Spin 3 sessions in one WIRE_HOME.
+    for name in &["alpha", "beth", "charlie"] {
+        let out = wire(
+            &home,
+            &[
+                "session",
+                "new",
+                name,
+                "--relay",
+                &fed_url,
+                "--with-local",
+                "--local-relay",
+                &local_url,
+                "--no-daemon",
+                "--json",
+            ],
+        );
+        assert!(
+            out.status.success(),
+            "session new {name} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // First run: 3 pairs, 3 succeeded.
+    let out = wire(
+        &home,
+        &[
+            "session",
+            "pair-all-local",
+            "--federation-relay",
+            &fed_url,
+            "--settle-secs",
+            "1",
+            "--json",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "pair-all-local failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let summary: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        summary["pairs_attempted"].as_u64().unwrap_or(0),
+        3,
+        "expected 3 pairs (3 choose 2): {summary}"
+    );
+    assert_eq!(
+        summary["pairs_succeeded"].as_u64().unwrap_or(0),
+        3,
+        "expected all 3 succeeded: {summary}"
+    );
+    assert_eq!(summary["pairs_failed"].as_u64().unwrap_or(0), 0);
+
+    // Each session's relay.json should list the other two as peers.
+    let sessions_root = home.join("sessions");
+    for name in &["alpha", "beth", "charlie"] {
+        let relay_path = sessions_root
+            .join(name)
+            .join("config")
+            .join("wire")
+            .join("relay.json");
+        let state: Value =
+            serde_json::from_slice(&std::fs::read(&relay_path).expect("relay.json missing"))
+                .expect("relay.json parse");
+        let peers = state["peers"]
+            .as_object()
+            .expect("session must have peers map");
+        for other in &["alpha", "beth", "charlie"] {
+            if other == name {
+                continue;
+            }
+            assert!(
+                peers.contains_key(*other),
+                "session {name} missing peer {other}: peers={:?}",
+                peers.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // Re-run: idempotent — 3 pairs skipped_already_paired, 0 new.
+    let out2 = wire(
+        &home,
+        &[
+            "session",
+            "pair-all-local",
+            "--federation-relay",
+            &fed_url,
+            "--settle-secs",
+            "1",
+            "--json",
+        ],
+    );
+    assert!(out2.status.success(), "pair-all-local re-run failed");
+    let summary2: Value = serde_json::from_slice(&out2.stdout).unwrap();
+    assert_eq!(
+        summary2["pairs_skipped_already_paired"].as_u64().unwrap_or(0),
+        3,
+        "re-run should skip 3 already-paired: {summary2}"
+    );
+    assert_eq!(summary2["pairs_succeeded"].as_u64().unwrap_or(0), 0);
+}
+
 // ---------- TEST 0: regression — wire session new --with-local persists dual endpoints ----------
 
 /// v0.5.20 regression: `try_allocate_local_slot` (cli.rs) and

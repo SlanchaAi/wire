@@ -756,6 +756,37 @@ pub enum SessionCommand {
         #[arg(long)]
         json: bool,
     },
+    /// v0.6.0 (issue #12): mesh-pair every sister session against every
+    /// other in O(N²) handshakes. For each unordered pair (A, B) that
+    /// is not already paired, drives the bilateral flow end-to-end:
+    /// `wire add` from A → B (queued + pushed), `wire pair-accept` on
+    /// B's side, then a final pull on A so the ack lands. Idempotent —
+    /// re-running skips pairs already in `state.peers`.
+    ///
+    /// **Trust anchor:** the operator running this command owns every
+    /// session listed in `wire session list-local` (they all live under
+    /// the same `$WIRE_HOME/sessions/` directory the operator chose).
+    /// That filesystem-permission boundary IS the consent for both
+    /// sides — the bilateral SAS / network-level handshake assumes
+    /// strangers; same-uid sister sessions are by definition not
+    /// strangers. Cross-uid sister sessions are out of scope; today
+    /// `wire session list-local` only enumerates this user's sessions.
+    PairAllLocal {
+        /// Seconds to wait between handshake stages for pair_drop /
+        /// pair_drop_ack to propagate over the relay. Default 1s
+        /// (local-relay is typically <100ms RTT). Bump if you see
+        /// "pending-inbound never arrived" errors on a slow relay.
+        #[arg(long, default_value_t = 1)]
+        settle_secs: u64,
+        /// Federation relay to bind each `wire add` against. Default
+        /// `https://wireup.net`. Sister sessions should be bound to
+        /// the same federation relay; the pair handshake routes through
+        /// it for the .well-known resolution + pair_drop deposit.
+        #[arg(long, default_value = "https://wireup.net")]
+        federation_relay: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the `export WIRE_HOME=...` line for a session, so a shell
     /// can `eval $(wire session env <name>)` to activate it. With no
     /// name, resolves the cwd through the registry.
@@ -4692,6 +4723,11 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
         ),
         SessionCommand::List { json } => cmd_session_list(json),
         SessionCommand::ListLocal { json } => cmd_session_list_local(json),
+        SessionCommand::PairAllLocal {
+            settle_secs,
+            federation_relay,
+            json,
+        } => cmd_session_pair_all_local(settle_secs, &federation_relay, json),
         SessionCommand::Env { name, json } => cmd_session_env(name.as_deref(), json),
         SessionCommand::Current { json } => cmd_session_current(json),
         SessionCommand::Destroy { name, force, json } => cmd_session_destroy(&name, force, json),
@@ -5187,6 +5223,258 @@ fn cmd_session_list_local(as_json: bool) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+/// v0.6.0 (issue #12): orchestrate bilateral pair across every sister
+/// session that has a Local-scope endpoint. Skips already-paired
+/// pairs; reports a per-pair outcome JSON suitable for scripting.
+///
+/// Same-uid trust anchor: the caller owns every session enumerated by
+/// `list_local_sessions`, so the operator running this command IS the
+/// consent for both sides. The bilateral SAS / network-level handshake
+/// assumes strangers; same-uid sister sessions are not strangers.
+///
+/// Per-pair flow (sequential to keep relay-side load + log clarity):
+///   1. WIRE_HOME=A wire add <B-handle>@<host>  (writes pending-inbound on B)
+///   2. WIRE_HOME=A wire push --json            (sends pair_drop to relay)
+///   3. sleep settle_secs                       (pair_drop reaches B)
+///   4. WIRE_HOME=B wire pull --json            (B receives pair_drop)
+///   5. WIRE_HOME=B wire pair-accept <A-bare>   (B pins A, sends ack)
+///   6. WIRE_HOME=B wire push --json            (sends pair_drop_ack)
+///   7. sleep settle_secs                       (ack reaches A)
+///   8. WIRE_HOME=A wire pull --json            (A pins B)
+fn cmd_session_pair_all_local(
+    settle_secs: u64,
+    federation_relay: &str,
+    as_json: bool,
+) -> Result<()> {
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    let listing = crate::session::list_local_sessions()?;
+    // Flatten + dedup by session NAME (same session can appear under
+    // multiple local-relay URLs if it advertises two local endpoints;
+    // rare, but pair each pair exactly once).
+    let mut by_name: std::collections::BTreeMap<String, crate::session::LocalSessionView> =
+        Default::default();
+    for group in listing.local.into_values() {
+        for s in group {
+            by_name.entry(s.name.clone()).or_insert(s);
+        }
+    }
+    let sessions: Vec<crate::session::LocalSessionView> = by_name.into_values().collect();
+
+    if sessions.len() < 2 {
+        let msg = format!(
+            "{} sister session(s) with a local endpoint — need at least 2 to pair.",
+            sessions.len()
+        );
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "sessions": sessions.iter().map(|s| &s.name).collect::<Vec<_>>(),
+                    "pairs_attempted": 0,
+                    "pairs_succeeded": 0,
+                    "pairs_skipped_already_paired": 0,
+                    "pairs_failed": 0,
+                    "note": msg,
+                }))?
+            );
+        } else {
+            println!("{msg}");
+            if let Some(s) = sessions.first() {
+                println!("  - {} ({})", s.name, s.cwd.as_deref().unwrap_or("?"));
+            }
+            println!("Use `wire session new --with-local` to add more.");
+        }
+        return Ok(());
+    }
+
+    let fed_host = host_of_url(federation_relay);
+    if fed_host.is_empty() {
+        bail!(
+            "federation_relay `{federation_relay}` has no parseable host — \
+             pass a full URL like `https://wireup.net`."
+        );
+    }
+
+    // Enumerate unordered pairs deterministically by session name.
+    let mut attempted = 0u32;
+    let mut succeeded = 0u32;
+    let mut skipped_already = 0u32;
+    let mut failed = 0u32;
+    let mut per_pair: Vec<Value> = Vec::new();
+
+    for i in 0..sessions.len() {
+        for j in (i + 1)..sessions.len() {
+            let a = &sessions[i];
+            let b = &sessions[j];
+            attempted += 1;
+
+            // Already-paired check: if A's relay-state has B's nick in
+            // peers AND vice versa, skip.
+            let a_pinned_b = session_has_peer(&a.home_dir, &b.name);
+            let b_pinned_a = session_has_peer(&b.home_dir, &a.name);
+            if a_pinned_b && b_pinned_a {
+                skipped_already += 1;
+                per_pair.push(json!({
+                    "from": a.name,
+                    "to": b.name,
+                    "status": "already_paired",
+                }));
+                continue;
+            }
+
+            let pair_result = drive_bilateral_pair(
+                &a.home_dir,
+                &a.name,
+                &b.home_dir,
+                &b.name,
+                &fed_host,
+                federation_relay,
+                settle_secs,
+            );
+
+            match pair_result {
+                Ok(()) => {
+                    succeeded += 1;
+                    per_pair.push(json!({
+                        "from": a.name,
+                        "to": b.name,
+                        "status": "paired",
+                    }));
+                }
+                Err(e) => {
+                    failed += 1;
+                    let detail = format!("{e:#}");
+                    per_pair.push(json!({
+                        "from": a.name,
+                        "to": b.name,
+                        "status": "failed",
+                        "error": detail,
+                    }));
+                }
+            }
+
+            // Brief settle between pairs so we don't slam the relay
+            // with N(N-1) parallel requests.
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    let _ = BTreeSet::<String>::new(); // silence unused-import lint if any
+    let summary = json!({
+        "sessions": sessions.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+        "pairs_attempted": attempted,
+        "pairs_succeeded": succeeded,
+        "pairs_skipped_already_paired": skipped_already,
+        "pairs_failed": failed,
+        "results": per_pair,
+    });
+    if as_json {
+        println!("{}", serde_json::to_string(&summary)?);
+    } else {
+        println!(
+            "wire session pair-all-local: {} session(s), {} pair(s) attempted",
+            sessions.len(),
+            attempted
+        );
+        println!("  paired:                 {succeeded}");
+        println!("  skipped (already pinned): {skipped_already}");
+        println!("  failed:                 {failed}");
+        for entry in summary["results"].as_array().unwrap_or(&vec![]) {
+            let from = entry["from"].as_str().unwrap_or("?");
+            let to = entry["to"].as_str().unwrap_or("?");
+            let status = entry["status"].as_str().unwrap_or("?");
+            let err = entry.get("error").and_then(Value::as_str).unwrap_or("");
+            if err.is_empty() {
+                println!("  {from:<24} ↔ {to:<24} {status}");
+            } else {
+                println!("  {from:<24} ↔ {to:<24} {status} — {err}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Check whether `session_home`'s `relay.json` already lists `peer_name`
+/// under `state.peers`. Best-effort — any read/parse error → false.
+fn session_has_peer(session_home: &std::path::Path, peer_name: &str) -> bool {
+    let path = session_home.join("config").join("wire").join("relay.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let val: Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    val.get("peers")
+        .and_then(|p| p.get(peer_name))
+        .is_some()
+}
+
+/// Drive one bilateral pair handshake between two sister sessions
+/// using their session home dirs as `WIRE_HOME`. Sequential 8-step
+/// flow so failures bubble up at the offending step, not buried in
+/// a parallel race. See `cmd_session_pair_all_local` docstring.
+fn drive_bilateral_pair(
+    a_home: &std::path::Path,
+    a_name: &str,
+    b_home: &std::path::Path,
+    b_name: &str,
+    fed_host: &str,
+    federation_relay: &str,
+    settle_secs: u64,
+) -> Result<()> {
+    use std::time::Duration;
+    let bin = std::env::current_exe().context("locating self exe")?;
+
+    let run = |home: &std::path::Path, args: &[&str]| -> Result<()> {
+        let out = std::process::Command::new(&bin)
+            .env("WIRE_HOME", home)
+            .env_remove("RUST_LOG")
+            .args(args)
+            .output()
+            .with_context(|| format!("spawning `wire {}`", args.join(" ")))?;
+        if !out.status.success() {
+            bail!(
+                "`wire {}` failed: stderr={}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
+    };
+
+    let b_handle = format!("{b_name}@{fed_host}");
+
+    // 1. A initiates → 2. A push pair_drop
+    run(a_home, &["add", &b_handle, "--relay", federation_relay, "--json"])
+        .with_context(|| format!("step 1/8: {a_name} `wire add {b_handle}`"))?;
+    run(a_home, &["push", "--json"])
+        .with_context(|| format!("step 2/8: {a_name} `wire push`"))?;
+
+    // 3. settle so pair_drop reaches B's slot
+    std::thread::sleep(Duration::from_secs(settle_secs));
+
+    // 4. B pulls pair_drop → 5. B pair-accept (pins A) → 6. B push pair_drop_ack
+    run(b_home, &["pull", "--json"])
+        .with_context(|| format!("step 4/8: {b_name} `wire pull`"))?;
+    run(b_home, &["pair-accept", a_name, "--json"])
+        .with_context(|| format!("step 5/8: {b_name} `wire pair-accept {a_name}`"))?;
+    run(b_home, &["push", "--json"])
+        .with_context(|| format!("step 6/8: {b_name} `wire push`"))?;
+
+    // 7. settle so ack reaches A's slot
+    std::thread::sleep(Duration::from_secs(settle_secs));
+
+    // 8. A pulls ack (pins B with the slot_token + endpoints[] from the ack)
+    run(a_home, &["pull", "--json"])
+        .with_context(|| format!("step 8/8: {a_name} `wire pull`"))?;
+
     Ok(())
 }
 
