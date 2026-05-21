@@ -2033,4 +2033,59 @@ mod tests {
         let resp = handle_request(&req, &McpState::default());
         assert_eq!(resp, Value::Null);
     }
+
+    /// v0.6.1 regression: `detect_session_wire_home` must return the
+    /// session's home dir when the cwd is in the registry AND the
+    /// session dir exists on disk. The original v0.6.1 shipped with
+    /// only an eprintln "verification" — this test asserts the
+    /// observable return value so the env-set-but-not-consumed class
+    /// of bug fails loudly.
+    #[test]
+    fn detect_session_wire_home_resolves_registered_cwd() {
+        crate::config::test_support::with_temp_home(|| {
+            // Set up sessions/registry.json + sessions/test-alpha/ under
+            // the temp WIRE_HOME so session::read_registry +
+            // session::session_dir resolve through it.
+            let wire_home = std::env::var("WIRE_HOME").unwrap();
+            let sessions_root = std::path::PathBuf::from(&wire_home).join("sessions");
+            let session_home = sessions_root.join("test-alpha");
+            std::fs::create_dir_all(&session_home).unwrap();
+            let fake_cwd = "/tmp/fake-project-cwd-abc123";
+            let registry = json!({"by_cwd": {fake_cwd: "test-alpha"}});
+            std::fs::write(
+                sessions_root.join("registry.json"),
+                serde_json::to_vec_pretty(&registry).unwrap(),
+            )
+            .unwrap();
+
+            // Hit happy path.
+            let got = super::detect_session_wire_home(std::path::Path::new(fake_cwd));
+            assert_eq!(
+                got.as_deref(),
+                Some(session_home.as_path()),
+                "registered cwd must resolve to session_home"
+            );
+
+            // Unregistered cwd → None.
+            let nope = super::detect_session_wire_home(std::path::Path::new(
+                "/tmp/cwd-not-in-registry-xyz789",
+            ));
+            assert!(nope.is_none(), "unregistered cwd must return None");
+
+            // Registered cwd but session dir missing → None (defensive:
+            // stale registry entry pointing at a deleted session).
+            let stale_cwd = "/tmp/stale-session-cwd";
+            let stale_registry = json!({"by_cwd": {fake_cwd: "test-alpha", stale_cwd: "test-stale"}});
+            std::fs::write(
+                sessions_root.join("registry.json"),
+                serde_json::to_vec_pretty(&stale_registry).unwrap(),
+            )
+            .unwrap();
+            let stale_got = super::detect_session_wire_home(std::path::Path::new(stale_cwd));
+            assert!(
+                stale_got.is_none(),
+                "registered cwd whose session dir is missing must return None"
+            );
+        });
+    }
 }
