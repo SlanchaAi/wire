@@ -85,10 +85,50 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///   inbox event, checks the shared subscription set; if any matching
 ///   `wire://inbox/<peer>` or `wire://inbox/all` URI is subscribed, pushes
 ///   a `notifications/resources/updated` message into the channel.
+/// v0.6.1: if WIRE_HOME isn't set in env, look up `$PWD` in the session
+/// registry. If a session is registered for this cwd, return that
+/// session's home dir; otherwise None.
+///
+/// Read-only — does NOT mutate env. The caller decides whether to apply.
+fn detect_session_wire_home(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    let registry = crate::session::read_registry().ok()?;
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    let session_name = registry.by_cwd.get(&cwd_str)?;
+    let session_home = crate::session::session_dir(session_name).ok()?;
+    if !session_home.exists() {
+        return None;
+    }
+    Some(session_home)
+}
+
 pub fn run() -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    // v0.6.1: auto-detect WIRE_HOME from cwd. If the operator already set
+    // it (explicit override via `.mcp.json env.WIRE_HOME`), respect that.
+    // Else: if the cwd maps to a `wire session` entry in the registry,
+    // adopt that session's WIRE_HOME for this MCP process so every
+    // subsequent tool call routes to the right inbox / outbox / identity.
+    // Without this, two Claudes in different project dirs share the
+    // default WIRE_HOME and race the cursor (issue #69 ergonomic ask
+    // shipped from the v0.6.0 release thread).
+    if std::env::var("WIRE_HOME").is_err()
+        && let Ok(cwd) = std::env::current_dir()
+        && let Some(home) = detect_session_wire_home(&cwd)
+    {
+        eprintln!(
+            "wire mcp: auto-detected session for cwd `{}` → WIRE_HOME=`{}`",
+            cwd.display(),
+            home.display()
+        );
+        // SAFETY: we are at the very start of `run()`, BEFORE any worker
+        // thread or watcher spawns; nothing else is reading env yet.
+        unsafe {
+            std::env::set_var("WIRE_HOME", &home);
+        }
+    }
 
     let state = McpState::default();
     let shutdown = Arc::new(AtomicBool::new(false));

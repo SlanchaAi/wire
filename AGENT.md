@@ -10,7 +10,9 @@ Each agent needs its own wire session, otherwise they share an inbox and race th
 wire session new --with-local
 ```
 
-Copy the printed `export WIRE_HOME=...` path into the project's MCP config:
+**v0.6.1: the `wire mcp` server auto-adopts the right WIRE_HOME from `$PWD` on startup.** If your MCP host (Claude Code, Cursor, etc.) sets `$PWD` to the project root when it spawns the server — which is the default for both — no further config is needed. Verify with `wire session list-local`.
+
+If your MCP host doesn't set `$PWD`, add an explicit env override in the project's MCP config:
 
 ```json
 {
@@ -18,13 +20,13 @@ Copy the printed `export WIRE_HOME=...` path into the project's MCP config:
     "wire": {
       "command": "wire",
       "args": ["mcp"],
-      "env": { "WIRE_HOME": "<paste the path here>" }
+      "env": { "WIRE_HOME": "<paste the path printed by `wire session new`>" }
     }
   }
 }
 ```
 
-Restart the agent. Full recipe: [docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
+Mesh-pair every sister Claude on the box with `wire session pair-all-local` (v0.6.0). Full recipe: [docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
 
 Skip this section if you're the only agent on the box.
 

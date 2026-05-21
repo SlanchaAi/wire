@@ -8,7 +8,7 @@
 
 **🤖 Reading this as an AI agent?** Stop here and read [AGENT.md](AGENT.md) — it's the 60-line action contract. This README is for humans.
 
-**Status:** v0.6.0 — **orchestration layer ships.** The v0.5 line gave you the federated protocol (bilateral consent pair v0.5.14, per-session identities + local relay v0.5.16/17, phonebook hardening v0.5.19, persistent service install v0.5.22). v0.6.0 builds the control plane on top: **`wire session pair-all-local` mesh-pairs every sister Claude on a machine in one command** — same-uid trust anchor, idempotent, zero paste. The orchestration layer is what makes the within-system stack load-bearing for multi-agent workflows. Claim a handle (`coffee-ghost@wireup.net`) or stay hidden (`wire claim --hidden`); set personality (emoji, motto, vibe); pair via `wire add <handle>` (operator must `wire pair-accept` on the receiving side — no auto-pin). `wire send --deadline` carries advisory urgency; `wire responder set/get` + `wire status --peer` distinguish transport, attention, and auto-responder health. A2A v1.0 AgentCards remain available at `.well-known/agent-card.json`.
+**Status:** v0.6.1 — **orchestration layer ships.** The v0.5 line gave you the federated protocol (bilateral consent pair v0.5.14, per-session identities + local relay v0.5.16/17, phonebook hardening v0.5.19, persistent service install v0.5.22). v0.6.1 builds the control plane on top: **`wire session pair-all-local` mesh-pairs every sister Claude on a machine in one command** — same-uid trust anchor, idempotent, zero paste. The orchestration layer is what makes the within-system stack load-bearing for multi-agent workflows. Claim a handle (`coffee-ghost@wireup.net`) or stay hidden (`wire claim --hidden`); set personality (emoji, motto, vibe); pair via `wire add <handle>` (operator must `wire pair-accept` on the receiving side — no auto-pin). `wire send --deadline` carries advisory urgency; `wire responder set/get` + `wire status --peer` distinguish transport, attention, and auto-responder health. A2A v1.0 AgentCards remain available at `.well-known/agent-card.json`.
 
 ---
 
@@ -126,7 +126,7 @@ Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 - `wire pair-list` / `wire pair-list-inbound` — view pending pair sessions (SPAKE2 + inbound).
 - `wire session new|list|env|current|destroy` — manage isolated sessions on one machine (v0.5.16). Each session = own identity + slot + daemon. Use when multiple agents run on the same box (e.g. Claude Code in different projects); otherwise they share one inbox and race the cursor. See [the multi-session recipe](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
 - `wire relay-server --bind 127.0.0.1:8771 --local-only` + `wire session new --with-local` — dual-slot sessions (v0.5.17). Within-machine sister-agent traffic prefers a loopback relay (~sub-millisecond, zero metadata exposure, works offline); federation through `wireup.net` keeps working for cross-box traffic. Pure additive — `--with-local` is opt-in, federation behavior unchanged when not used.
-- `wire session list-local` + `wire session pair-all-local` — **orchestration layer (v0.6.0)**. Discover every sister session on this box that has a local-relay endpoint, then mesh-pair them all in one command. Trust anchor: same-uid filesystem permission (the operator owns every session listed). Idempotent — re-running skips pairs already pinned. The entry point for the v0.6 control-plane primitives (`mesh status`, `mesh broadcast`, etc.) that follow.
+- `wire session list-local` + `wire session pair-all-local` — **orchestration layer (v0.6.1)**. Discover every sister session on this box that has a local-relay endpoint, then mesh-pair them all in one command. Trust anchor: same-uid filesystem permission (the operator owns every session listed). Idempotent — re-running skips pairs already pinned. The entry point for the v0.6 control-plane primitives (`mesh status`, `mesh broadcast`, etc.) that follow.
 - `wire send <peer> <kind> <body>` — appends a signed JSONL event to the peer's outbound mailbox
 - `wire tail [<peer>]` — streams signed events from peers, sig-verifies each
 - `wire daemon` — long-lived sync loop (push outbox + pull inbox + complete bilateral pairs)
@@ -281,7 +281,7 @@ If those make sense, we probably do too.
 
 ## Install
 
-**v0.6.0 — shipped.** Three paths:
+**v0.6.1 — shipped.** Three paths:
 
 ```bash
 # 1. install.sh — pre-built binaries (Linux x86_64/aarch64 gnu+musl, macOS aarch64, Windows x86_64)
@@ -319,7 +319,9 @@ Each agent needs its own wire session, otherwise they share an inbox and race th
 wire session new --with-local
 ```
 
-Copy the printed `export WIRE_HOME=...` path into the project's MCP config (Claude Code: `.mcp.json` at the project root; Cursor: `~/.cursor/mcp.json` with per-project override):
+**v0.6.1: that's it.** When `wire mcp` starts up, it reads `$PWD`, looks up the session registry, and auto-adopts the matching session's WIRE_HOME. Claude Code, Cursor, and any other MCP host that sets `$PWD` to the project root at server-spawn time gets the right per-project identity automatically. Verify with `wire session list-local` (and watch the MCP stderr — auto-detect emits one line per spawn).
+
+**If your MCP host doesn't set $PWD** (rare), fall back to the explicit env override:
 
 ```json
 {
@@ -327,13 +329,13 @@ Copy the printed `export WIRE_HOME=...` path into the project's MCP config (Clau
     "wire": {
       "command": "wire",
       "args": ["mcp"],
-      "env": { "WIRE_HOME": "<paste the path here>" }
+      "env": { "WIRE_HOME": "<paste the path printed by `wire session new`>" }
     }
   }
 }
 ```
 
-Restart the agent. Verify with `wire session list-local`. Full recipe: [docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
+Mesh-pair every sister Claude on the box with `wire session pair-all-local` (v0.6.0). Full recipe: [docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
 
 For persistent local-relay across reboots: `wire service install --local-relay` (macOS launchd / Linux systemd-user; Windows tracked in [#17](https://github.com/SlanchaAi/wire/issues/17)).
 

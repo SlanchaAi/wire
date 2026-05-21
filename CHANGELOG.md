@@ -8,6 +8,32 @@ The v0.5 line shipped the protocol: bilateral signed-message bus, federated hand
 
 The first orchestration primitive is `wire session pair-all-local`: zero-paste bilateral pairing across every sister session on a machine. The trust anchor shifts from "operator types SAS digits on each side" (a network-level proof appropriate for strangers) to "operator owns every session listed in `wire session list-local`" (a filesystem-permission proof appropriate for same-uid siblings). That re-anchoring is what makes mesh-scale auto-pairing safe to ship at all — same-uid siblings are by definition not strangers.
 
+### v0.6.1 — MCP server auto-detects WIRE_HOME from cwd
+
+Removes the manual `.mcp.json env.WIRE_HOME` step that v0.5.16+ multi-session setups required. When the `wire mcp` server starts:
+
+1. If `WIRE_HOME` is already in env (explicit operator override) — respect it, no change.
+2. Else: read `std::env::current_dir()`, look it up in the session registry (`<state_dir>/wire/sessions/registry.json`). If a session is registered for this cwd, adopt that session's `$WIRE_HOME/sessions/<name>` as the process-wide WIRE_HOME for the rest of the MCP server's lifetime.
+3. Else: fall through to default WIRE_HOME (pre-v0.6.1 behavior).
+
+Emits a single stderr line on auto-detect so operators can see the resolution: `wire mcp: auto-detected session for cwd '...' → WIRE_HOME='...'`. Goes to stderr (not stdout, which is the MCP JSON-RPC channel).
+
+**Practical effect.** Operators run `wire session new --with-local` once per project. Then Claude Code, Cursor, or any other MCP host that sets `$PWD` to the project directory at server-spawn time gets the right per-project identity automatically. No `.mcp.json env` editing, no shell-side `eval $(wire session env)` plumbing. The README + AGENT.md multi-session sections updated to mention auto-detect first; the manual env override is still documented for hosts that don't set `$PWD` (rare).
+
+Implementation lives at `src/mcp.rs::detect_session_wire_home` — read-only lookup; the caller (`run()`) does the `set_var` inside an `unsafe` block because Rust 2024 marks env mutation unsafe (thread-safety). Safe at this call site because `run()` hasn't spawned the writer / watcher threads yet.
+
+**Verified live on this laptop:**
+
+```
+$ wire mcp < initialize.jsonl
+wire mcp: auto-detected session for cwd `/Users/laul_pogan/Source/wire` → WIRE_HOME=`/Users/laul_pogan/Library/Application Support/wire/sessions/wire`
+{"id":1,"jsonrpc":"2.0","result":{"capabilities":...,"serverInfo":{"name":"wire","version":"0.6.1"}}}
+```
+
+The MCP `initialize` response now reports `"version": "0.6.1"` from inside the session-scoped WIRE_HOME, not the default.
+
+**Pure additive.** No protocol or schema change. Pre-v0.6.1 clients that set WIRE_HOME explicitly continue working unchanged; the auto-detect path is purely additive for the unset-env case.
+
 ### v0.6.0 — `wire session pair-all-local`: first orchestration primitive (issue #12)
 
 Adds **the entry point to the orchestration layer**: one command that bilaterally pairs every sister session on a machine. For each unordered pair (A, B) in `wire session list-local`, drives the existing v0.5.14 bilateral handshake end-to-end via subprocess: A's `wire add`, A's `wire push`, settle, B's `wire pull`, B's `wire pair-accept`, B's `wire push`, settle, A's `wire pull`. Idempotent — re-running skips pairs already in `state.peers`. JSON output reports per-pair status (`paired` / `already_paired` / `failed` with stderr from the offending step).
