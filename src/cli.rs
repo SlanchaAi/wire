@@ -911,6 +911,39 @@ pub enum MeshCommand {
         #[command(subcommand)]
         action: MeshRoleAction,
     },
+    /// v0.6.5 (issue #21): capability-match routing. Resolve a role tag
+    /// to one sister session and deliver an event to that one peer.
+    /// Closes the orchestration-primitive arc opened in v0.6.0 — operators
+    /// can now address "the reviewer" instead of hard-coding a handle.
+    ///
+    /// Strategies:
+    ///   - `round-robin` (default): per-role cursor, persisted at
+    ///     `<state_dir>/mesh-route-cursor.json`. Alternates fairly.
+    ///   - `first`: alphabetically-first matching sister. Deterministic.
+    ///   - `random`: uniform random among matches. Stateless.
+    ///
+    /// Pinned-peers-only by construction (same posture as `broadcast`).
+    /// Caller must already have the target sister pinned in
+    /// `state.peers` — otherwise we can't sign + push. Run
+    /// `wire session pair-all-local` first if the mesh isn't wired.
+    Route {
+        /// Role to match (operator-defined tag from `wire mesh role set`).
+        role: String,
+        /// `round-robin` (default), `first`, or `random`.
+        #[arg(long, default_value = "round-robin")]
+        strategy: String,
+        /// Skip a specific sister handle. Repeatable.
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Event kind: `claim` (default), `decision`, `question`, `ack`,
+        /// `heartbeat`. Same vocabulary as `wire send` / broadcast.
+        #[arg(long, default_value = "claim")]
+        kind: String,
+        /// Body — string, `@/path` for a file, or `-` for stdin.
+        body: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// v0.6.4: subcommands of `wire mesh role`.
@@ -4849,7 +4882,265 @@ fn cmd_mesh(cmd: MeshCommand) -> Result<()> {
             json,
         } => cmd_mesh_broadcast(&kind, &scope, &exclude, noreply, &body, json),
         MeshCommand::Role { action } => cmd_mesh_role(action),
+        MeshCommand::Route {
+            role,
+            strategy,
+            exclude,
+            kind,
+            body,
+            json,
+        } => cmd_mesh_route(&role, &strategy, &exclude, &kind, &body, json),
     }
+}
+
+/// v0.6.5 (issue #21): capability-match routing. Walks sister sessions,
+/// filters by `profile.role` + `--exclude` + must-be-pinned-in-our-peers,
+/// picks ONE via the requested strategy, then signs + pushes the event
+/// to that peer. Pinned-peers-only by construction (same as broadcast).
+fn cmd_mesh_route(
+    role: &str,
+    strategy: &str,
+    exclude: &[String],
+    kind: &str,
+    body_arg: &str,
+    as_json: bool,
+) -> Result<()> {
+    use std::time::Instant;
+
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire init <handle>` first");
+    }
+    let strategy = strategy.to_ascii_lowercase();
+    if !matches!(strategy.as_str(), "round-robin" | "first" | "random") {
+        bail!(
+            "unknown strategy `{strategy}` — use round-robin | first | random"
+        );
+    }
+
+    // Our pinned-peer set: only these handles are addressable. mesh-route
+    // refuses to invent a recipient, same posture as broadcast.
+    let state = config::read_relay_state()?;
+    let pinned: std::collections::BTreeSet<String> = state["peers"]
+        .as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+
+    let exclude_set: std::collections::HashSet<&str> = exclude.iter().map(String::as_str).collect();
+
+    // Enumerate every sister on the box, read each one's role from its
+    // signed agent-card. Filter: matching role AND pinned AND not
+    // excluded. `list_sessions` returns the cross-session view (using the
+    // v0.6.4 inside-session sessions_root fallback).
+    let sessions = crate::session::list_sessions()?;
+    let mut candidates: Vec<(String, Option<String>)> = Vec::new(); // (handle, did)
+    for s in &sessions {
+        let handle = match s.handle.as_ref() {
+            Some(h) => h.clone(),
+            None => continue,
+        };
+        if exclude_set.contains(handle.as_str()) {
+            continue;
+        }
+        if !pinned.contains(&handle) {
+            continue;
+        }
+        let card_path = s
+            .home_dir
+            .join("config")
+            .join("wire")
+            .join("agent-card.json");
+        let card_role = std::fs::read(&card_path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|c| {
+                c.get("profile")
+                    .and_then(|p| p.get("role"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+        if card_role.as_deref() == Some(role) {
+            candidates.push((handle, s.did.clone()));
+        }
+    }
+
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates.dedup_by(|a, b| a.0 == b.0);
+
+    if candidates.is_empty() {
+        bail!(
+            "no pinned sister with role=`{role}` (run `wire mesh role list` to see what's available)"
+        );
+    }
+
+    let chosen = match strategy.as_str() {
+        "first" => candidates[0].clone(),
+        "random" => {
+            use rand::Rng;
+            let idx = rand::thread_rng().gen_range(0..candidates.len());
+            candidates[idx].clone()
+        }
+        "round-robin" => {
+            // Cursor persisted at <state_dir>/mesh-route-cursor.json:
+            // `{role: last_picked_handle}`. Next pick = first candidate
+            // alphabetically AFTER last_picked, wrapping around when no
+            // candidate is greater.
+            let cursor_path = mesh_route_cursor_path()?;
+            let mut cursors: std::collections::BTreeMap<String, String> =
+                read_mesh_route_cursors(&cursor_path);
+            let last = cursors.get(role).cloned();
+            let pick = match last {
+                None => candidates[0].clone(),
+                Some(last_h) => candidates
+                    .iter()
+                    .find(|(h, _)| h.as_str() > last_h.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| candidates[0].clone()),
+            };
+            cursors.insert(role.to_string(), pick.0.clone());
+            write_mesh_route_cursors(&cursor_path, &cursors)?;
+            pick
+        }
+        _ => unreachable!(),
+    };
+
+    let (chosen_handle, _chosen_did) = chosen;
+
+    // Body parsing follows wire send / mesh broadcast.
+    let body_value: Value = if body_arg == "-" {
+        use std::io::Read;
+        let mut raw = String::new();
+        std::io::stdin()
+            .read_to_string(&mut raw)
+            .with_context(|| "reading body from stdin")?;
+        serde_json::from_str(raw.trim_end()).unwrap_or(Value::String(raw))
+    } else if let Some(path) = body_arg.strip_prefix('@') {
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading body file {path:?}"))?;
+        serde_json::from_str(&raw).unwrap_or(Value::String(raw))
+    } else {
+        Value::String(body_arg.to_string())
+    };
+
+    let sk_seed = config::read_private_key()?;
+    let card = config::read_agent_card()?;
+    let did = card
+        .get("did")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent-card missing did"))?
+        .to_string();
+    let handle = crate::agent_card::display_handle_from_did(&did).to_string();
+    let pk_b64 = card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent-card missing verify_keys[*].key"))?;
+    let pk_bytes = crate::signing::b64decode(pk_b64)?;
+
+    let kind_id = parse_kind(kind)?;
+    let now_iso = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+
+    let event = json!({
+        "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
+        "timestamp": now_iso,
+        "from": did,
+        "to": format!("did:wire:{chosen_handle}"),
+        "type": kind,
+        "kind": kind_id,
+        "body": json!({
+            "content": body_value,
+            "routed_via": {
+                "role": role,
+                "strategy": strategy,
+            },
+        }),
+    });
+    let signed = crate::signing::sign_message_v31(&event, &sk_seed, &pk_bytes, &handle)
+        .map_err(|e| anyhow!("sign_message_v31 failed: {e:?}"))?;
+    let event_id = signed["event_id"].as_str().unwrap_or("").to_string();
+
+    let line = serde_json::to_vec(&signed)?;
+    config::append_outbox_record(&chosen_handle, &line)?;
+
+    let endpoints = crate::endpoints::peer_endpoints_in_priority_order(&state, &chosen_handle);
+    if endpoints.is_empty() {
+        bail!(
+            "no reachable endpoint pinned for `{chosen_handle}` (the role matched, but we can't push)"
+        );
+    }
+    let start = Instant::now();
+    let mut delivered = false;
+    let mut last_err: Option<String> = None;
+    let mut via_scope: Option<String> = None;
+    for ep in &endpoints {
+        let client = crate::relay_client::RelayClient::new(&ep.relay_url);
+        match client.post_event(&ep.slot_id, &ep.slot_token, &signed) {
+            Ok(_) => {
+                delivered = true;
+                via_scope = Some(
+                    match ep.scope {
+                        crate::endpoints::EndpointScope::Local => "local",
+                        crate::endpoints::EndpointScope::Federation => "federation",
+                    }
+                    .to_string(),
+                );
+                break;
+            }
+            Err(e) => last_err = Some(format!("{e:#}")),
+        }
+    }
+    let rtt_ms = start.elapsed().as_millis() as u64;
+
+    let summary = json!({
+        "role": role,
+        "strategy": strategy,
+        "routed_to": chosen_handle,
+        "event_id": event_id,
+        "delivered": delivered,
+        "delivered_via": via_scope,
+        "rtt_ms": rtt_ms,
+        "candidates": candidates.iter().map(|(h, _)| h.clone()).collect::<Vec<_>>(),
+        "error": last_err,
+    });
+
+    if as_json {
+        println!("{}", serde_json::to_string(&summary)?);
+    } else if delivered {
+        let via = via_scope.as_deref().unwrap_or("?");
+        println!("wire mesh route: {role} → {chosen_handle} ({rtt_ms}ms, {via})");
+    } else {
+        let err = last_err.as_deref().unwrap_or("no endpoints reachable");
+        bail!("delivery to `{chosen_handle}` failed: {err}");
+    }
+    Ok(())
+}
+
+fn mesh_route_cursor_path() -> Result<std::path::PathBuf> {
+    Ok(config::state_dir()?.join("mesh-route-cursor.json"))
+}
+
+fn read_mesh_route_cursors(
+    path: &std::path::Path,
+) -> std::collections::BTreeMap<String, String> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn write_mesh_route_cursors(
+    path: &std::path::Path,
+    cursors: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
+    }
+    let body = serde_json::to_vec_pretty(cursors)?;
+    std::fs::write(path, body).with_context(|| format!("writing {path:?}"))?;
+    Ok(())
 }
 
 /// v0.6.4 (issue #20): mesh role tag dispatcher. Wraps the existing

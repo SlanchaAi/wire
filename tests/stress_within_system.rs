@@ -349,6 +349,194 @@ async fn pair_all_local_mesh_pairs_every_sister_session_v0_6_0() {
     assert_eq!(summary2["pairs_succeeded"].as_u64().unwrap_or(0), 0);
 }
 
+// ---------- TEST 8: mesh route picks one sister by role + strategy (v0.6.5 / #21) ----------
+
+/// v0.6.5 (issue #21): `wire mesh route <role>` filters sister sessions by
+/// `profile.role` (and excludes non-pinned/excluded peers), picks ONE via
+/// the requested strategy, signs + pushes the event to that one peer.
+/// Spins 3 sessions (alpha=planner, beth=reviewer, charlie=reviewer),
+/// pairs them, then:
+///   - `--strategy first` × 1: deterministically alpha-sort = beth.
+///   - `--strategy round-robin` × 4: must alternate beth/charlie 2-2.
+///   - `--strategy random` × 20: must hit BOTH beth and charlie at least
+///     once each (loose statistical check; cosmic-ray-tight enough).
+///   - Routing to a nonexistent role bails with the role-list hint.
+///   - `--exclude beth` from alpha with role=reviewer → only charlie.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mesh_route_picks_one_sister_per_strategy_v0_6_5() {
+    let fed_url = spawn_federation_relay().await;
+    let local_url = spawn_local_only_relay().await;
+    let home = fresh_dir("mesh-route");
+
+    let session_roles = [("alpha", "planner"), ("beth", "reviewer"), ("charlie", "reviewer")];
+    for (name, _) in &session_roles {
+        let out = wire(
+            &home,
+            &[
+                "session",
+                "new",
+                name,
+                "--relay",
+                &fed_url,
+                "--with-local",
+                "--local-relay",
+                &local_url,
+                "--no-daemon",
+                "--json",
+            ],
+        );
+        assert!(
+            out.status.success(),
+            "session new {name} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // Pair all sessions, then assign roles.
+    let pair_out = wire(
+        &home,
+        &[
+            "session",
+            "pair-all-local",
+            "--federation-relay",
+            &fed_url,
+            "--settle-secs",
+            "1",
+            "--json",
+        ],
+    );
+    assert!(
+        pair_out.status.success(),
+        "pair-all-local failed: stderr={}",
+        String::from_utf8_lossy(&pair_out.stderr)
+    );
+    for (name, role) in &session_roles {
+        let session_home = home.join("sessions").join(name);
+        let out = wire(&session_home, &["mesh", "role", "set", role]);
+        assert!(out.status.success(), "set role {role} for {name}");
+    }
+
+    let alpha_home = home.join("sessions").join("alpha");
+
+    // 1) `first` strategy: alphabetical = beth.
+    let out = wire(
+        &alpha_home,
+        &[
+            "mesh",
+            "route",
+            "reviewer",
+            "--strategy",
+            "first",
+            "--json",
+            "deterministic",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "first-strategy route failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let summary: Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert_eq!(summary["routed_to"].as_str(), Some("beth"));
+    assert_eq!(summary["delivered"].as_bool(), Some(true));
+
+    // 2) round-robin × 4 — first call picks "beth" (alpha sort), second
+    // call picks the candidate AFTER beth = charlie, third wraps back to
+    // beth, fourth to charlie. Net: 2 beth + 2 charlie.
+    let mut rr_routes: Vec<String> = Vec::new();
+    for _ in 0..4 {
+        let out = wire(
+            &alpha_home,
+            &[
+                "mesh",
+                "route",
+                "reviewer",
+                "--strategy",
+                "round-robin",
+                "--json",
+                "rr",
+            ],
+        );
+        assert!(out.status.success(), "rr route failed: {}", String::from_utf8_lossy(&out.stderr));
+        let v: Value = serde_json::from_slice(&out.stdout).expect("JSON");
+        rr_routes.push(v["routed_to"].as_str().unwrap_or("?").to_string());
+    }
+    let beth_hits = rr_routes.iter().filter(|h| *h == "beth").count();
+    let charlie_hits = rr_routes.iter().filter(|h| *h == "charlie").count();
+    assert_eq!(
+        beth_hits, 2,
+        "round-robin should hit beth exactly 2× in 4 calls: routes={rr_routes:?}"
+    );
+    assert_eq!(
+        charlie_hits, 2,
+        "round-robin should hit charlie exactly 2× in 4 calls: routes={rr_routes:?}"
+    );
+
+    // 3) random × 20 — must hit BOTH beth and charlie at least once
+    // (catastrophically unlikely to fail by chance: P(beth-only) = 1/2^20).
+    let mut beth_random = 0usize;
+    let mut charlie_random = 0usize;
+    for _ in 0..20 {
+        let out = wire(
+            &alpha_home,
+            &[
+                "mesh",
+                "route",
+                "reviewer",
+                "--strategy",
+                "random",
+                "--json",
+                "rand",
+            ],
+        );
+        assert!(out.status.success(), "random route failed");
+        let v: Value = serde_json::from_slice(&out.stdout).expect("JSON");
+        match v["routed_to"].as_str().unwrap_or("?") {
+            "beth" => beth_random += 1,
+            "charlie" => charlie_random += 1,
+            other => panic!("unexpected route target `{other}`"),
+        }
+    }
+    assert!(
+        beth_random > 0 && charlie_random > 0,
+        "random should hit both reviewers in 20 calls: beth={beth_random} charlie={charlie_random}"
+    );
+
+    // 4) Nonexistent role → clean bail with role-list hint.
+    let none = wire(
+        &alpha_home,
+        &["mesh", "route", "nonexistent-role", "--json", "nope"],
+    );
+    assert!(!none.status.success(), "nonexistent role should error");
+    let stderr = String::from_utf8_lossy(&none.stderr);
+    assert!(
+        stderr.contains("wire mesh role list"),
+        "error message should hint at `wire mesh role list`: {stderr}"
+    );
+
+    // 5) --exclude beth → only charlie is in candidates.
+    let exc = wire(
+        &alpha_home,
+        &[
+            "mesh",
+            "route",
+            "reviewer",
+            "--exclude",
+            "beth",
+            "--strategy",
+            "first",
+            "--json",
+            "exclude",
+        ],
+    );
+    assert!(exc.status.success());
+    let v: Value = serde_json::from_slice(&exc.stdout).expect("JSON");
+    assert_eq!(v["routed_to"].as_str(), Some("charlie"));
+    let cands = v["candidates"].as_array().unwrap();
+    assert_eq!(cands.len(), 1, "exclude should leave 1 candidate: {cands:?}");
+    assert_eq!(cands[0].as_str(), Some("charlie"));
+}
+
 // ---------- TEST 7: mesh role assigns + lists role tags across sisters (v0.6.4 / #20) ----------
 
 /// v0.6.4 (issue #20): `wire mesh role set <role>` writes profile.role to

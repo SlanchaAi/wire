@@ -8,6 +8,33 @@ The v0.5 line shipped the protocol: bilateral signed-message bus, federated hand
 
 The first orchestration primitive is `wire session pair-all-local`: zero-paste bilateral pairing across every sister session on a machine. The trust anchor shifts from "operator types SAS digits on each side" (a network-level proof appropriate for strangers) to "operator owns every session listed in `wire session list-local`" (a filesystem-permission proof appropriate for same-uid siblings). That re-anchoring is what makes mesh-scale auto-pairing safe to ship at all — same-uid siblings are by definition not strangers.
 
+### v0.6.5 — `wire mesh route`: capability-match addressing (issue #21)
+
+Closes the orchestration-primitive arc opened in v0.6.0. The mesh now has a discovery layer (pair-all-local), an observability layer (mesh-status), a fan-out layer (mesh-broadcast), a metadata layer (mesh-role), and now a *routing* layer. Prompts stop saying "send to beth" and start saying "send to the reviewer" — handle-free addressing.
+
+```bash
+wire mesh route reviewer "PR #142 ready for review"     # round-robin among reviewers
+wire mesh route planner --strategy first "..."          # deterministic alpha-pick
+wire mesh route reviewer --strategy random "..."        # uniform across matches
+wire mesh route reviewer --exclude beth "..."           # skip a specific sister
+wire mesh route reviewer --kind question "thoughts on..."  # any event kind
+```
+
+**Resolver.** Enumerate every sister session, read each one's `profile.role` from its agent-card, filter: matching role AND not in `--exclude` AND pinned in our own `state.peers`. The third filter is load-bearing — mesh-route refuses to invent a recipient. Same pinned-peers-only posture as mesh-broadcast; same defense against the phonebook-scrape class.
+
+**Strategies.**
+- `round-robin` (default): per-role cursor persisted at `<state_dir>/mesh-route-cursor.json` keyed by role. Each call picks the candidate alphabetically AFTER the last one, wrapping. Fair under steady-state load.
+- `first`: alphabetically-first matching sister. Deterministic — useful for testing and pinning a specific peer when there's exactly one match.
+- `random`: uniform random over matches. Stateless. Best for stateless tasks where any matching peer is fine.
+
+**Failure modes.** No matching sister bails loudly with a `wire mesh role list` hint (operators see the available role taxonomy on the box). `--exclude` leaving zero candidates is the same hard error. Delivery failure on the chosen peer bubbles up with the exact relay error — not silent.
+
+**Implementation.** `src/cli.rs::cmd_mesh_route`. Single resolved peer, single sign + push, ~ms-scale. Round-robin cursor reads/writes a small JSON dict; rebuilds on missing file, survives session destroy/re-create (cursor entries pointing at gone sisters silently fall through to the next candidate).
+
+**Regression test.** `tests/stress_within_system.rs::mesh_route_picks_one_sister_per_strategy_v0_6_5` spins 3 sessions (one planner, two reviewers), pairs them, then routes `reviewer` four times with round-robin and asserts an exact 2-2 split between the two reviewers; tests `first` for determinism (must hit beth, the alpha-sort winner); tests `random` over 20 calls (must hit both reviewers, vanishingly unlikely to miss); tests nonexistent-role error with the role-list hint; tests `--exclude` leaving exactly one candidate.
+
+**v0.6 line complete.** The four mesh primitives — status / broadcast / role / route — together turn the v0.5 protocol layer into an actual control plane. v0.7 will be about hardening + ergonomics on top of this base.
+
 ### v0.6.4 — `wire mesh role`: capability tags on sister sessions (issue #20)
 
 Fourth orchestration primitive — the first slice of the Layer-2 capability metadata umbrella (#13). Now operators can tag sister sessions by *function* (planner / executor / reviewer / coder / dispatcher / your-custom-tag) so the mesh has structure beyond bare connectivity. `wire mesh route` (#21) will consume these tags to pick the right sister for a task.
