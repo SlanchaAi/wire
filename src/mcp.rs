@@ -85,50 +85,29 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///   inbox event, checks the shared subscription set; if any matching
 ///   `wire://inbox/<peer>` or `wire://inbox/all` URI is subscribed, pushes
 ///   a `notifications/resources/updated` message into the channel.
-/// v0.6.1: if WIRE_HOME isn't set in env, look up `$PWD` in the session
-/// registry. If a session is registered for this cwd, return that
-/// session's home dir; otherwise None.
-///
-/// Read-only — does NOT mutate env. The caller decides whether to apply.
-fn detect_session_wire_home(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
-    let registry = crate::session::read_registry().ok()?;
-    let cwd_str = cwd.to_string_lossy().into_owned();
-    let session_name = registry.by_cwd.get(&cwd_str)?;
-    let session_home = crate::session::session_dir(session_name).ok()?;
-    if !session_home.exists() {
-        return None;
-    }
-    Some(session_home)
-}
+// v0.6.7: `detect_session_wire_home` moved to `session::detect_session_wire_home`
+// (shared with the CLI auto-detect at `cli::run` entry). The mcp-only
+// wrapper was removed; the regression test now calls the session-module
+// version directly.
 
 pub fn run() -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    // v0.6.1: auto-detect WIRE_HOME from cwd. If the operator already set
-    // it (explicit override via `.mcp.json env.WIRE_HOME`), respect that.
-    // Else: if the cwd maps to a `wire session` entry in the registry,
-    // adopt that session's WIRE_HOME for this MCP process so every
-    // subsequent tool call routes to the right inbox / outbox / identity.
-    // Without this, two Claudes in different project dirs share the
-    // default WIRE_HOME and race the cursor (issue #69 ergonomic ask
-    // shipped from the v0.6.0 release thread).
-    if std::env::var("WIRE_HOME").is_err()
-        && let Ok(cwd) = std::env::current_dir()
-        && let Some(home) = detect_session_wire_home(&cwd)
-    {
-        eprintln!(
-            "wire mcp: auto-detected session for cwd `{}` → WIRE_HOME=`{}`",
-            cwd.display(),
-            home.display()
-        );
-        // SAFETY: we are at the very start of `run()`, BEFORE any worker
-        // thread or watcher spawns; nothing else is reading env yet.
-        unsafe {
-            std::env::set_var("WIRE_HOME", &home);
-        }
-    }
+    // v0.6.1: auto-detect WIRE_HOME from cwd. If the operator already
+    // set it (explicit override via `.mcp.json env.WIRE_HOME`), respect
+    // that. Else: if the cwd maps to a `wire session` entry in the
+    // registry, adopt that session's WIRE_HOME for this MCP process so
+    // every subsequent tool call routes to the right inbox / outbox /
+    // identity.
+    //
+    // v0.6.7: identical helper now also runs at CLI entry (cli::run),
+    // so `wire whoami` / `wire monitor` from a session cwd resolve to
+    // the same identity the MCP server uses. Before v0.6.7 the CLI
+    // silently fell back to the default WIRE_HOME, leaving operators
+    // unable to tell which identity their monitor was tailing.
+    crate::session::maybe_adopt_session_wire_home("mcp");
 
     let state = McpState::default();
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -2059,7 +2038,7 @@ mod tests {
             .unwrap();
 
             // Hit happy path.
-            let got = super::detect_session_wire_home(std::path::Path::new(fake_cwd));
+            let got = crate::session::detect_session_wire_home(std::path::Path::new(fake_cwd));
             assert_eq!(
                 got.as_deref(),
                 Some(session_home.as_path()),
@@ -2067,7 +2046,7 @@ mod tests {
             );
 
             // Unregistered cwd → None.
-            let nope = super::detect_session_wire_home(std::path::Path::new(
+            let nope = crate::session::detect_session_wire_home(std::path::Path::new(
                 "/tmp/cwd-not-in-registry-xyz789",
             ));
             assert!(nope.is_none(), "unregistered cwd must return None");
@@ -2081,7 +2060,7 @@ mod tests {
                 serde_json::to_vec_pretty(&stale_registry).unwrap(),
             )
             .unwrap();
-            let stale_got = super::detect_session_wire_home(std::path::Path::new(stale_cwd));
+            let stale_got = crate::session::detect_session_wire_home(std::path::Path::new(stale_cwd));
             assert!(
                 stale_got.is_none(),
                 "registered cwd whose session dir is missing must return None"

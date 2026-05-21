@@ -8,6 +8,33 @@ The v0.5 line shipped the protocol: bilateral signed-message bus, federated hand
 
 The first orchestration primitive is `wire session pair-all-local`: zero-paste bilateral pairing across every sister session on a machine. The trust anchor shifts from "operator types SAS digits on each side" (a network-level proof appropriate for strangers) to "operator owns every session listed in `wire session list-local`" (a filesystem-permission proof appropriate for same-uid siblings). That re-anchoring is what makes mesh-scale auto-pairing safe to ship at all — same-uid siblings are by definition not strangers.
 
+### v0.6.7 — CLI auto-detects WIRE_HOME from cwd (parity with MCP)
+
+Latent leak fixed. v0.6.1 added MCP auto-detect: when `wire mcp` starts and `WIRE_HOME` isn't set in env, the server reads `$PWD`, looks it up in the session registry, and adopts that session's home dir for the rest of the process. v0.6.7 brings the bare CLI to the same parity:
+
+```bash
+cd ~/code/project-a
+wire whoami     # → did:wire:project-a-... (the session for this cwd)
+wire monitor    # → tails project-a's inbox, not paul-mac's
+```
+
+**Symptom pre-v0.6.7.** Operator opens a terminal in a project cwd that has a registered session, runs `wire whoami`. The CLI returns the *machine* default identity (`paul-mac` or whatever the default WIRE_HOME resolves to), NOT the session identity. `wire monitor` from the same cwd tailed the machine inbox, surfacing every federation peer's traffic — even when the operator expected per-session isolation. Reported as "all wire sessions on a machine get the wires for the entire machine" — accurate description of how it looked from the operator side, even though the underlying inboxes were correctly isolated on disk.
+
+**Root cause.** v0.6.1 fixed this for `wire mcp` but not for any other `wire` subcommand. The CLI's `cli::run` entry point passed `WIRE_HOME` straight through from env. With WIRE_HOME unset (the common case for shells that don't `eval $(wire session env)`), every CLI invocation hit the platform default state dir.
+
+**Fix.** Extract the auto-detect helper into `session::maybe_adopt_session_wire_home(label)` and call it at the top of `cli::run` BEFORE `Cli::parse`. Same precondition as MCP — only fires when WIRE_HOME is unset in env, so explicit operator overrides still win. Same stderr line on success (`wire cli: auto-detected session for cwd ... → WIRE_HOME=...`), suppressible with `WIRE_QUIET_AUTOSESSION=1`.
+
+`mcp::run` now calls the same shared helper instead of duplicating the logic. The original v0.6.1 regression test (`mcp::tests::detect_session_wire_home_resolves_registered_cwd`) was retargeted to `crate::session::detect_session_wire_home` so the contract is enforced at the module that owns it.
+
+**What this unlocks.**
+- `wire monitor` from any project cwd tails *that* session's inbox automatically. Operators stop seeing cross-session leak in monitor output.
+- `wire send` / `wire mesh broadcast` / `wire mesh route` from a session cwd send AS that session, not as the machine identity. Per-project audit trails just work.
+- The "machine session" vs "project session" confusion the user surfaced earlier (`"they keep getting confused with the machine session"`) is now an OS-level non-issue — whichever cwd you `cd` to is the identity you use.
+
+**Manual smoke verified live.** From `/Users/laul_pogan/Source/slancha-business` cwd, `wire whoami` now returns `did:wire:slancha-business-7bd164d3`, not `did:wire:paul-mac`. Stderr line surfaces the resolution so it's never silent.
+
+**Compatibility.** Purely additive. Explicit `WIRE_HOME=...` env or `eval $(wire session env <name>)` shell setup continues to work unchanged — auto-detect is a fallback, not an override. Operators who deliberately want machine-default behavior from inside a session cwd can prefix `WIRE_HOME= wire ...` (empty value is still "set"; auto-detect respects it).
+
 ### v0.6.6 — `--local-only` sessions + `--local-sister` pair (federation-free within-system mesh)
 
 UX fix shipped to the v0.6 orchestration layer. The previous shape — `wire session new --with-local` allocates BOTH a federation slot AND a local slot, then tries to claim the nick on `wireup.net` — broke down when:

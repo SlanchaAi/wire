@@ -466,6 +466,71 @@ pub fn list_local_sessions() -> Result<LocalSessionListing> {
     })
 }
 
+/// v0.6.7: cwd → session WIRE_HOME lookup. Read-only.
+///
+/// When `WIRE_HOME` isn't set in env, look up `cwd` in the session
+/// registry. If a session is registered for this cwd AND its home
+/// directory still exists, return that home dir; otherwise None.
+///
+/// Used by both `wire mcp` (v0.6.1) and the CLI entry point (v0.6.7)
+/// so a `wire whoami` / `wire monitor` invocation from a project cwd
+/// adopts that project's session identity automatically, instead of
+/// silently falling back to the machine default. The CLI parity is
+/// load-bearing: without it, the user-visible identity diverges
+/// between MCP and the terminal, and monitors pull machine-wide
+/// inboxes when the operator expected a per-session view.
+pub fn detect_session_wire_home(cwd: &std::path::Path) -> Option<PathBuf> {
+    let registry = read_registry().ok()?;
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    let session_name = registry.by_cwd.get(&cwd_str)?;
+    let session_home = session_dir(session_name).ok()?;
+    if !session_home.exists() {
+        return None;
+    }
+    Some(session_home)
+}
+
+/// v0.6.7: apply `detect_session_wire_home` for the current process.
+///
+/// If `WIRE_HOME` is unset and the current cwd maps to an existing
+/// session, set `WIRE_HOME` for the rest of this process and emit a
+/// one-liner to stderr so the operator knows which identity is in
+/// use. Noop when `WIRE_HOME` is already set (explicit override wins).
+///
+/// `label` distinguishes the caller in the stderr line (`mcp` vs
+/// `cli`). Set `WIRE_QUIET_AUTOSESSION=1` to suppress the stderr line
+/// while keeping the env-var application active.
+///
+/// MUST be called BEFORE any worker thread or async task spawns —
+/// `env::set_var` is unsafe in Rust 2024 because of thread-safety
+/// guarantees, and our use is safe only at process entry.
+pub fn maybe_adopt_session_wire_home(label: &str) {
+    if std::env::var("WIRE_HOME").is_ok() {
+        return;
+    }
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let home = match detect_session_wire_home(&cwd) {
+        Some(h) => h,
+        None => return,
+    };
+    if std::env::var("WIRE_QUIET_AUTOSESSION").is_err() {
+        eprintln!(
+            "wire {label}: auto-detected session for cwd `{}` → WIRE_HOME=`{}`",
+            cwd.display(),
+            home.display()
+        );
+    }
+    // SAFETY: caller contract is "before any thread spawn." All
+    // production sites (cli::run, mcp::run) call this as the first
+    // step in their respective entry points.
+    unsafe {
+        std::env::set_var("WIRE_HOME", &home);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

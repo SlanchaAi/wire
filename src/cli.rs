@@ -1085,6 +1085,17 @@ pub enum ProfileAction {
 
 /// Entry point — parse and dispatch.
 pub fn run() -> Result<()> {
+    // v0.6.7: when WIRE_HOME isn't explicitly set, look up the cwd in
+    // the session registry and adopt that session's home for this
+    // process. Brings the CLI to parity with the v0.6.1 MCP auto-
+    // detect — `wire whoami` / `wire monitor` from a project cwd now
+    // resolve to that project's session identity, not the machine
+    // default. Suppress the stderr line with `WIRE_QUIET_AUTOSESSION=1`.
+    //
+    // MUST run before any thread spawn — call it FIRST, before
+    // `Cli::parse` (which uses clap internals only) and before any
+    // command dispatch (which may spawn workers).
+    crate::session::maybe_adopt_session_wire_home("cli");
     let cli = Cli::parse();
     match cli.command {
         Command::Init {
