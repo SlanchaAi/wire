@@ -109,6 +109,15 @@ pub fn run() -> Result<()> {
     // unable to tell which identity their monitor was tailing.
     crate::session::maybe_adopt_session_wire_home("mcp");
 
+    // v0.6.10: surface multi-agent identity collisions explicitly.
+    // Two Claudes (or any MCP-host pair) launched in the same cwd
+    // auto-detect into the same wire session and silently share an
+    // inbox cursor. v0.6.7 made this invisible by design ("just adopt
+    // the cwd's session"); operators hit it as "they look identical"
+    // and burn hours debugging. The warning gives them a clear
+    // remediation path the first time they see it.
+    crate::session::warn_on_identity_collision(std::process::id());
+
     let state = McpState::default();
     let shutdown = Arc::new(AtomicBool::new(false));
 

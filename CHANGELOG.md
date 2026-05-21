@@ -8,6 +8,31 @@ The v0.5 line shipped the protocol: bilateral signed-message bus, federated hand
 
 The first orchestration primitive is `wire session pair-all-local`: zero-paste bilateral pairing across every sister session on a machine. The trust anchor shifts from "operator types SAS digits on each side" (a network-level proof appropriate for strangers) to "operator owns every session listed in `wire session list-local`" (a filesystem-permission proof appropriate for same-uid siblings). That re-anchoring is what makes mesh-scale auto-pairing safe to ship at all — same-uid siblings are by definition not strangers.
 
+### v0.6.10 — MCP identity-collision warning (visibility, not auto-magic)
+
+After four rounds of persona critique on how to fix the multi-agent-same-cwd UX (recap in [issue #24](https://github.com/SlanchaAi/wire/issues/24)), the smallest right intervention turned out to be: **make the collision visible**. Don't try to auto-disambiguate via terminal env vars, wrapper scripts, or per-host adapter chains. Just print a clear stderr warning when two `wire mcp` processes share an effective `WIRE_HOME`, telling the operator exactly how to opt into a separate identity.
+
+```
+wire mcp: WARNING — 1 other wire mcp process(es) already using WIRE_HOME=`/Users/.../sessions/dogfood-b` (pid 12345)
+  Multiple agents sharing one identity will race the inbox cursor; messages may be lost.
+  To use a separate identity:
+    1. Close the other agent(s), OR
+    2. `wire session new <name> --local-only` to create a fresh identity, then
+    3. Restart THIS agent's launcher with `export WIRE_HOME=<path printed by step 2>`
+```
+
+**Implementation.** `crate::session::warn_on_identity_collision(self_pid)` — pgrep for other `wire mcp` PIDs, read each one's `WIRE_HOME` env via `/proc/<pid>/environ` (Linux) or `ps -E -p <pid>` (macOS). If any matches ours, print the warning. Best-effort: any subprocess/env-read failure is silent (collision check must never block startup). Windows no-ops (no collision detection; non-blocking).
+
+**What this is NOT.** This is NOT auto-disambiguation. The operator still gets a single shared identity per cwd unless they explicitly opt out via `WIRE_HOME` export. The warning makes the limitation honest — operators who hit it see exactly what's happening and how to fix it. v0.6.7's auto-detect behavior is unchanged.
+
+**What v0.6.10 deliberately does NOT ship** (deferred to v0.7+ per [#24](https://github.com/SlanchaAi/wire/issues/24)):
+- `wire upgrade also kills wire mcp` — useful patch, but deferred; today's `wire upgrade` already handles the daemon side, and the MCP side is operator-driven (Claude Code respawns on next call).
+- TERM_SESSION_ID-based auto-discriminator — too clever, terminal env vars are fragile across Linux / IDE / tmux.
+- Per-host wrapper script — not harness-agnostic; replaced by future `WIRE_AS=<tag>` env + `wire launch --as <tag> -- <command>` in v0.7.2.
+- Three-layer wire-identity / wire-local / wire-federation split — see [#24](https://github.com/SlanchaAi/wire/issues/24) for the locked direction.
+
+**Long-term direction** (LOCKED in [#24](https://github.com/SlanchaAi/wire/issues/24), not scheduled): identity-first architecture. Identity (anonymous → local → federation lifecycle) is the noun; UDS + HTTP-relay are the two bounded transports; mesh primitives stay transport-agnostic. Harness-agnostic by construction (`WIRE_AS` env + `wire launch` wrapper, works for Claude Code / Cursor / Continue / Aider / any MCP host). Migration in 5 phases over 3-4 weeks; each phase independently useful.
+
 ### v0.6.9 — fix v0.6.8 session-daemon respawn (caught live, ~5 min in)
 
 Caught by deploying v0.6.8 on this laptop ~5 min after publish. The session-daemon respawn loop checked `s.daemon_running` AFTER step 3's pgrep+SIGTERM had already killed every wire daemon (default home AND all sessions share the `wire daemon` command line, so pgrep matches all of them). Result: `daemon_running` was always false at the respawn-decision site, and zero session daemons got respawned. The default-home daemon was reborn correctly, but session daemons stayed dead.

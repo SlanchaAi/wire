@@ -480,6 +480,116 @@ pub fn detect_session_wire_home(cwd: &std::path::Path) -> Option<PathBuf> {
     Some(session_home)
 }
 
+/// v0.6.10: warn at MCP/CLI startup if another `wire mcp` process is
+/// already running with the same effective `WIRE_HOME`. Closes the
+/// "two Claudes in same cwd silently share an identity" failure mode
+/// that wasted hours of operator debugging time: today the collision
+/// is invisible (both Claudes resolve to the same wire session via
+/// v0.6.7 auto-detect, race the inbox cursor, "look identical" from
+/// the operator's view). This surfaces it explicitly with a clear
+/// remediation path.
+///
+/// Best-effort: any subprocess / env-read failure is silent (the
+/// collision check should never block startup). Cross-platform via
+/// `ps -E -p <pid>` on macOS, `/proc/<pid>/environ` on Linux. Windows
+/// returns empty (no collision detected).
+pub fn warn_on_identity_collision(self_pid: u32) {
+    let our_wire_home = match std::env::var("WIRE_HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    let pgrep_out = match std::process::Command::new("pgrep")
+        .args(["-f", "wire mcp"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return,
+    };
+
+    let other_pids: Vec<u32> = String::from_utf8_lossy(&pgrep_out.stdout)
+        .split_whitespace()
+        .filter_map(|s| s.parse::<u32>().ok())
+        .filter(|&p| p != self_pid)
+        .collect();
+
+    let mut colliders: Vec<u32> = Vec::new();
+    for pid in &other_pids {
+        if let Some(their_home) = read_wire_home_from_pid(*pid)
+            && their_home == our_wire_home
+        {
+            colliders.push(*pid);
+        }
+    }
+
+    if colliders.is_empty() {
+        return;
+    }
+
+    eprintln!(
+        "wire mcp: WARNING — {} other wire mcp process(es) already using WIRE_HOME=`{}` (pid {})",
+        colliders.len(),
+        our_wire_home,
+        colliders
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    eprintln!(
+        "  Multiple agents sharing one identity will race the inbox cursor; messages may be lost."
+    );
+    eprintln!("  To use a separate identity:");
+    eprintln!("    1. Close the other agent(s), OR");
+    eprintln!("    2. `wire session new <name> --local-only` to create a fresh identity, then");
+    eprintln!(
+        "    3. Restart THIS agent's launcher with `export WIRE_HOME=<path printed by step 2>`"
+    );
+}
+
+/// Best-effort cross-platform read of another process's `WIRE_HOME`.
+/// Linux: parses `/proc/<pid>/environ` (NUL-separated KEY=VAL).
+/// macOS: `ps -E -p <pid>` (whitespace-separated KEY=VAL prefix).
+/// Windows / other: returns `None` (collision detection no-ops).
+fn read_wire_home_from_pid(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = format!("/proc/{pid}/environ");
+        let bytes = std::fs::read(&path).ok()?;
+        for entry in bytes.split(|&b| b == 0) {
+            let s = match std::str::from_utf8(entry) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if let Some(val) = s.strip_prefix("WIRE_HOME=") {
+                return Some(val.to_string());
+            }
+        }
+        None
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["-E", "-p", &pid.to_string(), "-o", "command="])
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&output.stdout);
+        for tok in s.split_whitespace() {
+            if let Some(val) = tok.strip_prefix("WIRE_HOME=") {
+                return Some(val.to_string());
+            }
+        }
+        None
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// v0.6.7: apply `detect_session_wire_home` for the current process.
 ///
 /// If `WIRE_HOME` is unset and the current cwd maps to an existing
