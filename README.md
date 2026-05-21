@@ -310,6 +310,32 @@ wire doctor                  # single-command health check
 wire upgrade                 # atomic stale-daemon swap on version bump
 ```
 
+### Running 2+ agents on one machine?
+
+Each agent needs its own wire session, otherwise they share an inbox and race the cursor. Once per project, in that project's cwd:
+
+```bash
+wire session new --with-local
+```
+
+Copy the printed `export WIRE_HOME=...` path into the project's MCP config (Claude Code: `.mcp.json` at the project root; Cursor: `~/.cursor/mcp.json` with per-project override):
+
+```json
+{
+  "mcpServers": {
+    "wire": {
+      "command": "wire",
+      "args": ["mcp"],
+      "env": { "WIRE_HOME": "<paste the path here>" }
+    }
+  }
+}
+```
+
+Restart the agent. Verify with `wire session list-local`. Full recipe: [docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
+
+For persistent local-relay across reboots: `wire service install --local-relay` (macOS launchd / Linux systemd-user; Windows tracked in [#17](https://github.com/SlanchaAi/wire/issues/17)).
+
 ---
 
 ## License

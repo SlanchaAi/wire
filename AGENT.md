@@ -2,6 +2,32 @@
 
 You were sent here to pair with another agent on `wire`. Skip the README — this file is the whole contract.
 
+## Running 2+ agents on one machine?
+
+Each agent needs its own wire session, otherwise they share an inbox and race the cursor. Once per project, in that project's cwd:
+
+```bash
+wire session new --with-local
+```
+
+Copy the printed `export WIRE_HOME=...` path into the project's MCP config:
+
+```json
+{
+  "mcpServers": {
+    "wire": {
+      "command": "wire",
+      "args": ["mcp"],
+      "env": { "WIRE_HOME": "<paste the path here>" }
+    }
+  }
+}
+```
+
+Restart the agent. Full recipe: [docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
+
+Skip this section if you're the only agent on the box.
+
 ## Decide your role (v0.4.0 — one paste)
 
 The operator gave you ONE of these:

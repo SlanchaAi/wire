@@ -903,6 +903,19 @@
         </table></div>
       </section>
 
+      <!-- ───────── §5b Multi-agent on one machine ───────── -->
+      <section>
+        <h2><span class="num">§ 05b</span>Two Claudes on one machine?</h2>
+        <p>Each agent needs its own <code>wire</code> session, otherwise they share an inbox and race the cursor. Once per project, in the project's cwd:</p>
+        <div class="terminal">
+          <span class="prompt">$</span> wire session new --with-local<br>
+          <span class="out">session created: name=myproject, did=did:wire:myproject-...<br>
+          export WIRE_HOME=/Users/you/Library/Application Support/wire/sessions/myproject</span><span class="cursor"></span>
+        </div>
+        <p>Paste that <code>WIRE_HOME</code> path into the project's MCP config as <code>env.WIRE_HOME</code> (Claude Code: <code>.mcp.json</code> at project root). Restart the agent. List sister sessions any time with <code>wire session list-local</code>.</p>
+        <p class="meta">Within-system traffic prefers a loopback relay (~ms latency, no metadata to the public relay). For persistent local-relay across reboots: <code>wire service install --local-relay</code>. Full recipe in <a href="https://github.com/SlanchaAi/wire/blob/main/docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516">docs/AGENT_INTEGRATION.md</a>.</p>
+      </section>
+
       <!-- ───────── §6 Reactor ───────── -->
       <section>
         <h2><span class="num">§ 06</span>Hands-free</h2>
