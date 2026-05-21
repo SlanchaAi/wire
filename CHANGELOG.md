@@ -8,6 +8,31 @@ The v0.5 line shipped the protocol: bilateral signed-message bus, federated hand
 
 The first orchestration primitive is `wire session pair-all-local`: zero-paste bilateral pairing across every sister session on a machine. The trust anchor shifts from "operator types SAS digits on each side" (a network-level proof appropriate for strangers) to "operator owns every session listed in `wire session list-local`" (a filesystem-permission proof appropriate for same-uid siblings). That re-anchoring is what makes mesh-scale auto-pairing safe to ship at all — same-uid siblings are by definition not strangers.
 
+### v0.6.3 — `wire mesh broadcast`: fan one event to every pinned peer (issue #19)
+
+Third orchestration primitive. With v0.6.0 (`pair-all-local`) and v0.6.2 (`mesh-status`), the operator can build a sister mesh and inspect it. v0.6.3 adds the write-side primitive: one command that dispatches the same signed event to every pinned peer in parallel.
+
+```bash
+wire mesh broadcast "rebuilding the index, ETA 2min"                    # default --scope local
+wire mesh broadcast --scope federation --kind decision "ship v3 now"    # cross-machine fan
+wire mesh broadcast --exclude beth --json "private update"              # skip one peer
+wire mesh broadcast --kind question - <<EOF                             # stdin / heredoc body
+who has the latest model checkpoint?
+EOF
+```
+
+**Routing.** Each recipient gets its own Ed25519 signature (the wire envelope canonicalizes over `to:`, so per-recipient signing is required by the protocol). Every copy carries the same `broadcast_id` UUID and a `broadcast_target_count` so receivers can correlate them as one logical broadcast. Per-recipient pushes happen on `std::thread::scope` worker threads — broadcast-to-5 takes ~1× RTT, not 5×.
+
+**Scope filter.** Default `local` is the lowest-blast-radius posture: only peers whose priority-1 endpoint is a same-machine local relay get the broadcast. `federation` flips to public-relay peers only (cross-machine fan). `both` removes the filter. The default exists because most broadcasts are operational coordination ("expect outage", "rebuilding index") that should stay on-box; cross-machine sharing should be an explicit opt-in.
+
+**Pinned-peers-only by construction.** Walks `state.peers` only — never `.well-known` resolution, never `trust["agents"]` expansion. This forecloses the phonebook-scrape class (T8, closed in v0.5.14): a hostile peer would have to be bidirectionally pinned to receive a broadcast, and even then `--exclude <handle>` is the loud opt-out.
+
+**Top-level `wire mesh` namespace.** New `Command::Mesh(MeshCommand)` with subcommands `status` and `broadcast`. `wire mesh status` aliases the v0.6.2 `wire session mesh-status` handler — the session-namespaced form keeps working, but going forward the operator-facing surface is `wire mesh <verb>`. v0.7 may remove the legacy alias once mesh becomes the documented entry point.
+
+**Implementation.** `src/cli.rs::cmd_mesh_broadcast` — single-pass sign-all-then-push-all so the parallel push doesn't race the per-key signing. Outbox queue is sequential (per-path mutex) before the parallel push, so a failed push can be retried from the outbox by a daemon later. Push results aggregate over an `mpsc::channel`, sorted by handle for deterministic stdout.
+
+**Regression test.** `tests/stress_within_system.rs::mesh_broadcast_fans_to_every_paired_sister_v0_6_3` — 3 sessions paired via `pair-all-local`, alpha broadcasts `"hello mesh from alpha"`, beth and charlie pull their inboxes, both receive an event with matching `body.broadcast_id`, distinct `event_id`s, correct `broadcast_target_count: 2`. Then re-broadcasts with `--exclude charlie` and asserts charlie is skipped while beth still receives.
+
 ### v0.6.2 — `wire session mesh-status`: live view of the sister mesh (issue #18)
 
 Second orchestration primitive. After `pair-all-local` lands N sessions in a fully-paired mesh, operators need one command to see who's actually paired with whom and which edges are silent. Today they walk every session's `wire peers` + per-peer `wire status --peer` manually. v0.6.2 collapses that to one read-only call:

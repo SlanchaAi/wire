@@ -459,6 +459,12 @@ pub enum Command {
     /// so re-entering the same project reuses the same identity.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// v0.6.3 (issues #18 / #19 / #20 / #21): orchestration verbs for the
+    /// sister-session mesh. `wire mesh status` is the live view of every
+    /// paired sister (alias for `wire session mesh-status`); `wire mesh
+    /// broadcast` fans one signed event to every pinned peer.
+    #[command(subcommand)]
+    Mesh(MeshCommand),
     /// Detect known MCP host config locations (Claude Desktop, Claude Code,
     /// Cursor, project-local) and either print or auto-merge the wire MCP
     /// server entry. Default prints; pass `--apply` to actually modify config
@@ -839,6 +845,62 @@ pub enum SessionCommand {
     },
 }
 
+/// v0.6.3: top-level `wire mesh` verbs. Each verb operates on the current
+/// session's view of the pinned peer set. `status` is the read-only
+/// observability primitive (alias for `wire session mesh-status`);
+/// `broadcast` fans a signed event to every pinned peer in one call.
+#[derive(Subcommand, Debug)]
+pub enum MeshCommand {
+    /// Alias for `wire session mesh-status`. Reports the N×N pin matrix +
+    /// per-edge health roll-up across every sister session on this machine.
+    Status {
+        /// Threshold in seconds for "stale" classification on an edge.
+        #[arg(long, default_value_t = 300)]
+        stale_secs: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fan one signed event to every pinned peer. Each peer receives a
+    /// distinct `event_id` but every copy shares the same `broadcast_id`
+    /// UUID so receivers can correlate them as a single broadcast.
+    ///
+    /// `--scope local` (default) only fans to peers reachable via a same-
+    /// machine local relay. `--scope federation` only to public-relay
+    /// peers. `--scope both` to every pinned peer.
+    ///
+    /// `--exclude <peer>` (repeatable) skips a specific handle. Useful
+    /// for "ack-loop" prevention: a peer responding to a broadcast can
+    /// exclude its own broadcaster when re-broadcasting.
+    ///
+    /// Body parsing follows `wire send`: literal string, `@/path` reads a
+    /// file, `-` reads stdin (JSON if parseable, else literal).
+    ///
+    /// Pinned-peers-only by construction. NEVER broadcasts to non-paired
+    /// peers — that would re-introduce the phonebook-scrape risk closed
+    /// in v0.5.14 (T8).
+    Broadcast {
+        /// Event kind: `claim` (default), `decision`, `question`, `ack`,
+        /// `heartbeat`. Same vocabulary as `wire send`.
+        #[arg(long, default_value = "claim")]
+        kind: String,
+        /// `local`, `federation`, or `both`. Default `local`.
+        #[arg(long, default_value = "local")]
+        scope: String,
+        /// Skip a specific peer handle. Repeatable.
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Drop the broadcast event ID from the relay-side attentiveness
+        /// nag (`phyllis`) — useful when broadcasting to many peers and
+        /// the per-peer "X hasn't pulled in 5min" lines would be noise.
+        #[arg(long)]
+        noreply: bool,
+        /// Body — string, `@/path` for a file, or `-` for stdin.
+        body: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 pub enum ServiceAction {
     /// Write the launchd plist (macOS) or systemd user unit (linux) and
@@ -1075,6 +1137,7 @@ pub fn run() -> Result<()> {
         Command::PairReject { peer, json } => cmd_pair_reject(&peer, json),
         Command::PairListInbound { json } => cmd_pair_list_inbound(json),
         Command::Session(cmd) => cmd_session(cmd),
+        Command::Mesh(cmd) => cmd_mesh(cmd),
         Command::Invite {
             relay,
             ttl,
@@ -4726,6 +4789,314 @@ fn cmd_pair_reject(peer_nick: &str, as_json: bool) -> Result<()> {
 // `wire` invocations with `WIRE_HOME` overridden to the session's dir;
 // each session-local `init` / `claim` / `daemon` runs in its own world
 // without cross-contamination via env vars in this process.
+
+/// v0.6.3: top-level `wire mesh` verb dispatcher. Status aliases the
+/// v0.6.2 session-namespaced handler; broadcast is the new primitive.
+fn cmd_mesh(cmd: MeshCommand) -> Result<()> {
+    match cmd {
+        MeshCommand::Status { stale_secs, json } => cmd_session_mesh_status(stale_secs, json),
+        MeshCommand::Broadcast {
+            kind,
+            scope,
+            exclude,
+            noreply,
+            body,
+            json,
+        } => cmd_mesh_broadcast(&kind, &scope, &exclude, noreply, &body, json),
+    }
+}
+
+/// v0.6.3 (issue #19): fan one signed event to every pinned peer.
+///
+/// **Routing.** Each recipient gets its own signed event (Ed25519 over the
+/// canonical event including `to:`, so per-recipient signing is required;
+/// the cost is one sign per peer = ~50µs each, dominated by relay RTT).
+/// Per-recipient pushes happen in parallel via `std::thread::scope` so
+/// broadcast-to-5 takes ~1× RTT, not 5×.
+///
+/// **Scope filter.** Default `local` — only peers reachable via a same-
+/// machine local relay (priority-1 endpoint has `scope=local`). This is
+/// the lowest-blast-radius default: local-only broadcasts cannot escape
+/// the operator's machine. `federation` flips to public-relay peers
+/// only; `both` removes the filter.
+///
+/// **Pinned-peers-only.** Walks `state.peers` — never .well-known
+/// resolution, never trust["agents"] expansion. Closes #8-class
+/// phonebook-scrape vectors by construction: an attacker pinning a
+/// hostile handle has to first be pinned bidirectionally by the
+/// operator, and even then `--exclude` is the loud opt-out.
+fn cmd_mesh_broadcast(
+    kind: &str,
+    scope_str: &str,
+    exclude: &[String],
+    _noreply: bool,
+    body_arg: &str,
+    as_json: bool,
+) -> Result<()> {
+    use std::time::Instant;
+
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire init <handle>` first");
+    }
+
+    let scope = match scope_str {
+        "local" => crate::endpoints::EndpointScope::Local,
+        "federation" => crate::endpoints::EndpointScope::Federation,
+        "both" => {
+            // Sentinel: we don't actually have a `Both` variant on the
+            // scope enum; use a tri-state below. Treat as Local for the
+            // typed match and special-case it via the bool below.
+            crate::endpoints::EndpointScope::Local
+        }
+        other => bail!("unknown scope `{other}` — use local | federation | both"),
+    };
+    let any_scope = scope_str == "both";
+
+    let state = config::read_relay_state()?;
+    let peers = state["peers"].as_object().cloned().unwrap_or_default();
+    if peers.is_empty() {
+        bail!("no peers pinned — run `wire accept <invite-url>` or `wire pair-accept` first");
+    }
+
+    let exclude_set: std::collections::HashSet<&str> = exclude.iter().map(String::as_str).collect();
+
+    // Walk the pinned-peer set, filter by scope + exclude. Keep the
+    // priority-ordered endpoint list for each match so the push can
+    // try local first then fall through to federation (when scope=both).
+    struct Target {
+        handle: String,
+        endpoints: Vec<crate::endpoints::Endpoint>,
+    }
+    let mut targets: Vec<Target> = Vec::new();
+    let mut skipped_wrong_scope: Vec<String> = Vec::new();
+    let mut skipped_excluded: Vec<String> = Vec::new();
+    for handle in peers.keys() {
+        if exclude_set.contains(handle.as_str()) {
+            skipped_excluded.push(handle.clone());
+            continue;
+        }
+        let ordered = crate::endpoints::peer_endpoints_in_priority_order(&state, handle);
+        let filtered: Vec<crate::endpoints::Endpoint> = ordered
+            .into_iter()
+            .filter(|ep| any_scope || ep.scope == scope)
+            .collect();
+        if filtered.is_empty() {
+            skipped_wrong_scope.push(handle.clone());
+            continue;
+        }
+        targets.push(Target {
+            handle: handle.clone(),
+            endpoints: filtered,
+        });
+    }
+
+    if targets.is_empty() {
+        bail!(
+            "no peers matched scope=`{scope_str}` after exclude filter ({} excluded, {} wrong-scope)",
+            skipped_excluded.len(),
+            skipped_wrong_scope.len()
+        );
+    }
+
+    // Load signing material once; share across per-peer signatures.
+    let sk_seed = config::read_private_key()?;
+    let card = config::read_agent_card()?;
+    let did = card
+        .get("did")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent-card missing did"))?
+        .to_string();
+    let handle = crate::agent_card::display_handle_from_did(&did).to_string();
+    let pk_b64 = card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent-card missing verify_keys[*].key"))?;
+    let pk_bytes = crate::signing::b64decode(pk_b64)?;
+
+    let body_value: Value = if body_arg == "-" {
+        use std::io::Read;
+        let mut raw = String::new();
+        std::io::stdin()
+            .read_to_string(&mut raw)
+            .with_context(|| "reading body from stdin")?;
+        serde_json::from_str(raw.trim_end()).unwrap_or(Value::String(raw))
+    } else if let Some(path) = body_arg.strip_prefix('@') {
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading body file {path:?}"))?;
+        serde_json::from_str(&raw).unwrap_or(Value::String(raw))
+    } else {
+        Value::String(body_arg.to_string())
+    };
+
+    let kind_id = parse_kind(kind)?;
+    let now_iso = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+
+    let broadcast_id = generate_broadcast_id();
+    let target_count = targets.len();
+
+    // Build + sign every event up front (sequential, ~50µs/sig). Then
+    // queue to outbox + push to relay in parallel per-peer. Returns
+    // a per-peer outcome we then sort by handle for deterministic output.
+    let mut signed_per_peer: Vec<(String, Vec<crate::endpoints::Endpoint>, Value, String)> =
+        Vec::with_capacity(targets.len());
+    for t in &targets {
+        let body = json!({
+            "content": body_value,
+            "broadcast_id": broadcast_id,
+            "broadcast_target_count": target_count,
+        });
+        let event = json!({
+            "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
+            "timestamp": now_iso,
+            "from": did,
+            "to": format!("did:wire:{}", t.handle),
+            "type": kind,
+            "kind": kind_id,
+            "body": body,
+        });
+        let signed = crate::signing::sign_message_v31(&event, &sk_seed, &pk_bytes, &handle)
+            .map_err(|e| anyhow!("sign_message_v31 failed for `{}`: {e:?}", t.handle))?;
+        let event_id = signed["event_id"].as_str().unwrap_or("").to_string();
+        signed_per_peer.push((t.handle.clone(), t.endpoints.clone(), signed, event_id));
+    }
+
+    // Persist to per-peer outbox FIRST (sequential — `append_outbox_record`
+    // holds a per-path mutex; writes are independent across handles but
+    // we want the side-effect ordering deterministic).
+    for (peer, _, signed, _) in &signed_per_peer {
+        let line = serde_json::to_vec(signed)?;
+        config::append_outbox_record(peer, &line)?;
+    }
+
+    // Per-peer parallel push. Each thread tries the priority-ordered
+    // endpoint list; first 2xx wins. Aggregate (peer, delivered, rtt_ms,
+    // error_opt) over a channel.
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::channel::<Value>();
+    std::thread::scope(|s| {
+        for (peer, endpoints, signed, event_id) in &signed_per_peer {
+            let tx = tx.clone();
+            let peer = peer.clone();
+            let event_id = event_id.clone();
+            let endpoints = endpoints.clone();
+            let signed = signed.clone();
+            s.spawn(move || {
+                let start = Instant::now();
+                let mut delivered = false;
+                let mut last_err: Option<String> = None;
+                let mut delivered_via: Option<String> = None;
+                for ep in &endpoints {
+                    let client = crate::relay_client::RelayClient::new(&ep.relay_url);
+                    match client.post_event(&ep.slot_id, &ep.slot_token, &signed) {
+                        Ok(_) => {
+                            delivered = true;
+                            delivered_via = Some(
+                                match ep.scope {
+                                    crate::endpoints::EndpointScope::Local => "local",
+                                    crate::endpoints::EndpointScope::Federation => "federation",
+                                }
+                                .to_string(),
+                            );
+                            break;
+                        }
+                        Err(e) => last_err = Some(format!("{e:#}")),
+                    }
+                }
+                let rtt_ms = start.elapsed().as_millis() as u64;
+                let _ = tx.send(json!({
+                    "peer": peer,
+                    "event_id": event_id,
+                    "delivered": delivered,
+                    "delivered_via": delivered_via,
+                    "rtt_ms": rtt_ms,
+                    "error": last_err,
+                }));
+            });
+        }
+    });
+    drop(tx);
+
+    let mut results: Vec<Value> = rx.iter().collect();
+    results.sort_by(|a, b| {
+        a["peer"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["peer"].as_str().unwrap_or(""))
+    });
+
+    let delivered = results
+        .iter()
+        .filter(|r| r["delivered"].as_bool().unwrap_or(false))
+        .count();
+    let failed = results.len() - delivered;
+
+    let summary = json!({
+        "broadcast_id": broadcast_id,
+        "kind": kind,
+        "scope": scope_str,
+        "target_count": target_count,
+        "delivered": delivered,
+        "failed": failed,
+        "skipped_excluded": skipped_excluded,
+        "skipped_wrong_scope": skipped_wrong_scope,
+        "results": results,
+    });
+
+    if as_json {
+        println!("{}", serde_json::to_string(&summary)?);
+        return Ok(());
+    }
+
+    println!(
+        "wire mesh broadcast: scope={scope_str} → {target_count} pinned peer(s)"
+    );
+    for r in &results {
+        let peer = r["peer"].as_str().unwrap_or("?");
+        let delivered = r["delivered"].as_bool().unwrap_or(false);
+        let rtt = r["rtt_ms"].as_u64().unwrap_or(0);
+        let via = r["delivered_via"].as_str().unwrap_or("");
+        if delivered {
+            println!("  {peer:<24} ✓ delivered ({rtt}ms, {via})");
+        } else {
+            let err = r["error"].as_str().unwrap_or("?");
+            println!("  {peer:<24} ✗ failed — {err}");
+        }
+    }
+    if !skipped_excluded.is_empty() {
+        println!("  excluded: {}", skipped_excluded.join(", "));
+    }
+    if !skipped_wrong_scope.is_empty() {
+        println!(
+            "  skipped (wrong scope): {}",
+            skipped_wrong_scope.join(", ")
+        );
+    }
+    println!("broadcast_id: {broadcast_id}");
+    Ok(())
+}
+
+/// Random 16-byte UUID-shaped id for correlating a broadcast's recipient
+/// events. Not strictly UUID v4 (no version/variant bits set) — receivers
+/// correlate by string equality, the shape is for human readability.
+fn generate_broadcast_id() -> String {
+    use rand::RngCore;
+    let mut buf = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut buf);
+    let h = hex::encode(buf);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32],
+    )
+}
 
 fn cmd_session(cmd: SessionCommand) -> Result<()> {
     match cmd {

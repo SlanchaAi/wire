@@ -349,6 +349,205 @@ async fn pair_all_local_mesh_pairs_every_sister_session_v0_6_0() {
     assert_eq!(summary2["pairs_succeeded"].as_u64().unwrap_or(0), 0);
 }
 
+// ---------- TEST 6: mesh broadcast fans one event to every paired sister (v0.6.3 / #19) ----------
+
+/// v0.6.3 (issue #19): `wire mesh broadcast` signs one event per pinned
+/// peer with a shared `broadcast_id` UUID and distinct `event_id`s, then
+/// pushes them in parallel. Spins 3 sessions, pairs them, broadcasts
+/// from alpha to its local-scope peers, then pulls beth + charlie and
+/// asserts each received exactly one event whose `body.broadcast_id`
+/// matches the broadcast_id alpha reported, with distinct event_ids
+/// across the recipients.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mesh_broadcast_fans_to_every_paired_sister_v0_6_3() {
+    let fed_url = spawn_federation_relay().await;
+    let local_url = spawn_local_only_relay().await;
+    let home = fresh_dir("mesh-broadcast");
+
+    for name in &["alpha", "beth", "charlie"] {
+        let out = wire(
+            &home,
+            &[
+                "session",
+                "new",
+                name,
+                "--relay",
+                &fed_url,
+                "--with-local",
+                "--local-relay",
+                &local_url,
+                "--no-daemon",
+                "--json",
+            ],
+        );
+        assert!(
+            out.status.success(),
+            "session new {name} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let pair_out = wire(
+        &home,
+        &[
+            "session",
+            "pair-all-local",
+            "--federation-relay",
+            &fed_url,
+            "--settle-secs",
+            "1",
+            "--json",
+        ],
+    );
+    assert!(
+        pair_out.status.success(),
+        "pair-all-local failed: stderr={}",
+        String::from_utf8_lossy(&pair_out.stderr)
+    );
+
+    // alpha broadcasts to beth + charlie via the local relay.
+    let alpha_home = home.join("sessions").join("alpha");
+    let out = wire(
+        &alpha_home,
+        &[
+            "mesh",
+            "broadcast",
+            "--scope",
+            "local",
+            "--kind",
+            "claim",
+            "--json",
+            "hello mesh from alpha",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "mesh broadcast failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let summary: Value =
+        serde_json::from_slice(&out.stdout).expect("broadcast --json must be valid JSON");
+    let broadcast_id = summary["broadcast_id"]
+        .as_str()
+        .expect("broadcast_id present")
+        .to_string();
+    assert_eq!(
+        summary["delivered"].as_u64().unwrap_or(0),
+        2,
+        "expected delivery to both beth and charlie: {summary}"
+    );
+    assert_eq!(
+        summary["failed"].as_u64().unwrap_or(99),
+        0,
+        "no failures expected: {summary}"
+    );
+    assert_eq!(
+        summary["target_count"].as_u64().unwrap_or(0),
+        2,
+        "alpha should see 2 local-scope peers: {summary}"
+    );
+
+    // Drive beth + charlie to pull from their slots so the events land
+    // in their inbox files. Each pull is per-session-home.
+    let beth_home = home.join("sessions").join("beth");
+    let charlie_home = home.join("sessions").join("charlie");
+    let pull_deadline = Instant::now() + Duration::from_secs(5);
+    let mut beth_lines = 0;
+    let mut charlie_lines = 0;
+    while Instant::now() < pull_deadline {
+        let _ = wire(&beth_home, &["pull", "--json"]);
+        let _ = wire(&charlie_home, &["pull", "--json"]);
+        beth_lines = count_inbox_lines(&beth_home, "alpha");
+        charlie_lines = count_inbox_lines(&charlie_home, "alpha");
+        if beth_lines >= 1 && charlie_lines >= 1 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        beth_lines >= 1,
+        "beth's inbox from alpha is empty after pull"
+    );
+    assert!(
+        charlie_lines >= 1,
+        "charlie's inbox from alpha is empty after pull"
+    );
+
+    // Find the broadcast event in each recipient's inbox by matching
+    // body.broadcast_id. Assert distinct event_ids.
+    fn find_broadcast_event(session_home: &PathBuf, broadcast_id: &str) -> Option<Value> {
+        let inbox = session_home
+            .join("state")
+            .join("wire")
+            .join("inbox")
+            .join("alpha.jsonl");
+        let body = std::fs::read_to_string(&inbox).ok()?;
+        for line in body.lines() {
+            let v: Value = serde_json::from_str(line).ok()?;
+            // Pair flow events use kind=pair_drop etc.; the broadcast
+            // event is the one whose body carries broadcast_id.
+            let bid = v["body"]["broadcast_id"].as_str();
+            if bid == Some(broadcast_id) {
+                return Some(v);
+            }
+        }
+        None
+    }
+    let beth_event =
+        find_broadcast_event(&beth_home, &broadcast_id).expect("beth must have the broadcast");
+    let charlie_event = find_broadcast_event(&charlie_home, &broadcast_id)
+        .expect("charlie must have the broadcast");
+
+    let beth_eid = beth_event["event_id"].as_str().unwrap_or("");
+    let charlie_eid = charlie_event["event_id"].as_str().unwrap_or("");
+    assert!(!beth_eid.is_empty() && !charlie_eid.is_empty());
+    assert_ne!(
+        beth_eid, charlie_eid,
+        "per-recipient broadcast events must have distinct event_ids"
+    );
+
+    // Body content + target_count round-trip.
+    assert_eq!(
+        beth_event["body"]["content"].as_str(),
+        Some("hello mesh from alpha")
+    );
+    assert_eq!(
+        beth_event["body"]["broadcast_target_count"].as_u64(),
+        Some(2)
+    );
+    assert_eq!(
+        charlie_event["body"]["content"].as_str(),
+        Some("hello mesh from alpha")
+    );
+
+    // --exclude: re-broadcast skipping charlie should deliver only to beth.
+    let out2 = wire(
+        &alpha_home,
+        &[
+            "mesh",
+            "broadcast",
+            "--scope",
+            "local",
+            "--exclude",
+            "charlie",
+            "--json",
+            "second wave",
+        ],
+    );
+    assert!(out2.status.success(), "exclude broadcast failed");
+    let summary2: Value = serde_json::from_slice(&out2.stdout).expect("JSON");
+    assert_eq!(
+        summary2["delivered"].as_u64().unwrap_or(99),
+        1,
+        "exclude should deliver to 1: {summary2}"
+    );
+    let excluded = summary2["skipped_excluded"]
+        .as_array()
+        .map(|a| a.iter().any(|v| v.as_str() == Some("charlie")))
+        .unwrap_or(false);
+    assert!(excluded, "charlie should appear in skipped_excluded");
+}
+
 // ---------- TEST 5: mesh-status reports paired mesh + per-edge health (v0.6.2 / #18) ----------
 
 /// v0.6.2 (issue #18): `wire session mesh-status --json` enumerates every
