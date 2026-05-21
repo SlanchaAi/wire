@@ -787,6 +787,29 @@ pub enum SessionCommand {
         #[arg(long)]
         json: bool,
     },
+    /// v0.6.2 (issue #18): live view of the sister-session mesh on this
+    /// machine. Enumerates every session in `wire session list-local`,
+    /// walks each session's `relay.json#peers` to find which other sister
+    /// sessions it has pinned, and probes the local relay for each edge's
+    /// `last_pull_at_unix` to surface stale/silent peers. Text output is
+    /// the pin matrix + per-edge health roll-up; JSON is `{sessions, edges,
+    /// local_relay, summary}` so scripts can scrape.
+    ///
+    /// Read-only — does NOT touch peers or daemons, only the relay's
+    /// public `/v1/slot/<id>/state` endpoint with the slot tokens we
+    /// already hold. Silent on any probe failure (degrades to "no
+    /// signal" rather than abort) so a half-broken mesh is still
+    /// inspectable.
+    MeshStatus {
+        /// Threshold in seconds for "stale" classification on an edge.
+        /// An edge whose receiver hasn't polled their slot in this long
+        /// is flagged. Default 300s (5 min) — same as the per-send
+        /// `phyllis` attentiveness nag.
+        #[arg(long, default_value_t = 300)]
+        stale_secs: u64,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the `export WIRE_HOME=...` line for a session, so a shell
     /// can `eval $(wire session env <name>)` to activate it. With no
     /// name, resolves the cwd through the registry.
@@ -4728,6 +4751,7 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
             federation_relay,
             json,
         } => cmd_session_pair_all_local(settle_secs, &federation_relay, json),
+        SessionCommand::MeshStatus { stale_secs, json } => cmd_session_mesh_status(stale_secs, json),
         SessionCommand::Env { name, json } => cmd_session_env(name.as_deref(), json),
         SessionCommand::Current { json } => cmd_session_current(json),
         SessionCommand::Destroy { name, force, json } => cmd_session_destroy(&name, force, json),
@@ -5402,18 +5426,347 @@ fn cmd_session_pair_all_local(
 /// Check whether `session_home`'s `relay.json` already lists `peer_name`
 /// under `state.peers`. Best-effort — any read/parse error → false.
 fn session_has_peer(session_home: &std::path::Path, peer_name: &str) -> bool {
-    let path = session_home.join("config").join("wire").join("relay.json");
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-    let val: Value = match serde_json::from_slice(&bytes) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    val.get("peers")
-        .and_then(|p| p.get(peer_name))
+    val_session_relay_state(session_home)
+        .and_then(|v| v.get("peers").cloned())
+        .and_then(|p| p.get(peer_name).cloned())
         .is_some()
+}
+
+/// Read a session's `relay.json` directly without mutating the process'
+/// WIRE_HOME env (which would race other threads / processes). Returns
+/// `None` on any read or parse error — callers treat missing state as
+/// "no peers / no endpoints" rather than aborting.
+fn val_session_relay_state(session_home: &std::path::Path) -> Option<Value> {
+    let path = session_home.join("config").join("wire").join("relay.json");
+    let bytes = std::fs::read(&path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// v0.6.2 (issue #18): produce a live view of the sister-session mesh.
+/// One probe per directed edge against the relay backing that edge's
+/// priority-1 endpoint; output groups by undirected pair.
+fn cmd_session_mesh_status(stale_secs: u64, as_json: bool) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    // Flatten by session NAME — same dedup logic as pair-all-local so a
+    // session advertising two local endpoints doesn't get double-counted.
+    let listing = crate::session::list_local_sessions()?;
+    let mut by_name: BTreeMap<String, crate::session::LocalSessionView> = BTreeMap::new();
+    for group in listing.local.into_values() {
+        for s in group {
+            by_name.entry(s.name.clone()).or_insert(s);
+        }
+    }
+    let sessions: Vec<crate::session::LocalSessionView> = by_name.into_values().collect();
+    let federation_only = listing.federation_only;
+
+    if sessions.is_empty() {
+        let msg = "no sister sessions with a local endpoint on this machine.".to_string();
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "sessions": [],
+                    "edges": [],
+                    "local_relay": null,
+                    "federation_only": federation_only.iter().map(|f| &f.name).collect::<Vec<_>>(),
+                    "summary": {
+                        "session_count": 0,
+                        "edge_count": 0,
+                        "healthy": 0,
+                        "stale": 0,
+                        "asymmetric": 0,
+                    },
+                    "note": msg,
+                }))?
+            );
+        } else {
+            println!("{msg}");
+            println!("Use `wire session new --with-local` to create one.");
+        }
+        return Ok(());
+    }
+
+    // Build a name → session-state map: relay_state + reachable handle set.
+    struct SessionState {
+        view: crate::session::LocalSessionView,
+        relay_state: Value,
+        local_relay_url: Option<String>,
+    }
+    let mut sstates: Vec<SessionState> = Vec::with_capacity(sessions.len());
+    for s in sessions {
+        let relay_state = val_session_relay_state(&s.home_dir).unwrap_or_else(|| {
+            json!({"self": Value::Null, "peers": {}})
+        });
+        let local_relay_url = s.local_endpoints.first().map(|e| e.relay_url.clone());
+        sstates.push(SessionState {
+            view: s,
+            relay_state,
+            local_relay_url,
+        });
+    }
+
+    // Probe each unique local-relay URL once for healthz so the operator
+    // sees one liveness line per local relay, not one per edge.
+    let mut local_relays: BTreeMap<String, bool> = BTreeMap::new();
+    for s in &sstates {
+        if let Some(url) = &s.local_relay_url
+            && !local_relays.contains_key(url)
+        {
+            let healthy = probe_relay_healthz(url);
+            local_relays.insert(url.clone(), healthy);
+        }
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Edges: walk every unordered pair, surface bilateral state + each
+    // direction's last_pull. Probe priority-1 endpoint (local preferred
+    // by `peer_endpoints_in_priority_order`).
+    let mut edges: Vec<Value> = Vec::new();
+    let mut healthy_count = 0u32;
+    let mut stale_count = 0u32;
+    let mut asymmetric_count = 0u32;
+
+    for i in 0..sstates.len() {
+        for j in (i + 1)..sstates.len() {
+            let a = &sstates[i];
+            let b = &sstates[j];
+            let a_to_b = probe_directed_edge(&a.relay_state, &b.view.name, now);
+            let b_to_a = probe_directed_edge(&b.relay_state, &a.view.name, now);
+
+            let bilateral = a_to_b.pinned && b_to_a.pinned;
+            // Scope = the most-local scope available in either direction.
+            // (If a→b is local and b→a is federation, the asymmetric
+            // detail surfaces below; the headline scope is the better.)
+            let scope = match (a_to_b.scope.as_deref(), b_to_a.scope.as_deref()) {
+                (Some("local"), _) | (_, Some("local")) => "local",
+                (Some("federation"), _) | (_, Some("federation")) => "federation",
+                _ => "unknown",
+            };
+
+            // Health: stale if either direction's last_pull is older than
+            // `stale_secs`, or never observed when both sides are pinned.
+            let mut status = if bilateral { "healthy" } else { "asymmetric" };
+            if bilateral {
+                let either_stale = [&a_to_b, &b_to_a].iter().any(|d| match d.silent_secs {
+                    Some(s) => s > stale_secs,
+                    None => d.probed,
+                });
+                if either_stale {
+                    status = "stale";
+                }
+            }
+
+            match status {
+                "healthy" => healthy_count += 1,
+                "stale" => stale_count += 1,
+                "asymmetric" => asymmetric_count += 1,
+                _ => {}
+            }
+
+            edges.push(json!({
+                "from": a.view.name,
+                "to": b.view.name,
+                "bilateral": bilateral,
+                "scope": scope,
+                "status": status,
+                "directions": {
+                    a.view.name.clone(): direction_summary(&a_to_b),
+                    b.view.name.clone(): direction_summary(&b_to_a),
+                },
+            }));
+        }
+    }
+
+    let summary = json!({
+        "sessions": sstates.iter().map(|s| json!({
+            "name": s.view.name,
+            "handle": s.view.handle,
+            "cwd": s.view.cwd,
+            "daemon_running": s.view.daemon_running,
+            "local_relay": s.local_relay_url,
+        })).collect::<Vec<_>>(),
+        "edges": edges,
+        "local_relays": local_relays.iter().map(|(url, healthy)| json!({
+            "url": url,
+            "healthy": healthy,
+        })).collect::<Vec<_>>(),
+        "federation_only": federation_only.iter().map(|f| &f.name).collect::<Vec<_>>(),
+        "summary": {
+            "session_count": sstates.len(),
+            "edge_count": edges.len(),
+            "healthy": healthy_count,
+            "stale": stale_count,
+            "asymmetric": asymmetric_count,
+            "stale_threshold_secs": stale_secs,
+        },
+    });
+
+    if as_json {
+        println!("{}", serde_json::to_string(&summary)?);
+        return Ok(());
+    }
+
+    println!(
+        "wire mesh: {} session(s), {} edge(s)",
+        sstates.len(),
+        edges.len()
+    );
+    for (url, healthy) in &local_relays {
+        let tick = if *healthy { "✓" } else { "✗" };
+        println!("  local-relay {url} {tick}");
+    }
+    if !federation_only.is_empty() {
+        print!("  federation-only sessions:");
+        for f in &federation_only {
+            print!(" {}", f.name);
+        }
+        println!();
+    }
+
+    // Pin matrix: sessions × sessions, cell = scope code or "self" / "—".
+    let names: Vec<&str> = sstates.iter().map(|s| s.view.name.as_str()).collect();
+    let col_w = names.iter().map(|n| n.len()).max().unwrap_or(8).max(7) + 1;
+    print!("\n{:>col_w$}", "", col_w = col_w);
+    for n in &names {
+        print!("{:>col_w$}", n, col_w = col_w);
+    }
+    println!();
+    for (i, row) in names.iter().enumerate() {
+        print!("{:>col_w$}", row, col_w = col_w);
+        for (j, col) in names.iter().enumerate() {
+            let cell = if i == j {
+                "self".to_string()
+            } else {
+                let d = probe_directed_edge(&sstates[i].relay_state, col, now);
+                match d.scope.as_deref() {
+                    Some("local") => "local".to_string(),
+                    Some("federation") => "fed".to_string(),
+                    _ => "—".to_string(),
+                }
+            };
+            print!("{:>col_w$}", cell, col_w = col_w);
+        }
+        println!();
+    }
+
+    println!("\nHealth (stale threshold: {stale_secs}s):");
+    for e in &edges {
+        let from = e["from"].as_str().unwrap_or("?");
+        let to = e["to"].as_str().unwrap_or("?");
+        let scope = e["scope"].as_str().unwrap_or("?");
+        let status = e["status"].as_str().unwrap_or("?");
+        let mark = match status {
+            "healthy" => "✓",
+            "stale" => "⚠",
+            "asymmetric" => "!",
+            _ => "?",
+        };
+        let dirs = e["directions"].as_object().cloned().unwrap_or_default();
+        let mut details: Vec<String> = Vec::new();
+        for (who, d) in &dirs {
+            let silent = d.get("silent_secs").and_then(Value::as_u64);
+            let pinned = d.get("pinned").and_then(Value::as_bool).unwrap_or(false);
+            let probed = d.get("probed").and_then(Value::as_bool).unwrap_or(false);
+            let label = match (pinned, probed, silent) {
+                (false, _, _) => format!("{who} has not pinned"),
+                (true, false, _) => format!("{who} pinned but no endpoint to probe"),
+                (true, true, Some(s)) if s <= stale_secs => format!("{who} fresh ({s}s)"),
+                (true, true, Some(s)) => format!("{who} silent {s}s"),
+                (true, true, None) => format!("{who} never pulled"),
+            };
+            details.push(label);
+        }
+        println!(
+            "  {mark} {from} ↔ {to}  scope={scope} {status:>10}  [{}]",
+            details.join(" | ")
+        );
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct DirectedEdge {
+    pinned: bool,
+    scope: Option<String>,
+    last_pull_at_unix: Option<u64>,
+    silent_secs: Option<u64>,
+    probed: bool,
+    event_count: usize,
+}
+
+/// Probe a single directed edge from `from_state`'s view of `to_name`.
+/// Picks the priority-1 endpoint (local preferred when reachable) and
+/// asks the relay for that slot's `last_pull_at_unix`. Silent on probe
+/// failure (the function records `probed = true`, `last_pull = None`,
+/// which the caller treats as "never pulled, route exists" = stale).
+fn probe_directed_edge(from_state: &Value, to_name: &str, now: u64) -> DirectedEdge {
+    let pinned = from_state
+        .get("peers")
+        .and_then(|p| p.get(to_name))
+        .is_some();
+    if !pinned {
+        return DirectedEdge::default();
+    }
+    let endpoints = crate::endpoints::peer_endpoints_in_priority_order(from_state, to_name);
+    let ep = match endpoints.into_iter().next() {
+        Some(e) => e,
+        None => {
+            return DirectedEdge {
+                pinned: true,
+                ..Default::default()
+            };
+        }
+    };
+    let scope = Some(
+        match ep.scope {
+            crate::endpoints::EndpointScope::Local => "local",
+            crate::endpoints::EndpointScope::Federation => "federation",
+        }
+        .to_string(),
+    );
+    let client = crate::relay_client::RelayClient::new(&ep.relay_url);
+    let (count, last) = client.slot_state(&ep.slot_id, &ep.slot_token).unwrap_or((0, None));
+    let silent = last.map(|t| now.saturating_sub(t));
+    DirectedEdge {
+        pinned: true,
+        scope,
+        last_pull_at_unix: last,
+        silent_secs: silent,
+        probed: true,
+        event_count: count,
+    }
+}
+
+fn direction_summary(d: &DirectedEdge) -> Value {
+    json!({
+        "pinned": d.pinned,
+        "scope": d.scope,
+        "probed": d.probed,
+        "last_pull_at_unix": d.last_pull_at_unix,
+        "silent_secs": d.silent_secs,
+        "event_count": d.event_count,
+    })
+}
+
+/// Best-effort GET `<url>/healthz`. Returns true iff status 2xx.
+fn probe_relay_healthz(url: &str) -> bool {
+    let probe_url = format!("{}/healthz", url.trim_end_matches('/'));
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    match client.get(&probe_url).send() {
+        Ok(r) => r.status().is_success(),
+        Err(_) => false,
+    }
 }
 
 /// Drive one bilateral pair handshake between two sister sessions

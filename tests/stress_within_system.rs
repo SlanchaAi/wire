@@ -349,6 +349,139 @@ async fn pair_all_local_mesh_pairs_every_sister_session_v0_6_0() {
     assert_eq!(summary2["pairs_succeeded"].as_u64().unwrap_or(0), 0);
 }
 
+// ---------- TEST 5: mesh-status reports paired mesh + per-edge health (v0.6.2 / #18) ----------
+
+/// v0.6.2 (issue #18): `wire session mesh-status --json` enumerates every
+/// sister session, walks each session's `relay.json#peers` to identify
+/// mesh edges, and probes the relay for each edge's `last_pull_at_unix`.
+/// Spins 3 sessions, pairs them via `pair-all-local`, then asserts:
+/// - `summary.session_count` == 3
+/// - `summary.edge_count` == 3 (3 choose 2)
+/// - `summary.asymmetric` == 0 (every pair-all-local edge is bilateral)
+/// - every edge has `scope == "local"` (sister sessions share a local relay)
+/// - at least one direction per edge has a recorded `last_pull_at_unix`
+///   (the pair-all-local handshake itself triggers pulls)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mesh_status_reports_paired_mesh_v0_6_2() {
+    let fed_url = spawn_federation_relay().await;
+    let local_url = spawn_local_only_relay().await;
+    let home = fresh_dir("mesh-status-paired");
+
+    for name in &["alpha", "beth", "charlie"] {
+        let out = wire(
+            &home,
+            &[
+                "session",
+                "new",
+                name,
+                "--relay",
+                &fed_url,
+                "--with-local",
+                "--local-relay",
+                &local_url,
+                "--no-daemon",
+                "--json",
+            ],
+        );
+        assert!(
+            out.status.success(),
+            "session new {name} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let pair_out = wire(
+        &home,
+        &[
+            "session",
+            "pair-all-local",
+            "--federation-relay",
+            &fed_url,
+            "--settle-secs",
+            "1",
+            "--json",
+        ],
+    );
+    assert!(
+        pair_out.status.success(),
+        "pair-all-local failed: stderr={}",
+        String::from_utf8_lossy(&pair_out.stderr)
+    );
+
+    let out = wire(&home, &["session", "mesh-status", "--json"]);
+    assert!(
+        out.status.success(),
+        "mesh-status failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let view: Value = serde_json::from_slice(&out.stdout).expect("mesh-status JSON parse");
+
+    let summary = &view["summary"];
+    assert_eq!(
+        summary["session_count"].as_u64().unwrap_or(0),
+        3,
+        "expected 3 sessions: {view}"
+    );
+    assert_eq!(
+        summary["edge_count"].as_u64().unwrap_or(0),
+        3,
+        "expected 3 edges (3 choose 2): {view}"
+    );
+    assert_eq!(
+        summary["asymmetric"].as_u64().unwrap_or(99),
+        0,
+        "no edge should be asymmetric after pair-all-local: {view}"
+    );
+
+    let edges = view["edges"].as_array().expect("edges array");
+    assert_eq!(edges.len(), 3, "expected 3 mesh edges: {view}");
+    let mut any_fresh = false;
+    for e in edges {
+        assert_eq!(
+            e["bilateral"].as_bool(),
+            Some(true),
+            "edge {} ↔ {} not bilateral: {e}",
+            e["from"],
+            e["to"]
+        );
+        assert_eq!(
+            e["scope"].as_str(),
+            Some("local"),
+            "edge {} ↔ {} routed off-local: {e}",
+            e["from"],
+            e["to"]
+        );
+        // At least one of the two directions per edge should have a
+        // last_pull recorded by the relay (the pair handshake pulled at
+        // least once per session).
+        if let Some(dirs) = e["directions"].as_object() {
+            for d in dirs.values() {
+                if d.get("last_pull_at_unix")
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false)
+                {
+                    any_fresh = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        any_fresh,
+        "expected at least one direction with a recorded last_pull_at_unix: {view}"
+    );
+
+    // local_relays should report our spun local relay healthy.
+    let local_relays = view["local_relays"].as_array().expect("local_relays array");
+    assert!(
+        local_relays
+            .iter()
+            .any(|r| r["url"].as_str() == Some(local_url.as_str())
+                && r["healthy"].as_bool() == Some(true)),
+        "expected our local relay healthy: {view}"
+    );
+}
+
 // ---------- TEST 0: regression — wire session new --with-local persists dual endpoints ----------
 
 /// v0.5.20 regression: `try_allocate_local_slot` (cli.rs) and

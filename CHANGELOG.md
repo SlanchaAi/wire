@@ -8,6 +8,31 @@ The v0.5 line shipped the protocol: bilateral signed-message bus, federated hand
 
 The first orchestration primitive is `wire session pair-all-local`: zero-paste bilateral pairing across every sister session on a machine. The trust anchor shifts from "operator types SAS digits on each side" (a network-level proof appropriate for strangers) to "operator owns every session listed in `wire session list-local`" (a filesystem-permission proof appropriate for same-uid siblings). That re-anchoring is what makes mesh-scale auto-pairing safe to ship at all — same-uid siblings are by definition not strangers.
 
+### v0.6.2 — `wire session mesh-status`: live view of the sister mesh (issue #18)
+
+Second orchestration primitive. After `pair-all-local` lands N sessions in a fully-paired mesh, operators need one command to see who's actually paired with whom and which edges are silent. Today they walk every session's `wire peers` + per-peer `wire status --peer` manually. v0.6.2 collapses that to one read-only call:
+
+```bash
+wire session mesh-status            # NxN pin matrix + per-edge health roll-up
+wire session mesh-status --json     # {sessions, edges, local_relays, summary}
+wire session mesh-status --stale-secs 60   # tighten the "silent" threshold
+```
+
+**What it does.** For each session in `wire session list-local`, reads that session's `relay.json` directly (no WIRE_HOME mutation — sessions are inspected by path, not env), enumerates pinned peers, and for every unordered pair (A, B) where both are sister sessions:
+
+- Reports **bilateral state** — `bilateral: true` only if A has pinned B AND B has pinned A. Half-pinned pairs surface as `status: "asymmetric"`, which usually means a pair handshake was interrupted mid-flow.
+- Reports **route scope** — `local` if the priority-1 endpoint is a same-machine relay, `federation` if it's wireup.net or another public relay. Local sister sessions should always route `local`; anything else is a degradation signal.
+- Probes the receiver's slot on the relay for `last_pull_at_unix`, computes `silent_secs = now - last_pull`. An edge with `silent_secs > stale_secs` (default 300s, matching the per-send `phyllis` attentiveness nag) gets `status: "stale"`.
+- Probes each unique local-relay URL's `/healthz` once (not per-edge) so the operator sees one liveness line per relay.
+
+**Read-only by construction.** No daemon contact, no peer state mutation, no WIRE_HOME env tweaking. Failures degrade silently — a relay timeout records the edge as `probed: true, last_pull: null` (treated as stale) rather than aborting the whole report. A half-broken mesh is still inspectable.
+
+**Why this matters.** Operators get a single observable for the orchestration layer's health. Before v0.6.2 you could `pair-all-local` ten sessions and have no idea whether the daemons were actually pulling — silent failure was easy. Now `mesh-status` surfaces every silent edge with the exact direction and silence duration. That's the precondition for everything downstream: broadcast can refuse to dispatch to silent peers, route can prefer fresh ones, role assignment can detect stale capability advertisements.
+
+**Implementation.** `src/cli.rs::cmd_session_mesh_status` + `probe_directed_edge` (one slot_state probe per direction) + `probe_relay_healthz` (one healthz call per unique local-relay URL). Reuses `peer_endpoints_in_priority_order` from v0.5.17, so local-first routing logic is identical to what `wire push` uses. Matrix rendering is O(N²) probes for the text path — fine for the realistic ceiling of ~20 sessions per machine.
+
+**Regression test.** `tests/stress_within_system.rs::mesh_status_reports_paired_mesh_v0_6_2` — spins 3 sessions, pairs them via `pair-all-local`, runs `mesh-status --json`, asserts: 3 sessions, 3 edges, 0 asymmetric, every edge `scope=local` and `bilateral=true`, at least one direction with a recorded `last_pull_at_unix`, local relay reported healthy.
+
 ### v0.6.1 — MCP server auto-detects WIRE_HOME from cwd
 
 Removes the manual `.mcp.json env.WIRE_HOME` step that v0.5.16+ multi-session setups required. When the `wire mcp` server starts:
