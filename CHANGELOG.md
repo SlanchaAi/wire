@@ -8,6 +8,18 @@ The v0.5 line shipped the protocol: bilateral signed-message bus, federated hand
 
 The first orchestration primitive is `wire session pair-all-local`: zero-paste bilateral pairing across every sister session on a machine. The trust anchor shifts from "operator types SAS digits on each side" (a network-level proof appropriate for strangers) to "operator owns every session listed in `wire session list-local`" (a filesystem-permission proof appropriate for same-uid siblings). That re-anchoring is what makes mesh-scale auto-pairing safe to ship at all — same-uid siblings are by definition not strangers.
 
+### v0.6.9 — fix v0.6.8 session-daemon respawn (caught live, ~5 min in)
+
+Caught by deploying v0.6.8 on this laptop ~5 min after publish. The session-daemon respawn loop checked `s.daemon_running` AFTER step 3's pgrep+SIGTERM had already killed every wire daemon (default home AND all sessions share the `wire daemon` command line, so pgrep matches all of them). Result: `daemon_running` was always false at the respawn-decision site, and zero session daemons got respawned. The default-home daemon was reborn correctly, but session daemons stayed dead.
+
+On the test machine: `wire` session bounced (because `wire upgrade` was auto-detected into the wire session via v0.6.7, so the default-home respawn IS the session respawn for whichever session is auto-detected), `slancha-business` stayed down. Operator inboxes go silent until they re-run `wire session new` from each cwd.
+
+Fix: snapshot which sessions had a running daemon BEFORE step 3's kill, use that list at the respawn site. Verified on this laptop — `slancha-business` now respawns correctly after `wire upgrade`.
+
+Tiny patch, ships immediately so v0.6.8 stays usable for any operator who's already pulled it.
+
+Ship-deploy-find-bug-reship discipline pays again: v0.6.8 looked good in tests (which spin sessions but don't exercise the upgrade flow), would have broken silently for every operator who ran `wire upgrade` from a sister-Claude box. Caught in the v0.6.8 self-install validation, fixed in v0.6.9, total turnaround ~10 min.
+
 ### v0.6.8 — stale cleanup on upgrade + crates.io publish wired into release pipeline
 
 Infra release. Three load-bearing fixes ship together because they're tangled — each one explained the "I updated but it's still broken" reports operators were filing.

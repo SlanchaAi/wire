@@ -7192,6 +7192,20 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
     };
     let cli_version = env!("CARGO_PKG_VERSION").to_string();
 
+    // 2b. v0.6.9: snapshot which sessions HAD a running daemon BEFORE
+    // we kill anything. Step 3's pgrep+SIGTERM also kills session-owned
+    // daemons (they share the `wire daemon` command line), so by the
+    // time the respawn loop runs, `daemon_running` would always be
+    // false and zero sessions would respawn. Capture state up front
+    // and respawn whatever was alive at the start.
+    let sessions_to_respawn_after_kill: Vec<std::path::PathBuf> =
+        crate::session::list_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.daemon_running)
+            .map(|s| s.home_dir)
+            .collect();
+
     if check_only {
         // v0.6.8: also surface session-level state + PATH dupes in --check.
         let sessions_with_daemons: Vec<String> = crate::session::list_sessions()
@@ -7301,29 +7315,21 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         let _ = std::fs::remove_file(&pidfile);
     }
 
-    // 4b. v0.6.8 stale-cleanup: walk every session on this machine,
-    // wipe each session's stale pidfile, and remember which ones had a
-    // daemon running so we can respawn them under the new binary. Same
-    // process kill the default home got in step 3 — the pgrep-by-name
-    // pass above already SIGTERM'd anything calling itself `wire daemon`
-    // including session daemons, so this just cleans up the pidfile
-    // tombstones the kills leave behind.
-    let mut session_daemons_to_respawn: Vec<std::path::PathBuf> = Vec::new();
+    // 4b. v0.6.8/9 stale-cleanup: wipe every session's pidfile (step 3's
+    // pgrep+SIGTERM has already killed the processes; pidfile tombstones
+    // would otherwise block ensure_session_daemon's "already running"
+    // short-circuit). The respawn list comes from the v0.6.9 pre-kill
+    // snapshot above — checking `daemon_running` here would always
+    // return false because we just killed them.
     if let Ok(sessions) = crate::session::list_sessions() {
         for s in &sessions {
             let session_pidfile = s.home_dir.join("state").join("wire").join("daemon.pid");
             if session_pidfile.exists() {
-                // Anything pgrep found in step 1 has already been
-                // SIGTERM'd by step 3 — but session daemons may have
-                // unique pid records pointing at processes that are
-                // now dead. Wipe and remember to respawn.
                 let _ = std::fs::remove_file(&session_pidfile);
-                if s.daemon_running {
-                    session_daemons_to_respawn.push(s.home_dir.clone());
-                }
             }
         }
     }
+    let session_daemons_to_respawn = sessions_to_respawn_after_kill;
 
     // 4c. v0.6.8 PATH duplicate-binary detection. If `wire` resolves to
     // multiple distinct files on $PATH, surface the conflict — operators
