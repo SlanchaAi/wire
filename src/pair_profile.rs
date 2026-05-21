@@ -188,6 +188,7 @@ pub const PROFILE_FIELDS: &[&str] = &[
     "handle",
     "now",
     "listed",
+    "role",
 ];
 
 /// Read this agent's profile blob from the agent-card. Returns `Value::Null`

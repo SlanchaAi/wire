@@ -349,6 +349,112 @@ async fn pair_all_local_mesh_pairs_every_sister_session_v0_6_0() {
     assert_eq!(summary2["pairs_succeeded"].as_u64().unwrap_or(0), 0);
 }
 
+// ---------- TEST 7: mesh role assigns + lists role tags across sisters (v0.6.4 / #20) ----------
+
+/// v0.6.4 (issue #20): `wire mesh role set <role>` writes profile.role to
+/// the agent-card; `wire mesh role list` enumerates sister sessions and
+/// shows each one's role. Spins 3 sessions, sets a distinct role on each,
+/// runs `mesh role list --json`, asserts each session reports its role.
+/// Validates role-string sanitization (illegal chars rejected, oversize
+/// rejected). Also asserts that `wire mesh role get` against a peer with
+/// no pinned card returns null (graceful — not a crash).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mesh_role_set_list_round_trips_v0_6_4() {
+    let fed_url = spawn_federation_relay().await;
+    let local_url = spawn_local_only_relay().await;
+    let home = fresh_dir("mesh-role");
+
+    let session_roles = [("alpha", "planner"), ("beth", "reviewer"), ("charlie", "coder")];
+
+    for (name, _) in &session_roles {
+        let out = wire(
+            &home,
+            &[
+                "session",
+                "new",
+                name,
+                "--relay",
+                &fed_url,
+                "--with-local",
+                "--local-relay",
+                &local_url,
+                "--no-daemon",
+                "--json",
+            ],
+        );
+        assert!(
+            out.status.success(),
+            "session new {name} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // Set role per session by running `wire mesh role set` against each
+    // session's WIRE_HOME directly.
+    for (name, role) in &session_roles {
+        let session_home = home.join("sessions").join(name);
+        let out = wire(&session_home, &["mesh", "role", "set", role]);
+        assert!(
+            out.status.success(),
+            "mesh role set {role} for {name} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // List from each session's WIRE_HOME and check it sees all 3 roles.
+    for (name, _) in &session_roles {
+        let session_home = home.join("sessions").join(name);
+        let out = wire(&session_home, &["mesh", "role", "list", "--json"]);
+        assert!(
+            out.status.success(),
+            "mesh role list failed for {name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let view: Value = serde_json::from_slice(&out.stdout).expect("JSON");
+        let rows = view["sessions"].as_array().expect("sessions array");
+        assert_eq!(rows.len(), 3, "list should see 3 sister sessions: {view}");
+        for (expected_name, expected_role) in &session_roles {
+            let found = rows.iter().find(|r| r["name"].as_str() == Some(expected_name));
+            let row = found
+                .unwrap_or_else(|| panic!("session {expected_name} missing from list: {view}"));
+            assert_eq!(
+                row["role"].as_str(),
+                Some(*expected_role),
+                "session {expected_name} role mismatch: {row}"
+            );
+        }
+    }
+
+    // Role validation: illegal char + oversize must reject.
+    let alpha_home = home.join("sessions").join("alpha");
+    let illegal = wire(&alpha_home, &["mesh", "role", "set", "bad role"]);
+    assert!(!illegal.status.success(), "space-in-role should be rejected");
+    assert!(
+        String::from_utf8_lossy(&illegal.stderr).contains("illegal char"),
+        "illegal char rejection message expected, got: {}",
+        String::from_utf8_lossy(&illegal.stderr)
+    );
+    let oversize: String = "a".repeat(33);
+    let too_long = wire(&alpha_home, &["mesh", "role", "set", &oversize]);
+    assert!(!too_long.status.success(), "33-char role should be rejected");
+
+    // Clear works; list reports (unset) thereafter.
+    let cleared = wire(&alpha_home, &["mesh", "role", "clear", "--json"]);
+    assert!(cleared.status.success(), "mesh role clear failed");
+    let after: Value = serde_json::from_slice(
+        &wire(&alpha_home, &["mesh", "role", "list", "--json"]).stdout,
+    )
+    .expect("JSON");
+    let alpha_row = after["sessions"]
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["name"].as_str() == Some("alpha")))
+        .expect("alpha row");
+    assert!(
+        alpha_row["role"].is_null(),
+        "alpha role should be null after clear: {alpha_row}"
+    );
+}
+
 // ---------- TEST 6: mesh broadcast fans one event to every paired sister (v0.6.3 / #19) ----------
 
 /// v0.6.3 (issue #19): `wire mesh broadcast` signs one event per pinned

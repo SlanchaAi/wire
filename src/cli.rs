@@ -899,6 +899,51 @@ pub enum MeshCommand {
         #[arg(long)]
         json: bool,
     },
+    /// v0.6.4 (issue #20): assign role tags to sister sessions for
+    /// capability-aware addressing. Stored as `profile.role` on the
+    /// signed agent-card — propagates over the existing pair / .well-
+    /// known plumbing, no new persistence.
+    ///
+    /// First slice of the Layer-2 capability metadata umbrella (#13).
+    /// `wire mesh route` (issue #21) will consume these tags to pick
+    /// the right sister for a task.
+    Role {
+        #[command(subcommand)]
+        action: MeshRoleAction,
+    },
+}
+
+/// v0.6.4: subcommands of `wire mesh role`.
+#[derive(Subcommand, Debug)]
+pub enum MeshRoleAction {
+    /// Assign self to a role. Role is a free-form ASCII string
+    /// (alphanumeric + `-` + `_`, max 32 chars). Operators agree on
+    /// the vocabulary out-of-band — common starters: `planner`,
+    /// `executor`, `reviewer`, `coder`, `tester`, `dispatcher`.
+    Set {
+        role: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read self or a peer's role. With no arg, prints self. With a
+    /// handle, reads from the peer's pinned agent-card.
+    Get {
+        peer: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List roles across every sister session on this machine. Reads
+    /// each session's agent-card by path — no network, no env mutation.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove self from any assigned role. Re-signs the card with
+    /// `profile.role: null`.
+    Clear {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -4803,7 +4848,171 @@ fn cmd_mesh(cmd: MeshCommand) -> Result<()> {
             body,
             json,
         } => cmd_mesh_broadcast(&kind, &scope, &exclude, noreply, &body, json),
+        MeshCommand::Role { action } => cmd_mesh_role(action),
     }
+}
+
+/// v0.6.4 (issue #20): mesh role tag dispatcher. Wraps the existing
+/// `profile.role` persistence (re-uses `pair_profile::write_profile_field`)
+/// behind a discoverability-friendlier surface, plus cross-session
+/// enumeration for the list path.
+fn cmd_mesh_role(action: MeshRoleAction) -> Result<()> {
+    match action {
+        MeshRoleAction::Set { role, json } => {
+            validate_role_tag(&role)?;
+            let new_profile =
+                crate::pair_profile::write_profile_field("role", Value::String(role.clone()))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "role": role,
+                        "profile": new_profile,
+                    }))?
+                );
+            } else {
+                println!("self role = {role} (signed into agent-card)");
+            }
+        }
+        MeshRoleAction::Get { peer, json } => {
+            let (who, role) = match peer.as_deref() {
+                None => {
+                    let card = config::read_agent_card()?;
+                    let role = card
+                        .get("profile")
+                        .and_then(|p| p.get("role"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let who = card
+                        .get("did")
+                        .and_then(Value::as_str)
+                        .map(|d| crate::agent_card::display_handle_from_did(d).to_string())
+                        .unwrap_or_else(|| "self".to_string());
+                    (who, role)
+                }
+                Some(handle) => {
+                    let bare = crate::agent_card::bare_handle(handle).to_string();
+                    let trust = config::read_trust()?;
+                    let role = trust
+                        .get("agents")
+                        .and_then(|a| a.get(&bare))
+                        .and_then(|a| a.get("card"))
+                        .and_then(|c| c.get("profile"))
+                        .and_then(|p| p.get("role"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    (bare, role)
+                }
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "handle": who,
+                        "role": role,
+                    }))?
+                );
+            } else {
+                match role {
+                    Some(r) => println!("{who}: {r}"),
+                    None => println!("{who}: (unset)"),
+                }
+            }
+        }
+        MeshRoleAction::List { json } => {
+            let mut self_did: Option<String> = None;
+            if let Ok(card) = config::read_agent_card() {
+                self_did = card.get("did").and_then(Value::as_str).map(str::to_string);
+            }
+            let sessions = crate::session::list_sessions()?;
+            let mut rows: Vec<Value> = Vec::new();
+            for s in &sessions {
+                let card_path = s
+                    .home_dir
+                    .join("config")
+                    .join("wire")
+                    .join("agent-card.json");
+                let role = std::fs::read(&card_path)
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                    .and_then(|c| {
+                        c.get("profile")
+                            .and_then(|p| p.get("role"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    });
+                let is_self = match (&self_did, &s.did) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
+                };
+                rows.push(json!({
+                    "name": s.name,
+                    "handle": s.handle,
+                    "role": role,
+                    "self": is_self,
+                }));
+            }
+            rows.sort_by(|a, b| {
+                a["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(b["name"].as_str().unwrap_or(""))
+            });
+            if json {
+                println!("{}", serde_json::to_string(&json!({"sessions": rows}))?);
+            } else if rows.is_empty() {
+                println!("no sister sessions on this machine.");
+            } else {
+                println!("SISTER ROLES (this machine):");
+                for r in &rows {
+                    let name = r["name"].as_str().unwrap_or("?");
+                    let role = r["role"].as_str().unwrap_or("(unset)");
+                    let marker = if r["self"].as_bool().unwrap_or(false) {
+                        "    ← you"
+                    } else {
+                        ""
+                    };
+                    println!("  {name:<24} {role}{marker}");
+                }
+            }
+        }
+        MeshRoleAction::Clear { json } => {
+            let new_profile = crate::pair_profile::write_profile_field("role", Value::Null)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "cleared": true,
+                        "profile": new_profile,
+                    }))?
+                );
+            } else {
+                println!("self role cleared");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// v0.6.4: role tag must be ASCII alphanumeric + `-` + `_`, 1-32 chars.
+/// No vocabulary check — operators choose the taxonomy (planner /
+/// reviewer / dispatcher / your-custom-tag). The constraint is purely
+/// to keep the tag safe for filenames / URLs / shell args.
+fn validate_role_tag(role: &str) -> Result<()> {
+    if role.is_empty() {
+        bail!("role must not be empty (use `wire mesh role --clear` to unset)");
+    }
+    if role.len() > 32 {
+        bail!("role too long ({} chars; max 32)", role.len());
+    }
+    for c in role.chars() {
+        if !(c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            bail!(
+                "role contains illegal char {c:?} (allowed: A-Z a-z 0-9 - _)"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// v0.6.3 (issue #19): fan one signed event to every pinned peer.

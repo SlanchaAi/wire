@@ -48,8 +48,31 @@ use crate::endpoints::{Endpoint, EndpointScope, self_endpoints};
 ///     `config::state_dir`'s fallback so the two surfaces resolve to
 ///     compatible roots on every platform.
 pub fn sessions_root() -> Result<PathBuf> {
-    if let Ok(home) = std::env::var("WIRE_HOME") {
-        return Ok(PathBuf::from(home).join("sessions"));
+    if let Ok(home_str) = std::env::var("WIRE_HOME") {
+        let home = PathBuf::from(&home_str);
+        let direct = home.join("sessions");
+        if direct.exists() {
+            return Ok(direct);
+        }
+        // v0.6.4: inside-session fallback. When WIRE_HOME is set by the
+        // MCP auto-detect or `wire session env`, it points at one
+        // session's home (`<root>/sessions/<name>`) — *not* the root
+        // holding every session. Without this fallback, `wire mesh
+        // status` / `mesh role list` / `mesh broadcast` invoked from
+        // inside a session see zero sister sessions even though the
+        // operator can plainly see them with `wire session list`.
+        //
+        // The check is tight on purpose: only short-circuit when the
+        // immediate parent dir is named `sessions`. Anything else (a
+        // plain test WIRE_HOME, a custom location) keeps the v0.6.3
+        // behavior of returning `<WIRE_HOME>/sessions/` so the caller
+        // can populate it.
+        if let Some(parent) = home.parent()
+            && parent.file_name().and_then(|s| s.to_str()) == Some("sessions")
+        {
+            return Ok(parent.to_path_buf());
+        }
+        return Ok(direct);
     }
     let state = dirs::state_dir()
         .or_else(dirs::data_local_dir)

@@ -8,6 +8,28 @@ The v0.5 line shipped the protocol: bilateral signed-message bus, federated hand
 
 The first orchestration primitive is `wire session pair-all-local`: zero-paste bilateral pairing across every sister session on a machine. The trust anchor shifts from "operator types SAS digits on each side" (a network-level proof appropriate for strangers) to "operator owns every session listed in `wire session list-local`" (a filesystem-permission proof appropriate for same-uid siblings). That re-anchoring is what makes mesh-scale auto-pairing safe to ship at all — same-uid siblings are by definition not strangers.
 
+### v0.6.4 — `wire mesh role`: capability tags on sister sessions (issue #20)
+
+Fourth orchestration primitive — the first slice of the Layer-2 capability metadata umbrella (#13). Now operators can tag sister sessions by *function* (planner / executor / reviewer / coder / dispatcher / your-custom-tag) so the mesh has structure beyond bare connectivity. `wire mesh route` (#21) will consume these tags to pick the right sister for a task.
+
+```bash
+wire mesh role set planner          # assign self to a role
+wire mesh role get                  # print self role
+wire mesh role get charlie          # print pinned peer's role
+wire mesh role list                 # show roles across every sister session
+wire mesh role clear                # unset self role
+```
+
+**Persistence.** Stored as `profile.role: Option<String>` on the signed agent-card via the existing `pair_profile::write_profile_field` plumbing — no new storage, no new schema layer. The card's existing signature covers `profile.role` by construction (card canonicalization includes the profile sub-object). Backward compatible: pre-v0.6.4 cards have no `role` field, surfaced as `(unset)`.
+
+**Vocabulary is operator territory.** No relay-side validation of role names. Common starters surfaced in the CLI help: `planner`, `executor`, `reviewer`, `coder`, `tester`, `dispatcher`. But "data-vibes-checker" or "PR-approver" are equally valid — the operator picks the taxonomy. Client-side validation is purely a *safety* check (ASCII alphanumeric + `-` + `_`, max 32 chars) so role strings stay safe for filenames, URLs, and shell args. Illegal chars / oversize get rejected loudly.
+
+**Cross-session list reads by path.** `wire mesh role list` enumerates `wire session list` and reads each session's `agent-card.json` directly off the filesystem — no network, no env mutation. Marks the running session (when applicable) with `← you` in the text output. JSON output is `{sessions: [{name, handle, role, self}]}`.
+
+**Inside-session sessions_root fix (latent bug).** `session::sessions_root()` previously returned `WIRE_HOME/sessions/` unconditionally. When `WIRE_HOME` was set by `wire session env` or v0.6.1 MCP auto-detect — i.e., pointing at one specific session's home — that path was empty and `wire mesh role list` (plus `mesh status`, `mesh broadcast`, `pair-all-local`) silently saw zero sister sessions. v0.6.4 adds a tight fallback: if the canonical `<WIRE_HOME>/sessions/` doesn't exist AND `WIRE_HOME`'s immediate parent is named `sessions`, treat that parent as the canonical sessions root. So inside-session invocation now Just Works. Other WIRE_HOME shapes (test harnesses, custom locations) keep the v0.6.3 behavior.
+
+**Regression test.** `tests/stress_within_system.rs::mesh_role_set_list_round_trips_v0_6_4` spins 3 sessions, sets a distinct role on each from inside its own WIRE_HOME (`alpha=planner`, `beth=reviewer`, `charlie=coder`), then runs `mesh role list --json` from *each* session and asserts all three sessions report each other's roles correctly. Also rejects illegal chars (`bad role`) and oversize (33-char string), and verifies `clear` round-trips back to `null`.
+
 ### v0.6.3 — `wire mesh broadcast`: fan one event to every pinned peer (issue #19)
 
 Third orchestration primitive. With v0.6.0 (`pair-all-local`) and v0.6.2 (`mesh-status`), the operator can build a sister mesh and inspect it. v0.6.3 adds the write-side primitive: one command that dispatches the same signed event to every pinned peer in parallel.
