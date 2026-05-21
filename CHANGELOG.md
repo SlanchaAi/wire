@@ -8,6 +8,36 @@ The v0.5 line shipped the protocol: bilateral signed-message bus, federated hand
 
 The first orchestration primitive is `wire session pair-all-local`: zero-paste bilateral pairing across every sister session on a machine. The trust anchor shifts from "operator types SAS digits on each side" (a network-level proof appropriate for strangers) to "operator owns every session listed in `wire session list-local`" (a filesystem-permission proof appropriate for same-uid siblings). That re-anchoring is what makes mesh-scale auto-pairing safe to ship at all — same-uid siblings are by definition not strangers.
 
+### v0.6.6 — `--local-only` sessions + `--local-sister` pair (federation-free within-system mesh)
+
+UX fix shipped to the v0.6 orchestration layer. The previous shape — `wire session new --with-local` allocates BOTH a federation slot AND a local slot, then tries to claim the nick on `wireup.net` — broke down when:
+
+- The cwd-derived session name collided with a reserved nick (`wire`, `slancha`, etc.) — federation claim silently failed and `pair-all-local` 404'd downstream on `.well-known/wire/agent`.
+- The operator only needed within-box coordination but was paying the federation tax (and pulling sister-coordination traffic through `wireup.net` for no reason).
+- Operators confused "machine identity" with "session identity" — both were federation-claimed, both showed up in `wire peers` from different `WIRE_HOME` views, easy to lose track of which Claude is talking as whom.
+
+v0.6.6 introduces a pure within-system mode that fixes all three:
+
+```bash
+wire session new --local-only      # no federation slot, no nick claim, local-relay identity only
+wire session pair-all-local        # uses --local-sister (v0.6.6) — no .well-known round-trip
+```
+
+**`--local-only` on `session new`** allocates ONLY a local-relay slot. No federation contact. Reserved nicks are allowed because nothing tries to publish them. The session is unaddressable from outside the box by construction — same-box sisters reach it via the local relay; cross-machine peers cannot. If the local relay isn't running, `--local-only` bails with the exact remediation (`wire service install --local-relay`) rather than silently degrading to federation-only.
+
+**`wire add --local-sister <name>`** is the new pair-initiation path. Looks up `name` in `wire session list`, reads that session's `agent-card.json` + `relay.json` directly off disk, pins endpoints into our trust + relay-state, then POSTs the `pair_drop` event direct to the sister's local slot. No `.well-known/wire/agent?handle=<name>` resolution, no federation phonebook lookup — the trust anchor is filesystem permission, which is exactly what same-uid sister sessions can rely on.
+
+**`pair-all-local` now uses `--local-sister` internally.** The federation-path step 1 (`wire add <peer>@<host> --relay <federation>`) is replaced by `wire add <peer> --local-sister`. Pair-all-local works for sessions whose federation handle is unclaimable (reserved nicks) and for `--local-only` sessions with no federation slot at all. The 8-step bilateral handshake otherwise stays identical — same ack flow, same idempotent re-run semantics, same `state.peers` shape on both sides.
+
+**Two latent bugs caught + fixed along the way:**
+
+1. `try_allocate_local_slot` previously wrote `self.relay_url = federation_relay` as a default-filler legacy field even when no federation slot existed. For `--local-only` sessions that produced half-populated `self` state (relay_url set but no `slot_id` / `slot_token` at the top level), which broke any caller that read the legacy fields directly. v0.6.6 writes the LOCAL endpoint into the legacy `relay_url` / `slot_id` / `slot_token` fields when there's no federation endpoint.
+2. `ensure_self_with_relay` was hard-coded to auto-allocate a federation slot at `DEFAULT_RELAY` (wireup.net) any time `self.slot_id` was missing — including for `--local-only` sessions that genuinely had no business touching federation. `wire pair-accept` would then silently turn a `--local-only` session into a dual-slot one. v0.6.6 prefers any existing `self.endpoints[]` entry over auto-allocating.
+
+**Docs.** `AGENT.md` (§0 within-system / §1 cross-system), `README.md`, and `landing/index.html` all got an explicit two-mode comparison table + the full within-system recipe. The user-reported confusion ("they keep getting confused with the machine session") is addressed at the doc level — sessions vs default identity, local-only vs federation, and the trust anchor for each are surfaced before the commands instead of after.
+
+**Regression test.** `tests/stress_within_system.rs::local_only_sessions_pair_without_federation_v0_6_6` — spins THREE local-only sessions including one named `wire` (a reserved nick that pre-v0.6.6 would fail federation claim), runs `pair-all-local`, asserts every session has every other in `state.peers`, asserts the broadcast from the reserved-nick session delivers to all sisters. Plus regression: each `--local-only` session's `self.endpoints[]` is local-scope only (no federation slot leaked).
+
 ### v0.6.5 — `wire mesh route`: capability-match addressing (issue #21)
 
 Closes the orchestration-primitive arc opened in v0.6.0. The mesh now has a discovery layer (pair-all-local), an observability layer (mesh-status), a fan-out layer (mesh-broadcast), a metadata layer (mesh-role), and now a *routing* layer. Prompts stop saying "send to beth" and start saying "send to the reviewer" — handle-free addressing.

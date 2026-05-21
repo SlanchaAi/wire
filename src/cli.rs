@@ -493,11 +493,21 @@ pub enum Command {
     /// the bilateral pin on its next pull (sends back pair_drop_ack carrying
     /// their slot_token so we can `wire send` to them).
     Add {
-        /// Peer handle (`nick@domain`).
+        /// Peer handle (`nick@domain`), OR a bare sister-session name
+        /// when `--local-sister` is set.
         handle: String,
         /// Override the relay base URL used for resolution.
         #[arg(long)]
         relay: Option<String>,
+        /// v0.6.6: pair with a sister session on this machine without
+        /// touching federation. Looks up `handle` as a session name in
+        /// `wire session list`, reads that session's agent-card +
+        /// endpoints from disk, pins directly, then delivers the
+        /// `pair_drop` to the sister's local-relay slot. No `.well-known`
+        /// resolution; reserved nicks (`wire`, `slancha`, etc.) are
+        /// addressable because they don't need a federation claim.
+        #[arg(long)]
+        local_sister: bool,
         #[arg(long)]
         json: bool,
     },
@@ -743,6 +753,15 @@ pub enum SessionCommand {
         /// to drive sync explicitly from the agent or test rig.
         #[arg(long)]
         no_daemon: bool,
+        /// v0.6.6: create a federation-free session — no nick claim on
+        /// `--relay`, no federation slot allocation. Implies
+        /// `--with-local`. The session exists only to coordinate with
+        /// other sister sessions on this machine; it has no public
+        /// address and cannot be reached from outside. Reserved nicks
+        /// (`wire`, `slancha`, etc.) are allowed because nothing tries
+        /// to publish them.
+        #[arg(long)]
+        local_only: bool,
         /// Emit JSON.
         #[arg(long)]
         json: bool,
@@ -1232,8 +1251,9 @@ pub fn run() -> Result<()> {
         Command::Add {
             handle,
             relay,
+            local_sister,
             json,
-        } => cmd_add(&handle, relay.as_deref(), json),
+        } => cmd_add(&handle, relay.as_deref(), local_sister, json),
         Command::Up {
             handle,
             name,
@@ -4517,7 +4537,197 @@ fn is_known_relay_domain(peer_domain: &str, our_relay_url: &str) -> bool {
     false
 }
 
-fn cmd_add(handle_arg: &str, relay_override: Option<&str>, as_json: bool) -> Result<()> {
+/// v0.6.6: pair with a sister session on this machine without federation.
+/// Reads the sister's agent-card + endpoints from disk, pins them into our
+/// trust + relay_state, builds the same `pair_drop` event the federation
+/// path would emit, then POSTs it directly to the sister's local-relay slot.
+/// No `.well-known/wire/agent` resolution. Reserved-nick sessions (like
+/// the cwd-derived `wire`) are addressable because the local relay never
+/// needed a public claim for sister coordination.
+fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<()> {
+    // 1. Locate sister session by name.
+    let sessions = crate::session::list_sessions()?;
+    let sister = sessions
+        .iter()
+        .find(|s| s.name == sister_name)
+        .ok_or_else(|| {
+            anyhow!(
+                "no sister session named `{sister_name}` (run `wire session list` to see what's available)"
+            )
+        })?;
+
+    // 2. Refuse self-pair — operator owns both sides, but a self-loop
+    // breaks the bilateral state machine.
+    let our_card = config::read_agent_card()
+        .map_err(|_| anyhow!("not initialized — run `wire init <handle>` first"))?;
+    let our_did = our_card
+        .get("did")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent-card missing did"))?
+        .to_string();
+    if let Some(sister_did) = sister.did.as_deref()
+        && sister_did == our_did
+    {
+        bail!("refusing to add self (`{sister_name}` is this very session)");
+    }
+
+    // 3. Read sister's agent-card + relay state from disk.
+    let sister_card_path = sister
+        .home_dir
+        .join("config")
+        .join("wire")
+        .join("agent-card.json");
+    let sister_card: Value = serde_json::from_slice(
+        &std::fs::read(&sister_card_path)
+            .with_context(|| format!("reading sister card {sister_card_path:?}"))?,
+    )
+    .with_context(|| format!("parsing sister card {sister_card_path:?}"))?;
+    let sister_relay_state: Value = std::fs::read(
+        sister
+            .home_dir
+            .join("config")
+            .join("wire")
+            .join("relay.json"),
+    )
+    .ok()
+    .and_then(|b| serde_json::from_slice(&b).ok())
+    .unwrap_or_else(|| json!({"self": Value::Null, "peers": {}}));
+
+    let sister_did = sister_card
+        .get("did")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("sister card missing did"))?
+        .to_string();
+    let sister_handle = crate::agent_card::display_handle_from_did(&sister_did).to_string();
+
+    // Pull sister's full endpoint set; we want the local one for delivery
+    // and we'll pin all of them so OUR pushes prefer local-first per the
+    // existing routing logic.
+    let sister_endpoints = crate::endpoints::self_endpoints(&sister_relay_state);
+    if sister_endpoints.is_empty() {
+        bail!(
+            "sister `{sister_name}` has no endpoints in its relay.json — recreate with `wire session new --local-only` or `--with-local`"
+        );
+    }
+    let sister_local = sister_endpoints
+        .iter()
+        .find(|e| e.scope == crate::endpoints::EndpointScope::Local);
+    let delivery_endpoint = match sister_local {
+        Some(e) => e.clone(),
+        None => sister_endpoints[0].clone(),
+    };
+
+    // 4. Ensure WE have a slot to advertise back. For local-only sessions
+    // this is the local slot; for dual-slot sessions, federation is fine.
+    // `ensure_self_with_relay(None)` defaults to wireup.net which is wrong
+    // for pure local-only — instead, pick our own existing federation
+    // endpoint if present, else fall back to whatever's first.
+    let our_relay_state = config::read_relay_state()?;
+    let our_endpoints = crate::endpoints::self_endpoints(&our_relay_state);
+    if our_endpoints.is_empty() {
+        bail!(
+            "this session has no endpoints — run `wire session new --local-only` or `wire bind-relay` first"
+        );
+    }
+    let our_advertised = our_endpoints
+        .iter()
+        .find(|e| e.scope == crate::endpoints::EndpointScope::Federation)
+        .cloned()
+        .unwrap_or_else(|| our_endpoints[0].clone());
+
+    // 5. Pin sister into our trust (VERIFIED — operator-owned siblings) +
+    // relay_state.peers with their full endpoint set. slot_token lands
+    // via pair_drop_ack as usual.
+    let mut trust = config::read_trust()?;
+    crate::trust::add_agent_card_pin(&mut trust, &sister_card, Some("VERIFIED"));
+    config::write_trust(&trust)?;
+    let mut relay_state = config::read_relay_state()?;
+    crate::endpoints::pin_peer_endpoints(&mut relay_state, &sister_handle, &sister_endpoints)?;
+    config::write_relay_state(&relay_state)?;
+
+    // 6. Build the same pair_drop event the federation path emits, with
+    // our card + endpoints in the body so the sister can pin us back.
+    let sk_seed = config::read_private_key()?;
+    let our_handle = crate::agent_card::display_handle_from_did(&our_did).to_string();
+    let pk_b64 = our_card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("our card missing verify_keys[*].key"))?;
+    let pk_bytes = crate::signing::b64decode(pk_b64)?;
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let mut body = json!({
+        "card": our_card,
+        "relay_url": our_advertised.relay_url,
+        "slot_id": our_advertised.slot_id,
+        "slot_token": our_advertised.slot_token,
+    });
+    body["endpoints"] = serde_json::to_value(&our_endpoints).unwrap_or(json!([]));
+    let event = json!({
+        "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
+        "timestamp": now,
+        "from": our_did,
+        "to": sister_did,
+        "type": "pair_drop",
+        "kind": 1100u32,
+        "body": body,
+    });
+    let signed = crate::signing::sign_message_v31(&event, &sk_seed, &pk_bytes, &our_handle)?;
+    let event_id = signed["event_id"].as_str().unwrap_or("").to_string();
+
+    // 7. Deliver direct to sister's local slot. Skip /v1/handle/intro
+    // (the federation handle indexer) — we already know the slot coords
+    // from disk, so post_event is sufficient.
+    let client = crate::relay_client::RelayClient::new(&delivery_endpoint.relay_url);
+    client
+        .post_event(
+            &delivery_endpoint.slot_id,
+            &delivery_endpoint.slot_token,
+            &signed,
+        )
+        .with_context(|| format!("delivering pair_drop to `{sister_name}`'s local slot"))?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "handle": sister_name,
+                "paired_with": sister_did,
+                "peer_handle": sister_handle,
+                "event_id": event_id,
+                "delivered_via": match delivery_endpoint.scope {
+                    crate::endpoints::EndpointScope::Local => "local",
+                    crate::endpoints::EndpointScope::Federation => "federation",
+                },
+                "status": "drop_sent",
+            }))?
+        );
+    } else {
+        let scope = match delivery_endpoint.scope {
+            crate::endpoints::EndpointScope::Local => "local",
+            crate::endpoints::EndpointScope::Federation => "federation",
+        };
+        println!(
+            "→ found sister `{sister_name}` (did={sister_did})\n→ pinned peer locally\n→ pair_drop delivered to {scope} slot on {}\nawaiting pair_drop_ack from {sister_handle} to complete bilateral pin.",
+            delivery_endpoint.relay_url
+        );
+    }
+    Ok(())
+}
+
+fn cmd_add(
+    handle_arg: &str,
+    relay_override: Option<&str>,
+    local_sister: bool,
+    as_json: bool,
+) -> Result<()> {
+    if local_sister {
+        return cmd_add_local_sister(handle_arg, as_json);
+    }
     let parsed = crate::pair_profile::parse_handle(handle_arg)?;
 
     // 1. Auto-init self if needed + ensure a relay slot.
@@ -5606,6 +5816,7 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
             with_local,
             local_relay,
             no_daemon,
+            local_only,
             json,
         } => cmd_session_new(
             name.as_deref(),
@@ -5613,6 +5824,7 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
             with_local,
             &local_relay,
             no_daemon,
+            local_only,
             json,
         ),
         SessionCommand::List { json } => cmd_session_list(json),
@@ -5644,8 +5856,12 @@ fn cmd_session_new(
     with_local: bool,
     local_relay: &str,
     no_daemon: bool,
+    local_only: bool,
     as_json: bool,
 ) -> Result<()> {
+    // v0.6.6: --local-only implies --with-local (a federation-free
+    // session with no endpoints at all would be unaddressable).
+    let with_local = with_local || local_only;
     let cwd = std::env::current_dir().with_context(|| "reading cwd")?;
     let mut registry = crate::session::read_registry().unwrap_or_default();
     let name = match name_arg {
@@ -5679,54 +5895,62 @@ fn cmd_session_new(
     std::fs::create_dir_all(&session_home)
         .with_context(|| format!("creating session dir {session_home:?}"))?;
 
-    // Phase 1: init identity in the new session's WIRE_HOME.
-    let init_status = run_wire_with_home(
-        &session_home,
-        &["init", &name, "--relay", relay],
-    )?;
+    // Phase 1: init identity in the new session's WIRE_HOME. For
+    // federation-bound sessions we pass `--relay` so init also
+    // allocates a federation slot in the same step; for `--local-only`
+    // we run init without --relay so no federation contact happens.
+    let init_args: Vec<&str> = if local_only {
+        vec!["init", &name]
+    } else {
+        vec!["init", &name, "--relay", relay]
+    };
+    let init_status = run_wire_with_home(&session_home, &init_args)?;
     if !init_status.success() {
-        bail!(
-            "`wire init {name} --relay {relay}` failed inside session dir {session_home:?}"
-        );
+        let how = if local_only {
+            format!("`wire init {name}` (local-only)")
+        } else {
+            format!("`wire init {name} --relay {relay}`")
+        };
+        bail!("{how} failed inside session dir {session_home:?}");
     }
 
-    // Phase 2: claim the handle on the relay. If FCFS rejects the name
-    // (another machine has it), fall back to `<name>-<2hex>` until success
-    // or 5 attempts exhausted. Failure here is fatal — the session is
-    // unreachable without a claim.
-    let mut claim_attempt = 0u32;
-    let mut effective_handle = name.clone();
-    loop {
-        claim_attempt += 1;
-        let status = run_wire_with_home(
-            &session_home,
-            &["claim", &effective_handle, "--relay", relay],
-        )?;
-        if status.success() {
-            break;
+    // Phase 2: claim the handle on the federation relay — SKIPPED when
+    // `--local-only`. Local-only sessions have no public address and
+    // accept reserved nicks (e.g. cwd-derived `wire`) because nothing
+    // tries to publish them.
+    let effective_handle = if local_only {
+        name.clone()
+    } else {
+        let mut claim_attempt = 0u32;
+        let mut effective = name.clone();
+        loop {
+            claim_attempt += 1;
+            let status = run_wire_with_home(
+                &session_home,
+                &["claim", &effective, "--relay", relay],
+            )?;
+            if status.success() {
+                break;
+            }
+            if claim_attempt >= 5 {
+                bail!(
+                    "5 failed attempts to claim a handle on {relay} for session {name}. \
+                     Try `wire session destroy {name} --force` and re-run with a different name, \
+                     or use `--local-only` if you don't need a federation address."
+                );
+            }
+            let attempt_path = cwd.join(format!("__attempt_{claim_attempt}"));
+            let suffix = crate::session::derive_name_from_cwd(&attempt_path, &registry);
+            let token = suffix
+                .rsplit('-')
+                .next()
+                .filter(|t| t.len() == 4)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{claim_attempt}"));
+            effective = format!("{name}-{token}");
         }
-        if claim_attempt >= 5 {
-            bail!(
-                "5 failed attempts to claim a handle on {relay} for session {name}. \
-                 Try `wire session destroy {name} --force` and re-run with a different name."
-            );
-        }
-        // Use a fresh random-ish suffix on each retry. We piggyback on the
-        // path-hash logic but mix in the attempt counter to avoid getting
-        // stuck on the same colliding suffix.
-        let attempt_path = cwd.join(format!("__attempt_{claim_attempt}"));
-        let suffix = crate::session::derive_name_from_cwd(&attempt_path, &registry);
-        // suffix here is the full derived name for attempt_path; we just
-        // want a short token, so take the trailing hash if it has one,
-        // else hash the attempt-path ourselves.
-        let token = suffix
-            .rsplit('-')
-            .next()
-            .filter(|t| t.len() == 4)
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("{claim_attempt}"));
-        effective_handle = format!("{name}-{token}");
-    }
+        effective
+    };
 
     // Persist the cwd → name mapping NOW so subsequent invocations from
     // this directory short-circuit to the "already_exists" branch.
@@ -5740,8 +5964,38 @@ fn cmd_session_new(
     // relay_state.json grows a `self.endpoints[]` array carrying both
     // endpoints; routing layer (cmd_push) prefers local for sister-
     // session peers that also have a local slot.
+    //
+    // v0.6.6 (--local-only): try_allocate_local_slot is the ONLY slot
+    // allocation; a failed probe leaves the session with no endpoints,
+    // which we surface as a hard error (the operator asked for local-
+    // only but the local relay isn't running — fix that first).
     if with_local {
         try_allocate_local_slot(&session_home, &effective_handle, relay, local_relay);
+        if local_only {
+            // Verify the local slot landed. If the local relay was
+            // unreachable, the session would be unreachable from
+            // anywhere — surface that loudly instead of leaving an
+            // orphaned session dir.
+            let relay_state_path = session_home
+                .join("config")
+                .join("wire")
+                .join("relay.json");
+            let state: Value = std::fs::read(&relay_state_path)
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_else(|| json!({"self": Value::Null, "peers": {}}));
+            let endpoints = crate::endpoints::self_endpoints(&state);
+            let has_local = endpoints
+                .iter()
+                .any(|e| e.scope == crate::endpoints::EndpointScope::Local);
+            if !has_local {
+                bail!(
+                    "--local-only requested but local-relay probe at {local_relay} failed — \
+                     ensure the local relay is running (`wire service install --local-relay`), \
+                     then re-run `wire session new {name} --local-only`."
+                );
+            }
+        }
     }
 
     if !no_daemon {
@@ -5762,7 +6016,7 @@ fn cmd_session_new(
 fn try_allocate_local_slot(
     session_home: &std::path::Path,
     handle: &str,
-    federation_relay: &str,
+    _federation_relay: &str,
     local_relay: &str,
 ) {
     // Probe healthz with a tight timeout. Use a fresh client (don't
@@ -5857,16 +6111,37 @@ fn try_allocate_local_slot(
     }
     endpoints.push(local_endpoint);
 
+    // v0.6.6: when there's no federation endpoint (e.g. `--local-only`
+    // bootstrap), the legacy top-level `relay_url` / `slot_id` /
+    // `slot_token` fields must point at the LOCAL endpoint so callers
+    // that read those legacy fields (send_pair_drop_ack, post-v0.6.6
+    // ensure_self_with_relay fallback, v0.5.16-era back-compat readers)
+    // still find a valid slot. Pre-v0.6.6 this branch wrote
+    // `relay_url: federation_relay` with no slot_id, which produced
+    // half-populated self state that broke pair-accept on local-only
+    // sessions.
+    let (legacy_relay, legacy_slot_id, legacy_slot_token) = match fed_endpoint.clone() {
+        Some(f) => (f.relay_url, f.slot_id, f.slot_token),
+        None => (
+            local_relay.trim_end_matches('/').to_string(),
+            alloc.slot_id.clone(),
+            alloc.slot_token.clone(),
+        ),
+    };
     let self_obj = state
         .as_object_mut()
         .expect("relay_state root is an object")
         .entry("self")
-        .or_insert_with(|| {
-            serde_json::json!({
-                "relay_url": federation_relay,
-            })
-        });
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    // The entry might be Value::Null (left by read_relay_state's default
+    // template) — replace with an object before mutating.
+    if !self_obj.is_object() {
+        *self_obj = serde_json::Value::Object(serde_json::Map::new());
+    }
     if let Some(obj) = self_obj.as_object_mut() {
+        obj.insert("relay_url".into(), serde_json::Value::String(legacy_relay));
+        obj.insert("slot_id".into(), serde_json::Value::String(legacy_slot_id));
+        obj.insert("slot_token".into(), serde_json::Value::String(legacy_slot_token));
         obj.insert(
             "endpoints".into(),
             serde_json::to_value(&endpoints).unwrap_or(serde_json::Value::Null),
@@ -6644,13 +6919,23 @@ fn probe_relay_healthz(url: &str) -> bool {
 /// using their session home dirs as `WIRE_HOME`. Sequential 8-step
 /// flow so failures bubble up at the offending step, not buried in
 /// a parallel race. See `cmd_session_pair_all_local` docstring.
+///
+/// v0.6.6: step 1 (the `wire add`) uses `--local-sister` instead of
+/// federation `.well-known/wire/agent` resolution. Reads B's card +
+/// endpoints directly off disk under `b_home` and pins them. This
+/// makes pair-all-local work for sister sessions whose federation
+/// handle is unclaimable (reserved nicks like `wire` / `slancha`) and
+/// for sessions created with `wire session new --local-only`
+/// (no federation slot at all). The `_federation_relay` / `_fed_host`
+/// parameters are retained for callers that want to log them but
+/// the handshake itself no longer touches federation.
 fn drive_bilateral_pair(
     a_home: &std::path::Path,
     a_name: &str,
     b_home: &std::path::Path,
     b_name: &str,
-    fed_host: &str,
-    federation_relay: &str,
+    _fed_host: &str,
+    _federation_relay: &str,
     settle_secs: u64,
 ) -> Result<()> {
     use std::time::Duration;
@@ -6673,13 +6958,13 @@ fn drive_bilateral_pair(
         Ok(())
     };
 
-    let b_handle = format!("{b_name}@{fed_host}");
-
-    // 1. A initiates → 2. A push pair_drop
-    run(a_home, &["add", &b_handle, "--relay", federation_relay, "--json"])
-        .with_context(|| format!("step 1/8: {a_name} `wire add {b_handle}`"))?;
-    run(a_home, &["push", "--json"])
-        .with_context(|| format!("step 2/8: {a_name} `wire push`"))?;
+    // 1. A initiates via --local-sister (reads B's card + endpoints
+    // from disk, pins, delivers pair_drop direct to B's local slot)
+    // → 2. NO separate push needed — `wire add --local-sister` does
+    // the slot POST inline. Keeping a no-op push so the step count
+    // matches the old federation flow for log/error continuity.
+    run(a_home, &["add", b_name, "--local-sister", "--json"])
+        .with_context(|| format!("step 1/8: {a_name} `wire add {b_name} --local-sister`"))?;
 
     // 3. settle so pair_drop reaches B's slot
     std::thread::sleep(Duration::from_secs(settle_secs));
@@ -7697,7 +7982,7 @@ fn cmd_pair_megacommand(
     let peer_handle = parsed.nick.clone();
 
     eprintln!("wire pair: resolving {handle_arg}...");
-    cmd_add(handle_arg, relay_override, /* as_json */ false)?;
+    cmd_add(handle_arg, relay_override, /* local_sister */ false, /* as_json */ false)?;
 
     eprintln!(
         "wire pair: intro delivered. waiting up to {timeout_secs}s for {peer_handle} \

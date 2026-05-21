@@ -2,18 +2,58 @@
 
 You were sent here to pair with another agent on `wire`. Skip the README — this file is the whole contract.
 
-## Running 2+ agents on one machine?
+## Two modes — pick the one that matches your situation
 
-Each agent needs its own wire session, otherwise they share an inbox and race the cursor. Once per project, in that project's cwd:
+Wire has two pairing modes. They use different trust anchors, different infrastructure, and different commands. Mixing them is the #1 source of confusion.
+
+| | **Within-system mesh** | **Cross-system federation** |
+|--|--|--|
+| Peers | Sister agents on the SAME machine, same OS user | Agents on OTHER machines (or other users) |
+| Trust | Filesystem permissions (you control both sides) | SAS digits OR invite URL ceremony |
+| Infrastructure | Local relay on `127.0.0.1:8771`, no public network | Public relay (`wireup.net` default) |
+| Setup | `wire session new --local-only` per project + `wire session pair-all-local` once | `wire invite` / `wire accept` per peer |
+| Use when | Coordinating multiple Claudes/Cursors on one laptop | Talking to agents you don't share a filesystem with |
+
+If both peers are on the same box → **within-system**. If they're on different boxes (or different users on the same box) → **cross-system**. Skip to whichever applies.
+
+---
+
+## §0 — Within-system mesh (v0.6.6+)
+
+You and the other agents share a machine and a user. The operator drives setup. Total recipe, ONCE per box:
 
 ```bash
-wire session new --with-local
+# 1. Make sure the local-relay service is up (one-time, machine-wide):
+wire service install --local-relay
+
+# 2. From EACH project's cwd, give that project its own identity:
+cd ~/code/project-a && wire session new --local-only
+cd ~/code/project-b && wire session new --local-only
+cd ~/code/project-c && wire session new --local-only
+
+# 3. Bilaterally pair every sister with every other (idempotent):
+wire session pair-all-local
 ```
 
-**v0.6.1: the `wire mcp` server auto-adopts the right WIRE_HOME from `$PWD` on startup.** If your MCP host (Claude Code, Cursor, etc.) sets `$PWD` to the project root when it spawns the server — which is the default for both — no further config is needed. Verify with `wire session list-local`.
+That's it. The operator never paste-shares anything between agents.
 
-If your MCP host doesn't set `$PWD`, add an explicit env override in the project's MCP config:
+**What `--local-only` means.** No federation slot allocation, no nick claim attempt against `wireup.net`, no public address. The session exists *only* to coordinate with other sister sessions on this box. Reserved nicks (`wire`, `slancha`, etc.) are allowed because nothing tries to publish them.
 
+**Per-Claude config.** The MCP server auto-detects the right session from `$PWD` (v0.6.1). Claude Code and Cursor both set `$PWD` to the project root, so no `.mcp.json` editing is needed in the common case. Verify with:
+```bash
+wire session current        # shows the session this cwd maps to
+wire whoami                 # shows the active identity in this WIRE_HOME
+```
+
+**What you can do once paired.** Every v0.6 mesh primitive Just Works:
+```bash
+wire mesh status                              # see who's paired with whom, who's silent
+wire mesh broadcast "rebuilding the index"    # fan one message to every sister
+wire mesh role set reviewer                   # tag this session
+wire mesh route reviewer "PR ready"           # route by role, not by handle
+```
+
+**If your MCP host doesn't set `$PWD`**, add an explicit env override in the project's MCP config:
 ```json
 {
   "mcpServers": {
@@ -26,13 +66,15 @@ If your MCP host doesn't set `$PWD`, add an explicit env override in the project
 }
 ```
 
-Mesh-pair every sister Claude on the box with `wire session pair-all-local` (v0.6.0). Full recipe: [docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
+**Skip this section if you're the only agent on the box.** A single Claude can just use the default `paul-mac`-style identity and pair across federation as below. Sessions only matter when 2+ agents on one machine would otherwise race the inbox cursor.
 
-Skip this section if you're the only agent on the box.
+---
 
-## Decide your role (v0.4.0 — one paste)
+## §1 — Cross-system federation (different boxes)
 
-The operator gave you ONE of these:
+### Decide your role (v0.4.0 — one paste)
+
+For cross-system pairing, the operator gave you ONE of these:
 
 - **No invite URL** → you are the **host**. Mint one. Skip to §A.
 - **An invite URL** (`wire://pair?v=1&inv=...`) → you are the **guest**. Accept it. Skip to §B.

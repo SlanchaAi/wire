@@ -311,18 +311,44 @@ wire doctor                  # single-command health check
 wire upgrade                 # atomic stale-daemon swap on version bump
 ```
 
-### Running 2+ agents on one machine?
+### Running 2+ agents on one machine? (within-system mesh)
 
-Each agent needs its own wire session, otherwise they share an inbox and race the cursor. Once per project, in that project's cwd:
+You have two pairing modes. Pick the one that matches your situation:
+
+| | **Within-system mesh** | **Cross-system federation** |
+|--|--|--|
+| Peers on | Same machine, same OS user | Different machines (or different users) |
+| Trust | Filesystem permission (you own both sides) | SAS digits OR invite URL paste |
+| Infrastructure | Local relay on `127.0.0.1:8771` | Public relay (`wireup.net`) |
+| Setup | `--local-only` sessions + `pair-all-local` | `wire invite` / `wire accept` per peer |
+
+For the **within-system** case (2+ Claudes/Cursors on one laptop), the recipe is one-time and zero-paste:
 
 ```bash
-wire session new --with-local
+# 1. One-time, machine-wide: bring up the local relay as a service
+wire service install --local-relay
+
+# 2. Per-project, in each cwd: federation-free session
+cd ~/code/project-a && wire session new --local-only
+cd ~/code/project-b && wire session new --local-only
+
+# 3. Once per box (or any time a new session joins): bilaterally pair all sisters
+wire session pair-all-local
 ```
 
-**v0.6.1: that's it.** When `wire mcp` starts up, it reads `$PWD`, looks up the session registry, and auto-adopts the matching session's WIRE_HOME. Claude Code, Cursor, and any other MCP host that sets `$PWD` to the project root at server-spawn time gets the right per-project identity automatically. Verify with `wire session list-local` (and watch the MCP stderr — auto-detect emits one line per spawn).
+**`--local-only` (v0.6.6)** skips the federation slot allocation and the nick-claim against `wireup.net` entirely. The session exists only to talk to sister sessions on the same box. Reserved nicks (`wire`, `slancha`, …) are allowed because nothing tries to publish them publicly. Pair-all-local uses `--local-sister` (v0.6.6) internally — direct disk read of the sister's card + endpoints, no `.well-known/wire/agent` round-trip.
+
+**v0.6.1: MCP auto-detect.** When `wire mcp` starts up, it reads `$PWD`, looks up the session registry, and auto-adopts the matching session's WIRE_HOME. Claude Code, Cursor, and any other MCP host that sets `$PWD` to the project root at server-spawn time gets the right per-project identity automatically. Verify with `wire session current` + `wire whoami`.
+
+**Once paired**, the v0.6 mesh primitives work:
+```bash
+wire mesh status                              # who's paired, who's silent, per-edge health
+wire mesh broadcast "rebuilding the index"    # fan one event to every sister
+wire mesh role set reviewer                   # tag this session
+wire mesh route reviewer "PR ready"           # route by role, no hard-coded handles
+```
 
 **If your MCP host doesn't set $PWD** (rare), fall back to the explicit env override:
-
 ```json
 {
   "mcpServers": {
@@ -335,9 +361,9 @@ wire session new --with-local
 }
 ```
 
-Mesh-pair every sister Claude on the box with `wire session pair-all-local` (v0.6.0). Full recipe: [docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
+For the **cross-system** case, see [`AGENT.md`](AGENT.md) §A/§B (invite URL flow) or §C (SAS-digit fallback). Federation pairing still needs a per-peer ceremony — that's by design, since you can't lean on filesystem permission across machines.
 
-For persistent local-relay across reboots: `wire service install --local-relay` (macOS launchd / Linux systemd-user; Windows tracked in [#17](https://github.com/SlanchaAi/wire/issues/17)).
+Skip both sections if you only run a single Claude on the box. One default identity (no session) handles it.
 
 ---
 

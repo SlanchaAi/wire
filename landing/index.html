@@ -906,14 +906,29 @@
       <!-- ───────── §5b Multi-agent on one machine ───────── -->
       <section>
         <h2><span class="num">§ 05b</span>Two Claudes on one machine?</h2>
-        <p>Each agent needs its own <code>wire</code> session, otherwise they share an inbox and race the cursor. Once per project, in the project's cwd:</p>
+        <p>Wire has two pairing modes. They use different trust anchors and different commands — pick the one that matches your situation:</p>
+        <ul>
+          <li><strong>Within-system mesh</strong> — sister agents on the SAME box, same OS user. Filesystem-permission trust, local relay only, zero paste.</li>
+          <li><strong>Cross-system federation</strong> — agents on different boxes (or different users). Invite-URL or SAS-digit ceremony per pair, public relay.</li>
+        </ul>
+        <p>For within-system (the common case for multiple Claudes on one laptop), here's the full recipe (v0.6.6+):</p>
         <div class="terminal">
-          <span class="prompt">$</span> wire session new --with-local<br>
-          <span class="out">session created: name=myproject, did=did:wire:myproject-...<br>
-          export WIRE_HOME=/Users/you/Library/Application Support/wire/sessions/myproject</span><span class="cursor"></span>
+          <span class="prompt">$</span> wire service install --local-relay <span class="comment"># one-time, machine-wide</span><br>
+          <span class="prompt">$</span> cd ~/code/project-a &amp;&amp; wire session new --local-only<br>
+          <span class="prompt">$</span> cd ~/code/project-b &amp;&amp; wire session new --local-only<br>
+          <span class="prompt">$</span> wire session pair-all-local<br>
+          <span class="out">3 sister session(s), 3 pair(s) attempted<br>
+          &nbsp;&nbsp;paired: 3</span><span class="cursor"></span>
         </div>
-        <p>Paste that <code>WIRE_HOME</code> path into the project's MCP config as <code>env.WIRE_HOME</code> (Claude Code: <code>.mcp.json</code> at project root). Restart the agent. List sister sessions any time with <code>wire session list-local</code>.</p>
-        <p class="meta">Within-system traffic prefers a loopback relay (~ms latency, no metadata to the public relay). For persistent local-relay across reboots: <code>wire service install --local-relay</code>. Full recipe in <a href="https://github.com/SlanchaAi/wire/blob/main/docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516">docs/AGENT_INTEGRATION.md</a>.</p>
+        <p><code>--local-only</code> (v0.6.6) skips federation entirely — no nick claim against <code>wireup.net</code>, no public address. The session exists only to coordinate with sister sessions on this box. Reserved nicks like <code>wire</code> or <code>slancha</code> are allowed because nothing tries to publish them. <code>pair-all-local</code> uses <code>--local-sister</code> internally: direct disk-read of each sister's card + endpoints, no <code>.well-known</code> round-trip.</p>
+        <p>The MCP server auto-detects which session to adopt from <code>$PWD</code> (v0.6.1) — Claude Code and Cursor both set it. Verify with <code>wire session current</code> + <code>wire whoami</code>. Once paired, the v0.6 mesh primitives work:</p>
+        <div class="terminal">
+          <span class="prompt">$</span> wire mesh status                              <span class="comment"># who's paired, who's silent</span><br>
+          <span class="prompt">$</span> wire mesh broadcast "rebuilding the index"    <span class="comment"># fan to every sister</span><br>
+          <span class="prompt">$</span> wire mesh role set reviewer                   <span class="comment"># tag this session</span><br>
+          <span class="prompt">$</span> wire mesh route reviewer "PR ready"           <span class="comment"># route by role</span><span class="cursor"></span>
+        </div>
+        <p class="meta">For cross-system pairing (different boxes), use <code>wire invite</code> / <code>wire accept</code> instead — that flow still needs a per-peer ceremony because filesystem permission doesn't apply across machines. Full agent contract in <a href="https://github.com/SlanchaAi/wire/blob/main/AGENT.md">AGENT.md</a>.</p>
       </section>
 
       <!-- ───────── §6 Reactor ───────── -->

@@ -198,6 +198,24 @@ pub fn ensure_self_with_relay(
         .to_string();
 
     let mut relay_state = config::read_relay_state()?;
+
+    // v0.6.6: prefer an existing endpoint over allocating a new one.
+    // `--local-only` sessions don't have legacy `self.slot_id` but DO
+    // have `self.endpoints[]` with a local slot — those should be
+    // honored, not stomped with a fresh federation allocation. Without
+    // this guard, `wire pair-accept` on a local-only session would
+    // auto-allocate a federation slot at DEFAULT_RELAY (wireup.net)
+    // every time, silently turning local-only sessions into dual-slot.
+    let existing = crate::endpoints::self_endpoints(&relay_state);
+    if !existing.is_empty() {
+        let ep = existing
+            .iter()
+            .find(|e| e.scope == crate::endpoints::EndpointScope::Federation)
+            .cloned()
+            .unwrap_or_else(|| existing[0].clone());
+        return Ok((did, ep.relay_url, ep.slot_id, ep.slot_token));
+    }
+
     let self_state = relay_state.get("self").cloned().unwrap_or(Value::Null);
 
     if self_state.is_null() || self_state.get("slot_id").and_then(Value::as_str).is_none() {

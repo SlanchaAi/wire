@@ -349,6 +349,156 @@ async fn pair_all_local_mesh_pairs_every_sister_session_v0_6_0() {
     assert_eq!(summary2["pairs_succeeded"].as_u64().unwrap_or(0), 0);
 }
 
+// ---------- TEST 9: --local-only sessions pair without federation (v0.6.6) ----------
+
+/// v0.6.6: `wire session new --local-only` produces a federation-free
+/// session — no nick claim attempt, no federation slot, just a local-
+/// relay identity. `wire add --local-sister <name>` (driven by
+/// pair-all-local internally) pairs them without ever calling
+/// `.well-known/wire/agent`.
+///
+/// This test deliberately uses `wire` as one of the session names —
+/// a reserved nick that would FAIL on federation claim. Pre-v0.6.6
+/// pair-all-local 404'd on this case. v0.6.6 pairs cleanly because
+/// the local-sister add path doesn't touch federation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_only_sessions_pair_without_federation_v0_6_6() {
+    // Federation relay still spun up because `wire session new` runs
+    // `wire init <name>` which has no relay opinion when --relay isn't
+    // passed. Local relay is the actual data path.
+    let _fed_url = spawn_federation_relay().await;
+    let local_url = spawn_local_only_relay().await;
+    let home = fresh_dir("local-only-mesh");
+
+    // Include `wire` (reserved nick) to prove local-only sessions
+    // bypass the federation claim that previously failed.
+    let session_names = ["wire", "slancha", "playground"];
+    for name in &session_names {
+        let out = wire(
+            &home,
+            &[
+                "session",
+                "new",
+                name,
+                "--local-only",
+                "--local-relay",
+                &local_url,
+                "--no-daemon",
+                "--json",
+            ],
+        );
+        assert!(
+            out.status.success(),
+            "local-only session new {name} failed: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // Verify each session has ONLY a local endpoint (no federation slot).
+    let sessions_dir = home.join("sessions");
+    for name in &session_names {
+        let relay_path = sessions_dir
+            .join(name)
+            .join("config")
+            .join("wire")
+            .join("relay.json");
+        let state: Value =
+            serde_json::from_slice(&std::fs::read(&relay_path).expect("relay.json present"))
+                .expect("relay.json parse");
+        let endpoints = state["self"]["endpoints"].as_array().expect("endpoints array");
+        assert!(
+            endpoints
+                .iter()
+                .all(|e| e["scope"].as_str() == Some("local")),
+            "local-only session {name} has non-local endpoints: {endpoints:?}"
+        );
+        assert!(
+            !endpoints.is_empty(),
+            "local-only session {name} has no endpoints — local relay probe must have succeeded"
+        );
+    }
+
+    // pair-all-local should succeed: 3 choose 2 = 3 pairs.
+    let pair_out = wire(
+        &home,
+        &[
+            "session",
+            "pair-all-local",
+            "--settle-secs",
+            "1",
+            "--json",
+        ],
+    );
+    assert!(
+        pair_out.status.success(),
+        "pair-all-local on local-only sessions failed: stderr={}",
+        String::from_utf8_lossy(&pair_out.stderr)
+    );
+    let summary: Value = serde_json::from_slice(&pair_out.stdout).expect("JSON");
+    assert_eq!(
+        summary["pairs_attempted"].as_u64().unwrap_or(0),
+        3,
+        "3 choose 2 = 3 pairs: {summary}"
+    );
+    assert_eq!(
+        summary["pairs_succeeded"].as_u64().unwrap_or(0),
+        3,
+        "every pair should succeed even with reserved-nick sessions: {summary}"
+    );
+    assert_eq!(summary["pairs_failed"].as_u64().unwrap_or(99), 0);
+
+    // Verify the actual peer pin: each session's relay.json#peers
+    // should carry the other two.
+    for name in &session_names {
+        let relay_path = sessions_dir
+            .join(name)
+            .join("config")
+            .join("wire")
+            .join("relay.json");
+        let state: Value =
+            serde_json::from_slice(&std::fs::read(&relay_path).expect("relay.json")).expect("parse");
+        let peers = state["peers"].as_object().expect("peers map");
+        for other in &session_names {
+            if other == name {
+                continue;
+            }
+            assert!(
+                peers.contains_key(*other),
+                "session {name} missing local-paired peer {other}: peers={:?}",
+                peers.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // mesh broadcast from `wire` (the reserved-nick session) to the
+    // other two should land — proving the routing layer treats local-
+    // only sessions as first-class.
+    let wire_home = sessions_dir.join("wire");
+    let bcast = wire(
+        &wire_home,
+        &[
+            "mesh",
+            "broadcast",
+            "--scope",
+            "local",
+            "--json",
+            "hello from reserved-nick",
+        ],
+    );
+    assert!(
+        bcast.status.success(),
+        "broadcast from local-only `wire` failed: stderr={}",
+        String::from_utf8_lossy(&bcast.stderr)
+    );
+    let bs: Value = serde_json::from_slice(&bcast.stdout).expect("JSON");
+    assert_eq!(
+        bs["delivered"].as_u64().unwrap_or(0),
+        2,
+        "broadcast should reach the other 2 sisters: {bs}"
+    );
+    assert_eq!(bs["failed"].as_u64().unwrap_or(99), 0);
+}
+
 // ---------- TEST 8: mesh route picks one sister by role + strategy (v0.6.5 / #21) ----------
 
 /// v0.6.5 (issue #21): `wire mesh route <role>` filters sister sessions by

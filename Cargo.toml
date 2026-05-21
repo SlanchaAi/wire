@@ -1,6 +1,6 @@
 [package]
 name = "slancha-wire"
-version = "0.6.5"
+version = "0.6.6"
 edition = "2024"
 rust-version = "1.88"
 description = "Magic-wormhole for AI agents — bilateral signed-message bus over a mailbox relay"
