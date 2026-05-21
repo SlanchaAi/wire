@@ -132,7 +132,10 @@ async fn wire_add_zero_paste_e2e() {
         let body = String::from_utf8_lossy(&p.stdout);
         body.contains("night-train")
     });
-    assert!(a_has_pending_b, "A never received a pending-inbound pair_drop from B");
+    assert!(
+        a_has_pending_b,
+        "A never received a pending-inbound pair_drop from B"
+    );
 
     // A explicitly accepts — the bilateral gate's consent step. Only after
     // this does A pin B and emit pair_drop_ack with A's endpoints.

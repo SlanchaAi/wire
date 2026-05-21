@@ -133,9 +133,27 @@ if [ -x "$target" ]; then
     echo
     "$target" --version
     echo
+
+    # v0.6.8: stale-cleanup pass. After replacing the binary in place,
+    # old daemons may still be running (with the previous binary text
+    # loaded in memory) and old pidfiles may point at processes that
+    # have just been clobbered. Running `wire upgrade` here:
+    #   - kills any wire daemon still alive from the old binary,
+    #   - wipes stale pidfiles across every session,
+    #   - respawns session daemons under the new binary,
+    #   - warns if multiple wire binaries are on $PATH (the most common
+    #     "I updated but it's still broken" cause).
+    # Best effort: silent skip on older binaries that lack `upgrade`.
+    if "$target" upgrade --check >/dev/null 2>&1; then
+        echo "running stale-cleanup pass (wire upgrade)..."
+        "$target" upgrade || echo "warn: wire upgrade returned non-zero; running daemons may need a manual restart" >&2
+        echo
+    fi
+
     echo "next steps:"
-    echo "  wire init <handle>"
-    echo "  wire pair-host --relay <relay-url>   # pair with a friend"
+    echo "  wire init <handle>                   # first-time identity setup"
+    echo "  wire session new --local-only        # per-project isolated identity"
+    echo "  wire session pair-all-local          # mesh-pair every sister"
     echo
     echo "see 'wire --help' or https://github.com/SlanchaAi/wire for more."
 fi

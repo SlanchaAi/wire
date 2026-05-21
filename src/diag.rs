@@ -33,7 +33,10 @@ const ROTATE_AT_BYTES: u64 = 8 * 1024 * 1024;
 /// Checked on every call (not cached) so an operator can toggle the
 /// file-based knob mid-session without restarting their daemon.
 pub fn is_enabled() -> bool {
-    if std::env::var("WIRE_DIAG").map(|v| !v.is_empty()).unwrap_or(false) {
+    if std::env::var("WIRE_DIAG")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
         return true;
     }
     if let Ok(state) = crate::config::state_dir()

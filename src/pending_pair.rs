@@ -305,22 +305,18 @@ pub fn cleanup_on_startup() -> Result<()> {
     let started_at = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
-    let did = crate::config::read_agent_card()
-        .ok()
-        .and_then(|card| {
-            card.get("did")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        });
-    let relay_url = crate::config::read_relay_state()
-        .ok()
-        .and_then(|state| {
-            state
-                .get("self")
-                .and_then(|s| s.get("relay_url"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        });
+    let did = crate::config::read_agent_card().ok().and_then(|card| {
+        card.get("did")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    });
+    let relay_url = crate::config::read_relay_state().ok().and_then(|state| {
+        state
+            .get("self")
+            .and_then(|s| s.get("relay_url"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    });
     let record = crate::ensure_up::DaemonPid {
         schema: crate::ensure_up::DAEMON_PID_SCHEMA.to_string(),
         pid: my_pid,

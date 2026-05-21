@@ -72,8 +72,7 @@ fn pending_inbound_path(peer_handle: &str) -> Result<PathBuf> {
 /// pending entry; latest payload wins).
 pub fn write_pending_inbound(p: &PendingInboundPair) -> Result<()> {
     let dir = pending_inbound_dir()?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {dir:?}"))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {dir:?}"))?;
     let path = pending_inbound_path(&p.peer_handle)?;
     let body = serde_json::to_vec_pretty(p)?;
     std::fs::write(&path, body)
@@ -88,8 +87,8 @@ pub fn read_pending_inbound(peer_handle: &str) -> Result<Option<PendingInboundPa
     if !path.exists() {
         return Ok(None);
     }
-    let body = std::fs::read(&path)
-        .with_context(|| format!("reading pending-inbound record {path:?}"))?;
+    let body =
+        std::fs::read(&path).with_context(|| format!("reading pending-inbound record {path:?}"))?;
     let p: PendingInboundPair = serde_json::from_slice(&body)
         .with_context(|| format!("parsing pending-inbound record {path:?}"))?;
     Ok(Some(p))

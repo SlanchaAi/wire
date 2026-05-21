@@ -66,11 +66,11 @@ pub(crate) fn record_pair_rejection(peer_handle: &str, code: &str, detail: &str)
             return;
         }
     };
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("wire: could not create {parent:?}: {e}");
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("wire: could not create {parent:?}: {e}");
+        return;
     }
     use std::io::Write;
     match std::fs::OpenOptions::new()
@@ -484,9 +484,7 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
                 // P0.2: warn if cleanup fails — orphaned expired invites in
                 // `pending-invites/` will pile up and confuse `wire doctor`.
                 if let Err(e) = std::fs::remove_file(&path) {
-                    eprintln!(
-                        "wire: could not delete expired invite {path:?}: {e}"
-                    );
+                    eprintln!("wire: could not delete expired invite {path:?}: {e}");
                 }
                 return Ok(None);
             }
@@ -527,15 +525,9 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
     crate::signing::verify_message_v31(event, &tmp_trust)
         .map_err(|e| anyhow!("pair_drop event sig verify failed: {e}"))?;
 
-    let peer_relay = body
-        .get("relay_url")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let peer_relay = body.get("relay_url").and_then(Value::as_str).unwrap_or("");
     let peer_slot_id = body.get("slot_id").and_then(Value::as_str).unwrap_or("");
-    let peer_slot_token = body
-        .get("slot_token")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let peer_slot_token = body.get("slot_token").and_then(Value::as_str).unwrap_or("");
     if peer_relay.is_empty() || peer_slot_id.is_empty() || peer_slot_token.is_empty() {
         bail!("pair_drop body missing relay_url/slot_id/slot_token");
     }
@@ -549,7 +541,9 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
         .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
-                .filter_map(|e| serde_json::from_value::<crate::endpoints::Endpoint>(e.clone()).ok())
+                .filter_map(|e| {
+                    serde_json::from_value::<crate::endpoints::Endpoint>(e.clone()).ok()
+                })
                 .collect()
         })
         .unwrap_or_else(|| {
@@ -591,9 +585,7 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
         if let (Some(pending), Some(invite_path)) = (pending, invite_path) {
             if pending.uses_remaining <= 1 {
                 if let Err(e) = std::fs::remove_file(&invite_path) {
-                    eprintln!(
-                        "wire: could not delete consumed invite {invite_path:?}: {e}"
-                    );
+                    eprintln!("wire: could not delete consumed invite {invite_path:?}: {e}");
                 }
             } else {
                 let mut updated = pending.clone();
@@ -764,7 +756,9 @@ pub fn maybe_consume_pair_drop_ack(event: &Value) -> Result<bool> {
         .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
-                .filter_map(|e| serde_json::from_value::<crate::endpoints::Endpoint>(e.clone()).ok())
+                .filter_map(|e| {
+                    serde_json::from_value::<crate::endpoints::Endpoint>(e.clone()).ok()
+                })
                 .collect()
         })
         .unwrap_or_else(|| {
@@ -806,10 +800,7 @@ mod tests {
                 "POST returned 502",
             );
             let path = config::state_dir().unwrap().join("pair-rejected.jsonl");
-            assert!(
-                path.exists(),
-                "record_pair_rejection must create {path:?}"
-            );
+            assert!(path.exists(), "record_pair_rejection must create {path:?}");
             let body = std::fs::read_to_string(&path).unwrap();
             let line = body.lines().last().expect("at least one line");
             let parsed: Value = serde_json::from_str(line).expect("valid JSON");

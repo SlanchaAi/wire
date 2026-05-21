@@ -261,7 +261,10 @@ fn pair_reject_deletes_pending_inbound_v0_5_14() {
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
     assert_eq!(parsed["rejected"], true);
-    assert!(!path.exists(), "pending file should be deleted after reject");
+    assert!(
+        !path.exists(),
+        "pending file should be deleted after reject"
+    );
 
     // pair-list-inbound is now empty.
     let out2 = run(&home, &["pair-list-inbound", "--json"]);
@@ -336,18 +339,24 @@ fn session_list_empty_reports_no_sessions_v0_5_16() {
 fn session_list_enumerates_on_disk_sessions_v0_5_16() {
     let home = fresh_home();
     write_session_fixture(&home, "wire", Some("/Users/paul/Source/wire"));
-    write_session_fixture(&home, "slancha-mesh", Some("/Users/paul/Source/slancha-mesh"));
+    write_session_fixture(
+        &home,
+        "slancha-mesh",
+        Some("/Users/paul/Source/slancha-mesh"),
+    );
 
     let out = run(&home, &["session", "list", "--json"]);
-    assert!(out.status.success(), "session list --json failed: {:?}", out);
+    assert!(
+        out.status.success(),
+        "session list --json failed: {:?}",
+        out
+    );
     let s = String::from_utf8(out.stdout).unwrap();
     let arr: serde_json::Value = serde_json::from_str(&s).unwrap();
     let items = arr.as_array().expect("flat array");
     assert_eq!(items.len(), 2);
-    let names: std::collections::HashSet<&str> = items
-        .iter()
-        .filter_map(|v| v["name"].as_str())
-        .collect();
+    let names: std::collections::HashSet<&str> =
+        items.iter().filter_map(|v| v["name"].as_str()).collect();
     assert!(names.contains("wire"));
     assert!(names.contains("slancha-mesh"));
     // Daemon liveness false for a fixture with no pidfile.
@@ -374,7 +383,10 @@ fn session_env_errors_cleanly_for_missing_session_v0_5_16() {
     assert!(!out.status.success(), "expected failure: {:?}", out);
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("no session named"), "stderr: {stderr}");
-    assert!(stderr.contains("wire session list") || stderr.contains("wire session new"), "should hint: {stderr}");
+    assert!(
+        stderr.contains("wire session list") || stderr.contains("wire session new"),
+        "should hint: {stderr}"
+    );
 }
 
 #[test]
@@ -382,7 +394,11 @@ fn session_destroy_requires_force_flag_v0_5_16() {
     let home = fresh_home();
     let session_home = write_session_fixture(&home, "wire", None);
     let out = run(&home, &["session", "destroy", "wire"]);
-    assert!(!out.status.success(), "destroy without --force must fail: {:?}", out);
+    assert!(
+        !out.status.success(),
+        "destroy without --force must fail: {:?}",
+        out
+    );
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("--force"), "stderr: {stderr}");
     // State must still be on disk.
@@ -415,11 +431,7 @@ fn session_destroy_with_force_removes_state_and_registry_entry_v0_5_16() {
 
 /// Attach a v0.5.17 dual-slot `relay.json` to an existing fixture
 /// so `wire session list-local` sees a Local-scope endpoint for it.
-fn write_local_endpoint(
-    session_home: &std::path::Path,
-    local_relay: &str,
-    slot_id: &str,
-) {
+fn write_local_endpoint(session_home: &std::path::Path, local_relay: &str, slot_id: &str) {
     let cfg = session_home.join("config").join("wire");
     let body = serde_json::json!({
         "self": {
@@ -484,14 +496,20 @@ fn session_list_local_groups_by_local_relay_url_v0_5_19() {
         .collect();
     assert!(names.contains("alpha"), "alpha missing: {stdout}");
     assert!(names.contains("beta"), "beta missing: {stdout}");
-    assert!(!names.contains("legacy"), "legacy must NOT be in local group: {stdout}");
+    assert!(
+        !names.contains("legacy"),
+        "legacy must NOT be in local group: {stdout}"
+    );
 
-    let fed_only = parsed["federation_only"].as_array().expect("federation_only array");
-    let fed_names: std::collections::HashSet<&str> = fed_only
-        .iter()
-        .filter_map(|v| v["name"].as_str())
-        .collect();
-    assert!(fed_names.contains("legacy"), "legacy should be federation-only: {stdout}");
+    let fed_only = parsed["federation_only"]
+        .as_array()
+        .expect("federation_only array");
+    let fed_names: std::collections::HashSet<&str> =
+        fed_only.iter().filter_map(|v| v["name"].as_str()).collect();
+    assert!(
+        fed_names.contains("legacy"),
+        "legacy should be federation-only: {stdout}"
+    );
 }
 
 #[test]

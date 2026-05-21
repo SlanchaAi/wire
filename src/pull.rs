@@ -144,10 +144,7 @@ pub fn process_events(
         // — we can't retroactively stamp old traffic. Mismatched major =
         // hard reject with both incoming + supported versions in reason.
         // Format locked with spark: `schema_mismatch=<received> binary_supports=<ours>`.
-        if let Some(declared) = event
-            .get("schema_version")
-            .and_then(Value::as_str)
-        {
+        if let Some(declared) = event.get("schema_version").and_then(Value::as_str) {
             let ours = signing::EVENT_SCHEMA_VERSION;
             if signing::schema_major(declared) != signing::schema_major(ours) {
                 rejected.push(json!({
@@ -168,9 +165,7 @@ pub fn process_events(
 
         // P0.1: unknown kind → transient, block cursor, fail loud.
         if !is_known_kind(kind) {
-            let reason = format!(
-                "unknown_kind={kind} binary_version={binary_version}"
-            );
+            let reason = format!("unknown_kind={kind} binary_version={binary_version}");
             rejected.push(json!({
                 "event_id": event_id,
                 "reason": reason,
@@ -363,12 +358,8 @@ mod tests {
                 "from": "did:wire:future-peer",
             });
 
-            let result = process_events(
-                &[event],
-                Some("prior-cursor".to_string()),
-                &inbox,
-            )
-            .unwrap();
+            let result =
+                process_events(&[event], Some("prior-cursor".to_string()), &inbox).unwrap();
 
             assert_eq!(result.rejected.len(), 1);
             let reason = result.rejected[0]["reason"].as_str().unwrap();
@@ -408,8 +399,7 @@ mod tests {
                 "type": "decision",
                 "from": "did:wire:future",
             });
-            let result = process_events(&[event], Some("prior".to_string()), &inbox)
-                .unwrap();
+            let result = process_events(&[event], Some("prior".to_string()), &inbox).unwrap();
             assert_eq!(result.rejected.len(), 1);
             let reason = result.rejected[0]["reason"].as_str().unwrap();
             assert!(reason.contains("schema_mismatch=v4.0"));
@@ -434,8 +424,7 @@ mod tests {
                 "type": "decision",
                 "from": "did:wire:peer-not-in-trust",
             });
-            let result = process_events(&[event], Some("prior".to_string()), &inbox)
-                .unwrap();
+            let result = process_events(&[event], Some("prior".to_string()), &inbox).unwrap();
             // Schema check passes, falls through to verify which rejects
             // for trust reasons (transient blocks_cursor=true). Either way,
             // the reason must NOT be a schema_mismatch.
@@ -462,8 +451,7 @@ mod tests {
                 "type": "decision",
                 "from": "did:wire:legacy-peer",
             });
-            let result = process_events(&[event], Some("prior".to_string()), &inbox)
-                .unwrap();
+            let result = process_events(&[event], Some("prior".to_string()), &inbox).unwrap();
             let reason = result.rejected[0]["reason"].as_str().unwrap();
             assert!(!reason.contains("schema_mismatch"));
         });
@@ -544,12 +532,7 @@ mod tests {
                 }),
             ];
 
-            let result = process_events(
-                &events,
-                Some("prior".to_string()),
-                &inbox,
-            )
-            .unwrap();
+            let result = process_events(&events, Some("prior".to_string()), &inbox).unwrap();
 
             assert_eq!(result.rejected.len(), 2);
             assert_eq!(result.advance_cursor_to, Some("prior".to_string()));

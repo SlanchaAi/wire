@@ -105,10 +105,11 @@ pub fn format_transport_error(err: &anyhow::Error) -> String {
             || p.contains("tls handshake")
     }) {
         Some("TLS error")
-    } else if lower
-        .iter()
-        .any(|p| p.contains("dns error") || p.contains("nodename nor servname") || p.contains("failed to lookup address"))
-    {
+    } else if lower.iter().any(|p| {
+        p.contains("dns error")
+            || p.contains("nodename nor servname")
+            || p.contains("failed to lookup address")
+    }) {
         Some("DNS error")
     } else if lower
         .iter()
@@ -550,7 +551,10 @@ mod tests {
             formatted.starts_with("TLS error:"),
             "expected TLS class prefix, got: {formatted}"
         );
-        assert!(formatted.contains("UnknownIssuer"), "lost root cause: {formatted}");
+        assert!(
+            formatted.contains("UnknownIssuer"),
+            "lost root cause: {formatted}"
+        );
         assert!(
             formatted.contains("POST https://relay.example"),
             "lost context URL: {formatted}"

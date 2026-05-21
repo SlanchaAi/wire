@@ -8,6 +8,44 @@ The v0.5 line shipped the protocol: bilateral signed-message bus, federated hand
 
 The first orchestration primitive is `wire session pair-all-local`: zero-paste bilateral pairing across every sister session on a machine. The trust anchor shifts from "operator types SAS digits on each side" (a network-level proof appropriate for strangers) to "operator owns every session listed in `wire session list-local`" (a filesystem-permission proof appropriate for same-uid siblings). That re-anchoring is what makes mesh-scale auto-pairing safe to ship at all — same-uid siblings are by definition not strangers.
 
+### v0.6.8 — stale cleanup on upgrade + crates.io publish wired into release pipeline
+
+Infra release. Three load-bearing fixes ship together because they're tangled — each one explained the "I updated but it's still broken" reports operators were filing.
+
+**1. `wire upgrade` now sweeps every session, not just the default home.** Pre-v0.6.8 `wire upgrade` killed only the daemon owning the default `WIRE_HOME`. Session daemons (one per `wire session new`, often one per project) kept running the OLD binary text in memory, racing the new daemon and the new pidfile contracts. Operators saw "I updated but the new behavior isn't there" because the old daemon was still answering. v0.6.8:
+
+- Kills the default-home daemon (existing v0.5.11 behavior).
+- Enumerates every session via `crate::session::list_sessions()`; for each session that had a running daemon, wipes its pidfile and respawns it under the new binary via `ensure_session_daemon`.
+- Detects when `$PATH` contains multiple distinct `wire` binaries (e.g. `/usr/local/bin/wire` AND `~/.local/bin/wire`) and surfaces a warning — that PATH-shadow class of bug accounts for most "I ran install.sh but the version didn't change" reports.
+
+`wire upgrade --check` reports all of this in JSON or text without making any changes, so operators can preview what the upgrade would touch.
+
+**2. `install.sh` now runs `wire upgrade` automatically.** Right after the binary is moved into place, install.sh calls `wire upgrade --check` to confirm the new binary supports the cleanup pass, then runs `wire upgrade` to:
+- Kill stale daemons from the old binary (which may still be running because `mv` doesn't touch their process memory),
+- Wipe stale pidfiles,
+- Respawn session daemons under the new binary.
+
+Best-effort: if the new binary somehow doesn't support `upgrade` (downgrade install, partial replacement) the install script just skips the cleanup step rather than fail. The "next steps" footer also got rewritten to lead with `wire session new --local-only` + `wire session pair-all-local` (the v0.6.6+ recipe), not the legacy `wire pair-host --relay` flow.
+
+**3. `release.yml` now publishes to crates.io on tag.** Pre-v0.6.8, `.github/workflows/release.yml` only built GitHub release binaries — `cargo publish` was never called. crates.io has been frozen at v0.6.1 since the original manual publish; v0.6.2–v0.6.7 were never installable via `cargo install slancha-wire`, and `install.sh`'s cargo-fallback path silently grabbed the stale v0.6.1. v0.6.8 adds a `publish-crates-io` job to the release workflow that runs on every stable tag (skips `-rc` / `-beta` / `-alpha`), gated on a `CARGO_REGISTRY_TOKEN` secret. Treats an already-published version as a soft success (the next-run scenario).
+
+**One-time operator setup for crates.io publish:**
+1. Generate a token at https://crates.io/me with `publish-update` scope for the `slancha-wire` crate.
+2. Add it under repo Settings → Secrets and variables → Actions → New repository secret, name `CARGO_REGISTRY_TOKEN`.
+3. Next stable tag push auto-publishes.
+
+**Until the secret is configured**, v0.6.7 and v0.6.8 are still stuck on crates.io 0.6.1. Run `cargo publish` manually from a checkout with the token in env to unstick:
+```bash
+CARGO_REGISTRY_TOKEN=<token> cargo publish
+```
+
+**Also bundled:**
+- `cargo fmt --all` applied across the codebase (CI's `fmt` job had been red since v0.6.5).
+- All clippy warnings fixed (CI's `clippy` job same story). `--all-targets -D warnings` is now green.
+- `demo-hotline.sh` CI job is still broken (pre-v0.6.0 regression from the bilateral pair gate, predates this release). Not blocking but tracked.
+
+163 lib + 38 cli + 9 within-system stress tests green. CI's fmt and clippy jobs will go green on the next push; the demo-hotline job remains red until that script is updated for the v0.5.14+ bilateral flow.
+
 ### v0.6.7 — CLI auto-detects WIRE_HOME from cwd (parity with MCP)
 
 Latent leak fixed. v0.6.1 added MCP auto-detect: when `wire mcp` starts and `WIRE_HOME` isn't set in env, the server reads `$PWD`, looks it up in the session registry, and adopts that session's home dir for the rest of the process. v0.6.7 brings the bare CLI to the same parity:

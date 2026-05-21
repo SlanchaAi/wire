@@ -75,12 +75,9 @@ impl ServiceKind {
     fn binary_args(self) -> &'static [&'static str] {
         match self {
             ServiceKind::Daemon => &["daemon", "--interval", "5"],
-            ServiceKind::LocalRelay => &[
-                "relay-server",
-                "--bind",
-                "127.0.0.1:8771",
-                "--local-only",
-            ],
+            ServiceKind::LocalRelay => {
+                &["relay-server", "--bind", "127.0.0.1:8771", "--local-only"]
+            }
         }
     }
 
@@ -148,12 +145,10 @@ pub fn install_kind(kind: ServiceKind) -> Result<ServiceReport> {
     if cfg!(target_os = "macos") {
         let plist_path = launchd_plist_path(kind)?;
         if let Some(parent) = plist_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {parent:?}"))?;
+            std::fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
         }
         let plist = launchd_plist_xml(kind, &exe_str, &log_str);
-        std::fs::write(&plist_path, plist)
-            .with_context(|| format!("writing {plist_path:?}"))?;
+        std::fs::write(&plist_path, plist).with_context(|| format!("writing {plist_path:?}"))?;
 
         // launchctl bootstrap is idempotent if we bootout first.
         let _ = Command::new("launchctl")
@@ -172,11 +167,13 @@ pub fn install_kind(kind: ServiceKind) -> Result<ServiceReport> {
             action: "install".into(),
             platform: "macos-launchd".into(),
             unit_path: plist_path.to_string_lossy().to_string(),
-            status: if loaded { "loaded".into() } else { "written".into() },
+            status: if loaded {
+                "loaded".into()
+            } else {
+                "written".into()
+            },
             detail: if loaded {
-                format!(
-                    "plist written + bootstrapped; logs at {log_str}"
-                )
+                format!("plist written + bootstrapped; logs at {log_str}")
             } else {
                 format!(
                     "plist written; `launchctl bootstrap` failed — try `launchctl bootstrap {} {}` manually",
@@ -190,12 +187,10 @@ pub fn install_kind(kind: ServiceKind) -> Result<ServiceReport> {
     if cfg!(target_os = "linux") {
         let unit_path = systemd_unit_path(kind)?;
         if let Some(parent) = unit_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {parent:?}"))?;
+            std::fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
         }
         let unit = systemd_unit_text(kind, &exe_str);
-        std::fs::write(&unit_path, unit)
-            .with_context(|| format!("writing {unit_path:?}"))?;
+        std::fs::write(&unit_path, unit).with_context(|| format!("writing {unit_path:?}"))?;
 
         // Reload + enable + start. Each is idempotent on linux.
         let _ = Command::new("systemctl")
@@ -228,7 +223,11 @@ pub fn install_kind(kind: ServiceKind) -> Result<ServiceReport> {
             action: "install".into(),
             platform: "linux-systemd-user".into(),
             unit_path: unit_path.to_string_lossy().to_string(),
-            status: if enabled { "enabled".into() } else { "written".into() },
+            status: if enabled {
+                "enabled".into()
+            } else {
+                "written".into()
+            },
             detail: if enabled {
                 format!(
                     "unit written + enable --now succeeded; logs via \
@@ -263,7 +262,11 @@ pub fn uninstall_kind(kind: ServiceKind) -> Result<ServiceReport> {
             action: "uninstall".into(),
             platform: "macos-launchd".into(),
             unit_path: plist_path.to_string_lossy().to_string(),
-            status: if removed { "removed".into() } else { "absent".into() },
+            status: if removed {
+                "removed".into()
+            } else {
+                "absent".into()
+            },
             detail: "launchctl bootout + plist file removed".into(),
             kind: kind_label(kind).into(),
         });
@@ -286,7 +289,11 @@ pub fn uninstall_kind(kind: ServiceKind) -> Result<ServiceReport> {
             action: "uninstall".into(),
             platform: "linux-systemd-user".into(),
             unit_path: unit_path.to_string_lossy().to_string(),
-            status: if removed { "removed".into() } else { "absent".into() },
+            status: if removed {
+                "removed".into()
+            } else {
+                "absent".into()
+            },
             detail: "systemctl disable --now + unit file removed".into(),
             kind: kind_label(kind).into(),
         });
@@ -561,9 +568,9 @@ mod tests {
     #[test]
     fn systemd_unit_text_for_local_relay_uses_correct_exec() {
         let unit = systemd_unit_text(ServiceKind::LocalRelay, "/usr/local/bin/wire");
-        assert!(unit.contains(
-            "/usr/local/bin/wire relay-server --bind 127.0.0.1:8771 --local-only"
-        ));
+        assert!(
+            unit.contains("/usr/local/bin/wire relay-server --bind 127.0.0.1:8771 --local-only")
+        );
         assert!(!unit.contains("daemon --interval"));
     }
 
@@ -571,10 +578,7 @@ mod tests {
     fn label_and_unit_name_distinct_per_kind() {
         // Both kinds MUST have distinct identifiers so they can coexist
         // on the same machine.
-        assert_ne!(
-            ServiceKind::Daemon.label(),
-            ServiceKind::LocalRelay.label()
-        );
+        assert_ne!(ServiceKind::Daemon.label(), ServiceKind::LocalRelay.label());
         assert_ne!(
             ServiceKind::Daemon.systemd_unit_name(),
             ServiceKind::LocalRelay.systemd_unit_name()

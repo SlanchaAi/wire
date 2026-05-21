@@ -15,7 +15,7 @@
 //! routing path that `cmd_push` walks (`peer_endpoints_in_priority_order`).
 
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -91,7 +91,7 @@ async fn spawn_local_only_relay() -> String {
 /// `wire session new --with-local` does internally, but works on a
 /// plain WIRE_HOME (no session orchestration) so we can drive the
 /// routing layer directly.
-async fn attach_local_endpoint(home: &PathBuf, handle: &str, local_relay_url: &str) {
+async fn attach_local_endpoint(home: &Path, handle: &str, local_relay_url: &str) {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{local_relay_url}/v1/slot/allocate"))
@@ -177,18 +177,18 @@ async fn pair_two_homes_with_local_endpoints(
             .success()
     );
     assert!(
-        wire(&bob, &["claim", bob_name, "--public-url", fed_url, "--json"])
-            .status
-            .success()
+        wire(
+            &bob,
+            &["claim", bob_name, "--public-url", fed_url, "--json"]
+        )
+        .status
+        .success()
     );
     attach_local_endpoint(&bob, bob_name, local_url).await;
 
     // ---- bilateral pair ----
     let bob_handle = format!("{alice_name}@{host_only}");
-    let add_out = wire(
-        &bob,
-        &["add", &bob_handle, "--relay", fed_url, "--json"],
-    );
+    let add_out = wire(&bob, &["add", &bob_handle, "--relay", fed_url, "--json"]);
     assert!(
         add_out.status.success(),
         "bob `wire add` failed: {}",
@@ -217,7 +217,7 @@ async fn pair_two_homes_with_local_endpoints(
     (alice, bob)
 }
 
-fn count_inbox_lines(home: &PathBuf, peer: &str) -> usize {
+fn count_inbox_lines(home: &Path, peer: &str) -> usize {
     let inbox = home
         .join("state")
         .join("wire")
@@ -342,7 +342,9 @@ async fn pair_all_local_mesh_pairs_every_sister_session_v0_6_0() {
     assert!(out2.status.success(), "pair-all-local re-run failed");
     let summary2: Value = serde_json::from_slice(&out2.stdout).unwrap();
     assert_eq!(
-        summary2["pairs_skipped_already_paired"].as_u64().unwrap_or(0),
+        summary2["pairs_skipped_already_paired"]
+            .as_u64()
+            .unwrap_or(0),
         3,
         "re-run should skip 3 already-paired: {summary2}"
     );
@@ -405,7 +407,9 @@ async fn local_only_sessions_pair_without_federation_v0_6_6() {
         let state: Value =
             serde_json::from_slice(&std::fs::read(&relay_path).expect("relay.json present"))
                 .expect("relay.json parse");
-        let endpoints = state["self"]["endpoints"].as_array().expect("endpoints array");
+        let endpoints = state["self"]["endpoints"]
+            .as_array()
+            .expect("endpoints array");
         assert!(
             endpoints
                 .iter()
@@ -421,13 +425,7 @@ async fn local_only_sessions_pair_without_federation_v0_6_6() {
     // pair-all-local should succeed: 3 choose 2 = 3 pairs.
     let pair_out = wire(
         &home,
-        &[
-            "session",
-            "pair-all-local",
-            "--settle-secs",
-            "1",
-            "--json",
-        ],
+        &["session", "pair-all-local", "--settle-secs", "1", "--json"],
     );
     assert!(
         pair_out.status.success(),
@@ -455,8 +453,8 @@ async fn local_only_sessions_pair_without_federation_v0_6_6() {
             .join("config")
             .join("wire")
             .join("relay.json");
-        let state: Value =
-            serde_json::from_slice(&std::fs::read(&relay_path).expect("relay.json")).expect("parse");
+        let state: Value = serde_json::from_slice(&std::fs::read(&relay_path).expect("relay.json"))
+            .expect("parse");
         let peers = state["peers"].as_object().expect("peers map");
         for other in &session_names {
             if other == name {
@@ -518,7 +516,11 @@ async fn mesh_route_picks_one_sister_per_strategy_v0_6_5() {
     let local_url = spawn_local_only_relay().await;
     let home = fresh_dir("mesh-route");
 
-    let session_roles = [("alpha", "planner"), ("beth", "reviewer"), ("charlie", "reviewer")];
+    let session_roles = [
+        ("alpha", "planner"),
+        ("beth", "reviewer"),
+        ("charlie", "reviewer"),
+    ];
     for (name, _) in &session_roles {
         let out = wire(
             &home,
@@ -607,7 +609,11 @@ async fn mesh_route_picks_one_sister_per_strategy_v0_6_5() {
                 "rr",
             ],
         );
-        assert!(out.status.success(), "rr route failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "rr route failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let v: Value = serde_json::from_slice(&out.stdout).expect("JSON");
         rr_routes.push(v["routed_to"].as_str().unwrap_or("?").to_string());
     }
@@ -683,7 +689,11 @@ async fn mesh_route_picks_one_sister_per_strategy_v0_6_5() {
     let v: Value = serde_json::from_slice(&exc.stdout).expect("JSON");
     assert_eq!(v["routed_to"].as_str(), Some("charlie"));
     let cands = v["candidates"].as_array().unwrap();
-    assert_eq!(cands.len(), 1, "exclude should leave 1 candidate: {cands:?}");
+    assert_eq!(
+        cands.len(),
+        1,
+        "exclude should leave 1 candidate: {cands:?}"
+    );
     assert_eq!(cands[0].as_str(), Some("charlie"));
 }
 
@@ -702,7 +712,11 @@ async fn mesh_role_set_list_round_trips_v0_6_4() {
     let local_url = spawn_local_only_relay().await;
     let home = fresh_dir("mesh-role");
 
-    let session_roles = [("alpha", "planner"), ("beth", "reviewer"), ("charlie", "coder")];
+    let session_roles = [
+        ("alpha", "planner"),
+        ("beth", "reviewer"),
+        ("charlie", "coder"),
+    ];
 
     for (name, _) in &session_roles {
         let out = wire(
@@ -752,7 +766,9 @@ async fn mesh_role_set_list_round_trips_v0_6_4() {
         let rows = view["sessions"].as_array().expect("sessions array");
         assert_eq!(rows.len(), 3, "list should see 3 sister sessions: {view}");
         for (expected_name, expected_role) in &session_roles {
-            let found = rows.iter().find(|r| r["name"].as_str() == Some(expected_name));
+            let found = rows
+                .iter()
+                .find(|r| r["name"].as_str() == Some(expected_name));
             let row = found
                 .unwrap_or_else(|| panic!("session {expected_name} missing from list: {view}"));
             assert_eq!(
@@ -766,7 +782,10 @@ async fn mesh_role_set_list_round_trips_v0_6_4() {
     // Role validation: illegal char + oversize must reject.
     let alpha_home = home.join("sessions").join("alpha");
     let illegal = wire(&alpha_home, &["mesh", "role", "set", "bad role"]);
-    assert!(!illegal.status.success(), "space-in-role should be rejected");
+    assert!(
+        !illegal.status.success(),
+        "space-in-role should be rejected"
+    );
     assert!(
         String::from_utf8_lossy(&illegal.stderr).contains("illegal char"),
         "illegal char rejection message expected, got: {}",
@@ -774,15 +793,17 @@ async fn mesh_role_set_list_round_trips_v0_6_4() {
     );
     let oversize: String = "a".repeat(33);
     let too_long = wire(&alpha_home, &["mesh", "role", "set", &oversize]);
-    assert!(!too_long.status.success(), "33-char role should be rejected");
+    assert!(
+        !too_long.status.success(),
+        "33-char role should be rejected"
+    );
 
     // Clear works; list reports (unset) thereafter.
     let cleared = wire(&alpha_home, &["mesh", "role", "clear", "--json"]);
     assert!(cleared.status.success(), "mesh role clear failed");
-    let after: Value = serde_json::from_slice(
-        &wire(&alpha_home, &["mesh", "role", "list", "--json"]).stdout,
-    )
-    .expect("JSON");
+    let after: Value =
+        serde_json::from_slice(&wire(&alpha_home, &["mesh", "role", "list", "--json"]).stdout)
+            .expect("JSON");
     let alpha_row = after["sessions"]
         .as_array()
         .and_then(|a| a.iter().find(|r| r["name"].as_str() == Some("alpha")))
@@ -919,7 +940,7 @@ async fn mesh_broadcast_fans_to_every_paired_sister_v0_6_3() {
 
     // Find the broadcast event in each recipient's inbox by matching
     // body.broadcast_id. Assert distinct event_ids.
-    fn find_broadcast_event(session_home: &PathBuf, broadcast_id: &str) -> Option<Value> {
+    fn find_broadcast_event(session_home: &Path, broadcast_id: &str) -> Option<Value> {
         let inbox = session_home
             .join("state")
             .join("wire")
@@ -1236,13 +1257,9 @@ async fn regression_session_new_with_local_writes_dual_endpoints_v0_5_20() {
 async fn stress_within_system_local_first_routing_v0_5_19() {
     let fed_url = spawn_federation_relay().await;
     let local_url = spawn_local_only_relay().await;
-    let (alice, bob) = pair_two_homes_with_local_endpoints(
-        &fed_url,
-        &local_url,
-        "stress-w-alice",
-        "stress-w-bob",
-    )
-    .await;
+    let (alice, bob) =
+        pair_two_homes_with_local_endpoints(&fed_url, &local_url, "stress-w-alice", "stress-w-bob")
+            .await;
 
     // Queue FLOOD_COUNT events.
     let queue_start = Instant::now();
@@ -1368,7 +1385,11 @@ async fn stress_within_system_failover_to_federation_on_local_death_v0_5_19() {
             }
         }
     }
-    std::fs::write(&alice_relay_state, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    std::fs::write(
+        &alice_relay_state,
+        serde_json::to_vec_pretty(&state).unwrap(),
+    )
+    .unwrap();
 
     // Second half — should fall back to federation.
     for i in half..FLOOD_COUNT {
@@ -1403,10 +1424,7 @@ async fn stress_within_system_failover_to_federation_on_local_death_v0_5_19() {
     // new ones.
     let new_transport_skips = skipped
         .iter()
-        .filter(|s| {
-            s["reason"].as_str() != Some("duplicate")
-                && s.get("event_id").is_some()
-        })
+        .filter(|s| s["reason"].as_str() != Some("duplicate") && s.get("event_id").is_some())
         .count();
     assert!(
         new_transport_skips == 0,

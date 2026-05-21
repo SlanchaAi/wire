@@ -40,10 +40,7 @@ pub const EVENT_SCHEMA_VERSION: &str = "v3.1";
 /// start emitting v4.0 events; older 0.5.x binaries see major=v4 and bail
 /// instead of attempting to decode an incompatible shape.
 pub fn schema_major(schema_version: &str) -> &str {
-    schema_version
-        .split('.')
-        .next()
-        .unwrap_or(schema_version)
+    schema_version.split('.').next().unwrap_or(schema_version)
 }
 
 // ---------- kind ranges ----------

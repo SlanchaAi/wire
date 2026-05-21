@@ -2096,11 +2096,7 @@ pub async fn serve(bind: &str, state_dir: PathBuf) -> Result<()> {
 /// v0.5.17: server-mode-aware entry point. Same as `serve` but with the
 /// `--local-only` toggle exposed so the binary can refuse to publish
 /// phonebook + well-known surfaces on within-machine relays.
-pub async fn serve_with_mode(
-    bind: &str,
-    state_dir: PathBuf,
-    mode: ServerMode,
-) -> Result<()> {
+pub async fn serve_with_mode(bind: &str, state_dir: PathBuf, mode: ServerMode) -> Result<()> {
     let relay = Relay::new(state_dir).await?;
     relay.spawn_pair_sweeper();
     relay.spawn_counter_persister();
@@ -2109,7 +2105,9 @@ pub async fn serve_with_mode(
         .await
         .with_context(|| format!("binding {bind}"))?;
     if mode.local_only {
-        eprintln!("wire relay-server (LOCAL-ONLY) listening on {bind} — phonebook + well-known endpoints disabled");
+        eprintln!(
+            "wire relay-server (LOCAL-ONLY) listening on {bind} — phonebook + well-known endpoints disabled"
+        );
     } else {
         eprintln!("wire relay-server listening on {bind}");
     }

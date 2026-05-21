@@ -85,11 +85,11 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///   inbox event, checks the shared subscription set; if any matching
 ///   `wire://inbox/<peer>` or `wire://inbox/all` URI is subscribed, pushes
 ///   a `notifications/resources/updated` message into the channel.
-// v0.6.7: `detect_session_wire_home` moved to `session::detect_session_wire_home`
-// (shared with the CLI auto-detect at `cli::run` entry). The mcp-only
-// wrapper was removed; the regression test now calls the session-module
-// version directly.
-
+///
+/// v0.6.7: `detect_session_wire_home` moved to
+/// `session::detect_session_wire_home` (shared with the CLI auto-detect at
+/// `cli::run` entry). The mcp-only wrapper was removed; the regression test
+/// now calls the session-module version directly.
 pub fn run() -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
@@ -1741,10 +1741,9 @@ fn tool_pair_reject(args: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .ok_or("missing 'peer'")?;
     let nick = crate::agent_card::bare_handle(peer);
-    let existed = crate::pending_inbound_pair::read_pending_inbound(nick)
-        .map_err(|e| format!("{e:#}"))?;
-    crate::pending_inbound_pair::consume_pending_inbound(nick)
-        .map_err(|e| format!("{e:#}"))?;
+    let existed =
+        crate::pending_inbound_pair::read_pending_inbound(nick).map_err(|e| format!("{e:#}"))?;
+    crate::pending_inbound_pair::consume_pending_inbound(nick).map_err(|e| format!("{e:#}"))?;
     Ok(json!({
         "peer": nick,
         "rejected": existed.is_some(),
@@ -1755,8 +1754,8 @@ fn tool_pair_reject(args: &Value) -> Result<Value, String> {
 /// v0.5.14: MCP `wire_pair_list_inbound` — enumerate pending-inbound
 /// pair requests for operator review. Flat array sorted oldest-first.
 fn tool_pair_list_inbound() -> Result<Value, String> {
-    let items = crate::pending_inbound_pair::list_pending_inbound()
-        .map_err(|e| format!("{e:#}"))?;
+    let items =
+        crate::pending_inbound_pair::list_pending_inbound().map_err(|e| format!("{e:#}"))?;
     Ok(json!(items))
 }
 
@@ -2054,13 +2053,15 @@ mod tests {
             // Registered cwd but session dir missing → None (defensive:
             // stale registry entry pointing at a deleted session).
             let stale_cwd = "/tmp/stale-session-cwd";
-            let stale_registry = json!({"by_cwd": {fake_cwd: "test-alpha", stale_cwd: "test-stale"}});
+            let stale_registry =
+                json!({"by_cwd": {fake_cwd: "test-alpha", stale_cwd: "test-stale"}});
             std::fs::write(
                 sessions_root.join("registry.json"),
                 serde_json::to_vec_pretty(&stale_registry).unwrap(),
             )
             .unwrap();
-            let stale_got = crate::session::detect_session_wire_home(std::path::Path::new(stale_cwd));
+            let stale_got =
+                crate::session::detect_session_wire_home(std::path::Path::new(stale_cwd));
             assert!(
                 stale_got.is_none(),
                 "registered cwd whose session dir is missing must return None"

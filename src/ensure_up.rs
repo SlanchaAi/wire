@@ -266,20 +266,14 @@ fn build_pid_record(pid: u32) -> DaemonPid {
 fn identity_for_pid_record() -> (Option<String>, Option<String>) {
     let did = crate::config::read_agent_card()
         .ok()
-        .and_then(|card| {
-            card.get("did")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
-    let relay_url = crate::config::read_relay_state()
-        .ok()
-        .and_then(|state| {
-            state
-                .get("self")
-                .and_then(|s| s.get("relay_url"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
+        .and_then(|card| card.get("did").and_then(Value::as_str).map(str::to_string));
+    let relay_url = crate::config::read_relay_state().ok().and_then(|state| {
+        state
+            .get("self")
+            .and_then(|s| s.get("relay_url"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
     (did, relay_url)
 }
 

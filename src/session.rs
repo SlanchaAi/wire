@@ -112,21 +112,18 @@ pub fn read_registry() -> Result<SessionRegistry> {
     if !path.exists() {
         return Ok(SessionRegistry::default());
     }
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("reading session registry {path:?}"))?;
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing session registry {path:?}"))
+    let bytes =
+        std::fs::read(&path).with_context(|| format!("reading session registry {path:?}"))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parsing session registry {path:?}"))
 }
 
 pub fn write_registry(reg: &SessionRegistry) -> Result<()> {
     let path = registry_path()?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {parent:?}"))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
     }
     let body = serde_json::to_vec_pretty(reg)?;
-    std::fs::write(&path, body)
-        .with_context(|| format!("writing session registry {path:?}"))?;
+    std::fs::write(&path, body).with_context(|| format!("writing session registry {path:?}"))?;
     Ok(())
 }
 
@@ -284,9 +281,8 @@ fn read_card_identity(card_path: &Path) -> (Option<String>, Option<String>) {
         .and_then(|x| x.as_str())
         .map(str::to_string)
         .or_else(|| {
-            did.as_ref().map(|d| {
-                crate::agent_card::display_handle_from_did(d).to_string()
-            })
+            did.as_ref()
+                .map(|d| crate::agent_card::display_handle_from_did(d).to_string())
         });
     (did, handle)
 }
@@ -296,10 +292,7 @@ fn check_daemon_live(session_home: &Path) -> bool {
     // existing ensure_up reader by temporarily pointing at the path; we
     // can't change env mid-process race-free, so re-implement the pid
     // extraction directly here from the JSON structure.
-    let pidfile = session_home
-        .join("state")
-        .join("wire")
-        .join("daemon.pid");
+    let pidfile = session_home.join("state").join("wire").join("daemon.pid");
     let bytes = match std::fs::read(&pidfile) {
         Ok(b) => b,
         Err(_) => return false,
@@ -348,10 +341,7 @@ fn is_process_live(pid: u32) -> bool {
 /// in the same release — that helper had the symmetric write-side
 /// bug, so the local endpoint never got persisted in the first place.
 pub fn read_session_endpoints(session_home: &Path) -> Vec<Endpoint> {
-    let path = session_home
-        .join("config")
-        .join("wire")
-        .join("relay.json");
+    let path = session_home.join("config").join("wire").join("relay.json");
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(_) => return Vec::new(),
@@ -606,8 +596,7 @@ mod tests {
                 ]
             }
         });
-        std::fs::write(cfg.join("relay.json"), serde_json::to_vec(&body).unwrap())
-            .unwrap();
+        std::fs::write(cfg.join("relay.json"), serde_json::to_vec(&body).unwrap()).unwrap();
         let endpoints = read_session_endpoints(tmp.path());
         assert_eq!(endpoints.len(), 2);
         let local_count = endpoints
@@ -634,10 +623,8 @@ mod tests {
     #[test]
     fn derive_name_appends_path_hash_when_basename_collides() {
         let mut reg = SessionRegistry::default();
-        reg.by_cwd.insert(
-            "/Users/paul/Source/wire".to_string(),
-            "wire".to_string(),
-        );
+        reg.by_cwd
+            .insert("/Users/paul/Source/wire".to_string(), "wire".to_string());
         // Different cwd, same basename → must get a hash suffix.
         let name = derive_name_from_cwd(Path::new("/Users/paul/Archive/wire"), &reg);
         assert!(name.starts_with("wire-"));

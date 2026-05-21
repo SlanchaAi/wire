@@ -15,7 +15,7 @@
 //!      sender surfaces a meaningful error, not silent success.
 
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -81,11 +81,7 @@ async fn spawn_federation_relay() -> String {
 
 /// Pair two fresh homes through the bilateral-gate flow (v0.5.14+).
 /// Returns (alice_home, bob_home) where each has the other pinned.
-async fn pair_two_homes(
-    relay_url: &str,
-    alice_name: &str,
-    bob_name: &str,
-) -> (PathBuf, PathBuf) {
+async fn pair_two_homes(relay_url: &str, alice_name: &str, bob_name: &str) -> (PathBuf, PathBuf) {
     // Handle parser wants a dotted-ASCII host without port (so
     // `alice@127.0.0.1`, not `alice@127.0.0.1:56789`). The actual URL
     // is supplied separately via --relay. Mirror the trick used in
@@ -105,13 +101,7 @@ async fn pair_two_homes(
     assert!(
         wire(
             &alice,
-            &[
-                "claim",
-                alice_name,
-                "--public-url",
-                relay_url,
-                "--json"
-            ]
+            &["claim", alice_name, "--public-url", relay_url, "--json"]
         )
         .status
         .success()
@@ -126,10 +116,7 @@ async fn pair_two_homes(
 
     // bob → alice: handle-path pair_drop. Lands in alice's pending-inbound.
     let bob_handle = format!("{alice_name}@{host_only}");
-    let add_out = wire(
-        &bob,
-        &["add", &bob_handle, "--relay", relay_url, "--json"],
-    );
+    let add_out = wire(&bob, &["add", &bob_handle, "--relay", relay_url, "--json"]);
     assert!(
         add_out.status.success(),
         "bob `wire add` failed: {}",
@@ -171,8 +158,12 @@ async fn pair_two_homes(
     (alice, bob)
 }
 
-fn count_inbox_lines(home: &PathBuf, peer: &str) -> usize {
-    let inbox = home.join("state").join("wire").join("inbox").join(format!("{peer}.jsonl"));
+fn count_inbox_lines(home: &Path, peer: &str) -> usize {
+    let inbox = home
+        .join("state")
+        .join("wire")
+        .join("inbox")
+        .join(format!("{peer}.jsonl"));
     let body = std::fs::read_to_string(&inbox).unwrap_or_default();
     body.lines().filter(|l| !l.trim().is_empty()).count()
 }
@@ -242,7 +233,11 @@ async fn stress_outbox_flood_500_messages_single_peer() {
     );
 
     // Sanity: every line should be valid JSON.
-    let inbox = bob.join("state").join("wire").join("inbox").join("stress-alice-a.jsonl");
+    let inbox = bob
+        .join("state")
+        .join("wire")
+        .join("inbox")
+        .join("stress-alice-a.jsonl");
     let body = std::fs::read_to_string(&inbox).unwrap();
     let mut parsed_ok = 0;
     for line in body.lines() {
@@ -327,13 +322,13 @@ async fn stress_concurrent_sends_no_torn_writes() {
         total,
         "push didn't enumerate all {total} events: pushed={pushed_count} skipped={skipped_count}"
     );
-    assert!(wait_until(
-        Instant::now() + Duration::from_secs(60),
-        || {
+    assert!(
+        wait_until(Instant::now() + Duration::from_secs(60), || {
             let _ = wire(&bob, &["pull", "--json"]);
             count_inbox_lines(&bob, "stress-alice-b") >= total
-        },
-    ), "bob never received {total} events");
+        },),
+        "bob never received {total} events"
+    );
 }
 
 // ---------- TEST 3: bind-relay silent migration (issue #7 detector) ----------
@@ -359,10 +354,7 @@ async fn stress_bind_relay_warns_on_pinned_peers_issue_7() {
 
     // Run bind-relay against the new relay. Capture stderr/stdout for any
     // warning text mentioning pinned peers.
-    let migrate_out = wire(
-        &alice,
-        &["bind-relay", &new_relay_url, "--json"],
-    );
+    let migrate_out = wire(&alice, &["bind-relay", &new_relay_url, "--json"]);
 
     // If bind-relay refused / failed loudly, that satisfies (c).
     let failed_loudly = !migrate_out.status.success();
@@ -404,10 +396,7 @@ async fn stress_send_to_nonexistent_slot_surfaces_error() {
     // that does not exist on the relay. This simulates the post-bind-relay
     // state from bob's perspective (alice still thinks bob is at the old
     // slot, but the relay no longer routes to anything alice can reach).
-    let relay_state_path = alice
-        .join("config")
-        .join("wire")
-        .join("relay.json");
+    let relay_state_path = alice.join("config").join("wire").join("relay.json");
     let bytes = std::fs::read(&relay_state_path).expect("relay.json missing");
     let mut state: Value = serde_json::from_slice(&bytes).expect("relay.json malformed");
     let fake_slot_id = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
@@ -424,9 +413,11 @@ async fn stress_send_to_nonexistent_slot_surfaces_error() {
     .unwrap();
 
     // Queue a message + push. Capture the push --json output.
-    assert!(wire(&alice, &["send", "stress-bob-d", "claim", "to the void"])
-        .status
-        .success());
+    assert!(
+        wire(&alice, &["send", "stress-bob-d", "claim", "to the void"])
+            .status
+            .success()
+    );
     let push_out = wire(&alice, &["push", "--json"]);
     let stdout = String::from_utf8_lossy(&push_out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&push_out.stderr).into_owned();

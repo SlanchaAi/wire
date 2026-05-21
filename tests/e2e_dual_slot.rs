@@ -19,7 +19,7 @@
 //! decision space is real. WIRE_HOME per session.
 
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -83,23 +83,22 @@ async fn spawn_local_only_relay() -> String {
 }
 
 /// Read the agent's relay_state.json and return the parsed JSON.
-fn read_relay_state(home: &PathBuf) -> Value {
+fn read_relay_state(home: &Path) -> Value {
     let path = home.join("config").join("wire").join("relay.json");
     let bytes = std::fs::read(&path).expect("relay.json missing");
     serde_json::from_slice(&bytes).expect("relay.json malformed")
 }
 
-fn write_relay_state(home: &PathBuf, state: &Value) {
+fn write_relay_state(home: &Path, state: &Value) {
     let path = home.join("config").join("wire").join("relay.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(state).unwrap())
-        .expect("write relay.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(state).unwrap()).expect("write relay.json");
 }
 
 /// Allocate a local-relay slot for the given session via direct HTTP POST
 /// (mirrors what `wire session new --with-local` does internally), then
 /// patch the session's relay_state.json `self.endpoints[]` to include
 /// both federation + local endpoints.
-async fn add_local_endpoint(home: &PathBuf, handle: &str, local_relay_url: &str) {
+async fn add_local_endpoint(home: &Path, handle: &str, local_relay_url: &str) {
     // POST /v1/slot/allocate on the local relay.
     let client = reqwest::Client::new();
     let resp = client
@@ -220,7 +219,11 @@ async fn dual_slot_send_prefers_local_endpoint() {
     let alice_eps = bob_state["peers"]["alice"]["endpoints"]
         .as_array()
         .expect("alice should have endpoints[] in bob's state");
-    assert_eq!(alice_eps.len(), 2, "alice should have 2 endpoints: {alice_eps:?}");
+    assert_eq!(
+        alice_eps.len(),
+        2,
+        "alice should have 2 endpoints: {alice_eps:?}"
+    );
     let scopes: Vec<&str> = alice_eps
         .iter()
         .filter_map(|e| e["scope"].as_str())
@@ -231,14 +234,16 @@ async fn dual_slot_send_prefers_local_endpoint() {
     // Send: Alice → Bob. The push --json output should report the local
     // endpoint as the delivery path.
     assert!(
-        wire(&alice, &["send", "bob", "claim", "dual-slot hello", "--json"])
-            .status
-            .success()
+        wire(
+            &alice,
+            &["send", "bob", "claim", "dual-slot hello", "--json"]
+        )
+        .status
+        .success()
     );
     let push_out = wire(&alice, &["push", "--json"]);
     assert!(push_out.status.success(), "alice push failed");
-    let push_json: Value =
-        serde_json::from_slice(&push_out.stdout).expect("push --json parses");
+    let push_json: Value = serde_json::from_slice(&push_out.stdout).expect("push --json parses");
     let pushed = push_json["pushed"]
         .as_array()
         .expect("pushed array in push --json");
@@ -337,8 +342,7 @@ async fn dual_slot_send_falls_back_to_federation_on_local_failure() {
     );
     let push_out = wire(&alice, &["push", "--json"]);
     assert!(push_out.status.success(), "alice push failed");
-    let push_json: Value =
-        serde_json::from_slice(&push_out.stdout).expect("push --json parses");
+    let push_json: Value = serde_json::from_slice(&push_out.stdout).expect("push --json parses");
     let pushed = push_json["pushed"]
         .as_array()
         .expect("pushed array in push --json");
@@ -417,22 +421,26 @@ async fn dual_slot_back_compat_v0_5_16_peer_routes_via_federation() {
     // top-level fields are populated and endpoints[] is absent — both
     // are valid back-compat shapes for routing.
     if let Some(eps) = bob_eps {
-        assert_eq!(eps.len(), 1, "bob should have 1 endpoint (federation only): {eps:?}");
+        assert_eq!(
+            eps.len(),
+            1,
+            "bob should have 1 endpoint (federation only): {eps:?}"
+        );
         assert_eq!(eps[0]["scope"], "federation");
     }
 
     assert!(
-        wire(&alice, &["send", "bob", "claim", "back-compat test", "--json"])
-            .status
-            .success()
+        wire(
+            &alice,
+            &["send", "bob", "claim", "back-compat test", "--json"]
+        )
+        .status
+        .success()
     );
     let push_out = wire(&alice, &["push", "--json"]);
     assert!(push_out.status.success());
-    let push_json: Value =
-        serde_json::from_slice(&push_out.stdout).expect("push --json parses");
-    let pushed = push_json["pushed"]
-        .as_array()
-        .expect("pushed array");
+    let push_json: Value = serde_json::from_slice(&push_out.stdout).expect("push --json parses");
+    let pushed = push_json["pushed"].as_array().expect("pushed array");
     assert_eq!(pushed.len(), 1);
     assert_eq!(
         pushed[0]["scope"], "federation",

@@ -281,6 +281,7 @@ where
     // alive for the lifetime of the transaction.
     let lock_file = fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
@@ -465,11 +466,7 @@ mod tests {
         // passes the FQDN form (`bob@relay.example`), the file MUST
         // still land at `bob.jsonl` so `wire push` enumerates it.
         with_temp_home(|| {
-            let path_fqdn = append_outbox_record(
-                "bob@wireup.net",
-                b"{\"kind\":1100}",
-            )
-            .unwrap();
+            let path_fqdn = append_outbox_record("bob@wireup.net", b"{\"kind\":1100}").unwrap();
             let path_bare = append_outbox_record("bob", b"{\"kind\":1100}").unwrap();
             // Both calls must land in the SAME file — the bare handle one.
             assert_eq!(path_fqdn, path_bare, "FQDN form should normalize to bare");

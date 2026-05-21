@@ -101,10 +101,7 @@ impl Endpoint {
 /// Back-compat: peers stored by v0.5.16 or earlier have only the
 /// top-level `relay_url`/`slot_id`/`slot_token`; this falls back to
 /// synthesizing a single federation `Endpoint` from those fields.
-pub fn peer_endpoints_in_priority_order(
-    relay_state: &Value,
-    peer_handle: &str,
-) -> Vec<Endpoint> {
+pub fn peer_endpoints_in_priority_order(relay_state: &Value, peer_handle: &str) -> Vec<Endpoint> {
     let our_local_relay_url = relay_state
         .get("self")
         .and_then(|s| s.get("endpoints"))
@@ -117,10 +114,7 @@ pub fn peer_endpoints_in_priority_order(
                 .map(str::to_string)
         });
 
-    let peer = match relay_state
-        .get("peers")
-        .and_then(|p| p.get(peer_handle))
-    {
+    let peer = match relay_state.get("peers").and_then(|p| p.get(peer_handle)) {
         Some(p) => p,
         None => return Vec::new(),
     };
@@ -141,10 +135,7 @@ pub fn peer_endpoints_in_priority_order(
     if all.is_empty() {
         let relay_url = peer.get("relay_url").and_then(Value::as_str).unwrap_or("");
         let slot_id = peer.get("slot_id").and_then(Value::as_str).unwrap_or("");
-        let slot_token = peer
-            .get("slot_token")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let slot_token = peer.get("slot_token").and_then(Value::as_str).unwrap_or("");
         if !relay_url.is_empty() && !slot_id.is_empty() && !slot_token.is_empty() {
             all.push(Endpoint::federation(
                 relay_url.to_string(),
@@ -197,7 +188,10 @@ pub fn self_endpoints(relay_state: &Value) -> Vec<Endpoint> {
             .get("relay_url")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let slot_id = self_state.get("slot_id").and_then(Value::as_str).unwrap_or("");
+        let slot_id = self_state
+            .get("slot_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let slot_token = self_state
             .get("slot_token")
             .and_then(Value::as_str)
@@ -241,10 +235,7 @@ pub fn pin_peer_endpoints(
         entry.insert("relay_url".into(), Value::String(f.relay_url.clone()));
         entry.insert("slot_id".into(), Value::String(f.slot_id.clone()));
         entry.insert("slot_token".into(), Value::String(f.slot_token.clone()));
-    } else if let Some(loc) = endpoints
-        .iter()
-        .find(|e| e.scope == EndpointScope::Local)
-    {
+    } else if let Some(loc) = endpoints.iter().find(|e| e.scope == EndpointScope::Local) {
         // No federation endpoint? Use the local one as the legacy field
         // values. This case is unusual (peer would be unreachable from
         // other machines), but keeps the schema invariant intact.
@@ -344,18 +335,18 @@ mod tests {
         });
         // Our local is :8771, peer's local is :9999 — can't route there.
         let eps = peer_endpoints_in_priority_order(&state, "alice");
-        assert_eq!(eps.len(), 0, "different local relays cannot reach each other");
+        assert_eq!(
+            eps.len(),
+            0,
+            "different local relays cannot reach each other"
+        );
     }
 
     #[test]
     fn pin_peer_endpoints_preserves_legacy_top_level_fields() {
         let mut state = json!({"peers": {}});
         let endpoints = vec![
-            Endpoint::federation(
-                "https://wireup.net".into(),
-                "abc".into(),
-                "tok".into(),
-            ),
+            Endpoint::federation("https://wireup.net".into(), "abc".into(), "tok".into()),
             Endpoint::local(
                 "http://127.0.0.1:8771".into(),
                 "loop".into(),

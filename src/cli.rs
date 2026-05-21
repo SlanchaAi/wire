@@ -1135,7 +1135,13 @@ pub fn run() -> Result<()> {
             include_handshake,
             interval_ms,
             replay,
-        } => cmd_monitor(peer.as_deref(), json, include_handshake, interval_ms, replay),
+        } => cmd_monitor(
+            peer.as_deref(),
+            json,
+            include_handshake,
+            interval_ms,
+            replay,
+        ),
         Command::Verify { path, json } => cmd_verify(&path, json),
         Command::Responder { command } => match command {
             ResponderCommand::Set {
@@ -1265,11 +1271,7 @@ pub fn run() -> Result<()> {
             local_sister,
             json,
         } => cmd_add(&handle, relay.as_deref(), local_sister, json),
-        Command::Up {
-            handle,
-            name,
-            json,
-        } => cmd_up(&handle, name.as_deref(), json),
+        Command::Up { handle, name, json } => cmd_up(&handle, name.as_deref(), json),
         Command::Doctor {
             json,
             recent_rejections,
@@ -1283,13 +1285,7 @@ pub fn run() -> Result<()> {
             public_url,
             hidden,
             json,
-        } => cmd_claim(
-            &nick,
-            relay.as_deref(),
-            public_url.as_deref(),
-            hidden,
-            json,
-        ),
+        } => cmd_claim(&nick, relay.as_deref(), public_url.as_deref(), hidden, json),
         Command::Profile { action } => cmd_profile(action),
         Command::Setup { apply } => cmd_setup(apply),
         Command::Reactor {
@@ -1446,7 +1442,8 @@ fn cmd_status(as_json: bool) -> Result<()> {
             .unwrap_or_else(|| json!([]));
 
         let trust = config::read_trust()?;
-        let relay_state_for_tier = config::read_relay_state().unwrap_or_else(|_| json!({"peers": {}}));
+        let relay_state_for_tier =
+            config::read_relay_state().unwrap_or_else(|_| json!({"peers": {}}));
         let mut peers = Vec::new();
         if let Some(agents) = trust.get("agents").and_then(Value::as_object) {
             for (peer_handle, _agent) in agents {
@@ -2352,14 +2349,10 @@ fn cmd_monitor(
     replay: usize,
 ) -> Result<()> {
     let inbox_dir = config::inbox_dir()?;
-    if !inbox_dir.exists() {
-        if !as_json {
-            eprintln!(
-                "wire monitor: inbox dir {inbox_dir:?} missing — has the daemon ever run?"
-            );
-        }
-        // Still proceed — InboxWatcher::from_dir_head handles missing dir.
+    if !inbox_dir.exists() && !as_json {
+        eprintln!("wire monitor: inbox dir {inbox_dir:?} missing — has the daemon ever run?");
     }
+    // Still proceed — InboxWatcher::from_dir_head handles missing dir.
 
     // Optional replay — read existing files and emit the last `replay` events
     // (post-filter) before going live. Useful when the harness restarts and
@@ -2375,10 +2368,10 @@ fn cmd_monitor(
                 Some(s) => s.to_string(),
                 None => continue,
             };
-            if let Some(filter) = peer_filter {
-                if peer != filter {
-                    continue;
-                }
+            if let Some(filter) = peer_filter
+                && peer != filter
+            {
+                continue;
             }
             let body = std::fs::read_to_string(&path).unwrap_or_default();
             for line in body.lines() {
@@ -2391,9 +2384,7 @@ fn cmd_monitor(
                     Err(_) => continue,
                 };
                 let ev = crate::inbox_watch::InboxEvent::from_signed(
-                    &peer,
-                    signed,
-                    /* verified */ true,
+                    &peer, signed, /* verified */ true,
                 );
                 if !include_handshake && monitor_is_noise_kind(&ev.kind) {
                     continue;
@@ -2421,10 +2412,10 @@ fn cmd_monitor(
         let events = w.poll()?;
         let mut wrote = false;
         for ev in events {
-            if let Some(filter) = peer_filter {
-                if ev.peer != filter {
-                    continue;
-                }
+            if let Some(filter) = peer_filter
+                && ev.peer != filter
+            {
+                continue;
             }
             if !include_handshake && monitor_is_noise_kind(&ev.kind) {
                 continue;
@@ -2577,7 +2568,10 @@ mod monitor_tests {
         assert!(line.contains("real v8 train"));
         // Short event id (first 12 chars).
         assert!(line.contains("abcd12345678"));
-        assert!(!line.contains("abcd1234567890ef"), "should truncate full id");
+        assert!(
+            !line.contains("abcd1234567890ef"),
+            "should truncate full id"
+        );
         // RFC3339-ish second precision.
         assert!(line.contains("2026-05-15T23:14:07"));
     }
@@ -2943,10 +2937,7 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
             // Unreachable peer (no federation endpoint AND our local
             // relay doesn't match the peer's). Skip with a loud reason
             // rather than silently dropping events.
-            for line in std::fs::read_to_string(&outbox)
-                .unwrap_or_default()
-                .lines()
-            {
+            for line in std::fs::read_to_string(&outbox).unwrap_or_default().lines() {
                 let event: Value = match serde_json::from_str(line) {
                     Ok(v) => v,
                     Err(_) => continue,
@@ -3006,8 +2997,7 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
                         // try the next endpoint silently (operator sees
                         // the federation success). If every endpoint
                         // fails, the last reason is what gets reported.
-                        last_err_reason =
-                            Some(crate::relay_client::format_transport_error(&e));
+                        last_err_reason = Some(crate::relay_client::format_transport_error(&e));
                     }
                 }
             }
@@ -3579,9 +3569,8 @@ fn run_sync_push() -> Result<Value> {
                     // errors aren't hidden behind the topmost-context URL string.
                     // Issue #6 highest-impact silent-fail fix.
                     let reason = crate::relay_client::format_transport_error(&e);
-                    skipped.push(
-                        json!({"peer": peer_handle, "event_id": event_id, "reason": reason}),
-                    );
+                    skipped
+                        .push(json!({"peer": peer_handle, "event_id": event_id, "reason": reason}));
                 }
             }
         }
@@ -4792,13 +4781,11 @@ fn cmd_add(
             parsed.domain
         );
         eprintln!(
-            "  This is NOT `wireup.net` (the default), NOT your own relay (`{}`), "
-            ,
+            "  This is NOT `wireup.net` (the default), NOT your own relay (`{}`), ",
             host_of_url(&our_relay)
         );
         eprintln!(
-            "  and not on the known-good list. If you meant `{}@wireup.net`, "
-            ,
+            "  and not on the known-good list. If you meant `{}@wireup.net`, ",
             parsed.nick
         );
         eprintln!(
@@ -5050,9 +5037,7 @@ fn cmd_pair_list_inbound(as_json: bool) -> Result<()> {
             p.peer_handle, p.peer_relay_url, p.received_at, p.peer_did,
         );
     }
-    println!(
-        "→ accept with `wire pair-accept <peer>`; refuse with `wire pair-reject <peer>`."
-    );
+    println!("→ accept with `wire pair-accept <peer>`; refuse with `wire pair-reject <peer>`.");
     Ok(())
 }
 
@@ -5074,7 +5059,9 @@ fn cmd_pair_reject(peer_nick: &str, as_json: bool) -> Result<()> {
             }))?
         );
     } else if existed.is_some() {
-        println!("→ rejected pending pair from {nick}\n→ pending-inbound record deleted; no ack sent.");
+        println!(
+            "→ rejected pending pair from {nick}\n→ pending-inbound record deleted; no ack sent."
+        );
     } else {
         println!("no pending pair from {nick} — nothing to reject");
     }
@@ -5133,9 +5120,7 @@ fn cmd_mesh_route(
     }
     let strategy = strategy.to_ascii_lowercase();
     if !matches!(strategy.as_str(), "round-robin" | "first" | "random") {
-        bail!(
-            "unknown strategy `{strategy}` — use round-robin | first | random"
-        );
+        bail!("unknown strategy `{strategy}` — use round-robin | first | random");
     }
 
     // Our pinned-peer set: only these handles are addressable. mesh-route
@@ -5343,9 +5328,7 @@ fn mesh_route_cursor_path() -> Result<std::path::PathBuf> {
     Ok(config::state_dir()?.join("mesh-route-cursor.json"))
 }
 
-fn read_mesh_route_cursors(
-    path: &std::path::Path,
-) -> std::collections::BTreeMap<String, String> {
+fn read_mesh_route_cursors(path: &std::path::Path) -> std::collections::BTreeMap<String, String> {
     std::fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
@@ -5519,9 +5502,7 @@ fn validate_role_tag(role: &str) -> Result<()> {
     }
     for c in role.chars() {
         if !(c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-            bail!(
-                "role contains illegal char {c:?} (allowed: A-Z a-z 0-9 - _)"
-            );
+            bail!("role contains illegal char {c:?} (allowed: A-Z a-z 0-9 - _)");
         }
     }
     Ok(())
@@ -5773,9 +5754,7 @@ fn cmd_mesh_broadcast(
         return Ok(());
     }
 
-    println!(
-        "wire mesh broadcast: scope={scope_str} → {target_count} pinned peer(s)"
-    );
+    println!("wire mesh broadcast: scope={scope_str} → {target_count} pinned peer(s)");
     for r in &results {
         let peer = r["peer"].as_str().unwrap_or("?");
         let delivered = r["delivered"].as_bool().unwrap_or(false);
@@ -5845,7 +5824,9 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
             federation_relay,
             json,
         } => cmd_session_pair_all_local(settle_secs, &federation_relay, json),
-        SessionCommand::MeshStatus { stale_secs, json } => cmd_session_mesh_status(stale_secs, json),
+        SessionCommand::MeshStatus { stale_secs, json } => {
+            cmd_session_mesh_status(stale_secs, json)
+        }
         SessionCommand::Env { name, json } => cmd_session_env(name.as_deref(), json),
         SessionCommand::Current { json } => cmd_session_current(json),
         SessionCommand::Destroy { name, force, json } => cmd_session_destroy(&name, force, json),
@@ -5936,10 +5917,8 @@ fn cmd_session_new(
         let mut effective = name.clone();
         loop {
             claim_attempt += 1;
-            let status = run_wire_with_home(
-                &session_home,
-                &["claim", &effective, "--relay", relay],
-            )?;
+            let status =
+                run_wire_with_home(&session_home, &["claim", &effective, "--relay", relay])?;
             if status.success() {
                 break;
             }
@@ -5987,10 +5966,7 @@ fn cmd_session_new(
             // unreachable, the session would be unreachable from
             // anywhere — surface that loudly instead of leaving an
             // orphaned session dir.
-            let relay_state_path = session_home
-                .join("config")
-                .join("wire")
-                .join("relay.json");
+            let relay_state_path = session_home.join("config").join("wire").join("relay.json");
             let state: Value = std::fs::read(&relay_state_path)
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok())
@@ -6087,28 +6063,23 @@ fn try_allocate_local_slot(
     // federation-only despite the "local slot allocated" stderr line.
     // Caught by deploying v0.5.19 on the dev laptop and inspecting the
     // session's relay.json — it had only the federation endpoint.
-    let state_path = session_home
-        .join("config")
-        .join("wire")
-        .join("relay.json");
+    let state_path = session_home.join("config").join("wire").join("relay.json");
     let mut state: serde_json::Value = std::fs::read(&state_path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_else(|| serde_json::json!({}));
     // Read the existing federation self info (already written by
     // `wire init` + `wire bind-relay` path during session bootstrap).
-    let fed_endpoint = state
-        .get("self")
-        .and_then(|s| {
-            let url = s.get("relay_url").and_then(serde_json::Value::as_str)?;
-            let slot_id = s.get("slot_id").and_then(serde_json::Value::as_str)?;
-            let slot_token = s.get("slot_token").and_then(serde_json::Value::as_str)?;
-            Some(crate::endpoints::Endpoint::federation(
-                url.to_string(),
-                slot_id.to_string(),
-                slot_token.to_string(),
-            ))
-        });
+    let fed_endpoint = state.get("self").and_then(|s| {
+        let url = s.get("relay_url").and_then(serde_json::Value::as_str)?;
+        let slot_id = s.get("slot_id").and_then(serde_json::Value::as_str)?;
+        let slot_token = s.get("slot_token").and_then(serde_json::Value::as_str)?;
+        Some(crate::endpoints::Endpoint::federation(
+            url.to_string(),
+            slot_id.to_string(),
+            slot_token.to_string(),
+        ))
+    });
 
     let local_endpoint = crate::endpoints::Endpoint::local(
         local_relay.trim_end_matches('/').to_string(),
@@ -6152,7 +6123,10 @@ fn try_allocate_local_slot(
     if let Some(obj) = self_obj.as_object_mut() {
         obj.insert("relay_url".into(), serde_json::Value::String(legacy_relay));
         obj.insert("slot_id".into(), serde_json::Value::String(legacy_slot_id));
-        obj.insert("slot_token".into(), serde_json::Value::String(legacy_slot_token));
+        obj.insert(
+            "slot_token".into(),
+            serde_json::Value::String(legacy_slot_token),
+        );
         obj.insert(
             "endpoints".into(),
             serde_json::to_value(&endpoints).unwrap_or(serde_json::Value::Null),
@@ -6179,7 +6153,10 @@ fn render_session_info(
     session_home: &std::path::Path,
     cwd: &std::path::Path,
 ) -> Result<serde_json::Value> {
-    let card_path = session_home.join("config").join("wire").join("agent-card.json");
+    let card_path = session_home
+        .join("config")
+        .join("wire")
+        .join("agent-card.json");
     let (did, handle) = if card_path.exists() {
         let card: Value = serde_json::from_slice(&std::fs::read(&card_path)?)?;
         let did = card
@@ -6191,9 +6168,7 @@ fn render_session_info(
             .get("handle")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .unwrap_or_else(|| {
-                crate::agent_card::display_handle_from_did(&did).to_string()
-            });
+            .unwrap_or_else(|| crate::agent_card::display_handle_from_did(&did).to_string());
         (did, handle)
     } else {
         (String::new(), String::new())
@@ -6208,11 +6183,7 @@ fn render_session_info(
     }))
 }
 
-fn emit_session_new_result(
-    info: &serde_json::Value,
-    status: &str,
-    as_json: bool,
-) -> Result<()> {
+fn emit_session_new_result(info: &serde_json::Value, status: &str, as_json: bool) -> Result<()> {
     if as_json {
         let mut obj = info.clone();
         obj["status"] = json!(status);
@@ -6252,18 +6223,14 @@ fn run_wire_with_home(
 fn ensure_session_daemon(session_home: &std::path::Path) -> Result<()> {
     // Check if a daemon is already alive in this session's WIRE_HOME.
     // If so, no-op (let the existing process keep running).
-    let pidfile = session_home
-        .join("state")
-        .join("wire")
-        .join("daemon.pid");
+    let pidfile = session_home.join("state").join("wire").join("daemon.pid");
     if pidfile.exists() {
         let bytes = std::fs::read(&pidfile).unwrap_or_default();
-        let pid: Option<u32> =
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                v.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32)
-            } else {
-                String::from_utf8_lossy(&bytes).trim().parse::<u32>().ok()
-            };
+        let pid: Option<u32> = if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            v.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32)
+        } else {
+            String::from_utf8_lossy(&bytes).trim().parse::<u32>().ok()
+        };
         if let Some(p) = pid {
             let alive = {
                 #[cfg(target_os = "linux")]
@@ -6320,10 +6287,7 @@ fn cmd_session_list(as_json: bool) -> Result<()> {
         println!("no sessions on this machine. `wire session new` to create one.");
         return Ok(());
     }
-    println!(
-        "{:<24} {:<24} {:<10} CWD",
-        "NAME", "HANDLE", "DAEMON"
-    );
+    println!("{:<24} {:<24} {:<10} CWD", "NAME", "HANDLE", "DAEMON");
     for s in items {
         println!(
             "{:<24} {:<24} {:<10} {}",
@@ -6376,10 +6340,7 @@ fn cmd_session_list_local(as_json: bool) -> Result<()> {
         for relay_url in keys {
             let group = &listing.local[relay_url];
             println!("LOCAL RELAY: {relay_url}");
-            println!(
-                "  {:<24} {:<32} {:<10} CWD",
-                "NAME", "HANDLE", "DAEMON"
-            );
+            println!("  {:<24} {:<32} {:<10} CWD", "NAME", "HANDLE", "DAEMON");
             for s in group {
                 println!(
                     "  {:<24} {:<32} {:<10} {}",
@@ -6652,9 +6613,8 @@ fn cmd_session_mesh_status(stale_secs: u64, as_json: bool) -> Result<()> {
     }
     let mut sstates: Vec<SessionState> = Vec::with_capacity(sessions.len());
     for s in sessions {
-        let relay_state = val_session_relay_state(&s.home_dir).unwrap_or_else(|| {
-            json!({"self": Value::Null, "peers": {}})
-        });
+        let relay_state = val_session_relay_state(&s.home_dir)
+            .unwrap_or_else(|| json!({"self": Value::Null, "peers": {}}));
         let local_relay_url = s.local_endpoints.first().map(|e| e.relay_url.clone());
         sstates.push(SessionState {
             view: s,
@@ -6887,7 +6847,9 @@ fn probe_directed_edge(from_state: &Value, to_name: &str, now: u64) -> DirectedE
         .to_string(),
     );
     let client = crate::relay_client::RelayClient::new(&ep.relay_url);
-    let (count, last) = client.slot_state(&ep.slot_id, &ep.slot_token).unwrap_or((0, None));
+    let (count, last) = client
+        .slot_state(&ep.slot_id, &ep.slot_token)
+        .unwrap_or((0, None));
     let silent = last.map(|t| now.saturating_sub(t));
     DirectedEdge {
         pinned: true,
@@ -6981,19 +6943,16 @@ fn drive_bilateral_pair(
     std::thread::sleep(Duration::from_secs(settle_secs));
 
     // 4. B pulls pair_drop → 5. B pair-accept (pins A) → 6. B push pair_drop_ack
-    run(b_home, &["pull", "--json"])
-        .with_context(|| format!("step 4/8: {b_name} `wire pull`"))?;
+    run(b_home, &["pull", "--json"]).with_context(|| format!("step 4/8: {b_name} `wire pull`"))?;
     run(b_home, &["pair-accept", a_name, "--json"])
         .with_context(|| format!("step 5/8: {b_name} `wire pair-accept {a_name}`"))?;
-    run(b_home, &["push", "--json"])
-        .with_context(|| format!("step 6/8: {b_name} `wire push`"))?;
+    run(b_home, &["push", "--json"]).with_context(|| format!("step 6/8: {b_name} `wire push`"))?;
 
     // 7. settle so ack reaches A's slot
     std::thread::sleep(Duration::from_secs(settle_secs));
 
     // 8. A pulls ack (pins B with the slot_token + endpoints[] from the ack)
-    run(a_home, &["pull", "--json"])
-        .with_context(|| format!("step 8/8: {a_name} `wire pull`"))?;
+    run(a_home, &["pull", "--json"]).with_context(|| format!("step 8/8: {a_name} `wire pull`"))?;
 
     Ok(())
 }
@@ -7069,17 +7028,13 @@ fn cmd_session_destroy(name_arg: &str, force: bool, as_json: bool) -> Result<()>
     }
 
     // Kill the session-local daemon if alive.
-    let pidfile = session_home
-        .join("state")
-        .join("wire")
-        .join("daemon.pid");
+    let pidfile = session_home.join("state").join("wire").join("daemon.pid");
     if let Ok(bytes) = std::fs::read(&pidfile) {
-        let pid: Option<u32> =
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                v.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32)
-            } else {
-                String::from_utf8_lossy(&bytes).trim().parse::<u32>().ok()
-            };
+        let pid: Option<u32> = if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            v.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32)
+        } else {
+            String::from_utf8_lossy(&bytes).trim().parse::<u32>().ok()
+        };
         if let Some(p) = pid {
             let _ = std::process::Command::new("kill")
                 .args(["-TERM", &p.to_string()])
@@ -7147,9 +7102,7 @@ fn cmd_diag(action: DiagAction) -> Result<()> {
         }
         DiagAction::Status { json } => {
             let enabled = crate::diag::is_enabled();
-            let size = std::fs::metadata(&log_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let size = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
             if json {
                 println!(
                     "{}",
@@ -7240,24 +7193,67 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
     let cli_version = env!("CARGO_PKG_VERSION").to_string();
 
     if check_only {
+        // v0.6.8: also surface session-level state + PATH dupes in --check.
+        let sessions_with_daemons: Vec<String> = crate::session::list_sessions()
+            .unwrap_or_default()
+            .iter()
+            .filter(|s| s.daemon_running)
+            .map(|s| s.name.clone())
+            .collect();
+        let mut path_dupes: Vec<String> = Vec::new();
+        if let Ok(path) = std::env::var("PATH") {
+            let mut seen: std::collections::HashSet<std::path::PathBuf> =
+                std::collections::HashSet::new();
+            for dir in path.split(':') {
+                let candidate = std::path::PathBuf::from(dir).join("wire");
+                if candidate.exists() {
+                    let canon = candidate.canonicalize().unwrap_or(candidate);
+                    if seen.insert(canon.clone()) {
+                        path_dupes.push(canon.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
         let report = json!({
             "running_pids": running_pids,
             "pidfile_version": recorded_version,
             "cli_version": cli_version,
             "would_kill": running_pids,
+            "session_daemons_running": sessions_with_daemons,
+            "path_binaries": path_dupes,
+            "path_duplicate_warning": path_dupes.len() > 1,
         });
         if as_json {
             println!("{}", serde_json::to_string(&report)?);
         } else {
             println!("wire upgrade --check");
             println!("  cli version:      {cli_version}");
-            println!("  pidfile version:  {}", recorded_version.as_deref().unwrap_or("(missing)"));
+            println!(
+                "  pidfile version:  {}",
+                recorded_version.as_deref().unwrap_or("(missing)")
+            );
             if running_pids.is_empty() {
                 println!("  running daemons:  none");
             } else {
                 let pids: Vec<String> = running_pids.iter().map(|p| p.to_string()).collect();
                 println!("  running daemons:  pids {}", pids.join(", "));
                 println!("  would kill all + spawn fresh");
+            }
+            if !sessions_with_daemons.is_empty() {
+                println!(
+                    "  session daemons:  {} (would respawn under new binary)",
+                    sessions_with_daemons.join(", ")
+                );
+            }
+            if path_dupes.len() > 1 {
+                println!(
+                    "  PATH warning:     {} distinct `wire` binaries on PATH:",
+                    path_dupes.len()
+                );
+                for b in &path_dupes {
+                    println!("                      {b}");
+                }
+                println!("                    operators should remove the stale ones");
             }
         }
         return Ok(());
@@ -7305,9 +7301,81 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         let _ = std::fs::remove_file(&pidfile);
     }
 
+    // 4b. v0.6.8 stale-cleanup: walk every session on this machine,
+    // wipe each session's stale pidfile, and remember which ones had a
+    // daemon running so we can respawn them under the new binary. Same
+    // process kill the default home got in step 3 — the pgrep-by-name
+    // pass above already SIGTERM'd anything calling itself `wire daemon`
+    // including session daemons, so this just cleans up the pidfile
+    // tombstones the kills leave behind.
+    let mut session_daemons_to_respawn: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(sessions) = crate::session::list_sessions() {
+        for s in &sessions {
+            let session_pidfile = s.home_dir.join("state").join("wire").join("daemon.pid");
+            if session_pidfile.exists() {
+                // Anything pgrep found in step 1 has already been
+                // SIGTERM'd by step 3 — but session daemons may have
+                // unique pid records pointing at processes that are
+                // now dead. Wipe and remember to respawn.
+                let _ = std::fs::remove_file(&session_pidfile);
+                if s.daemon_running {
+                    session_daemons_to_respawn.push(s.home_dir.clone());
+                }
+            }
+        }
+    }
+
+    // 4c. v0.6.8 PATH duplicate-binary detection. If `wire` resolves to
+    // multiple distinct files on $PATH, surface the conflict — operators
+    // get bitten when an old binary at /usr/local/bin shadows a fresh
+    // ~/.local/bin install (or vice versa). Warning only; no auto-fix.
+    let mut path_dupes: Vec<String> = Vec::new();
+    if let Ok(path) = std::env::var("PATH") {
+        let mut seen: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
+        for dir in path.split(':') {
+            let candidate = std::path::PathBuf::from(dir).join("wire");
+            if candidate.exists() {
+                let canon = candidate.canonicalize().unwrap_or(candidate);
+                if seen.insert(canon.clone()) {
+                    path_dupes.push(canon.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    let path_warning = if path_dupes.len() > 1 {
+        Some(format!(
+            "WARN: {} distinct `wire` binaries on PATH — old versions can shadow the fresh install:\n  {}",
+            path_dupes.len(),
+            path_dupes.join("\n  ")
+        ))
+    } else {
+        None
+    };
+
     // 5. Spawn fresh daemon via ensure_up — atomically waits for
     //    process_alive + writes the versioned pidfile.
     let spawned = crate::ensure_up::ensure_daemon_running()?;
+
+    // 5b. v0.6.8: respawn each session daemon under the new binary.
+    // Reuses `ensure_session_daemon` — same code path `wire session new`
+    // takes for the initial spawn (writes versioned pidfile, opens log,
+    // detaches). Best effort: failure of one session's respawn doesn't
+    // abort the upgrade for the others.
+    let mut session_respawns: Vec<Value> = Vec::new();
+    for home in &session_daemons_to_respawn {
+        match ensure_session_daemon(home) {
+            Ok(()) => session_respawns.push(json!({
+                "session_home": home.to_string_lossy(),
+                "status": "respawned",
+            })),
+            Err(e) => session_respawns.push(json!({
+                "session_home": home.to_string_lossy(),
+                "status": "failed",
+                "error": format!("{e:#}"),
+            })),
+        }
+    }
 
     let new_record = crate::ensure_up::read_pid_record("daemon");
     let new_pid = new_record.pid();
@@ -7326,24 +7394,53 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
                 "new_pid": new_pid,
                 "new_version": new_version,
                 "cli_version": cli_version,
+                "session_respawns": session_respawns,
+                "path_binaries": path_dupes,
+                "path_warning": path_warning,
             }))?
         );
     } else {
         if killed.is_empty() {
             println!("wire upgrade: no stale daemons running");
         } else {
-            println!("wire upgrade: killed {} daemon(s) (pids {})",
+            println!(
+                "wire upgrade: killed {} daemon(s) (pids {})",
                 killed.len(),
-                killed.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "));
+                killed
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
         if spawned {
             println!(
                 "wire upgrade: spawned fresh daemon (pid {} v{})",
-                new_pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string()),
+                new_pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
                 new_version.as_deref().unwrap_or(&cli_version),
             );
         } else {
             println!("wire upgrade: daemon was already running on current binary");
+        }
+        if !session_respawns.is_empty() {
+            println!(
+                "wire upgrade: refreshed {} session daemon(s):",
+                session_respawns.len()
+            );
+            for r in &session_respawns {
+                let h = r["session_home"].as_str().unwrap_or("?");
+                let s = r["status"].as_str().unwrap_or("?");
+                let label = std::path::Path::new(h)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| h.to_string());
+                println!("  {label:<24} {s}");
+            }
+        }
+        if let Some(msg) = &path_warning {
+            eprintln!("wire upgrade: {msg}");
         }
     }
     Ok(())
@@ -7416,13 +7513,13 @@ impl DoctorCheck {
 /// blocks, P0.2 pair-rejection logs, P0.4 daemon version mismatch, etc.)
 /// so operators don't have to know where each lives.
 fn cmd_doctor(as_json: bool, recent_rejections: usize) -> Result<()> {
-    let mut checks: Vec<DoctorCheck> = Vec::new();
-
-    checks.push(check_daemon_health());
-    checks.push(check_daemon_pid_consistency());
-    checks.push(check_relay_reachable());
-    checks.push(check_pair_rejections(recent_rejections));
-    checks.push(check_cursor_progress());
+    let checks: Vec<DoctorCheck> = vec![
+        check_daemon_health(),
+        check_daemon_pid_consistency(),
+        check_relay_reachable(),
+        check_pair_rejections(recent_rejections),
+        check_cursor_progress(),
+    ];
 
     let fails = checks.iter().filter(|c| c.status == "FAIL").count();
     let warns = checks.iter().filter(|c| c.status == "WARN").count();
@@ -7511,9 +7608,9 @@ fn check_daemon_health() -> DoctorCheck {
                 "{n} `wire daemon` processes running (pids: {}); pidfile claims pid {} but pgrep also sees orphan(s): {}. \
                  The orphans race the relay cursor — they advance past events your current binary can't process. \
                  (Issue #2 exact class.)",
-                fmt_pids(&pgrep_pids),
+                fmt_pids(pgrep_pids),
                 pidfile_pid.unwrap(),
-                fmt_pids(&orphan_pids),
+                fmt_pids(orphan_pids),
             ),
             "`wire upgrade` kills all orphans and spawns a fresh daemon with a clean pidfile",
         ),
@@ -7524,7 +7621,7 @@ fn check_daemon_health() -> DoctorCheck {
                 "{n} `wire daemon` process(es) running (pids: {}) but pidfile {} — \
                  every running daemon is an orphan, advancing the cursor without coordinating with the current CLI. \
                  (Issue #2 exact class: doctor previously PASSed this state while `wire status` said DOWN.)",
-                fmt_pids(&pgrep_pids),
+                fmt_pids(pgrep_pids),
                 match pidfile_pid {
                     Some(p) => format!("claims pid {p} which is dead"),
                     None => "is missing".to_string(),
@@ -7537,7 +7634,7 @@ fn check_daemon_health() -> DoctorCheck {
             "daemon",
             format!(
                 "{n} `wire daemon` processes running (pids: {}). Multiple daemons race the relay cursor.",
-                fmt_pids(&pgrep_pids)
+                fmt_pids(pgrep_pids)
             ),
             "kill all-but-one: `pkill -f \"wire daemon\"; wire daemon &`",
         ),
@@ -7619,10 +7716,7 @@ fn check_daemon_pid_consistency() -> DoctorCheck {
             }
             let cli_version = env!("CARGO_PKG_VERSION");
             if d.version != cli_version {
-                issues.push(format!(
-                    "version daemon={} cli={cli_version}",
-                    d.version
-                ));
+                issues.push(format!("version daemon={} cli={cli_version}", d.version));
             }
             if !std::path::Path::new(&d.bin_path).exists() {
                 issues.push(format!("bin_path {} missing on disk", d.bin_path));
@@ -7674,11 +7768,13 @@ fn check_daemon_pid_consistency() -> DoctorCheck {
 fn check_relay_reachable() -> DoctorCheck {
     let state = match config::read_relay_state() {
         Ok(s) => s,
-        Err(e) => return DoctorCheck::fail(
-            "relay",
-            format!("could not read relay state: {e}"),
-            "run `wire up <handle>@<relay>` to bootstrap",
-        ),
+        Err(e) => {
+            return DoctorCheck::fail(
+                "relay",
+                format!("could not read relay state: {e}"),
+                "run `wire up <handle>@<relay>` to bootstrap",
+            );
+        }
     };
     let url = state
         .get("self")
@@ -7709,11 +7805,13 @@ fn check_relay_reachable() -> DoctorCheck {
 fn check_pair_rejections(recent_n: usize) -> DoctorCheck {
     let path = match config::state_dir() {
         Ok(d) => d.join("pair-rejected.jsonl"),
-        Err(e) => return DoctorCheck::warn(
-            "pair_rejections",
-            format!("could not resolve state dir: {e}"),
-            "set WIRE_HOME or fix XDG_STATE_HOME",
-        ),
+        Err(e) => {
+            return DoctorCheck::warn(
+                "pair_rejections",
+                format!("could not resolve state dir: {e}"),
+                "set WIRE_HOME or fix XDG_STATE_HOME",
+            );
+        }
     };
     if !path.exists() {
         return DoctorCheck::pass(
@@ -7723,18 +7821,17 @@ fn check_pair_rejections(recent_n: usize) -> DoctorCheck {
     }
     let body = match std::fs::read_to_string(&path) {
         Ok(b) => b,
-        Err(e) => return DoctorCheck::warn(
-            "pair_rejections",
-            format!("could not read {path:?}: {e}"),
-            "check file permissions",
-        ),
+        Err(e) => {
+            return DoctorCheck::warn(
+                "pair_rejections",
+                format!("could not read {path:?}: {e}"),
+                "check file permissions",
+            );
+        }
     };
     let lines: Vec<&str> = body.lines().filter(|l| !l.is_empty()).collect();
     if lines.is_empty() {
-        return DoctorCheck::pass(
-            "pair_rejections",
-            "pair-rejected.jsonl present but empty",
-        );
+        return DoctorCheck::pass("pair_rejections", "pair-rejected.jsonl present but empty");
     }
     let total = lines.len();
     let recent: Vec<&str> = lines.iter().rev().take(recent_n).rev().copied().collect();
@@ -7765,11 +7862,13 @@ fn check_pair_rejections(recent_n: usize) -> DoctorCheck {
 fn check_cursor_progress() -> DoctorCheck {
     let state = match config::read_relay_state() {
         Ok(s) => s,
-        Err(e) => return DoctorCheck::warn(
-            "cursor",
-            format!("could not read relay state: {e}"),
-            "check ~/Library/Application Support/wire/relay.json",
-        ),
+        Err(e) => {
+            return DoctorCheck::warn(
+                "cursor",
+                format!("could not read relay state: {e}"),
+                "check ~/Library/Application Support/wire/relay.json",
+            );
+        }
     };
     let cursor = state
         .get("self")
@@ -7848,8 +7947,8 @@ mod doctor_tests {
 ///
 /// Argument parsing accepts:
 ///   - `<nick>@<relay-host>` — explicit relay
-///   - `<nick>`              — defaults to wireup.net (the configured public
-///                             relay)
+///   - `<nick>`              — defaults to wireup.net (the configured
+///     public relay)
 fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
     let (nick, relay_url) = match handle_arg.split_once('@') {
         Some((n, host)) => {
@@ -7860,7 +7959,10 @@ fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
             };
             (n.to_string(), url)
         }
-        None => (handle_arg.to_string(), crate::pair_invite::DEFAULT_RELAY.to_string()),
+        None => (
+            handle_arg.to_string(),
+            crate::pair_invite::DEFAULT_RELAY.to_string(),
+        ),
     };
 
     let mut report: Vec<(String, String)> = Vec::new();
@@ -7875,8 +7977,7 @@ fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
     if config::is_initialized()? {
         let card = config::read_agent_card()?;
         let existing_did = card.get("did").and_then(Value::as_str).unwrap_or("");
-        let existing_handle =
-            crate::agent_card::display_handle_from_did(existing_did).to_string();
+        let existing_handle = crate::agent_card::display_handle_from_did(existing_did).to_string();
         if existing_handle != nick {
             bail!(
                 "wire up: already initialized as {existing_handle:?} but you asked for {nick:?}. \
@@ -7888,7 +7989,10 @@ fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
         step("init", format!("already initialized as {existing_handle}"));
     } else {
         cmd_init(&nick, name, Some(&relay_url), /* as_json */ false)?;
-        step("init", format!("created identity {nick} bound to {relay_url}"));
+        step(
+            "init",
+            format!("created identity {nick} bound to {relay_url}"),
+        );
     }
 
     // 2. Ensure relay binding matches. cmd_init with --relay binds it; if
@@ -7905,7 +8009,9 @@ fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
         // Identity exists but never bound to a relay — bind now.
         // Fresh box (no pinned peers yet) — migrate_pinned irrelevant.
         // Pass `false` so the safety check kicks in if state was non-empty.
-        cmd_bind_relay(&relay_url, /* migrate_pinned */ false, /* as_json */ false)?;
+        cmd_bind_relay(
+            &relay_url, /* migrate_pinned */ false, /* as_json */ false,
+        )?;
         step("bind-relay", format!("bound to {relay_url}"));
     } else if bound_relay != relay_url {
         step(
@@ -7921,8 +8027,17 @@ fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
 
     // 3. Claim nick on the relay's handle directory. Idempotent — same-DID
     // re-claims are accepted by the relay.
-    match cmd_claim(&nick, Some(&relay_url), None, /* hidden */ false, /* as_json */ false) {
-        Ok(()) => step("claim", format!("{nick}@{} claimed", strip_proto(&relay_url))),
+    match cmd_claim(
+        &nick,
+        Some(&relay_url),
+        None,
+        /* hidden */ false,
+        /* as_json */ false,
+    ) {
+        Ok(()) => step(
+            "claim",
+            format!("{nick}@{} claimed", strip_proto(&relay_url)),
+        ),
         Err(e) => step(
             "claim",
             format!("WARNING: claim failed: {e}. You can retry `wire claim {nick}`."),
@@ -7940,10 +8055,10 @@ fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
     }
 
     // 5. Final summary — point operator at the next commands.
-    let summary = format!(
+    let summary =
         "ready. `wire pair <peer>@<relay>` to pair, `wire send <peer> \"<msg>\"` to send, \
          `wire monitor` to watch incoming events."
-    );
+            .to_string();
     step("ready", summary.clone());
 
     if as_json {
@@ -7993,7 +8108,12 @@ fn cmd_pair_megacommand(
     let peer_handle = parsed.nick.clone();
 
     eprintln!("wire pair: resolving {handle_arg}...");
-    cmd_add(handle_arg, relay_override, /* local_sister */ false, /* as_json */ false)?;
+    cmd_add(
+        handle_arg,
+        relay_override,
+        /* local_sister */ false,
+        /* as_json */ false,
+    )?;
 
     eprintln!(
         "wire pair: intro delivered. waiting up to {timeout_secs}s for {peer_handle} \
@@ -8031,7 +8151,11 @@ fn cmd_pair_megacommand(
                 .is_some();
             println!(
                 "wire pair: paired with {peer_handle}.\n  trust: {}  bilateral: yes (slot_token recorded)\n  next: `wire send {peer_handle} \"<msg>\"`",
-                if pinned_in_trust { "VERIFIED" } else { "MISSING (bug)" }
+                if pinned_in_trust {
+                    "VERIFIED"
+                } else {
+                    "MISSING (bug)"
+                }
             );
             return Ok(());
         }
@@ -8081,14 +8205,8 @@ fn cmd_claim(
     // (back-compat); Some(false) for `--hidden`. Relays older than
     // v0.5.19 ignore the field, so this is safe to always send.
     let discoverable = if hidden { Some(false) } else { None };
-    let resp = client.handle_claim_v2(
-        nick,
-        &slot_id,
-        &slot_token,
-        public_url,
-        &card,
-        discoverable,
-    )?;
+    let resp =
+        client.handle_claim_v2(nick, &slot_id, &slot_token, public_url, &card, discoverable)?;
 
     if as_json {
         println!(
