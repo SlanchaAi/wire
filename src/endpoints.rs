@@ -53,6 +53,14 @@ pub enum EndpointScope {
     Federation,
     /// Loopback-only relay (e.g. `http://127.0.0.1:8771`). Same-machine only.
     Local,
+    /// LAN-bound relay (e.g. `http://192.168.1.50:8771`). Reachable from
+    /// other machines on the same network without going through federation.
+    /// v0.7.0-alpha.9: third scope for noble-creek-on-paul-mac ↔
+    /// running-light-on-spark style across-the-room pairing without
+    /// wireup.net hop. Visible to anyone who fetches the agent-card —
+    /// opt-in per session (operator passes `--with-lan-relay <url>` at
+    /// `wire session new` time).
+    Lan,
 }
 
 /// One reachable address for a wire identity. Includes the bearer
@@ -85,6 +93,16 @@ impl Endpoint {
             slot_id,
             slot_token,
             scope: EndpointScope::Local,
+        }
+    }
+
+    /// v0.7.0-alpha.9: construct a LAN-scope endpoint.
+    pub fn lan(relay_url: String, slot_id: String, slot_token: String) -> Self {
+        Self {
+            relay_url,
+            slot_id,
+            slot_token,
+            scope: EndpointScope::Lan,
         }
     }
 }
@@ -145,19 +163,29 @@ pub fn peer_endpoints_in_priority_order(relay_state: &Value, peer_handle: &str) 
         }
     }
 
-    // Sort: local-with-matching-self-local first, then federation,
-    // then any local we can't reach (filtered out by predicate).
+    // Sort: local-loopback-with-matching-self-local first, then LAN
+    // (cross-machine same-network), then federation, then any local we
+    // can't reach (filtered out by predicate).
+    //
+    // v0.7.0-alpha.9: LAN endpoints sit between Local and Federation —
+    // they're slower than loopback IPC but faster than federation
+    // round-tripping through wireup.net, and they're not gated by an
+    // "our_local matches" check because cross-machine peers won't have
+    // an our-local that matches theirs by definition.
     let our_local = our_local_relay_url.clone();
     all.sort_by_key(|ep| match (ep.scope, &our_local) {
         (EndpointScope::Local, Some(our)) if &ep.relay_url == our => 0,
-        (EndpointScope::Federation, _) => 1,
-        _ => 2,
+        (EndpointScope::Lan, _) => 1,
+        (EndpointScope::Federation, _) => 2,
+        _ => 3,
     });
     // Drop unreachable locals (we have no local slot or our local relay
-    // doesn't match the peer's local relay_url).
+    // doesn't match the peer's local relay_url). LAN endpoints are kept
+    // — the daemon will probe; failure falls through to federation.
     all.retain(|ep| match (ep.scope, &our_local) {
         (EndpointScope::Local, None) => false,
         (EndpointScope::Local, Some(our)) => &ep.relay_url == our,
+        (EndpointScope::Lan, _) => true,
         (EndpointScope::Federation, _) => true,
     });
     all
@@ -218,6 +246,8 @@ pub fn pin_peer_endpoints(
     endpoints: &[Endpoint],
 ) -> Result<()> {
     // Pick the federation endpoint (if any) to fill the legacy fields.
+    // v0.7.0-alpha.9: when no federation present, prefer LAN over Local
+    // for the legacy fields — LAN is cross-machine-reachable.
     let fed = endpoints
         .iter()
         .find(|e| e.scope == EndpointScope::Federation);
@@ -235,10 +265,14 @@ pub fn pin_peer_endpoints(
         entry.insert("relay_url".into(), Value::String(f.relay_url.clone()));
         entry.insert("slot_id".into(), Value::String(f.slot_id.clone()));
         entry.insert("slot_token".into(), Value::String(f.slot_token.clone()));
+    } else if let Some(lan_ep) = endpoints.iter().find(|e| e.scope == EndpointScope::Lan) {
+        entry.insert("relay_url".into(), Value::String(lan_ep.relay_url.clone()));
+        entry.insert("slot_id".into(), Value::String(lan_ep.slot_id.clone()));
+        entry.insert("slot_token".into(), Value::String(lan_ep.slot_token.clone()));
     } else if let Some(loc) = endpoints.iter().find(|e| e.scope == EndpointScope::Local) {
-        // No federation endpoint? Use the local one as the legacy field
-        // values. This case is unusual (peer would be unreachable from
-        // other machines), but keeps the schema invariant intact.
+        // No federation, no LAN? Local is the only option. Unusual
+        // (peer would only be reachable from same loopback), but keeps
+        // schema invariant intact.
         entry.insert("relay_url".into(), Value::String(loc.relay_url.clone()));
         entry.insert("slot_id".into(), Value::String(loc.slot_id.clone()));
         entry.insert("slot_token".into(), Value::String(loc.slot_token.clone()));

@@ -806,6 +806,19 @@ pub enum SessionCommand {
         /// `wire relay-server --bind 127.0.0.1:8771 --local-only`.
         #[arg(long, default_value = "http://127.0.0.1:8771")]
         local_relay: String,
+        /// v0.7.0-alpha.9: also allocate a slot on a LAN-bound relay
+        /// (must be running e.g. via `wire relay-server --bind <LAN-IP>:8771`).
+        /// Lets other machines on the same network reach this session
+        /// directly without round-tripping the public federation relay
+        /// at https://wireup.net. LAN endpoint is published in the
+        /// agent-card; opt-in per session (default off).
+        #[arg(long)]
+        with_lan: bool,
+        /// v0.7.0-alpha.9: LAN-reachable relay URL (no auto-detect of
+        /// LAN IP — operator must type the address). Example:
+        /// `http://192.168.1.50:8771`. Required when `--with-lan` is set.
+        #[arg(long)]
+        lan_relay: Option<String>,
         /// Skip spawning the session-local daemon. Use when you want
         /// to drive sync explicitly from the agent or test rig.
         #[arg(long)]
@@ -3498,6 +3511,7 @@ fn endpoint_cursor_key(scope: crate::endpoints::EndpointScope) -> String {
     match scope {
         crate::endpoints::EndpointScope::Federation => "last_pulled_event_id".to_string(),
         crate::endpoints::EndpointScope::Local => "last_pulled_event_id_local".to_string(),
+        crate::endpoints::EndpointScope::Lan => "last_pulled_event_id_lan".to_string(),
     }
 }
 
@@ -5133,6 +5147,7 @@ fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<()> {
                 "event_id": event_id,
                 "delivered_via": match delivery_endpoint.scope {
                     crate::endpoints::EndpointScope::Local => "local",
+                    crate::endpoints::EndpointScope::Lan => "lan",
                     crate::endpoints::EndpointScope::Federation => "federation",
                 },
                 "status": "drop_sent",
@@ -5141,6 +5156,7 @@ fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<()> {
     } else {
         let scope = match delivery_endpoint.scope {
             crate::endpoints::EndpointScope::Local => "local",
+            crate::endpoints::EndpointScope::Lan => "lan",
             crate::endpoints::EndpointScope::Federation => "federation",
         };
         println!(
@@ -5721,6 +5737,7 @@ fn cmd_mesh_route(
                 via_scope = Some(
                     match ep.scope {
                         crate::endpoints::EndpointScope::Local => "local",
+                        crate::endpoints::EndpointScope::Lan => "lan",
                         crate::endpoints::EndpointScope::Federation => "federation",
                     }
                     .to_string(),
@@ -6132,6 +6149,7 @@ fn cmd_mesh_broadcast(
                             delivered_via = Some(
                                 match ep.scope {
                                     crate::endpoints::EndpointScope::Local => "local",
+                                    crate::endpoints::EndpointScope::Lan => "lan",
                                     crate::endpoints::EndpointScope::Federation => "federation",
                                 }
                                 .to_string(),
@@ -6237,6 +6255,8 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
             relay,
             with_local,
             local_relay,
+            with_lan,
+            lan_relay,
             no_daemon,
             local_only,
             json,
@@ -6245,6 +6265,8 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
             &relay,
             with_local,
             &local_relay,
+            with_lan,
+            lan_relay.as_deref(),
             no_daemon,
             local_only,
             json,
@@ -6279,6 +6301,8 @@ fn cmd_session_new(
     relay: &str,
     with_local: bool,
     local_relay: &str,
+    with_lan: bool,
+    lan_relay: Option<&str>,
     no_daemon: bool,
     local_only: bool,
     as_json: bool,
@@ -6286,6 +6310,10 @@ fn cmd_session_new(
     // v0.6.6: --local-only implies --with-local (a federation-free
     // session with no endpoints at all would be unaddressable).
     let with_local = with_local || local_only;
+    // v0.7.0-alpha.9: --with-lan requires --lan-relay <url>.
+    if with_lan && lan_relay.is_none() {
+        bail!("--with-lan requires --lan-relay <url> (e.g. http://192.168.1.50:8771)");
+    }
     let cwd = std::env::current_dir().with_context(|| "reading cwd")?;
     let mut registry = crate::session::read_registry().unwrap_or_default();
     let name = match name_arg {
@@ -6417,12 +6445,126 @@ fn cmd_session_new(
         }
     }
 
+    // v0.7.0-alpha.9: also allocate a LAN-bound slot if requested.
+    // Sits AFTER local because cmd_session_new's flow is "add endpoints
+    // alongside existing self.endpoints[]" — order independent post-init.
+    if with_lan
+        && let Some(lan_url) = lan_relay
+    {
+        try_allocate_lan_slot(&session_home, &effective_handle, lan_url);
+    }
+
     if !no_daemon {
         ensure_session_daemon(&session_home)?;
     }
 
     let info = render_session_info(&name, &session_home, &cwd)?;
     emit_session_new_result(&info, "created", as_json)
+}
+
+/// v0.7.0-alpha.9: probe + allocate against a LAN-bound relay, then
+/// merge the resulting Lan endpoint into `self.endpoints[]` so peers
+/// pulling the agent-card see a third reachable address.
+///
+/// Mirrors `try_allocate_local_slot` but tags the endpoint
+/// `EndpointScope::Lan`. Non-fatal: if probe or alloc fails, the
+/// session stays at whatever endpoint mix it already had — operators
+/// can retry with `wire session new --with-lan --lan-relay <url>` once
+/// the LAN relay is up.
+fn try_allocate_lan_slot(
+    session_home: &std::path::Path,
+    handle: &str,
+    lan_relay: &str,
+) {
+    let probe = match crate::relay_client::build_blocking_client(Some(
+        std::time::Duration::from_millis(500),
+    )) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("wire session new: cannot build LAN probe client for {lan_relay}: {e:#}");
+            return;
+        }
+    };
+    let healthz_url = format!("{}/healthz", lan_relay.trim_end_matches('/'));
+    match probe.get(&healthz_url).send() {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => {
+            eprintln!(
+                "wire session new: LAN relay probe at {healthz_url} returned {} — not publishing LAN endpoint",
+                resp.status()
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!(
+                "wire session new: LAN relay at {lan_relay} unreachable ({}) — not publishing LAN endpoint. \
+                 Start one on the LAN-bound interface with `wire relay-server --bind <LAN-IP>:8771 --local-only`.",
+                crate::relay_client::format_transport_error(&anyhow::Error::new(e))
+            );
+            return;
+        }
+    };
+
+    let lan_client = crate::relay_client::RelayClient::new(lan_relay);
+    let alloc = match lan_client.allocate_slot(Some(handle)) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!(
+                "wire session new: LAN relay slot allocation failed: {e:#} — not publishing LAN endpoint"
+            );
+            return;
+        }
+    };
+
+    let state_path = session_home.join("config").join("wire").join("relay.json");
+    let mut state: serde_json::Value = std::fs::read(&state_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    // Read existing endpoints array and add the LAN one. Preserve
+    // federation / local entries already there.
+    let mut endpoints: Vec<crate::endpoints::Endpoint> = state
+        .get("self")
+        .and_then(|s| s.get("endpoints"))
+        .and_then(|e| e.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| serde_json::from_value::<crate::endpoints::Endpoint>(v.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    endpoints.push(crate::endpoints::Endpoint::lan(
+        lan_relay.trim_end_matches('/').to_string(),
+        alloc.slot_id.clone(),
+        alloc.slot_token.clone(),
+    ));
+
+    let self_obj = state
+        .as_object_mut()
+        .expect("relay_state root is an object")
+        .entry("self")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !self_obj.is_object() {
+        *self_obj = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(obj) = self_obj.as_object_mut() {
+        obj.insert(
+            "endpoints".into(),
+            serde_json::to_value(&endpoints).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Err(e) = std::fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&state).expect("relay_state serializable"),
+    ) {
+        eprintln!("wire session new: failed to write {state_path:?}: {e}");
+        return;
+    }
+    eprintln!(
+        "wire session new: LAN slot allocated on {lan_relay} (slot_id={}) — peers will see this endpoint in your agent-card",
+        alloc.slot_id
+    );
 }
 
 /// v0.5.17: probe the named local relay; if `/healthz` returns ok within
@@ -7470,6 +7612,7 @@ fn probe_directed_edge(from_state: &Value, to_name: &str, now: u64) -> DirectedE
     let scope = Some(
         match ep.scope {
             crate::endpoints::EndpointScope::Local => "local",
+            crate::endpoints::EndpointScope::Lan => "lan",
             crate::endpoints::EndpointScope::Federation => "federation",
         }
         .to_string(),

@@ -12,6 +12,41 @@ The first orchestration primitive is `wire session pair-all-local`: zero-paste b
 
 The v0.6 line landed the control plane (orchestration primitives over the bilateral protocol). v0.7 elevates **identity** to a first-class noun. After 4 rounds of persona critique ([issue #24](https://github.com/SlanchaAi/wire/issues/24)) and a 13-system survey of the wider ecosystem ([issue #25](https://github.com/SlanchaAi/wire/issues/25)), the locked direction is: identity is the noun, transport is the verb, mesh is the application. v0.6's `session` abstraction was conflating five concerns; v0.7 untangles them with a clear three-state identity lifecycle (anonymous / local / federation) and a path to operator-friendly cross-machine portability.
 
+### v0.7.0-alpha.9 — LAN relay endpoints (third transport scope)
+
+Use case: `🐅 noble-creek` on paul-mac wants to talk to `🌱 running-light` on spark over Wi-Fi without round-tripping the public federation relay at https://wireup.net. v0.5.17 added a binary scope (Local loopback only, or Federation public) — now there's a third scope, **Lan**, for cross-machine peers on the same network.
+
+**EndpointScope::Lan** sits between Local and Federation in routing priority:
+- `Local` (loopback) — sub-millisecond, same-machine sister sessions only
+- `Lan` — same-network across machines, sub-10ms
+- `Federation` — anywhere, ~50–300ms via wireup.net
+
+Routing is automatic: when both peers advertise compatible scopes, the daemon prefers the lowest-latency path that's reachable. Lan endpoints are kept in routing without an "our_local matches" gate (cross-machine peers won't have matching loopback URLs by definition).
+
+**CLI surface (opt-in per session):**
+```bash
+# on paul-mac (LAN IP 192.168.1.50):
+wire relay-server --bind 192.168.1.50:8771 --local-only &
+wire session new --with-local --with-lan --lan-relay http://192.168.1.50:8771
+
+# on spark (LAN IP 192.168.1.42):
+wire relay-server --bind 192.168.1.42:8771 --local-only &
+wire session new --with-local --with-lan --lan-relay http://192.168.1.42:8771
+
+# pair as normal — federation resolves the handles, then traffic prefers Lan
+wire add running-light@spark.local
+```
+
+LAN endpoints are published in `agent-card.endpoints[]` and visible to anyone who fetches `.well-known/wire/agent` — opt-in via explicit `--with-lan` flag because the LAN IP gets seen by anyone who has your handle. (Slot tokens are still the auth boundary, so a random LAN scanner can't deliver events.)
+
+**What's NOT in this alpha (logged for follow-up):**
+- mDNS / Bonjour discovery — operator types the LAN URL today
+- LAN-IP auto-detect — operator types the address
+- Roaming heartbeat — on LAN-IP change (coffee shop migration), today: re-run `wire session new --with-lan --lan-relay <new-url>`. v2 will add `wire session refresh-lan`
+- LAN-only mode (no federation) — today federation handle resolution is still required for pairing
+
+**Identity continuity across the three scopes**: same DID + keypair + character across Local, Lan, Federation endpoints — adding/removing an endpoint never changes the DID, so `🐅 winter-bay` stays `🐅 winter-bay` whether reachable via loopback, LAN, or wireup.net. The Character is DID-derived, so endpoint changes are display-invariant. v0.7 identity-first vision delivered.
+
 ### v0.7.0-alpha.4 — wider character variety (9.4× combo space)
 
 Stress testing surfaced a 5.24% nickname-emoji-triple collision rate at 100k samples (alpha.1 word lists: 120 adj × 120 noun × 64 emoji = 921k combos). The numbers were fine for practical multi-Claude usage (~0.04% at 20 sessions per host) but the cap felt small.
