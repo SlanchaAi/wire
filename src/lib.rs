@@ -27,6 +27,7 @@ pub mod pair_profile;
 pub mod pair_session;
 pub mod pending_inbound_pair;
 pub mod pending_pair;
+pub mod platform;
 pub mod pull;
 pub mod relay_client;
 pub mod relay_server;

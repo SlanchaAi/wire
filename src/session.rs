@@ -382,18 +382,12 @@ fn check_daemon_live(session_home: &Path) -> bool {
 }
 
 fn is_process_live(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
+    // v0.7.3: delegate to the shared platform helper. The previous
+    // implementation shelled out to `kill -0` on non-Linux, which
+    // unconditionally failed on Windows (no `kill` binary) and made
+    // `wire session list` report every daemon as `down` regardless of
+    // actual liveness.
+    crate::platform::process_alive(pid)
 }
 
 /// Read a session's `relay.json` and return its `self.endpoints[]`

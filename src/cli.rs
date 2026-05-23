@@ -8684,17 +8684,21 @@ fn cmd_service(action: ServiceAction) -> Result<()> {
 /// `--check` mode reports drift without acting — lists the processes
 /// that WOULD be killed and the binary version of each.
 fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
-    // 1. Identify all `wire daemon` processes.
-    let pgrep_out = std::process::Command::new("pgrep")
-        .args(["-f", "wire daemon"])
-        .output();
-    let running_pids: Vec<u32> = match pgrep_out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .split_whitespace()
-            .filter_map(|s| s.parse::<u32>().ok())
-            .collect(),
-        _ => Vec::new(),
-    };
+    // 1. Identify all running wire processes. v0.7.3: walks `pgrep -f`
+    // on unix / `Get-CimInstance Win32_Process` on Windows via the
+    // shared `platform::find_processes_by_cmdline`. Covers both the
+    // long-lived sync `wire daemon` *and* the `wire relay-server`
+    // local-only loopback — the pre-v0.7.3 upgrade only swept daemons
+    // and left stale relay-server children pinned on the old binary,
+    // forcing operators to `pkill -f relay-server` manually after
+    // every version bump.
+    let daemon_pids: Vec<u32> = crate::platform::find_processes_by_cmdline("wire daemon");
+    let relay_pids: Vec<u32> = crate::platform::find_processes_by_cmdline("wire relay-server");
+    let running_pids: Vec<u32> = daemon_pids
+        .iter()
+        .chain(relay_pids.iter())
+        .copied()
+        .collect();
 
     // 2. Read pidfile to surface what the daemon THINKS it is.
     let record = crate::ensure_up::read_pid_record("daemon");
@@ -8740,11 +8744,28 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
                 }
             }
         }
+        // v0.7.3: enumerate which service units WOULD be refreshed.
+        // Read-only — `status_kind` doesn't touch anything.
+        let installed_service_kinds: Vec<&'static str> = [
+            (crate::service::ServiceKind::Daemon, "daemon"),
+            (crate::service::ServiceKind::LocalRelay, "local-relay"),
+        ]
+        .into_iter()
+        .filter_map(|(k, label)| {
+            crate::service::status_kind(k)
+                .ok()
+                .filter(|r| r.status != "absent")
+                .map(|_| label)
+        })
+        .collect();
         let report = json!({
             "running_pids": running_pids,
+            "running_daemons": daemon_pids,
+            "running_relay_servers": relay_pids,
             "pidfile_version": recorded_version,
             "cli_version": cli_version,
             "would_kill": running_pids,
+            "would_refresh_services": installed_service_kinds,
             "session_daemons_running": sessions_with_daemons,
             "path_binaries": path_dupes,
             "path_duplicate_warning": path_dupes.len() > 1,
@@ -8760,10 +8781,27 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
             );
             if running_pids.is_empty() {
                 println!("  running daemons:  none");
+                println!("  running relays:   none");
             } else {
-                let pids: Vec<String> = running_pids.iter().map(|p| p.to_string()).collect();
-                println!("  running daemons:  pids {}", pids.join(", "));
+                if daemon_pids.is_empty() {
+                    println!("  running daemons:  none");
+                } else {
+                    let p: Vec<String> = daemon_pids.iter().map(|p| p.to_string()).collect();
+                    println!("  running daemons:  pids {}", p.join(", "));
+                }
+                if relay_pids.is_empty() {
+                    println!("  running relays:   none");
+                } else {
+                    let p: Vec<String> = relay_pids.iter().map(|p| p.to_string()).collect();
+                    println!("  running relays:   pids {}", p.join(", "));
+                }
                 println!("  would kill all + spawn fresh");
+            }
+            if !installed_service_kinds.is_empty() {
+                println!(
+                    "  would refresh:    {} installed service unit(s) → new binary path",
+                    installed_service_kinds.join(", ")
+                );
             }
             if !sessions_with_daemons.is_empty() {
                 println!(
@@ -8785,15 +8823,17 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         return Ok(());
     }
 
-    // 3. Kill every running wire daemon. Use SIGTERM first, then SIGKILL
-    // after a brief grace period.
+    // 3. Kill every running wire process (daemons + relay-servers).
+    // Graceful first (SIGTERM / taskkill), then forceful (SIGKILL /
+    // taskkill /F) after a brief grace period. v0.7.3: uses
+    // `platform::kill_process` so the Windows path goes through
+    // `taskkill /T /PID` (kills the process tree, important for
+    // relay-server's hyper worker threads).
     let mut killed: Vec<u32> = Vec::new();
     for pid in &running_pids {
-        // SIGTERM (15).
-        let _ = std::process::Command::new("kill")
-            .args(["-15", &pid.to_string()])
-            .status();
-        killed.push(*pid);
+        if crate::platform::kill_process(*pid, false) {
+            killed.push(*pid);
+        }
     }
     // Wait up to ~2s for graceful exit.
     if !killed.is_empty() {
@@ -8808,11 +8848,9 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
                 break;
             }
             if std::time::Instant::now() >= deadline {
-                // SIGKILL hold-outs.
+                // Force-kill hold-outs.
                 for pid in still_alive {
-                    let _ = std::process::Command::new("kill")
-                        .args(["-9", &pid.to_string()])
-                        .status();
+                    let _ = crate::platform::kill_process(pid, true);
                 }
                 break;
             }
@@ -8871,8 +8909,51 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         None
     };
 
+    // 4d. v0.7.3 NEW: refresh installed service units so they point at
+    // the freshly-installed binary path. Without this step, an upgrade
+    // would: kill the old daemon, leave the launchd plist /
+    // systemd unit / Windows scheduled task pointing at the OLD
+    // binary path (or, worse, an old binary location that's been
+    // unlinked), and then the OS's auto-respawn would either fail or
+    // bring the OLD binary back from the dead. Reinstalling rewrites
+    // the unit with `std::env::current_exe()` (the freshly-resolved
+    // path of the running upgrade-driver process) and re-bootstraps /
+    // re-enables / re-registers so the next OS-driven start uses it.
+    //
+    // Only refreshes units that are already installed — does NOT
+    // install services the operator never opted into.
+    let mut service_refreshes: Vec<Value> = Vec::new();
+    for kind in [
+        crate::service::ServiceKind::Daemon,
+        crate::service::ServiceKind::LocalRelay,
+    ] {
+        let already_installed = crate::service::status_kind(kind)
+            .map(|r| r.status != "absent")
+            .unwrap_or(false);
+        if !already_installed {
+            continue;
+        }
+        match crate::service::install_kind(kind) {
+            Ok(rep) => service_refreshes.push(json!({
+                "kind": rep.kind,
+                "platform": rep.platform,
+                "status": rep.status,
+                "unit_path": rep.unit_path,
+                "action": "refreshed",
+            })),
+            Err(e) => service_refreshes.push(json!({
+                "kind": format!("{kind:?}"),
+                "action": "refresh_failed",
+                "error": format!("{e:#}"),
+            })),
+        }
+    }
+
     // 5. Spawn fresh daemon via ensure_up — atomically waits for
-    //    process_alive + writes the versioned pidfile.
+    //    process_alive + writes the versioned pidfile. (If the Daemon
+    //    service was refreshed above, it has already started a fresh
+    //    process under the new binary; ensure_daemon_running notices
+    //    and short-circuits to "already running".)
     let spawned = crate::ensure_up::ensure_daemon_running()?;
 
     // 5b. v0.6.8: respawn each session daemon under the new binary.
@@ -8908,6 +8989,9 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
             "{}",
             serde_json::to_string(&json!({
                 "killed": killed,
+                "killed_daemons": daemon_pids,
+                "killed_relay_servers": relay_pids,
+                "service_refreshes": service_refreshes,
                 "spawned_fresh_daemon": spawned,
                 "new_pid": new_pid,
                 "new_version": new_version,
@@ -8919,17 +9003,37 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         );
     } else {
         if killed.is_empty() {
-            println!("wire upgrade: no stale daemons running");
+            println!("wire upgrade: no stale wire processes running");
         } else {
             println!(
-                "wire upgrade: killed {} daemon(s) (pids {})",
+                "wire upgrade: killed {} process(es) — {} daemon(s) + {} relay-server(s) (pids {})",
                 killed.len(),
+                daemon_pids.len(),
+                relay_pids.len(),
                 killed
                     .iter()
                     .map(|p| p.to_string())
                     .collect::<Vec<_>>()
                     .join(", ")
             );
+        }
+        if !service_refreshes.is_empty() {
+            println!(
+                "wire upgrade: refreshed {} installed service unit(s) to point at the new binary:",
+                service_refreshes.len()
+            );
+            for r in &service_refreshes {
+                let kind = r.get("kind").and_then(Value::as_str).unwrap_or("?");
+                let action = r.get("action").and_then(Value::as_str).unwrap_or("?");
+                let status = r.get("status").and_then(Value::as_str).unwrap_or("");
+                let platform = r.get("platform").and_then(Value::as_str).unwrap_or("");
+                if action == "refreshed" {
+                    println!("                    - {kind}: {action} ({status}, {platform})");
+                } else {
+                    let err = r.get("error").and_then(Value::as_str).unwrap_or("");
+                    println!("                    - {kind}: {action} ({err})");
+                }
+            }
         }
         if spawned {
             println!(
@@ -8965,21 +9069,11 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
 }
 
 fn process_alive_pid(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
+    // v0.7.3: delegate to the cross-platform helper. See
+    // `platform::process_alive` for the per-OS dispatch — Windows now
+    // uses `tasklist /FI "PID eq <n>"` instead of `kill -0`, which
+    // gave a hard-coded false on Windows pre-v0.7.3.
+    crate::platform::process_alive(pid)
 }
 
 // ---------- doctor (single-command diagnostic) ----------
