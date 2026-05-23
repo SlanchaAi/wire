@@ -86,6 +86,17 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// v0.9.3: one-screen "you are here" view. Prints the current
+    /// session's character + handle + cwd, plus a short list of
+    /// neighbors (sister sessions on the local relay, pinned peers).
+    /// Designed for the operator's quick "wait which Claude is this,
+    /// and who's around?" question — no `--json` shuffling, no
+    /// remembering `wire whoami` vs `wire peers` vs `wire session
+    /// list-local`.
+    Here {
+        #[arg(long)]
+        json: bool,
+    },
     /// v0.9 canonical surface: list pending-inbound pair requests waiting
     /// for your consent. Aliases the legacy `pair-list-inbound` verb
     /// but with the shorter, intent-first name. Operators reach for
@@ -1406,6 +1417,7 @@ pub fn run() -> Result<()> {
             colored,
         } => cmd_whoami(json_default(json), short, colored),
         Command::Peers { json } => cmd_peers(json_default(json)),
+        Command::Here { json } => cmd_here(json_default(json)),
         Command::Pending { json } => cmd_pair_list_inbound(json_default(json)),
         Command::Reject { peer, json } => cmd_pair_reject(&peer, json_default(json)),
         Command::Send {
@@ -3156,6 +3168,185 @@ fn parse_kind(s: &str) -> Result<u32> {
     }
     // Unknown name — default to kind 1 (decision) for v0.1.
     Ok(1)
+}
+
+// ---------- here (v0.9.3 you-are-here view) ----------
+
+/// `wire here` — one-screen "you are this session, your neighbors are
+/// these." Combines what `wire whoami`, `wire peers`, and `wire session
+/// list-local` would otherwise force the operator to call separately.
+fn cmd_here(as_json: bool) -> Result<()> {
+    let initialized = config::is_initialized().unwrap_or(false);
+
+    // Self identity.
+    let (self_did, self_handle, self_character) = if initialized {
+        let card = config::read_agent_card().ok();
+        let did = card
+            .as_ref()
+            .and_then(|c| c.get("did").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string();
+        let handle = if did.is_empty() {
+            String::new()
+        } else {
+            crate::agent_card::display_handle_from_did(&did).to_string()
+        };
+        let character = if did.is_empty() {
+            None
+        } else {
+            let overrides = config::read_display_overrides().unwrap_or_default();
+            Some(crate::character::Character::from_did_with_override(
+                &did,
+                overrides.nickname.as_deref(),
+                overrides.emoji.as_deref(),
+            ))
+        };
+        (did, handle, character)
+    } else {
+        (String::new(), String::new(), None)
+    };
+
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let wire_home = std::env::var("WIRE_HOME").unwrap_or_default();
+
+    // Sister sessions (same-machine).
+    let mut sisters: Vec<Value> = Vec::new();
+    if let Ok(listing) = crate::session::list_local_sessions() {
+        for group in listing.local.values() {
+            for s in group {
+                if s.handle.as_deref() == Some(self_handle.as_str()) {
+                    continue; // skip self
+                }
+                let ch = s.did.as_deref().map(crate::character::Character::from_did);
+                sisters.push(json!({
+                    "session": s.name,
+                    "handle": s.handle,
+                    "character": ch,
+                }));
+            }
+        }
+    }
+
+    // Pinned peers (trust ring agents).
+    let mut peers: Vec<Value> = Vec::new();
+    if initialized
+        && let Ok(trust) = config::read_trust()
+        && let Some(agents) = trust.get("agents").and_then(Value::as_object)
+    {
+        for (handle, agent) in agents {
+            if handle == &self_handle {
+                continue; // skip self
+            }
+            let did = agent.get("did").and_then(Value::as_str).unwrap_or("");
+            let ch = if did.is_empty() {
+                None
+            } else {
+                Some(crate::character::Character::from_did(did))
+            };
+            peers.push(json!({
+                "handle": handle,
+                "did": did,
+                "tier": agent.get("tier").and_then(Value::as_str).unwrap_or("UNKNOWN"),
+                "character": ch,
+            }));
+        }
+    }
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "self": {
+                    "handle": self_handle,
+                    "did": self_did,
+                    "character": self_character,
+                    "cwd": cwd,
+                    "wire_home": wire_home,
+                },
+                "sister_sessions": sisters,
+                "pinned_peers": peers,
+            }))?
+        );
+        return Ok(());
+    }
+
+    // Human format.
+    if !initialized {
+        println!("not initialized — run `wire init <handle>` to bootstrap.");
+        return Ok(());
+    }
+    let glyph = self_character
+        .as_ref()
+        .map(crate::character::emoji_with_fallback)
+        .unwrap_or_else(|| "?".to_string());
+    let nick = self_character
+        .as_ref()
+        .map(|c| c.nickname.clone())
+        .unwrap_or_default();
+    println!("you are {glyph} {nick}  ({self_handle})");
+    if !cwd.is_empty() {
+        println!("  cwd:    {cwd}");
+    }
+    // Helper closure that mirrors emoji_with_fallback over a JSON-encoded
+    // character object (because we already collected sisters/peers into
+    // Value rows above). Looks up the canonical emoji-name and falls
+    // back to that — never repeats the nickname inside the brackets.
+    let render_glyph = |character: &Value| -> String {
+        let emoji = character
+            .get("emoji")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let nickname = character
+            .get("nickname")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        if crate::character::terminal_supports_emoji() {
+            return emoji.to_string();
+        }
+        // Synthesize a minimal Character so emoji_with_fallback's
+        // lookup table picks the right ASCII tag.
+        let synth = crate::character::Character {
+            nickname: nickname.to_string(),
+            emoji: emoji.to_string(),
+            palette: crate::character::Palette {
+                primary_hex: String::new(),
+                accent_hex: String::new(),
+                ansi256_primary: 0,
+                ansi256_accent: 0,
+            },
+        };
+        crate::character::emoji_with_fallback(&synth)
+    };
+    if !sisters.is_empty() {
+        println!();
+        println!("sister sessions on this machine:");
+        for s in &sisters {
+            let session = s["session"].as_str().unwrap_or("?");
+            let ch_nick = s["character"]["nickname"].as_str().unwrap_or("?");
+            let glyph = render_glyph(&s["character"]);
+            println!("  {glyph} {ch_nick}  ({session})");
+        }
+    }
+    if !peers.is_empty() {
+        println!();
+        println!("pinned peers:");
+        for p in &peers {
+            let handle = p["handle"].as_str().unwrap_or("?");
+            let tier = p["tier"].as_str().unwrap_or("");
+            let ch_nick = p["character"]["nickname"].as_str().unwrap_or("?");
+            let glyph = render_glyph(&p["character"]);
+            println!("  {glyph} {ch_nick}  ({handle})  [{tier}]");
+        }
+    }
+    if sisters.is_empty() && peers.is_empty() {
+        println!();
+        println!(
+            "no neighbors yet — `wire session new` to add a sister, or `wire dial <peer>` to reach out."
+        );
+    }
+    Ok(())
 }
 
 // ---------- dial / whois (v0.8 canonical addressing) ----------
@@ -6465,17 +6656,40 @@ fn cmd_pair_list_inbound(as_json: bool) -> Result<()> {
         return Ok(());
     }
     if items.is_empty() {
-        println!("no pending inbound pair requests.");
+        println!("no pending pair requests — your inbox is clear.");
         return Ok(());
     }
-    println!("{:<20} {:<35} {:<25} DID", "PEER", "RELAY", "RECEIVED");
-    for p in items {
+    // v0.9.3: conversational output. Tabular data is for --json. Humans
+    // get one short sentence per pending peer, each rendered with the
+    // peer's character (DID-derived emoji + nickname) so they can match
+    // the speaker against their statusline / mesh-status view at a
+    // glance. The "next step" sentence at the bottom names the exact
+    // verbs to run.
+    let plural = if items.len() == 1 { "" } else { "s" };
+    println!("{} pending pair request{plural}:\n", items.len());
+    for p in &items {
+        let ch = crate::character::Character::from_did(&p.peer_did);
+        let glyph = crate::character::emoji_with_fallback(&ch);
+        // ASCII-friendly arrow if the operator's terminal can't render
+        // emoji (the same routine drives the fallback).
         println!(
-            "{:<20} {:<35} {:<25} {}",
-            p.peer_handle, p.peer_relay_url, p.received_at, p.peer_did,
+            "  {glyph} {nick}  ({handle})  wants to pair with you",
+            nick = ch.nickname,
+            handle = p.peer_handle,
         );
     }
-    println!("→ accept with `wire accept <peer>`; refuse with `wire reject <peer>`.");
+    println!();
+    println!(
+        "→ to accept any: `wire accept <name>`  (e.g. `wire accept {first}`)",
+        first = items
+            .first()
+            .map(|p| {
+                let ch = crate::character::Character::from_did(&p.peer_did);
+                ch.nickname
+            })
+            .unwrap_or_else(|| "<name>".to_string())
+    );
+    println!("→ to refuse:    `wire reject <name>`");
     Ok(())
 }
 

@@ -406,6 +406,78 @@ fn session_destroy_requires_force_flag_v0_5_16() {
 }
 
 #[test]
+fn here_prints_self_when_no_neighbors_v0_9_3() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "alice", "--offline"]);
+    let out = std::process::Command::new(wire_bin())
+        .args(["here"])
+        .env("WIRE_HOME", &home)
+        .env("WIRE_NO_AUTO_JSON", "1")
+        .env("WIRE_EMOJI", "off") // deterministic in CI
+        .output()
+        .expect("spawn wire");
+    assert!(out.status.success(), "here failed: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    // Self line present.
+    assert!(
+        stdout.contains("you are") && stdout.contains("alice"),
+        "here should show self — got: {stdout}"
+    );
+    // Empty-mesh hint present.
+    assert!(
+        stdout.contains("no neighbors yet"),
+        "here should explain empty mesh state — got: {stdout}"
+    );
+}
+
+#[test]
+fn here_json_includes_self_sisters_peers_v0_9_3() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "alice", "--offline"]);
+    let out = std::process::Command::new(wire_bin())
+        .args(["here", "--json"])
+        .env("WIRE_HOME", &home)
+        .output()
+        .expect("spawn wire");
+    assert!(out.status.success(), "here --json failed: {:?}", out);
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Required shape.
+    assert!(parsed.get("self").is_some(), "self field: {parsed}");
+    assert!(parsed["self"]["handle"].as_str() == Some("alice"));
+    assert!(
+        parsed.get("sister_sessions").is_some(),
+        "sister_sessions field"
+    );
+    assert!(parsed.get("pinned_peers").is_some(), "pinned_peers field");
+}
+
+#[test]
+fn emoji_fallback_returns_ascii_tag_when_terminal_off_v0_9_3() {
+    // v0.9.3: WIRE_EMOJI=off forces emoji_with_fallback to substitute
+    // an ASCII tag (e.g. `[bear]`) for the glyph. Test verifies the
+    // env var path without depending on terminal detection.
+    let home = fresh_home();
+    let _ = run(&home, &["init", "alice", "--offline"]);
+    let out = std::process::Command::new(wire_bin())
+        .args(["here"])
+        .env("WIRE_HOME", &home)
+        .env("WIRE_NO_AUTO_JSON", "1")
+        .env("WIRE_EMOJI", "off")
+        .output()
+        .expect("spawn wire");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    // Any ASCII tag in square brackets at start of "you are" line.
+    let you_line = stdout
+        .lines()
+        .find(|l| l.starts_with("you are "))
+        .unwrap_or_else(|| panic!("expected 'you are' line in: {stdout}"));
+    assert!(
+        you_line.contains('[') && you_line.contains(']'),
+        "WIRE_EMOJI=off should render bracketed ASCII tag — got: {you_line}"
+    );
+}
+
+#[test]
 fn whois_typo_returns_did_you_mean_v0_9_2() {
     // v0.9.2: nickname typo → suggestion from local pool. Test setup
     // pins "alice" as self (handle = "alice"), then queries a typo.
