@@ -2130,6 +2130,35 @@ fn cmd_identity_rename(
 
     config::write_display_overrides(&new_overrides)?;
 
+    // v0.7.0-alpha.6: publish the override on the agent-card so federated
+    // peers see what we call ourselves, not just the DID-hash default.
+    // Re-signs the card with the same private key the rest of the identity
+    // uses. Backward compat: peers with old wire versions ignore the
+    // unknown `display` field, fall back to auto-derived.
+    {
+        let mut card = config::read_agent_card()?;
+        if let Some(card_obj) = card.as_object_mut() {
+            // Strip prior signature; we'll re-sign over the new canonical
+            // form including (or excluding) the display field.
+            card_obj.remove("signature");
+            if new_overrides.nickname.is_none() && new_overrides.emoji.is_none() {
+                card_obj.remove("display");
+            } else {
+                let mut display = serde_json::Map::new();
+                if let Some(n) = &new_overrides.nickname {
+                    display.insert("nickname".into(), Value::String(n.clone()));
+                }
+                if let Some(e) = &new_overrides.emoji {
+                    display.insert("emoji".into(), Value::String(e.clone()));
+                }
+                card_obj.insert("display".into(), Value::Object(display));
+            }
+        }
+        let sk_seed = config::read_private_key()?;
+        let signed = crate::agent_card::sign_agent_card(&card, &sk_seed);
+        config::write_agent_card(&signed)?;
+    }
+
     if random_announce {
         eprintln!("wire identity rename: overrides cleared; falling back to auto-derived character (DID-deterministic, so the character is the same as it was before any rename).");
     }
@@ -2151,8 +2180,16 @@ fn cmd_identity_rename(
         );
     } else {
         println!(
-            "renamed → {}  (palette stays DID-derived; peers still see auto-derived character until federation publishes overrides)",
+            "renamed → {}",
             character.colored()
+        );
+        eprintln!(
+            "  · palette stays DID-derived (sticky color across renames)"
+        );
+        eprintln!(
+            "  · published to your agent-card; NEW pairs see this character. Existing pinned peers \
+             have a cached card from pair-time — they will only see the new name after they re-pair \
+             with you (e.g. `wire add --local-sister <yourname>` from their side)."
         );
     }
     Ok(())
@@ -2220,12 +2257,18 @@ fn cmd_peers(as_json: bool) -> Result<()> {
             .and_then(|c| c.get("capabilities"))
             .cloned()
             .unwrap_or_else(|| json!([]));
-        // v0.7.0-alpha.2: derive peer character from peer DID so
-        // operators see the same nickname their peer renders locally.
+        // v0.7.0-alpha.6: prefer peer's published character override
+        // (display.nickname / display.emoji on their pinned agent-card).
+        // Falls back to auto-derived if peer hasn't renamed themselves
+        // OR runs an older wire that doesn't publish the field.
         let character = if did.is_empty() {
             None
         } else {
-            Some(crate::character::Character::from_did(&did))
+            let card_obj = agent.get("card");
+            Some(match card_obj {
+                Some(card) => crate::character::Character::from_card(card),
+                None => crate::character::Character::from_did(&did),
+            })
         };
         peers.push(json!({
             "handle": handle,
@@ -4873,11 +4916,18 @@ fn resolve_peer_handle(input: &str) -> Result<Option<String>, ResolveError> {
     }
     let mut nick_matches: Vec<String> = Vec::new();
     for (handle, agent) in agents.iter() {
-        if let Some(did) = agent.get("did").and_then(Value::as_str) {
-            let character = crate::character::Character::from_did(did);
-            if character.nickname == input {
-                nick_matches.push(handle.clone());
-            }
+        // v0.7.0-alpha.6: prefer peer's published display nickname over
+        // auto-derived. Allows `wire send <their-chosen-name>` not just
+        // `wire send <their-did-hash-derived-name>`.
+        let character = match agent.get("card") {
+            Some(card) => crate::character::Character::from_card(card),
+            None => match agent.get("did").and_then(Value::as_str) {
+                Some(did) => crate::character::Character::from_did(did),
+                None => continue,
+            },
+        };
+        if character.nickname == input {
+            nick_matches.push(handle.clone());
         }
     }
     match nick_matches.len() {

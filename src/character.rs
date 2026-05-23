@@ -62,6 +62,29 @@ impl Character {
         Self::from_seed(did.as_bytes())
     }
 
+    /// Derive a Character from a pinned peer's agent-card JSON object.
+    ///
+    /// v0.7.0-alpha.6: when a peer has published their operator-chosen
+    /// character (display.nickname / display.emoji on their signed
+    /// agent-card), we honor it. Otherwise falls back to auto-derived
+    /// from their DID — same as `from_did`.
+    ///
+    /// Backward compat: agent-cards without the `display` field land in
+    /// the auto-derived path automatically.
+    pub fn from_card(card: &serde_json::Value) -> Self {
+        let did = card.get("did").and_then(|d| d.as_str()).unwrap_or("");
+        let display = card.get("display").and_then(|d| d.as_object());
+        let nick = display
+            .and_then(|d| d.get("nickname"))
+            .and_then(|n| n.as_str())
+            .filter(|s| !s.is_empty());
+        let emoji = display
+            .and_then(|d| d.get("emoji"))
+            .and_then(|e| e.as_str())
+            .filter(|s| !s.is_empty());
+        Self::from_did_with_override(did, nick, emoji)
+    }
+
     /// Derive a Character from a DID, optionally overriding the nickname
     /// and/or emoji with operator-chosen values.
     ///
