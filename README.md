@@ -41,9 +41,11 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.7.3 (latest)
+## Status — v0.7.4 (latest)
 
-v0.7.3 makes `wire upgrade` thorough and cross-platform. Two changes:
+v0.7.4 lets you address a peer by **character nickname only**. `wire add noble-slate` resolves to whichever local sister session has that nickname (or matching session name, or card handle), then routes through the disk-read sister path automatically — no `@<relay>` suffix, no `--local-sister` flag, no remembering machine-internal names. Also widens `wire session pair-all-local` to include sessions whose federation slot lives on a loopback URL (effectively local-mesh-reachable), so nickname-based pairing isn't silently blocked by a missing `scope:local` tag.
+
+v0.7.3 made `wire upgrade` thorough and cross-platform. Two changes:
 
 1. **Cross-platform process management.** `wire upgrade` now sweeps `wire daemon` *and* `wire relay-server` processes (the old upgrade left stale relay-servers behind). Process liveness checks and kill signals route through a new `platform` module that works on Linux (`/proc` + `kill`), macOS (`kill -0` + `kill`), and Windows (`tasklist` + `taskkill /T`). Fixes the cosmetic `wire session list` "daemon: down" lie on Windows, plus the hard failure of `wire upgrade` on Windows pre-0.7.3.
 2. **Service-unit refresh.** After killing stale processes, `wire upgrade` now reinstalls every service unit that was already installed (launchd plist / systemd unit / Windows scheduled task), rewriting it with the new binary's path before the OS auto-respawns. Pre-0.7.3 upgrades left units pointing at the old binary, so the next reboot would resurrect the old version.

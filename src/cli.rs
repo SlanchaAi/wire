@@ -5678,8 +5678,36 @@ fn cmd_add(
     local_sister: bool,
     as_json: bool,
 ) -> Result<()> {
+    // v0.7.4: nickname-friendly local-sister resolution. Whether the
+    // operator passed `--local-sister` explicitly OR just typed a bare
+    // name (no `@<relay>`), try to resolve through the local sessions
+    // registry so character nicknames AND session names AND card
+    // handles all work as input. Closes the "I only know this peer by
+    // its character name" ergonomic gap that forced operators into
+    // `wire session list-local | grep <nick> | awk` dances.
     if local_sister {
-        return cmd_add_local_sister(handle_arg, as_json);
+        let resolved = crate::session::resolve_local_sister(handle_arg)
+            .unwrap_or_else(|| handle_arg.to_string());
+        return cmd_add_local_sister(&resolved, as_json);
+    }
+    if !handle_arg.contains('@')
+        && let Some(resolved) = crate::session::resolve_local_sister(handle_arg)
+    {
+        eprintln!(
+            "wire add: `{handle_arg}` resolved to local sister session `{resolved}` \
+             — routing via --local-sister (disk-read card, no relay lookup)."
+        );
+        return cmd_add_local_sister(&resolved, as_json);
+    }
+    if !handle_arg.contains('@') {
+        bail!(
+            "`{handle_arg}` doesn't match any local sister session and has no \
+             @<relay> suffix for federation.\n\
+             — Local sisters: `wire session list-local` (operator types name OR \
+             character nickname)\n\
+             — Federation:    `wire add <handle>@<relay-domain>` (e.g. \
+             `wire add alice@wireup.net`)"
+        );
     }
     let parsed = crate::pair_profile::parse_handle(handle_arg)?;
 
