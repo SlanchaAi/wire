@@ -41,7 +41,19 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.9.4 (latest)
+## Status — v0.9.5 (latest)
+
+v0.9.5 adds discovery + onboarding ergonomics:
+
+- **Shell completions.** `wire completions <shell>` emits the completion script for bash / zsh / fish / elvish / powershell. Pipe into your shell's completion dir; tab completion covers every verb, subcommand, and flag.
+  ```
+  wire completions bash > /etc/bash_completion.d/wire
+  wire completions zsh  > ~/.zsh/completions/_wire
+  wire completions fish > ~/.config/fish/completions/wire.fish
+  ```
+- **Interactive init prompt.** First-time `wire init <handle>` from an interactive TTY (no `--relay`, local relay not running) now asks: "Bind to public federation relay https://wireup.net instead? [Y/n/offline/url]". CI / agents / non-TTY shells still get the v0.9.1 explicit error wall (no hang risk). `WIRE_NO_INTERACTIVE=1` forces non-interactive everywhere.
+
+## Status — v0.9.4
 
 v0.9.4 splits `wire accept` into two unambiguous verbs:
 

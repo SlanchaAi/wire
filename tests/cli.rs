@@ -406,6 +406,91 @@ fn session_destroy_requires_force_flag_v0_5_16() {
 }
 
 #[test]
+fn completions_emits_bash_script_v0_9_5() {
+    let home = fresh_home();
+    let out = run(&home, &["completions", "bash"]);
+    assert!(out.status.success(), "completions bash failed: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.starts_with("_wire()"),
+        "bash completion should start with _wire() — got: {}",
+        &stdout[..stdout.len().min(80)]
+    );
+    // Verb names that the completion grammar must mention.
+    for verb in [
+        "dial", "send", "pending", "accept", "reject", "whois", "here",
+    ] {
+        assert!(
+            stdout.contains(verb),
+            "bash completion missing verb `{verb}`"
+        );
+    }
+}
+
+#[test]
+fn completions_emits_zsh_script_v0_9_5() {
+    let home = fresh_home();
+    let out = run(&home, &["completions", "zsh"]);
+    assert!(out.status.success(), "completions zsh failed: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.starts_with("#compdef wire"),
+        "zsh completion should start with #compdef wire — got: {}",
+        &stdout[..stdout.len().min(80)]
+    );
+}
+
+#[test]
+fn completions_supports_fish_and_powershell_v0_9_5() {
+    let home = fresh_home();
+    for shell in ["fish", "powershell", "elvish"] {
+        let out = run(&home, &["completions", shell]);
+        assert!(
+            out.status.success(),
+            "completions {shell} failed: {:?}",
+            out
+        );
+        assert!(
+            !out.stdout.is_empty(),
+            "completions {shell} produced empty output"
+        );
+    }
+}
+
+#[test]
+fn init_interactive_skipped_when_non_tty_v0_9_5() {
+    // v0.9.5: when stdin is non-TTY (CI, captured), the interactive
+    // prompt MUST be skipped and the v0.9.1 actionable-error wall
+    // fires instead. This regression-test the non-interactive path —
+    // crucial so CI runs don't hang waiting for stdin.
+    let home = fresh_home();
+    let out = std::process::Command::new(wire_bin())
+        .args(["init", "alice"])
+        .env("WIRE_HOME", &home)
+        .env("WIRE_NO_AUTO_JSON", "1")
+        // Force the smart-default to fail (port that won't resolve) so we
+        // hit the no-local-relay branch where interactive prompt MIGHT
+        // fire. WIRE_NO_INTERACTIVE forces non-interactive fallback even
+        // if stdin happened to be a TTY (defensive).
+        .env("WIRE_NO_INTERACTIVE", "1")
+        .output()
+        .expect("spawn wire");
+    // Either the local relay happens to be up (success) or we get the
+    // error wall (non-success but actionable). Test just asserts no
+    // hang AND no garbled output.
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    if !out.status.success() {
+        // Must not be the prompt.
+        assert!(
+            !stderr.contains("Bind to public federation")
+                && !stdout.contains("Bind to public federation"),
+            "WIRE_NO_INTERACTIVE should suppress prompt — got stderr={stderr}"
+        );
+    }
+}
+
+#[test]
 fn accept_invite_verb_exists_v0_9_4() {
     // v0.9.4: federation invite URL accept gets its own explicit verb.
     let home = fresh_home();
