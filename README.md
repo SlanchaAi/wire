@@ -41,7 +41,33 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.7.5 (latest)
+## Status — v0.9.0 (latest)
+
+**Clean cut.** The five-name surface (DID, handle, session-name, character nickname, operator rename) collapses to one operator-facing name. The 12-verb pair cluster collapses to 3.
+
+Operator-facing verbs after v0.9:
+
+```bash
+wire dial <name> [message]      # talk to peer (local sister, federation, anything)
+wire send <name> "<msg>"        # talk (auto-pairs on miss)
+wire pending                    # what's waiting for my consent
+wire accept <name>              # consent to a pending pair (or paste an invite URL)
+wire reject <name>              # refuse pending pair
+wire whois <name>               # inspect identity
+wire tail [<name>]              # listen
+```
+
+Six verbs. Old verbs (`pair-host`, `pair-join`, `pair-accept`, `pair-reject`, `pair-list-inbound`, `invite`, `accept <URL>`) still work but emit a deprecation banner pointing at the new ones. v1.0 removes them.
+
+Structural fixes in v0.9:
+
+- **`wire init` refuses to create slotless sessions.** Root cause of the 2026-05-23 silent-fail incident. Pre-v0.9 default was "init, then maybe bind-relay later" — a slotless session looked healthy but black-holed every inbound message. Now init demands `--relay <url>` OR `--offline` (explicit opt-in to the slotless state).
+- **Single canonical `self_primary_endpoint()` reader everywhere.** Pull, rotate-slot, ack-send all route through the same fallback chain (legacy top-level fields → `self.endpoints[0]`). Removes the silent class where v0.5.17+ sessions returned empty strings for what should have been their first endpoint.
+- **`wire send <name>` auto-pairs on miss.** If you try to send to an unpinned local sister, wire dials first. Phone semantics.
+- **`wire dial <handle>@<relay>` routes through federation.** One verb across local + cross-machine; no more "this is the wrong orbit."
+- **`wire identity rename` is local-display only.** Doesn't publish on the agent-card. The DID-derived character is the canonical public name; rename affects only your own statusline.
+
+
 
 v0.7.5 fixes the silent-fail pair handshake. Before: pair-accept on a session created with `--with-local` (only `self.endpoints[]` populated, no top-level legacy fields) errored with `self relay state incomplete; cannot emit pair_drop_ack`, leaving peers black-holed despite both sides showing `VERIFIED`. Fix: `send_pair_drop_ack` now reads `self.endpoints[0]` as a fallback. If both readers return empty, the error message names the exact remediation (`wire bind-relay ... --migrate-pinned`).
 
@@ -107,13 +133,13 @@ awaiting pair_drop_ack from alice to complete bilateral pin.
 
 # Alice's side sees an OS toast: "wire — pair request from bob".
 # Alice's pair-list shows it:
-$ wire pair-list
+$ wire pending
 PENDING INBOUND (v0.5.14 zero-paste pair_drop awaiting your accept)
 PEER       RELAY                  RECEIVED              NEXT STEP
-bob        https://wireup.net     2026-05-17T22:00:00Z  `wire pair-accept bob` to accept; `wire pair-reject bob` to refuse
+bob        https://wireup.net     2026-05-17T22:00:00Z  `wire accept bob` to accept; `wire reject bob` to refuse
 
 # Alice accepts (one command, no relay arg needed — coords come from the stored drop):
-$ wire pair-accept bob
+$ wire accept bob
 → accepted pending pair from bob
 → pinned VERIFIED, slot_token recorded
 → shipped our slot_token back via pair_drop_ack
@@ -165,9 +191,9 @@ Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 - `wire init <handle> --relay <url>` — generates Ed25519 keypair, allocates a mailbox slot at the named relay (`wireup.net` is the public-good default)
 - `wire claim <nick>` — claims `<nick>@<relay-domain>` in the relay's handle directory, FCFS
 - `wire add <nick>@<relay-domain>` — outbound pair request: resolves the peer via `.well-known/wire/agent`, drops a signed pair-intro to their slot. Bilateral — receiver must `wire add` (or `wire pair-accept`) back to complete (v0.5.14+).
-- `wire pair-accept <peer>` — accept an inbound pair request waiting in `wire pair-list`. Pins peer VERIFIED + ships our slot_token via `pair_drop_ack`.
-- `wire pair-reject <peer>` — refuse an inbound pair request without pairing. No ack sent; from peer's side they remain in pending-outbound until they time out.
-- `wire pair-list` / `wire pair-list-inbound` — view pending pair sessions (SPAKE2 + inbound).
+- `wire accept <peer>` — accept an inbound pair request waiting in `wire pending`. Pins peer VERIFIED + ships our slot_token via `pair_drop_ack`. (Smart-dispatches: `wire accept wire://pair?...` accepts a federation invite URL.) Replaces deprecated `wire pair-accept <peer>`.
+- `wire reject <peer>` — refuse an inbound pair request without pairing. Replaces deprecated `wire pair-reject <peer>`.
+- `wire pending` — view pending-inbound pair requests. Replaces deprecated `wire pair-list-inbound`.
 - `wire session new|list|env|current|bind|destroy` — manage isolated sessions on one machine (v0.5.16+). Each session = own identity + slot + daemon. Use when multiple agents run on the same box (e.g. Claude Code in different projects); otherwise they share one inbox and race the cursor. `wire session bind <name>` (v0.7.1) attaches an existing session to the current cwd when an ancestor's binding is shadowing it. See [the multi-session recipe](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
 - `wire identity create|persist|publish|demote|rename|show|list|destroy` — lifecycle for the per-session **Character** (v0.7.0). Each session's emoji + nickname + color palette is deterministic from its DID; `wire identity rename` lets the agent pick its own face while keeping the palette stable.
 - `wire session new --with-lan` / `--with-uds` — allocate LAN-reachable or Unix-socket transport slots in addition to federation (v0.7.0). Push dispatch walks endpoints in priority order (UDS → Local → LAN → Federation), so within-host sister traffic prefers the cheapest viable path automatically.

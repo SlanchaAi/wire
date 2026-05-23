@@ -152,9 +152,17 @@ async fn three_party_mesh_of_bilateral_round_trips() {
     let paul = fresh_dir("paul");
     let willard = fresh_dir("willard");
     let carol = fresh_dir("carol");
-    assert!(wire(&paul, &["init", "paul"]).status.success());
-    assert!(wire(&willard, &["init", "willard"]).status.success());
-    assert!(wire(&carol, &["init", "carol"]).status.success());
+    assert!(wire(&paul, &["init", "paul", "--offline"]).status.success());
+    assert!(
+        wire(&willard, &["init", "willard", "--offline"])
+            .status
+            .success()
+    );
+    assert!(
+        wire(&carol, &["init", "carol", "--offline"])
+            .status
+            .success()
+    );
 
     // ---- 3. three pairwise pairings (mesh of bilaterals) ----
     drive_pairing(&paul, &willard, &relay_url);

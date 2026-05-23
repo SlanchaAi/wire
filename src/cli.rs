@@ -34,17 +34,34 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Generate a keypair, write self-card, and prepare to pair. (HUMAN-ONLY — DO NOT exec from agents.)
+    /// Generate a keypair, write self-card, and bind an inbound slot.
+    /// (HUMAN-ONLY — DO NOT exec from agents.)
+    ///
+    /// v0.9: refuses to create a slotless session by default. Pre-v0.9
+    /// the silent slotless state caused the 2026-05-23 silent-fail
+    /// incident — pairing + sending succeeded but peers black-holed
+    /// inbound. Operators must now name how the session is reachable:
+    /// `--relay <url>` (binds a slot inline) or `--offline` (opt into
+    /// slotless, acknowledge `wire bind-relay` is required before any
+    /// pair or send).
     Init {
         /// Short handle for this agent (becomes did:wire:<handle>).
         handle: String,
         /// Optional display name (defaults to capitalized handle).
         #[arg(long)]
         name: Option<String>,
-        /// Optional relay URL — if set, also allocates a relay slot in one step
-        /// (equivalent to running `wire init` then `wire bind-relay <url>`).
+        /// Relay URL — binds an inbound slot in the same step. Required
+        /// unless `--offline` is passed. Example:
+        /// `--relay http://127.0.0.1:8771` (local), `--relay https://wireup.net`
+        /// (federation).
         #[arg(long)]
         relay: Option<String>,
+        /// v0.9: opt into a slotless session — keypair only, no inbound
+        /// mailbox. You MUST run `wire bind-relay <url>` before any
+        /// pair / send / dial; until then peers cannot reach you.
+        /// Useful for offline keypair generation; rare in practice.
+        #[arg(long, conflicts_with = "relay")]
+        offline: bool,
         /// Emit JSON.
         #[arg(long)]
         json: bool,
@@ -66,6 +83,14 @@ pub enum Command {
     },
     /// List pinned peers with their tiers and capabilities.
     Peers {
+        #[arg(long)]
+        json: bool,
+    },
+    /// v0.9 canonical surface: list pending-inbound pair requests waiting
+    /// for your consent. Aliases the legacy `pair-list-inbound` verb
+    /// but with the shorter, intent-first name. Operators reach for
+    /// "what's pending?" not "what's in my pair-list-inbound table?"
+    Pending {
         #[arg(long)]
         json: bool,
     },
@@ -91,6 +116,35 @@ pub enum Command {
         /// Advisory deadline: duration (`30m`, `2h`, `1d`) or RFC3339 timestamp.
         #[arg(long)]
         deadline: Option<String>,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// v0.8 — "go talk to this name." The one verb operators reach for.
+    ///
+    /// `wire dial <name>` accepts a character nickname (`noble-slate`),
+    /// a session name (`slancha-api`), a card handle, or a DID — whichever
+    /// face you happen to know the peer by. Resolution order:
+    ///
+    /// 1. Already-pinned peer? → no-op (or send if a message was passed).
+    /// 2. Local sister session? → bilateral pair via the disk-read
+    ///    `--local-sister` path (no relay round-trip, no .well-known
+    ///    lookup, no SAS digits).
+    /// 3. Otherwise → bail with a clear hint pointing at federation
+    ///    syntax (`wire dial <handle>@<relay>` for cross-machine peers).
+    ///
+    /// With an optional message, `wire dial <name> "<msg>"` also queues
+    /// and pushes the message after the pair completes. Idempotent: re-
+    /// dialling a known peer just sends.
+    Dial {
+        /// Peer name. Character nickname (preferred), session name,
+        /// card handle, or DID — anything that identifies the peer to
+        /// you.
+        name: String,
+        /// Optional first message to send after the pair lands. Same
+        /// semantics as the body argument to `wire send`. Defaults to
+        /// kind=claim.
+        message: Option<String>,
         /// Emit JSON.
         #[arg(long)]
         json: bool,
@@ -654,11 +708,30 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Accept a wire invite URL. Single-step pair — pins issuer, sends our
-    /// signed card to issuer's slot. Auto-inits + auto-allocates if needed.
+    /// v0.9: smart-dispatch `accept`.
+    ///
+    /// - `wire accept <name>` — accept a pending-inbound pair request
+    ///   from a sister session by character nickname / handle. Replaces
+    ///   the verbose `wire pair-accept <peer>`.
+    /// - `wire accept wire://pair?v=1&inv=...` — accept a federation
+    ///   invite URL (v0.4 flow). Pins issuer, sends signed card to
+    ///   issuer's slot. Auto-inits + auto-allocates as needed.
+    ///
+    /// The dispatcher routes by input shape: URL-shaped → federation
+    /// invite path, anything else → pair-accept.
     Accept {
-        /// The full invite URL (starts with `wire://pair?v=1&inv=...`).
-        url: String,
+        /// Either: pending peer name (nickname/handle), OR a full wire
+        /// invite URL starting with `wire://pair?...`.
+        target: String,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// v0.9: refuse a pending-inbound pair request without pairing. Aliases
+    /// the legacy `wire pair-reject <peer>`.
+    Reject {
+        /// Peer name (character nickname or handle) from `wire pending`.
+        peer: String,
         /// Emit JSON.
         #[arg(long)]
         json: bool,
@@ -1306,8 +1379,9 @@ pub fn run() -> Result<()> {
             handle,
             name,
             relay,
+            offline,
             json,
-        } => cmd_init(&handle, name.as_deref(), relay.as_deref(), json),
+        } => cmd_init(&handle, name.as_deref(), relay.as_deref(), offline, json),
         Command::Status { peer, json } => {
             if let Some(peer) = peer {
                 cmd_status_peer(&peer, json)
@@ -1321,6 +1395,8 @@ pub fn run() -> Result<()> {
             colored,
         } => cmd_whoami(json, short, colored),
         Command::Peers { json } => cmd_peers(json),
+        Command::Pending { json } => cmd_pair_list_inbound(json),
+        Command::Reject { peer, json } => cmd_pair_reject(&peer, json),
         Command::Send {
             peer,
             kind_or_body,
@@ -1336,6 +1412,11 @@ pub fn run() -> Result<()> {
             };
             cmd_send(&peer, &kind, &body, deadline.as_deref(), json)
         }
+        Command::Dial {
+            name,
+            message,
+            json,
+        } => cmd_dial(&name, message.as_deref(), json),
         Command::Tail { peer, json, limit } => cmd_tail(peer.as_deref(), json, limit),
         Command::Monitor {
             peer,
@@ -1459,9 +1540,24 @@ pub fn run() -> Result<()> {
             }
         }
         Command::PairAbandon { code_phrase, relay } => cmd_pair_abandon(&code_phrase, &relay),
-        Command::PairAccept { peer, json } => cmd_pair_accept(&peer, json),
-        Command::PairReject { peer, json } => cmd_pair_reject(&peer, json),
-        Command::PairListInbound { json } => cmd_pair_list_inbound(json),
+        Command::PairAccept { peer, json } => {
+            eprintln!(
+                "wire pair-accept: DEPRECATED in v0.9 — use `wire accept {peer}`. Will be removed in v1.0."
+            );
+            cmd_pair_accept(&peer, json)
+        }
+        Command::PairReject { peer, json } => {
+            eprintln!(
+                "wire pair-reject: DEPRECATED in v0.9 — use `wire reject {peer}`. Will be removed in v1.0."
+            );
+            cmd_pair_reject(&peer, json)
+        }
+        Command::PairListInbound { json } => {
+            eprintln!(
+                "wire pair-list-inbound: DEPRECATED in v0.9 — use `wire pending`. Will be removed in v1.0."
+            );
+            cmd_pair_list_inbound(json)
+        }
         Command::Session(cmd) => cmd_session(cmd),
         Command::Identity { cmd } => cmd_identity(cmd),
         Command::Mesh(cmd) => cmd_mesh(cmd),
@@ -1472,12 +1568,34 @@ pub fn run() -> Result<()> {
             share,
             json,
         } => cmd_invite(&relay, ttl, uses, share, json),
-        Command::Accept { url, json } => cmd_accept(&url, json),
+        Command::Accept { target, json } => {
+            // v0.9 smart-dispatch: URL-shaped → federation invite accept;
+            // anything else → local pair-accept by name. Routes by input
+            // shape so operators don't need to remember two verbs.
+            if target.starts_with("wire://pair?") {
+                cmd_accept(&target, json)
+            } else {
+                cmd_pair_accept(&target, json)
+            }
+        }
         Command::Whois {
             handle,
             json,
             relay,
-        } => cmd_whois(handle.as_deref(), json, relay.as_deref()),
+        } => {
+            // v0.8 smart route: `wire whois <nickname>` (no `@<relay>`)
+            // resolves through the local identity layer (pinned peers
+            // + local sister sessions). `wire whois <nick>@<relay>`
+            // keeps the existing federation `.well-known/wire/agent`
+            // path. `wire whois` (no arg) prints self via the original
+            // path. The character nickname is the canonical operator-
+            // facing name as of v0.8 — most callers should hit the
+            // local route.
+            match handle.as_deref() {
+                Some(h) if !h.contains('@') => cmd_whois_local(h, json),
+                other => cmd_whois(other, json, relay.as_deref()),
+            }
+        }
         Command::Add {
             handle,
             relay,
@@ -1533,7 +1651,13 @@ pub fn run() -> Result<()> {
 
 // ---------- init ----------
 
-fn cmd_init(handle: &str, name: Option<&str>, relay: Option<&str>, as_json: bool) -> Result<()> {
+fn cmd_init(
+    handle: &str,
+    name: Option<&str>,
+    relay: Option<&str>,
+    offline: bool,
+    as_json: bool,
+) -> Result<()> {
     if !handle
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -1544,6 +1668,31 @@ fn cmd_init(handle: &str, name: Option<&str>, relay: Option<&str>, as_json: bool
         bail!(
             "already initialized — config exists at {:?}. Delete it first if you want a fresh identity.",
             config::config_dir()?
+        );
+    }
+    // v0.9 root-cause fix: refuse to create a slotless session by
+    // default. Pre-v0.9, `wire init <handle>` (no --relay) produced a
+    // session with no inbound slot — peers could not deliver to it,
+    // but pairing + sending operations all returned success, so the
+    // failure was silent and operator-invisible. Root cause of the
+    // 2026-05-23 slancha-api ↔ source incident.
+    //
+    // Operators must now name how the session is reachable:
+    //   wire init <handle> --relay <url>   (federation slot)
+    //   wire init <handle> --offline       (intentionally no slot; you
+    //                                       must `wire bind-relay <url>`
+    //                                       before pairing or sends)
+    if relay.is_none() && !offline {
+        bail!(
+            "wire init: refusing to create a session with no inbound slot.\n\
+             Pick one:\n\
+             • `wire init {handle} --relay http://127.0.0.1:8771` — bind a local-relay slot\n\
+             • `wire init {handle} --relay https://wireup.net`   — bind a public federation slot\n\
+             • `wire init {handle} --offline`                     — generate the keypair only \
+             (acknowledges peers will not be able to reach you until you `wire bind-relay <url>` later)\n\
+             \n\
+             Pre-v0.9 the default was slotless and peers silently black-holed inbound. \
+             v0.9 closes that footgun at birth."
         );
     }
 
@@ -2269,7 +2418,7 @@ fn cmd_identity_create(name: Option<&str>, anonymous: bool, as_json: bool) -> Re
         // Run `wire init <name>` with WIRE_HOME = anon_root/sessions/<name>
         let session_home = anon_root.join("sessions").join(&anon_name);
         std::fs::create_dir_all(&session_home)?;
-        let status = run_wire_with_home(&session_home, &["init", &anon_name])?;
+        let status = run_wire_with_home(&session_home, &["init", &anon_name, "--offline"])?;
         if !status.success() {
             bail!("anonymous identity init failed: {status}");
         }
@@ -2574,86 +2723,30 @@ fn cmd_identity_rename(
 
     config::write_display_overrides(&new_overrides)?;
 
-    // v0.7.0-alpha.6: publish the override on the agent-card so federated
-    // peers see what we call ourselves, not just the DID-hash default.
-    // Re-signs the card with the same private key the rest of the identity
-    // uses. Backward compat: peers with old wire versions ignore the
-    // unknown `display` field, fall back to auto-derived.
+    // v0.9: rename is LOCAL-DISPLAY ONLY. The agent-card's published
+    // identity is the DID-derived character (deterministic SHA-256
+    // hash → adj-noun + emoji + palette). Operator-typed overrides
+    // affect only THIS machine's UI — statusline, `wire whoami`,
+    // `wire peers` output. Federated peers ALWAYS see the canonical
+    // DID-derived character.
     //
-    // v0.7.0-alpha.12 (review-fix #134): also push the re-signed card
-    // back to the federation relay so .well-known/wire/agent serves the
-    // updated card. Pre-fix wrote the local card only; federated peers
-    // resolving the handle saw the OLD (pre-rename) card. Best-effort —
-    // failures log to stderr but don't bail (local rename still useful).
-    let signed_card = {
-        let mut card = config::read_agent_card()?;
-        if let Some(card_obj) = card.as_object_mut() {
-            // Strip prior signature; we'll re-sign over the new canonical
-            // form including (or excluding) the display field.
-            card_obj.remove("signature");
-            if new_overrides.nickname.is_none() && new_overrides.emoji.is_none() {
-                card_obj.remove("display");
-            } else {
-                let mut display = serde_json::Map::new();
-                if let Some(n) = &new_overrides.nickname {
-                    display.insert("nickname".into(), Value::String(n.clone()));
-                }
-                if let Some(e) = &new_overrides.emoji {
-                    display.insert("emoji".into(), Value::String(e.clone()));
-                }
-                card_obj.insert("display".into(), Value::Object(display));
-            }
-        }
-        let sk_seed = config::read_private_key()?;
-        let signed = crate::agent_card::sign_agent_card(&card, &sk_seed);
-        config::write_agent_card(&signed)?;
-        signed
-    };
-
-    // Re-publish to federation relay if we're bound. Walks the relay_state
-    // self endpoints — pushes the updated card to whichever federation
-    // relay holds our claimed handle. Local-only sessions skip silently.
-    if let Ok(state) = config::read_relay_state() {
-        let self_obj = state.get("self").cloned().unwrap_or(Value::Null);
-        let fed_url = self_obj.get("relay_url").and_then(Value::as_str);
-        let fed_slot_id = self_obj.get("slot_id").and_then(Value::as_str);
-        let fed_slot_token = self_obj.get("slot_token").and_then(Value::as_str);
-        if let (Some(url), Some(slot_id), Some(slot_token)) = (fed_url, fed_slot_id, fed_slot_token)
-        {
-            // Skip loopback / LAN relays (those don't publish handles to a
-            // public phonebook — they're local-only mode).
-            let is_publishable = url.starts_with("https://")
-                || (url.starts_with("http://")
-                    && !url.contains("127.0.0.1")
-                    && !url.contains("localhost"));
-            if is_publishable {
-                let nick_for_claim = signed_card
-                    .get("handle")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                if let Some(nick) = nick_for_claim {
-                    let client = crate::relay_client::RelayClient::new(url);
-                    match client.handle_claim_v2(
-                        &nick,
-                        slot_id,
-                        slot_token,
-                        None,
-                        &signed_card,
-                        None,
-                    ) {
-                        Ok(_) => {
-                            eprintln!("wire identity rename: re-published updated card to {url}");
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "wire identity rename: failed to re-publish to relay {url}: {e:#} — local rename is in effect; federated peers will see the old card until next `wire claim` succeeds"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Why: keeping rename publishable created a five-name surface
+    // (DID, handle, session-name, character-nickname, operator-rename)
+    // where operator-rename could be ANYTHING, breaking the "one
+    // immutable canonical name per identity" promise. v0.9 collapses
+    // the surface: the DID-derived character is THE name peers know
+    // you by. Local rename is your editor preference for your own
+    // surface, full stop.
+    //
+    // Pre-v0.9 (v0.7.0-alpha.6 through v0.8) republished the rewritten
+    // card to the federation relay's phonebook. That code path is
+    // removed deliberately; no agent-card mutation happens here
+    // anymore.
+    eprintln!(
+        "wire identity rename: applied as LOCAL display override only. \
+         Federated peers continue to see the DID-derived character. \
+         (Removed in v0.9: the rewrite-card + republish-to-relay flow.)"
+    );
 
     if random_announce {
         eprintln!(
@@ -2923,6 +3016,27 @@ fn cmd_send(
         ),
         Err(ResolveError::NotFound) => peer_in, // (unreachable for this fn but defensive)
     };
+
+    // v0.9 auto-pair-on-miss: if the resolved peer isn't pinned yet but
+    // matches a local sister session, pair first (disk-read --local-sister
+    // path) then continue. Closes the "wire send returns queued but
+    // peer never receives because we were never paired" silent-fail
+    // class. Equivalent to `wire dial <name>` followed by `wire send
+    // <name> ...` in one step.
+    let peer_is_pinned = config::read_relay_state()
+        .ok()
+        .and_then(|s| s.get("peers").and_then(Value::as_object).cloned())
+        .map(|peers| peers.contains_key(&peer))
+        .unwrap_or(false);
+    if !peer_is_pinned && let Some(sister_name) = crate::session::resolve_local_sister(&peer) {
+        eprintln!(
+            "wire send: `{peer}` not pinned yet — auto-pairing via local-sister `{sister_name}` first."
+        );
+        cmd_add_local_sister(&sister_name, true).map_err(|e| {
+            anyhow!("wire send: auto-pair to local sister `{sister_name}` failed: {e:#}")
+        })?;
+    }
+
     let peer = peer.as_str();
     let sk_seed = config::read_private_key()?;
     let card = config::read_agent_card()?;
@@ -3022,6 +3136,262 @@ fn parse_kind(s: &str) -> Result<u32> {
     }
     // Unknown name — default to kind 1 (decision) for v0.1.
     Ok(1)
+}
+
+// ---------- dial / whois (v0.8 canonical addressing) ----------
+
+/// `wire dial <name> [message]` — the one verb operators reach for.
+/// Resolves any name (nickname/handle/session/DID) to a peer and
+/// drives the right pair flow + optional first message. See the
+/// `Command::Dial` doc for the resolution ladder.
+///
+/// v0.9: when `name` contains `@<relay>`, route through the federation
+/// `wire add <handle>@<relay>` path (`.well-known/wire/agent` resolution
+/// plus cross-machine pair_drop). No more bail with "federation isn't
+/// implemented yet" — one verb across both orbits.
+fn cmd_dial(name: &str, message: Option<&str>, as_json: bool) -> Result<()> {
+    if name.contains('@') {
+        // Federation path. cmd_add already auto-detects (per v0.7.4)
+        // when input has `@` and routes through the .well-known
+        // resolver + pair_drop deposit. After it returns, the peer
+        // is in pending-outbound; bilateral completes when the peer
+        // accepts. Optionally send the first message after the add.
+        cmd_add(name, None, false, true)
+            .map_err(|e| anyhow!("wire dial: federation pair to `{name}` failed: {e:#}"))?;
+        if let Some(msg) = message {
+            // Peer handle for send = the nick part before the `@`.
+            let bare = name.split('@').next().unwrap_or(name);
+            cmd_send(bare, "claim", msg, None, as_json)?;
+        }
+        return Ok(());
+    }
+
+    let resolution = resolve_name_to_target(name)?;
+    let mut steps: Vec<Value> = Vec::new();
+
+    match &resolution {
+        DialTarget::PinnedPeer { handle, .. } => {
+            steps.push(json!({
+                "step": "resolved",
+                "kind": "already_pinned",
+                "handle": handle,
+            }));
+        }
+        DialTarget::LocalSister { session_name, .. } => {
+            steps.push(json!({
+                "step": "resolved",
+                "kind": "local_sister",
+                "session": session_name,
+            }));
+            // Drive the bilateral pair via the disk-read sister path.
+            // cmd_add_local_sister already handles "already paired"
+            // gracefully (its internal state.peers check returns the
+            // existing pin instead of re-issuing a pair_drop), so
+            // re-dialling is idempotent.
+            cmd_add_local_sister(session_name, true).map_err(|e| {
+                anyhow!("dial: local-sister pair to `{session_name}` failed: {e:#}")
+            })?;
+            steps.push(json!({
+                "step": "paired",
+                "via": "local_sister",
+            }));
+        }
+    }
+
+    let send_handle = match &resolution {
+        DialTarget::PinnedPeer { handle, .. } => handle.clone(),
+        DialTarget::LocalSister { handle, .. } => handle.clone(),
+    };
+
+    let send_result = if let Some(msg) = message {
+        let r = cmd_send(&send_handle, "claim", msg, None, true);
+        match &r {
+            Ok(()) => steps.push(json!({"step": "sent", "to": send_handle, "kind": "claim"})),
+            Err(e) => steps.push(json!({"step": "send_failed", "error": format!("{e:#}")})),
+        }
+        Some(r)
+    } else {
+        None
+    };
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "name_input": name,
+                "resolved_handle": send_handle,
+                "steps": steps,
+            }))?
+        );
+    } else {
+        println!("wire dial: resolved `{name}` → handle `{send_handle}`");
+        for s in &steps {
+            let step = s.get("step").and_then(Value::as_str).unwrap_or("?");
+            println!("  - {step}");
+        }
+        if message.is_some() {
+            println!("  (use `wire tail {send_handle}` to read replies)");
+        }
+    }
+    if let Some(Err(e)) = send_result {
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// `wire whois <name>` — resolve any local name (nickname/session/
+/// handle/DID) to the full identity row. The inspector for the
+/// canonical addressing layer. For federation `handle@relay-domain`
+/// resolution see `cmd_whois` (line 5536+) — the dispatcher chooses
+/// based on whether the input contains `@`.
+fn cmd_whois_local(name: &str, as_json: bool) -> Result<()> {
+    let resolution = resolve_name_to_target(name)?;
+    match resolution {
+        DialTarget::PinnedPeer {
+            handle,
+            did,
+            nickname,
+            emoji,
+            tier,
+        } => {
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "kind": "pinned_peer",
+                        "handle": handle,
+                        "did": did,
+                        "nickname": nickname,
+                        "emoji": emoji,
+                        "tier": tier,
+                    }))?
+                );
+            } else {
+                let n = nickname.as_deref().unwrap_or("(no character)");
+                let e = emoji.as_deref().unwrap_or("?");
+                println!("{e} {n}");
+                println!("  handle:   {handle}");
+                println!("  did:      {did}");
+                println!("  tier:     {tier}");
+                println!("  reach:    pinned peer (already in trust ring + slot pinned)");
+            }
+        }
+        DialTarget::LocalSister {
+            session_name,
+            handle,
+            did,
+            nickname,
+            emoji,
+        } => {
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "kind": "local_sister",
+                        "session_name": session_name,
+                        "handle": handle,
+                        "did": did,
+                        "nickname": nickname,
+                        "emoji": emoji,
+                    }))?
+                );
+            } else {
+                let n = nickname.as_deref().unwrap_or("(no character)");
+                let e = emoji.as_deref().unwrap_or("?");
+                println!("{e} {n}");
+                println!("  session:  {session_name}");
+                println!("  handle:   {handle}");
+                println!(
+                    "  did:      {}",
+                    did.as_deref().unwrap_or("(card unreadable)")
+                );
+                println!("  reach:    local sister on this machine — `wire dial {n}` pairs us");
+            }
+        }
+    }
+    Ok(())
+}
+
+enum DialTarget {
+    PinnedPeer {
+        handle: String,
+        did: String,
+        nickname: Option<String>,
+        emoji: Option<String>,
+        tier: String,
+    },
+    LocalSister {
+        session_name: String,
+        handle: String,
+        did: Option<String>,
+        nickname: Option<String>,
+        emoji: Option<String>,
+    },
+}
+
+/// Resolution order: pinned peers first (already in our trust ring),
+/// then local sister sessions (on-disk discovery). Case-insensitive
+/// match against handle, character nickname, session name, or DID.
+fn resolve_name_to_target(name: &str) -> Result<DialTarget> {
+    let needle = name.trim();
+    if needle.is_empty() {
+        bail!("empty name");
+    }
+
+    // 1. Pinned peers — `wire peers` data.
+    if config::is_initialized().unwrap_or(false) {
+        let trust = config::read_trust().unwrap_or(serde_json::Value::Null);
+        if let Some(agents) = trust.get("agents").and_then(Value::as_array) {
+            for agent in agents {
+                let did = agent.get("did").and_then(Value::as_str).unwrap_or("");
+                if did.is_empty() {
+                    continue;
+                }
+                let handle = crate::agent_card::display_handle_from_did(did).to_string();
+                let character = crate::character::Character::from_did(did);
+                let tier = agent
+                    .get("tier")
+                    .and_then(Value::as_str)
+                    .unwrap_or("UNKNOWN")
+                    .to_string();
+                let matches = handle.eq_ignore_ascii_case(needle)
+                    || did.eq_ignore_ascii_case(needle)
+                    || character.nickname.eq_ignore_ascii_case(needle);
+                if matches {
+                    return Ok(DialTarget::PinnedPeer {
+                        handle,
+                        did: did.to_string(),
+                        nickname: Some(character.nickname),
+                        emoji: Some(character.emoji.to_string()),
+                        tier,
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. Local sister sessions.
+    if let Some(session_name) = crate::session::resolve_local_sister(needle) {
+        let sessions = crate::session::list_sessions().unwrap_or_default();
+        let s = sessions.iter().find(|s| s.name == session_name);
+        if let Some(s) = s {
+            return Ok(DialTarget::LocalSister {
+                session_name: s.name.clone(),
+                handle: s.handle.clone().unwrap_or_else(|| s.name.clone()),
+                did: s.did.clone(),
+                nickname: s.character.as_ref().map(|c| c.nickname.clone()),
+                emoji: s.character.as_ref().map(|c| c.emoji.to_string()),
+            });
+        }
+    }
+
+    bail!(
+        "no peer matched `{name}`.\n\
+         Tried: pinned peers (`wire peers`) + local sister sessions \
+         (`wire session list-local`).\n\
+         For cross-machine federation: `wire dial <handle>@<relay-domain>` \
+         (note: federation dial isn't implemented yet — use `wire add` directly)."
+    );
 }
 
 // ---------- tail ----------
@@ -4029,18 +4399,14 @@ fn cmd_rotate_slot(no_announce: bool, as_json: bool) -> Result<()> {
     if self_state.is_null() {
         bail!("self slot not bound — run `wire bind-relay <url>` first (nothing to rotate)");
     }
-    let url = self_state["relay_url"]
-        .as_str()
-        .ok_or_else(|| anyhow!("self.relay_url missing"))?
-        .to_string();
-    let old_slot_id = self_state["slot_id"]
-        .as_str()
-        .ok_or_else(|| anyhow!("self.slot_id missing"))?
-        .to_string();
-    let old_slot_token = self_state["slot_token"]
-        .as_str()
-        .ok_or_else(|| anyhow!("self.slot_token missing"))?
-        .to_string();
+    // v0.9: route through self_primary_endpoint so v0.5.17+ sessions
+    // (which write only self.endpoints[]) can rotate. Pre-v0.9 read
+    // top-level legacy fields directly and bailed for those sessions.
+    let primary = crate::endpoints::self_primary_endpoint(&state)
+        .ok_or_else(|| anyhow!("self has no resolvable inbound endpoint to rotate"))?;
+    let url = primary.relay_url.clone();
+    let old_slot_id = primary.slot_id.clone();
+    let old_slot_token = primary.slot_token.clone();
 
     // Read identity to sign the announcement.
     let card = config::read_agent_card()?;
@@ -4422,15 +4788,25 @@ fn run_sync_push() -> Result<Value> {
 }
 
 /// Programmatic pull. Same shape as `wire pull --json`.
+///
+/// v0.9: routes through `endpoints::self_primary_endpoint` so sessions
+/// created via `wire session new --with-local` (which only writes
+/// `self.endpoints[]`, not the legacy top-level fields) actually pull.
+/// Pre-v0.9 this function read only the top-level fields and silently
+/// returned `{}` for any v0.5.17+ session.
 fn run_sync_pull() -> Result<Value> {
     let state = config::read_relay_state()?;
     let self_state = state.get("self").cloned().unwrap_or(Value::Null);
     if self_state.is_null() {
         return Ok(json!({"written": [], "rejected": [], "total_seen": 0}));
     }
-    let url = self_state["relay_url"].as_str().unwrap_or("");
-    let slot_id = self_state["slot_id"].as_str().unwrap_or("");
-    let slot_token = self_state["slot_token"].as_str().unwrap_or("");
+    let ep = match crate::endpoints::self_primary_endpoint(&state) {
+        Some(e) => e,
+        None => return Ok(json!({"written": [], "rejected": [], "total_seen": 0})),
+    };
+    let url = ep.relay_url.as_str();
+    let slot_id = ep.slot_id.as_str();
+    let slot_token = ep.slot_token.as_str();
     let last_event_id = self_state
         .get("last_pulled_event_id")
         .and_then(Value::as_str)
@@ -6018,7 +6394,7 @@ fn cmd_pair_list_inbound(as_json: bool) -> Result<()> {
             p.peer_handle, p.peer_relay_url, p.received_at, p.peer_did,
         );
     }
-    println!("→ accept with `wire pair-accept <peer>`; refuse with `wire pair-reject <peer>`.");
+    println!("→ accept with `wire accept <peer>`; refuse with `wire reject <peer>`.");
     Ok(())
 }
 
@@ -6972,9 +7348,13 @@ fn cmd_session_new(
     // Phase 1: init identity in the new session's WIRE_HOME. For
     // federation-bound sessions we pass `--relay` so init also
     // allocates a federation slot in the same step; for `--local-only`
-    // we run init without --relay so no federation contact happens.
+    // we run init with `--offline` (v0.9 requires explicit reachability
+    // acknowledgement at init time) because cmd_session_new allocates
+    // the local-relay slot itself via try_allocate_local_slot below.
+    // The session is not actually slotless — init is just deferred to
+    // the subsequent allocation pass.
     let init_args: Vec<&str> = if local_only {
-        vec!["init", &name]
+        vec!["init", &name, "--offline"]
     } else {
         vec!["init", &name, "--relay", relay]
     };
@@ -7661,7 +8041,11 @@ pub fn maybe_auto_init_cwd_session(label: &str) {
             let _ = fs2::FileExt::unlock(&lock_file);
             return;
         }
-        match run_wire_with_home(&session_home, &["init", &name]) {
+        // v0.9: --offline; the surrounding session-spawn path runs
+        // try_allocate_local_slot afterward to attach an inbound slot
+        // when a local relay is available. Init itself stays slotless
+        // because it's a precursor step, not the final state.
+        match run_wire_with_home(&session_home, &["init", &name, "--offline"]) {
             Ok(status) if status.success() => {}
             Ok(status) => {
                 eprintln!(
@@ -9628,7 +10012,13 @@ fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
         }
         step("init", format!("already initialized as {existing_handle}"));
     } else {
-        cmd_init(&nick, name, Some(&relay_url), /* as_json */ false)?;
+        cmd_init(
+            &nick,
+            name,
+            Some(&relay_url),
+            false,
+            /* as_json */ false,
+        )?;
         step(
             "init",
             format!("created identity {nick} bound to {relay_url}"),
