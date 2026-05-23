@@ -41,9 +41,14 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.7.2 (latest)
+## Status — v0.7.3 (latest)
 
-v0.7.2 brings **Windows service support** to `wire service install`. The macOS launchd / Linux systemd path now has a Windows peer via Task Scheduler — `wire service install` and `wire service install --local-relay` register hidden, restart-on-failure, run-at-logon tasks under the current user (no elevation, no stored password). Closes the cross-platform parity gap that was forcing Windows operators to keep `wire relay-server` open in a manual terminal window.
+v0.7.3 makes `wire upgrade` thorough and cross-platform. Two changes:
+
+1. **Cross-platform process management.** `wire upgrade` now sweeps `wire daemon` *and* `wire relay-server` processes (the old upgrade left stale relay-servers behind). Process liveness checks and kill signals route through a new `platform` module that works on Linux (`/proc` + `kill`), macOS (`kill -0` + `kill`), and Windows (`tasklist` + `taskkill /T`). Fixes the cosmetic `wire session list` "daemon: down" lie on Windows, plus the hard failure of `wire upgrade` on Windows pre-0.7.3.
+2. **Service-unit refresh.** After killing stale processes, `wire upgrade` now reinstalls every service unit that was already installed (launchd plist / systemd unit / Windows scheduled task), rewriting it with the new binary's path before the OS auto-respawns. Pre-0.7.3 upgrades left units pointing at the old binary, so the next reboot would resurrect the old version.
+
+v0.7.2 brought **Windows service support** to `wire service install`. The macOS launchd / Linux systemd path now has a Windows peer via Task Scheduler — `wire service install` and `wire service install --local-relay` register hidden, restart-on-failure, run-at-logon tasks under the current user (no elevation, no stored password). Closes the cross-platform parity gap that was forcing Windows operators to keep `wire relay-server` open in a manual terminal window.
 
 v0.7.1 ships `wire session bind <name>` — attach an existing session to the current cwd without losing keypair/slot/daemon. Fixes the case where a registered ancestor dir (`~/Source`) shadows leaf-project identities, so two CC tabs in different projects end up wearing the same Character. ([PR #28](https://github.com/SlanchaAi/wire/pull/28))
 

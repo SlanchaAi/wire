@@ -99,6 +99,24 @@ wire mesh route reviewer "PR ready"           # route by role, not by handle
 
 ---
 
+## §0.5 — "I'm a local agent and the operator told me to pair with another local agent"
+
+If you are about to type `wire pair-host`, `wire pair-join`, `wire pair`, or `wire invite` to talk to another agent **on the same machine** — STOP. Those are the federation flow (SAS digits, public relay, cross-internet). Same-host sisters don't need any of that.
+
+**The one-command answer:**
+
+```bash
+wire session pair-all-local
+```
+
+From EITHER side. It walks the local-relay sister-session registry, drives every missing bilateral pair, idempotently skips ones already paired. After it returns, both sides can `wire send <peer-handle> "..."` immediately.
+
+Why operators see agents reach for the wrong tool: `wire pair-*` is the most prominent verb in `wire --help`, and the federation path is well-documented in §1 below. Same-host pairing is one verb deeper (`wire session pair-all-local`) and easier to miss. If you see SAS digits or a `wire://pair?...` URL being minted to talk to a sister session, you took a wrong turn — kill the federation slot (`wire pair-cancel`) and run the line above instead.
+
+If `pair-all-local` returns `0 sister session(s) with a local endpoint`, the local relay isn't running — see §0 step 1 + verify with `wire session list-local --json`.
+
+---
+
 ## §1 — Cross-system federation (different boxes)
 
 ### Decide your role (v0.4.0 — one paste)
