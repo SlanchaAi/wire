@@ -41,7 +41,20 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.9.3 (latest)
+## Status — v0.9.4 (latest)
+
+v0.9.4 splits `wire accept` into two unambiguous verbs:
+
+- **`wire accept <name>`** — accept a pending pair request by character nickname or handle. Always.
+- **`wire accept-invite <URL>`** — accept a federation invite URL minted by `wire invite`.
+
+Pre-v0.9.4 `wire accept` smart-dispatched on input shape (URL-detection branched to invite-accept; everything else to pair-accept). Edge cases — peer handles that happened to look URL-shaped — were ambiguous. v0.9.4 makes the dispatch explicit: the verb you type maps directly to the action you want.
+
+Back-compat: `wire accept wire://pair?...` still works (one release of grace) but emits a deprecation banner pointing at `wire accept-invite`. v1.0 will reject URLs at the `wire accept` parser.
+
+**Note on federation phonebook:** `wire dial <nickname>@<relay>` (resolve a character nickname against a remote relay without knowing the handle) is still a server-side feature gap. Today operators need the handle for federation dial. Tracked for v0.10+ — requires relay protocol additions.
+
+## Status — v0.9.3
 
 v0.9.3 turns operator-facing surfaces conversational:
 
