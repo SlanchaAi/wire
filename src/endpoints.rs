@@ -305,6 +305,79 @@ mod tests {
     }
 
     #[test]
+    fn peer_endpoints_lan_beats_federation() {
+        // v0.7.0-alpha.9: when a peer publishes both Lan and Federation
+        // endpoints (and we have a matching local too), priority must be
+        // Local(matched) > Lan > Federation. Lan is cross-machine same-
+        // network, faster than federation but not as fast as loopback.
+        let state = json!({
+            "self": {
+                "endpoints": [
+                    {"relay_url": "http://127.0.0.1:8771", "slot_id": "self-loop", "slot_token": "t1", "scope": "local"},
+                    {"relay_url": "https://wireup.net", "slot_id": "self-fed", "slot_token": "t2", "scope": "federation"}
+                ]
+            },
+            "peers": {
+                "alice": {
+                    "endpoints": [
+                        {"relay_url": "https://wireup.net", "slot_id": "a-fed", "slot_token": "ta-f", "scope": "federation"},
+                        {"relay_url": "http://192.168.1.50:8771", "slot_id": "a-lan", "slot_token": "ta-l", "scope": "lan"},
+                        {"relay_url": "http://127.0.0.1:8771", "slot_id": "a-loop", "slot_token": "ta-loop", "scope": "local"}
+                    ]
+                }
+            }
+        });
+        let eps = peer_endpoints_in_priority_order(&state, "alice");
+        assert_eq!(eps.len(), 3, "Local(matched) + Lan + Federation all reachable");
+        assert_eq!(eps[0].scope, EndpointScope::Local, "loopback wins (same-machine)");
+        assert_eq!(eps[1].scope, EndpointScope::Lan, "Lan second (same-network)");
+        assert_eq!(eps[2].scope, EndpointScope::Federation, "Federation last (anywhere)");
+    }
+
+    #[test]
+    fn peer_endpoints_lan_kept_when_self_has_no_local() {
+        // Cross-machine peer scenario: we have no Local, peer has Lan
+        // and Federation. Lan must still be kept (we connect TO their
+        // LAN address; we don't need a Local of our own to do so).
+        let state = json!({
+            "self": {
+                "endpoints": [
+                    {"relay_url": "https://wireup.net", "slot_id": "self-fed", "slot_token": "t1", "scope": "federation"}
+                ]
+            },
+            "peers": {
+                "alice": {
+                    "endpoints": [
+                        {"relay_url": "https://wireup.net", "slot_id": "a-fed", "slot_token": "ta-f", "scope": "federation"},
+                        {"relay_url": "http://192.168.1.50:8771", "slot_id": "a-lan", "slot_token": "ta-l", "scope": "lan"}
+                    ]
+                }
+            }
+        });
+        let eps = peer_endpoints_in_priority_order(&state, "alice");
+        assert_eq!(eps.len(), 2);
+        assert_eq!(eps[0].scope, EndpointScope::Lan, "Lan preferred over Federation");
+        assert_eq!(eps[1].scope, EndpointScope::Federation);
+    }
+
+    #[test]
+    fn pin_peer_endpoints_uses_lan_as_legacy_when_no_federation() {
+        // Backward compat: when peer has no federation endpoint but has
+        // a LAN one, the legacy top-level relay_url/slot_id/slot_token
+        // should point at the LAN address (since LAN is cross-machine
+        // reachable; Local loopback wouldn't be).
+        let mut state = json!({});
+        let endpoints = vec![
+            Endpoint::lan("http://192.168.1.50:8771".to_string(), "lan-slot".to_string(), "lan-tok".to_string()),
+            Endpoint::local("http://127.0.0.1:8771".to_string(), "loop-slot".to_string(), "loop-tok".to_string()),
+        ];
+        pin_peer_endpoints(&mut state, "alice", &endpoints).unwrap();
+        let alice = &state["peers"]["alice"];
+        assert_eq!(alice["relay_url"], "http://192.168.1.50:8771", "LAN wins legacy fields");
+        assert_eq!(alice["slot_id"], "lan-slot");
+    }
+
+    #[test]
     fn peer_endpoints_orders_local_first_when_self_has_matching_local() {
         let state = json!({
             "self": {
