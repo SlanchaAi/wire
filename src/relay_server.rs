@@ -2124,6 +2124,123 @@ pub async fn serve_with_mode(bind: &str, state_dir: PathBuf, mode: ServerMode) -
     Ok(())
 }
 
+/// v0.7.0-alpha.16: Unix Domain Socket entry point. Mirrors `serve_with_mode`
+/// but binds to a UDS path instead of a TCP host:port. Implicitly forces
+/// `mode.local_only = true` because UDS has no concept of "publish to a
+/// public phonebook." Chmods the socket 0600 so only the owner uid can
+/// connect — the SO_PEERCRED-equivalent trust anchor for sister sessions.
+///
+/// Removes any stale socket file at `path` first (otherwise bind fails
+/// with EADDRINUSE). Removes the socket on graceful shutdown.
+///
+/// Implementation note: axum 0.7's `serve` is TcpListener-only, so we
+/// run the manual hyper accept loop (per-connection
+/// `hyper::server::conn::http1::Builder`). When axum 0.8 ships with
+/// generic `Listener` support, this can collapse to one line.
+#[cfg(unix)]
+pub async fn serve_uds(socket_path: PathBuf, state_dir: PathBuf) -> Result<()> {
+    use hyper::server::conn::http1;
+    use hyper_util::rt::TokioIo;
+    use tower_service::Service;
+
+    // Best-effort cleanup of stale socket file.
+    if socket_path.exists() {
+        std::fs::remove_file(&socket_path)
+            .with_context(|| format!("removing stale socket at {socket_path:?}"))?;
+    }
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating socket parent {parent:?}"))?;
+    }
+    let relay = Relay::new(state_dir).await?;
+    relay.spawn_pair_sweeper();
+    relay.spawn_counter_persister();
+    let app: axum::Router = relay
+        .clone()
+        .router_with_mode(ServerMode { local_only: true });
+    let listener = tokio::net::UnixListener::bind(&socket_path)
+        .with_context(|| format!("binding UDS at {socket_path:?}"))?;
+
+    // 0600: owner-rw only. Trust anchor is the kernel-attested peer uid
+    // (SO_PEERCRED equivalent); chmod is defense-in-depth.
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) =
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+    {
+        eprintln!(
+            "wire relay-server (UDS): chmod 0600 on {socket_path:?} failed: {e} — \
+             socket may be accessible to other uids. Investigate."
+        );
+    }
+    eprintln!(
+        "wire relay-server (UDS) listening on unix://{} — same-host, owner-uid only",
+        socket_path.display()
+    );
+
+    // Manual accept loop + per-conn hyper serve (axum 0.7's serve is
+    // TcpListener-only). On SIGINT, persist counters + remove socket.
+    let shutdown_relay = relay.clone();
+    let socket_path_for_cleanup = socket_path.clone();
+    let mut make_service = app.into_make_service();
+
+    let serve_loop = async {
+        loop {
+            let (stream, _peer_addr) = match listener.accept().await {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("wire relay-server (UDS): accept failed: {e}");
+                    continue;
+                }
+            };
+            let tower_service = match make_service.call(&stream).await {
+                Ok(s) => s,
+                Err(infallible) => match infallible {},
+            };
+            let io = TokioIo::new(stream);
+            let hyper_service = hyper::service::service_fn(
+                move |req: hyper::Request<hyper::body::Incoming>| {
+                    let mut svc = tower_service.clone();
+                    async move { Service::call(&mut svc, req).await }
+                },
+            );
+            tokio::task::spawn(async move {
+                if let Err(e) = http1::Builder::new()
+                    .serve_connection(io, hyper_service)
+                    .await
+                {
+                    // Connection-level error; not fatal to the listener.
+                    if !e.is_incomplete_message() {
+                        eprintln!("wire relay-server (UDS): conn error: {e}");
+                    }
+                }
+            });
+        }
+    };
+
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+        eprintln!("\nshutting down — final counter snapshot");
+        if let Err(e) = shutdown_relay.persist_counters().await {
+            eprintln!("final counter persist failed: {e}");
+        }
+        let _ = std::fs::remove_file(&socket_path_for_cleanup);
+    };
+
+    tokio::select! {
+        _ = serve_loop => {},
+        _ = shutdown => {},
+    };
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub async fn serve_uds(_socket_path: PathBuf, _state_dir: PathBuf) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "UDS transport is Unix-only; Windows falls back to loopback HTTP. \
+         Use `wire relay-server --bind 127.0.0.1:8771 --local-only` on Windows."
+    ))
+}
+
 /// v0.5.17: relay-server mode toggles. Default = full federation
 /// (current behavior). `local_only` strips phonebook + well-known
 /// surfaces so the relay is invisible from off-box and from any

@@ -61,6 +61,15 @@ pub enum EndpointScope {
     /// opt-in per session (operator passes `--with-lan-relay <url>` at
     /// `wire session new` time).
     Lan,
+    /// Unix Domain Socket (e.g. `unix:///path/to/local.sock`). Same-host,
+    /// same-uid only. v0.7.0-alpha.16: framed primarily as a SECURITY
+    /// boundary — no bound TCP port (no firewall surface), SO_PEERCRED
+    /// kernel-attested peer uid (sister-session trust anchor), 0600
+    /// socket permissions. Performance win over loopback HTTP is real
+    /// but tiny (~1.3µs) and not the headline reason. Opt-in via
+    /// `wire session new --with-uds`; Unix-only (Windows falls back to
+    /// Local loopback).
+    Uds,
 }
 
 /// One reachable address for a wire identity. Includes the bearer
@@ -103,6 +112,19 @@ impl Endpoint {
             slot_id,
             slot_token,
             scope: EndpointScope::Lan,
+        }
+    }
+
+    /// v0.7.0-alpha.16: construct a UDS-scope endpoint.
+    /// `relay_url` is a `unix:///abs/path/to/local.sock` URL (the
+    /// `unix://` scheme is wire-internal; readers route to a UDS HTTP
+    /// client rather than reqwest).
+    pub fn uds(relay_url: String, slot_id: String, slot_token: String) -> Self {
+        Self {
+            relay_url,
+            slot_id,
+            slot_token,
+            scope: EndpointScope::Uds,
         }
     }
 }
@@ -163,29 +185,37 @@ pub fn peer_endpoints_in_priority_order(relay_state: &Value, peer_handle: &str) 
         }
     }
 
-    // Sort: local-loopback-with-matching-self-local first, then LAN
-    // (cross-machine same-network), then federation, then any local we
-    // can't reach (filtered out by predicate).
+    // Sort: UDS (same-host trust anchor) first, then local-loopback-
+    // with-matching-self-local, then LAN (cross-machine same-network),
+    // then federation. Drop unreachable scopes via the retain pass.
     //
-    // v0.7.0-alpha.9: LAN endpoints sit between Local and Federation —
-    // they're slower than loopback IPC but faster than federation
-    // round-tripping through wireup.net, and they're not gated by an
-    // "our_local matches" check because cross-machine peers won't have
-    // an our-local that matches theirs by definition.
+    // v0.7.0-alpha.9: LAN endpoints sit between Local and Federation.
+    // Faster than federation; not gated by "our_local matches" because
+    // cross-machine peers won't have a matching our-local by definition.
+    //
+    // v0.7.0-alpha.16: UDS endpoints get rank 0 when peer + self share
+    // a UDS socket path (we need to be able to connect to their socket
+    // which means it must be readable by our uid). The "same-uid same-
+    // host" sister-session trust shape this enforces is the whole
+    // point of UDS — see project_wire_transport_substrate_research.
     let our_local = our_local_relay_url.clone();
     all.sort_by_key(|ep| match (ep.scope, &our_local) {
-        (EndpointScope::Local, Some(our)) if &ep.relay_url == our => 0,
-        (EndpointScope::Lan, _) => 1,
-        (EndpointScope::Federation, _) => 2,
-        _ => 3,
+        (EndpointScope::Uds, _) => 0,
+        (EndpointScope::Local, Some(our)) if &ep.relay_url == our => 1,
+        (EndpointScope::Lan, _) => 2,
+        (EndpointScope::Federation, _) => 3,
+        _ => 4,
     });
-    // Drop unreachable locals (we have no local slot or our local relay
-    // doesn't match the peer's local relay_url). LAN endpoints are kept
-    // — the daemon will probe; failure falls through to federation.
+    // Drop unreachable: Local needs matching loopback URL; UDS needs
+    // the socket file to exist on our filesystem (the daemon-side
+    // connect will surface a clearer error than a routing-time drop
+    // would, but we still keep UDS in the routing list — failure
+    // falls through to lower-priority scopes).
     all.retain(|ep| match (ep.scope, &our_local) {
         (EndpointScope::Local, None) => false,
         (EndpointScope::Local, Some(our)) => &ep.relay_url == our,
         (EndpointScope::Lan, _) => true,
+        (EndpointScope::Uds, _) => true,
         (EndpointScope::Federation, _) => true,
     });
     all

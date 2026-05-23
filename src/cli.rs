@@ -160,6 +160,13 @@ pub enum Command {
         /// `127.0.0.1:8771` and allocates a local slot automatically.
         #[arg(long)]
         local_only: bool,
+        /// v0.7.0-alpha.16: bind to a Unix Domain Socket instead of TCP.
+        /// When set, --bind is ignored. Implies --local-only semantics
+        /// (no phonebook, no .well-known). Socket is chmod 0600 (owner-
+        /// rw only), giving SO_PEERCRED-equivalent same-uid trust for
+        /// sister sessions. Unix only (Windows refuses).
+        #[arg(long)]
+        uds: Option<std::path::PathBuf>,
     },
     /// Allocate a slot on a relay; bind it to this agent's identity.
     ///
@@ -1270,7 +1277,11 @@ pub fn run() -> Result<()> {
             ResponderCommand::Get { peer, json } => cmd_responder_get(peer.as_deref(), json),
         },
         Command::Mcp => cmd_mcp(),
-        Command::RelayServer { bind, local_only } => cmd_relay_server(&bind, local_only),
+        Command::RelayServer {
+            bind,
+            local_only,
+            uds,
+        } => cmd_relay_server(&bind, local_only, uds.as_deref()),
         Command::BindRelay {
             url,
             migrate_pinned,
@@ -3112,7 +3123,36 @@ fn cmd_mcp() -> Result<()> {
     crate::mcp::run()
 }
 
-fn cmd_relay_server(bind: &str, local_only: bool) -> Result<()> {
+fn cmd_relay_server(
+    bind: &str,
+    local_only: bool,
+    uds: Option<&std::path::Path>,
+) -> Result<()> {
+    // v0.7.0-alpha.16: --uds <path> takes the UDS transport path,
+    // overriding --bind. Implies --local-only semantics. Routed to a
+    // separate serve_uds entry point with a manual hyper accept loop
+    // (axum 0.7's `serve` is TcpListener-only).
+    if let Some(socket_path) = uds {
+        let base = if let Ok(home) = std::env::var("WIRE_HOME") {
+            std::path::PathBuf::from(home)
+                .join("state")
+                .join("wire-relay")
+                .join("uds")
+        } else {
+            dirs::state_dir()
+                .or_else(dirs::data_local_dir)
+                .ok_or_else(|| anyhow::anyhow!("could not resolve XDG_STATE_HOME — set WIRE_HOME"))?
+                .join("wire-relay")
+                .join("uds")
+        };
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return runtime.block_on(crate::relay_server::serve_uds(
+            socket_path.to_path_buf(),
+            base,
+        ));
+    }
     // v0.5.17: --local-only refuses non-loopback binds. Catches the
     // "wait did I just bind a publicly-reachable local-only relay" mistake
     // at startup rather than discovering it via an empty phonebook later.
@@ -3648,6 +3688,7 @@ fn endpoint_cursor_key(scope: crate::endpoints::EndpointScope) -> String {
         crate::endpoints::EndpointScope::Federation => "last_pulled_event_id".to_string(),
         crate::endpoints::EndpointScope::Local => "last_pulled_event_id_local".to_string(),
         crate::endpoints::EndpointScope::Lan => "last_pulled_event_id_lan".to_string(),
+        crate::endpoints::EndpointScope::Uds => "last_pulled_event_id_uds".to_string(),
     }
 }
 
@@ -5284,6 +5325,7 @@ fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<()> {
                 "delivered_via": match delivery_endpoint.scope {
                     crate::endpoints::EndpointScope::Local => "local",
                     crate::endpoints::EndpointScope::Lan => "lan",
+                    crate::endpoints::EndpointScope::Uds => "uds",
                     crate::endpoints::EndpointScope::Federation => "federation",
                 },
                 "status": "drop_sent",
@@ -5293,6 +5335,7 @@ fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<()> {
         let scope = match delivery_endpoint.scope {
             crate::endpoints::EndpointScope::Local => "local",
             crate::endpoints::EndpointScope::Lan => "lan",
+            crate::endpoints::EndpointScope::Uds => "uds",
             crate::endpoints::EndpointScope::Federation => "federation",
         };
         println!(
@@ -5874,6 +5917,7 @@ fn cmd_mesh_route(
                     match ep.scope {
                         crate::endpoints::EndpointScope::Local => "local",
                         crate::endpoints::EndpointScope::Lan => "lan",
+                        crate::endpoints::EndpointScope::Uds => "uds",
                         crate::endpoints::EndpointScope::Federation => "federation",
                     }
                     .to_string(),
@@ -6286,6 +6330,7 @@ fn cmd_mesh_broadcast(
                                 match ep.scope {
                                     crate::endpoints::EndpointScope::Local => "local",
                                     crate::endpoints::EndpointScope::Lan => "lan",
+                                    crate::endpoints::EndpointScope::Uds => "uds",
                                     crate::endpoints::EndpointScope::Federation => "federation",
                                 }
                                 .to_string(),
@@ -7762,6 +7807,7 @@ fn probe_directed_edge(from_state: &Value, to_name: &str, now: u64) -> DirectedE
         match ep.scope {
             crate::endpoints::EndpointScope::Local => "local",
             crate::endpoints::EndpointScope::Lan => "lan",
+            crate::endpoints::EndpointScope::Uds => "uds",
             crate::endpoints::EndpointScope::Federation => "federation",
         }
         .to_string(),
