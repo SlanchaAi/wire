@@ -2367,17 +2367,26 @@ fn cmd_send(
         bail!("not initialized — run `wire init <handle>` first");
     }
     let peer_in = crate::agent_card::bare_handle(peer).to_string();
-    // v0.7.0-alpha.2: nickname-as-handle resolution. If the input matches
-    // a pinned peer's character nickname (derived from their DID), swap
-    // to the canonical handle for downstream lookups. Surface the
-    // resolution to stderr so operators see the indirection.
+    // v0.7.0-alpha.2/.5: nickname-as-handle resolution. Exact handle
+    // match wins; nickname (DID-hash auto-derived) is the fallback.
+    // Ambiguous nicknames (two pinned peers DID-hash to the same
+    // adj-noun pair) fail loudly with disambiguation; unknown handles
+    // pass through (matches existing `wire send` semantics — queue
+    // first, deliver best-effort).
     let peer = match resolve_peer_handle(&peer_in) {
-        Some(resolved) if resolved != peer_in => {
+        Ok(Some(resolved)) if resolved != peer_in => {
             eprintln!("wire send: resolved nickname `{peer_in}` → peer `{resolved}`");
             resolved
         }
-        Some(canonical) => canonical, // exact handle match
-        None => peer_in,               // pass through; downstream will error if truly unknown
+        Ok(Some(canonical)) => canonical, // exact handle match
+        Ok(None) => peer_in,               // unknown — pass through, downstream errors
+        Err(ResolveError::Ambiguous(candidates)) => bail!(
+            "nickname `{peer_in}` is ambiguous — matches {} pinned peers: {}. \
+             Disambiguate by passing the peer handle (one of those listed) instead of the nickname.",
+            candidates.len(),
+            candidates.join(", ")
+        ),
+        Err(ResolveError::NotFound) => peer_in, // (unreachable for this fn but defensive)
     };
     let peer = peer.as_str();
     let sk_seed = config::read_private_key()?;
@@ -4835,29 +4844,47 @@ enum ResolveError {
     Ambiguous(Vec<String>),
 }
 
-/// v0.7.0-alpha.2: resolve a peer input (handle or character nickname)
+/// v0.7.0-alpha.2/.5: resolve a peer input (handle or character nickname)
 /// to a pinned peer's canonical handle.
 ///
 /// `wire send <peer>` accepts either the handle the peer registered with
-/// or their character nickname (derived from their DID). Returns the
-/// canonical handle for downstream lookups, or None if no peer matches.
-fn resolve_peer_handle(input: &str) -> Option<String> {
-    let trust = config::read_trust().ok()?;
-    let agents = trust.get("agents")?.as_object()?;
-    // Exact handle match wins.
+/// or their character nickname (DID-hash-derived). Exact handle match
+/// always wins. When a nickname matches multiple peers (theoretically
+/// possible via DID-hash collision in the (adj, noun) space), returns
+/// `Ambiguous` so the caller can surface a disambiguation hint instead
+/// of silently picking one.
+///
+/// Only AUTO-DERIVED peer characters are matchable; operator-chosen
+/// overrides on the peer's side live in their local `display.json` and
+/// aren't yet published via agent-card. (That's the v0.7+ federation
+/// lifecycle work — peers publishing overrides so we resolve by what
+/// they call themselves, not just what their DID hashes to.)
+fn resolve_peer_handle(input: &str) -> Result<Option<String>, ResolveError> {
+    let trust = match config::read_trust() {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let agents = match trust.get("agents").and_then(|a| a.as_object()) {
+        Some(a) => a,
+        None => return Ok(None),
+    };
     if agents.contains_key(input) {
-        return Some(input.to_string());
+        return Ok(Some(input.to_string()));
     }
-    // Fallback: scan peers, compute character per DID, match nickname.
+    let mut nick_matches: Vec<String> = Vec::new();
     for (handle, agent) in agents.iter() {
         if let Some(did) = agent.get("did").and_then(Value::as_str) {
             let character = crate::character::Character::from_did(did);
             if character.nickname == input {
-                return Some(handle.clone());
+                nick_matches.push(handle.clone());
             }
         }
     }
-    None
+    match nick_matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(nick_matches.into_iter().next().unwrap())),
+        _ => Err(ResolveError::Ambiguous(nick_matches)),
+    }
 }
 
 fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<()> {
