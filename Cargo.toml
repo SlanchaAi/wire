@@ -1,6 +1,6 @@
 [package]
 name = "slancha-wire"
-version = "0.9.4"
+version = "0.9.5"
 edition = "2024"
 rust-version = "1.88"
 description = "Magic-wormhole for AI agents — bilateral signed-message bus over a mailbox relay"
@@ -42,6 +42,7 @@ hostname = "0.4"
 thiserror = "1"
 time = { version = "0.3", features = ["formatting", "macros", "parsing", "serde"] }
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 dirs = "5"
 anyhow = "1"
 fs2 = "0.4"

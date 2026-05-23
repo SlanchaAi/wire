@@ -86,6 +86,21 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// v0.9.5: emit shell completion script to stdout. Pipe to your
+    /// shell's completion dir to enable tab-completion of wire verbs
+    /// + handles + flags.
+    ///
+    /// Example installs:
+    ///   bash:       `wire completions bash > /etc/bash_completion.d/wire`
+    ///   zsh:        `wire completions zsh > ~/.zsh/completions/_wire`
+    ///   fish:       `wire completions fish > ~/.config/fish/completions/wire.fish`
+    ///   pwsh:       `wire completions powershell > $PROFILE` (append)
+    ///   elvish:     `wire completions elvish > ~/.elvish/lib/wire.elv`
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     /// v0.9.3: one-screen "you are here" view. Prints the current
     /// session's character + handle + cwd, plus a short list of
     /// neighbors (sister sessions on the local relay, pinned peers).
@@ -1430,6 +1445,18 @@ pub fn run() -> Result<()> {
         } => cmd_whoami(json_default(json), short, colored),
         Command::Peers { json } => cmd_peers(json_default(json)),
         Command::Here { json } => cmd_here(json_default(json)),
+        Command::Completions { shell } => {
+            // v0.9.5: print shell completion script to stdout. Operator
+            // pipes into their shell's completion dir; tab completion
+            // covers verbs (dial, send, pending, accept, etc.) AND
+            // their flags. Peer-name dynamic completion is a future
+            // shell-side enhancement; clap_complete only ships the
+            // static grammar.
+            use clap::CommandFactory;
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "wire", &mut std::io::stdout());
+            Ok(())
+        }
         Command::Pending { json } => cmd_pair_list_inbound(json_default(json)),
         Command::Reject { peer, json } => cmd_pair_reject(&peer, json_default(json)),
         Command::Send {
@@ -1731,15 +1758,66 @@ fn cmd_init(
             );
             resolved_relay = Some(default_local.to_string());
         } else {
-            bail!(
-                "wire init: no relay specified and no local relay reachable at \
-                 http://127.0.0.1:8771.\n\
-                 Pick one:\n\
-                 • `wire service install --local-relay` — start the local relay, then re-run\n\
-                 • `wire init {handle} --relay https://wireup.net` — bind to public federation\n\
-                 • `wire init {handle} --offline` — generate keypair only \
-                 (peers cannot reach you until you `wire bind-relay <url>` later)"
-            );
+            // v0.9.5: interactive prompt for first-time operators
+            // when the smart-default can't auto-attach. Detect TTY on
+            // stdin AND stderr — only prompt for humans. CI / agents
+            // / non-interactive shells fall through to the explicit
+            // error wall (unchanged behavior since v0.9.1).
+            use std::io::{BufRead, IsTerminal, Write};
+            let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+            if interactive && std::env::var("WIRE_NO_INTERACTIVE").is_err() {
+                eprintln!("wire init: no local relay reachable at {default_local}.");
+                eprint!(
+                    "  Bind to public federation relay https://wireup.net instead? \
+                     [Y/n/offline/url]: "
+                );
+                let _ = std::io::stderr().flush();
+                let mut input = String::new();
+                let _ = std::io::stdin().lock().read_line(&mut input);
+                let answer = input.trim();
+                match answer {
+                    "" | "y" | "Y" | "yes" | "YES" => {
+                        eprintln!("wire init: binding to https://wireup.net");
+                        resolved_relay = Some("https://wireup.net".to_string());
+                    }
+                    "n" | "N" | "no" | "NO" => {
+                        bail!(
+                            "wire init: declined federation default; re-run with --relay <url> or --offline."
+                        );
+                    }
+                    "offline" | "OFFLINE" => {
+                        eprintln!(
+                            "wire init: proceeding offline. \
+                             Run `wire bind-relay <url>` before pairing."
+                        );
+                        // Fall through with resolved_relay still None;
+                        // the `offline` flag is conceptually set but
+                        // the caller's local doesn't need updating —
+                        // resolved_relay = None + offline behavior
+                        // is identical for the rest of cmd_init.
+                    }
+                    url if url.starts_with("http://") || url.starts_with("https://") => {
+                        eprintln!("wire init: binding to {url}");
+                        resolved_relay = Some(url.to_string());
+                    }
+                    other => {
+                        bail!(
+                            "wire init: unrecognized answer `{other}` — \
+                             expected Y/n/offline/<url>. Re-run with --relay or --offline."
+                        );
+                    }
+                }
+            } else {
+                bail!(
+                    "wire init: no relay specified and no local relay reachable at \
+                     http://127.0.0.1:8771.\n\
+                     Pick one:\n\
+                     • `wire service install --local-relay` — start the local relay, then re-run\n\
+                     • `wire init {handle} --relay https://wireup.net` — bind to public federation\n\
+                     • `wire init {handle} --offline` — generate keypair only \
+                     (peers cannot reach you until you `wire bind-relay <url>` later)"
+                );
+            }
         }
     }
     let relay = resolved_relay.as_deref();
