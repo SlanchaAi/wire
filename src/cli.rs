@@ -2418,7 +2418,7 @@ fn cmd_identity_create(name: Option<&str>, anonymous: bool, as_json: bool) -> Re
         // Run `wire init <name>` with WIRE_HOME = anon_root/sessions/<name>
         let session_home = anon_root.join("sessions").join(&anon_name);
         std::fs::create_dir_all(&session_home)?;
-        let status = run_wire_with_home(&session_home, &["init", &anon_name])?;
+        let status = run_wire_with_home(&session_home, &["init", &anon_name, "--offline"])?;
         if !status.success() {
             bail!("anonymous identity init failed: {status}");
         }
@@ -7348,9 +7348,13 @@ fn cmd_session_new(
     // Phase 1: init identity in the new session's WIRE_HOME. For
     // federation-bound sessions we pass `--relay` so init also
     // allocates a federation slot in the same step; for `--local-only`
-    // we run init without --relay so no federation contact happens.
+    // we run init with `--offline` (v0.9 requires explicit reachability
+    // acknowledgement at init time) because cmd_session_new allocates
+    // the local-relay slot itself via try_allocate_local_slot below.
+    // The session is not actually slotless — init is just deferred to
+    // the subsequent allocation pass.
     let init_args: Vec<&str> = if local_only {
-        vec!["init", &name]
+        vec!["init", &name, "--offline"]
     } else {
         vec!["init", &name, "--relay", relay]
     };
@@ -8037,7 +8041,11 @@ pub fn maybe_auto_init_cwd_session(label: &str) {
             let _ = fs2::FileExt::unlock(&lock_file);
             return;
         }
-        match run_wire_with_home(&session_home, &["init", &name]) {
+        // v0.9: --offline; the surrounding session-spawn path runs
+        // try_allocate_local_slot afterward to attach an inbound slot
+        // when a local relay is available. Init itself stays slotless
+        // because it's a precursor step, not the final state.
+        match run_wire_with_home(&session_home, &["init", &name, "--offline"]) {
             Ok(status) if status.success() => {}
             Ok(status) => {
                 eprintln!(
