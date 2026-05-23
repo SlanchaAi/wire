@@ -3036,10 +3036,18 @@ fn cmd_relay_server(bind: &str, local_only: bool) -> Result<()> {
 }
 
 /// v0.5.17 loopback-bind guard. Refuses any address whose host portion
-/// resolves to something outside `127.0.0.0/8` or `::1`. Specifically
-/// rejects `0.0.0.0`, `::`, `0:0:0:0:0:0:0:0`, and any non-loopback
-/// IPv4/IPv6 literal. Hostname-form addresses (e.g. `localhost`) are
-/// accepted only if they resolve to a loopback address.
+/// resolves to something outside `127.0.0.0/8` or `::1`.
+///
+/// v0.7.0-alpha.11 (review-fix during cross-machine LAN stress): now
+/// ALSO accepts RFC 1918 private IPv4 addresses (10/8, 172.16/12,
+/// 192.168/16) so `wire relay-server --bind <LAN-IP>:8772 --local-only`
+/// works for the v0.7.0-alpha.9 LAN endpoint feature. The "local-only"
+/// semantics (no phonebook listing, no `.well-known/wire/agent` serve)
+/// still apply — only the loopback-only bind constraint is relaxed to
+/// loopback-or-private-LAN. Public IPv4 binds (8.8.8.8, etc.) and the
+/// wildcards `0.0.0.0`/`::` are still refused — those would publish a
+/// "local-only" relay to the global internet, which is the v0.5.17
+/// security gate's whole point.
 fn validate_loopback_bind(bind: &str) -> Result<()> {
     // Split host:port. IPv6 literals use `[::]:port` form.
     let host = if let Some(stripped) = bind.strip_prefix('[') {
@@ -3052,7 +3060,7 @@ fn validate_loopback_bind(bind: &str) -> Result<()> {
             .map(|(h, _)| h.to_string())
             .unwrap_or_else(|| bind.to_string())
     };
-    use std::net::ToSocketAddrs;
+    use std::net::{IpAddr, ToSocketAddrs};
     let probe = format!("{host}:0");
     let resolved: Vec<_> = probe
         .to_socket_addrs()
@@ -3062,12 +3070,17 @@ fn validate_loopback_bind(bind: &str) -> Result<()> {
         bail!("--local-only: bind host {host:?} resolved to no addresses");
     }
     for addr in &resolved {
-        if !addr.ip().is_loopback() {
+        let ip = addr.ip();
+        let is_private = match ip {
+            IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+            IpAddr::V6(v6) => v6.is_loopback(), // ULA detection deferred
+        };
+        if !is_private {
             bail!(
-                "--local-only refuses non-loopback bind: {host:?} resolves to {} \
-                 which is not in 127.0.0.0/8 or [::1]. Remove --local-only to bind \
-                 publicly, or use 127.0.0.1 / [::1] / localhost.",
-                addr.ip()
+                "--local-only refuses non-private bind: {host:?} resolves to {} \
+                 which is not loopback (127/8, ::1) or RFC 1918 private (10/8, 172.16/12, 192.168/16). \
+                 Remove --local-only to bind publicly.",
+                ip
             );
         }
     }
