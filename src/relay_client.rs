@@ -130,6 +130,71 @@ pub fn format_transport_error(err: &anyhow::Error) -> String {
     parts.join(": ")
 }
 
+/// v0.7.0-alpha.17: minimal blocking HTTP/1.1 client over Unix Domain
+/// Socket. Used by callers that detect a `unix://` scheme on a relay
+/// endpoint URL and route around reqwest (which has no UDS support).
+///
+/// Connects to `socket_path`, writes a single HTTP/1.1 request, parses
+/// status + Content-Length + body. Closes the connection (no keep-
+/// alive). Sufficient for wire's request shape: single POST or GET per
+/// call, JSON in + JSON out, small payloads.
+///
+/// Returns `(status_code, body_bytes)`. Caller decodes body per the
+/// endpoint's content type.
+#[cfg(unix)]
+pub fn uds_request(
+    socket_path: &std::path::Path,
+    method: &str,
+    request_target: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<(u16, Vec<u8>)> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(socket_path)
+        .with_context(|| format!("connect UDS {socket_path:?}"))?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+    let mut req = String::with_capacity(256 + headers.len() * 32 + body.len());
+    req.push_str(method);
+    req.push(' ');
+    req.push_str(request_target);
+    req.push_str(" HTTP/1.1\r\n");
+    req.push_str("Host: localhost\r\n");
+    req.push_str("Connection: close\r\n");
+    req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    for (k, v) in headers {
+        req.push_str(k);
+        req.push_str(": ");
+        req.push_str(v);
+        req.push_str("\r\n");
+    }
+    req.push_str("\r\n");
+    stream.write_all(req.as_bytes())?;
+    if !body.is_empty() {
+        stream.write_all(body)?;
+    }
+    stream.flush()?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw)?;
+    // Parse HTTP/1.1 response: status line + headers + \r\n\r\n + body.
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| anyhow!("UDS response missing header/body delimiter"))?;
+    let head = std::str::from_utf8(&raw[..split])
+        .map_err(|e| anyhow!("UDS response head not UTF-8: {e}"))?;
+    let body = raw[split + 4..].to_vec();
+    let status_line = head.lines().next().unwrap_or("");
+    // "HTTP/1.1 200 OK"
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| anyhow!("UDS response missing status code: {status_line:?}"))?;
+    Ok((status, body))
+}
+
 impl RelayClient {
     pub fn new(base_url: &str) -> Self {
         let client = build_blocking_client(Some(std::time::Duration::from_secs(30)))
@@ -524,6 +589,82 @@ impl RelayClient {
             return Err(anyhow!("well_known_agent failed: {status}: {detail}"));
         }
         Ok(resp.json()?)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod uds_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+
+    /// Spawn a one-shot UDS HTTP/1.1 server that returns a canned
+    /// response. Returns the socket path; cleanup is via drop of the
+    /// tempdir the caller manages.
+    fn spawn_canned_uds_server(socket_path: std::path::PathBuf, status: u16, body: &'static str) {
+        let listener = UnixListener::bind(&socket_path).expect("bind canned UDS");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept canned UDS");
+            let mut req_buf = [0u8; 4096];
+            let _ = stream.read(&mut req_buf);
+            let body_bytes = body.as_bytes();
+            let status_text = match status {
+                200 => "OK",
+                201 => "Created",
+                400 => "Bad Request",
+                _ => "Status",
+            };
+            let resp = format!(
+                "HTTP/1.1 {status} {status_text}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body_bytes.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        });
+    }
+
+    #[test]
+    fn uds_request_round_trips_200_with_body() {
+        let tmpdir = std::env::temp_dir().join(format!(
+            "wire-uds-test-{}",
+            rand::random::<u32>()
+        ));
+        std::fs::create_dir_all(&tmpdir).unwrap();
+        let sock = tmpdir.join("rt.sock");
+        let _ = std::fs::remove_file(&sock);
+        spawn_canned_uds_server(sock.clone(), 200, r#"{"ok":true}"#);
+        // Give the server a moment to bind.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let (status, body) = uds_request(&sock, "POST", "/v1/test", &[("Content-Type", "application/json")], b"{}")
+            .expect("uds_request succeeds");
+        assert_eq!(status, 200);
+        assert_eq!(body, br#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn uds_request_surfaces_non_2xx_status() {
+        let tmpdir = std::env::temp_dir().join(format!(
+            "wire-uds-test-{}",
+            rand::random::<u32>()
+        ));
+        std::fs::create_dir_all(&tmpdir).unwrap();
+        let sock = tmpdir.join("err.sock");
+        let _ = std::fs::remove_file(&sock);
+        spawn_canned_uds_server(sock.clone(), 400, r#"{"error":"bad"}"#);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let (status, body) = uds_request(&sock, "GET", "/v1/test", &[], b"")
+            .expect("uds_request succeeds even on 4xx");
+        assert_eq!(status, 400);
+        assert_eq!(body, br#"{"error":"bad"}"#);
+    }
+
+    #[test]
+    fn uds_request_fails_on_nonexistent_socket() {
+        let nope = std::path::Path::new("/tmp/wire-uds-nonexistent-socket-aaa.sock");
+        let _ = std::fs::remove_file(nope);
+        let err = uds_request(nope, "GET", "/", &[], b"").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("connect UDS"), "expected connect error, got: {msg}");
     }
 }
 
