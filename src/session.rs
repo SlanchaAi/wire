@@ -763,7 +763,18 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
         Some(h) => h,
         None => return,
     };
-    if std::env::var("WIRE_QUIET_AUTOSESSION").is_err() {
+    // v0.9.1: emit the chatter ONLY when stderr is an interactive TTY.
+    // When wire is invoked from a non-interactive parent (Claude Code's
+    // Bash tool, scripts, daemons), the auto-detect line is captured
+    // alongside command output and pollutes both — wasting agent
+    // context tokens and breaking JSON parsers that read combined
+    // streams. WIRE_VERBOSE=1 forces the line on; WIRE_QUIET_AUTOSESSION
+    // still forces it off for back-compat with v0.9 scripts.
+    use std::io::IsTerminal;
+    let quiet_env = std::env::var("WIRE_QUIET_AUTOSESSION").is_ok();
+    let verbose_env = std::env::var("WIRE_VERBOSE").is_ok();
+    let interactive = std::io::stderr().is_terminal();
+    if !quiet_env && (interactive || verbose_env) {
         eprintln!(
             "wire {label}: auto-detected session for cwd `{}` → WIRE_HOME=`{}`",
             cwd.display(),
