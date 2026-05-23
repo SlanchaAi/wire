@@ -870,6 +870,19 @@ pub enum SessionCommand {
         /// `http://192.168.1.50:8771`. Required when `--with-lan` is set.
         #[arg(long)]
         lan_relay: Option<String>,
+        /// v0.7.0-alpha.18: also allocate a slot on a Unix Domain Socket
+        /// relay (must be running e.g. via `wire relay-server --uds
+        /// /tmp/wire.sock`). Same-host, owner-uid-only path that
+        /// bypasses the macOS firewall + Tailscale userspace-netstack
+        /// class of issues entirely for sister-session traffic. UDS
+        /// endpoint is published in the agent-card.
+        #[arg(long)]
+        with_uds: bool,
+        /// v0.7.0-alpha.18: UDS socket path. Required when `--with-uds`
+        /// is set. Example: `/tmp/wire.sock` or
+        /// `~/.wire/local.sock`.
+        #[arg(long)]
+        uds_socket: Option<std::path::PathBuf>,
         /// Skip spawning the session-local daemon. Use when you want
         /// to drive sync explicitly from the agent or test rig.
         #[arg(long)]
@@ -6438,6 +6451,8 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
             local_relay,
             with_lan,
             lan_relay,
+            with_uds,
+            uds_socket,
             no_daemon,
             local_only,
             json,
@@ -6448,6 +6463,8 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
             &local_relay,
             with_lan,
             lan_relay.as_deref(),
+            with_uds,
+            uds_socket.as_deref(),
             no_daemon,
             local_only,
             json,
@@ -6484,6 +6501,8 @@ fn cmd_session_new(
     local_relay: &str,
     with_lan: bool,
     lan_relay: Option<&str>,
+    with_uds: bool,
+    uds_socket: Option<&std::path::Path>,
     no_daemon: bool,
     local_only: bool,
     as_json: bool,
@@ -6494,6 +6513,10 @@ fn cmd_session_new(
     // v0.7.0-alpha.9: --with-lan requires --lan-relay <url>.
     if with_lan && lan_relay.is_none() {
         bail!("--with-lan requires --lan-relay <url> (e.g. http://192.168.1.50:8771)");
+    }
+    // v0.7.0-alpha.18: --with-uds requires --uds-socket <path>.
+    if with_uds && uds_socket.is_none() {
+        bail!("--with-uds requires --uds-socket <path> (e.g. /tmp/wire.sock)");
     }
     let cwd = std::env::current_dir().with_context(|| "reading cwd")?;
     let mut registry = crate::session::read_registry().unwrap_or_default();
@@ -6634,6 +6657,12 @@ fn cmd_session_new(
     {
         try_allocate_lan_slot(&session_home, &effective_handle, lan_url);
     }
+    // v0.7.0-alpha.18: also allocate a UDS slot if requested.
+    if with_uds
+        && let Some(socket_path) = uds_socket
+    {
+        try_allocate_uds_slot(&session_home, &effective_handle, socket_path);
+    }
 
     if !no_daemon {
         ensure_session_daemon(&session_home)?;
@@ -6641,6 +6670,139 @@ fn cmd_session_new(
 
     let info = render_session_info(&name, &session_home, &cwd)?;
     emit_session_new_result(&info, "created", as_json)
+}
+
+/// v0.7.0-alpha.18: probe + allocate against a UDS-bound relay, then
+/// merge the resulting Uds endpoint into `self.endpoints[]` so paired
+/// sister sessions can route over the local socket instead of loopback
+/// HTTP. Uses the hand-rolled `uds_request` HTTP/1.1 client from
+/// alpha.17 — reqwest has no UDS support.
+///
+/// Non-fatal on probe/alloc failure (mirrors try_allocate_local_slot
+/// and try_allocate_lan_slot semantics): session stays at existing
+/// endpoint mix, operator can retry once the UDS relay is up.
+#[cfg(unix)]
+fn try_allocate_uds_slot(
+    session_home: &std::path::Path,
+    handle: &str,
+    uds_socket: &std::path::Path,
+) {
+    // Probe healthz first so we fail fast with a clear stderr if the
+    // socket doesn't exist OR isn't a wire relay.
+    let healthz = match crate::relay_client::uds_request(uds_socket, "GET", "/healthz", &[], b"") {
+        Ok((200, _)) => true,
+        Ok((status, body)) => {
+            eprintln!(
+                "wire session new: UDS relay probe at {uds_socket:?} returned {status} ({}) — not publishing UDS endpoint",
+                String::from_utf8_lossy(&body)
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!(
+                "wire session new: UDS relay at {uds_socket:?} unreachable ({e:#}) — \
+                 not publishing UDS endpoint. Start one with `wire relay-server --uds <path>`."
+            );
+            return;
+        }
+    };
+    if !healthz {
+        return;
+    }
+
+    // Allocate a slot via the same hand-rolled HTTP/1.1 client.
+    let alloc_body = serde_json::json!({"handle": handle}).to_string();
+    let (status, body) = match crate::relay_client::uds_request(
+        uds_socket,
+        "POST",
+        "/v1/slot/allocate",
+        &[("Content-Type", "application/json")],
+        alloc_body.as_bytes(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "wire session new: UDS relay slot allocation request failed: {e:#} — not publishing UDS endpoint"
+            );
+            return;
+        }
+    };
+    if status >= 300 {
+        eprintln!(
+            "wire session new: UDS relay slot allocation returned {status} ({}) — not publishing UDS endpoint",
+            String::from_utf8_lossy(&body)
+        );
+        return;
+    }
+    let alloc: crate::relay_client::AllocateResponse = match serde_json::from_slice(&body) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!(
+                "wire session new: UDS relay returned unparseable allocate response: {e:#}"
+            );
+            return;
+        }
+    };
+
+    let state_path = session_home.join("config").join("wire").join("relay.json");
+    let mut state: serde_json::Value = std::fs::read(&state_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let mut endpoints: Vec<crate::endpoints::Endpoint> = state
+        .get("self")
+        .and_then(|s| s.get("endpoints"))
+        .and_then(|e| e.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| serde_json::from_value::<crate::endpoints::Endpoint>(v.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    endpoints.push(crate::endpoints::Endpoint::uds(
+        format!("unix://{}", uds_socket.display()),
+        alloc.slot_id.clone(),
+        alloc.slot_token.clone(),
+    ));
+
+    let self_obj = state
+        .as_object_mut()
+        .expect("relay_state root is an object")
+        .entry("self")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !self_obj.is_object() {
+        *self_obj = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(obj) = self_obj.as_object_mut() {
+        obj.insert(
+            "endpoints".into(),
+            serde_json::to_value(&endpoints).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Err(e) = std::fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&state).expect("relay_state serializable"),
+    ) {
+        eprintln!("wire session new: failed to write {state_path:?}: {e}");
+        return;
+    }
+    eprintln!(
+        "wire session new: UDS slot allocated on unix://{} (slot_id={}) — sister sessions will see this endpoint in your agent-card",
+        uds_socket.display(),
+        alloc.slot_id
+    );
+}
+
+#[cfg(not(unix))]
+fn try_allocate_uds_slot(
+    _session_home: &std::path::Path,
+    _handle: &str,
+    _uds_socket: &std::path::Path,
+) {
+    eprintln!(
+        "wire session new: --with-uds is Unix-only (Windows lacks AF_UNIX in tokio/reqwest); ignoring"
+    );
 }
 
 /// v0.7.0-alpha.9: probe + allocate against a LAN-bound relay, then
