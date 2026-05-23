@@ -195,7 +195,15 @@ pub fn read_private_key() -> Result<[u8; 32]> {
 pub fn write_agent_card(card: &Value) -> Result<()> {
     let path = agent_card_path()?;
     let body = serde_json::to_vec_pretty(card)?;
-    fs::write(&path, body).with_context(|| format!("writing {path:?}"))?;
+    // v0.7.0-alpha.8 (review-fix #7): atomic write via tmp+rename so
+    // a power-loss / SIGKILL mid-write doesn't leave a 0-byte agent-
+    // card that `is_initialized()` claims is fine but `read_agent_card`
+    // can't parse. `cmd_identity_rename` made this a hot path; the
+    // pre-existing fs::write pattern was a corruption risk every call.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, body).with_context(|| format!("writing tmp {tmp:?}"))?;
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("atomic rename {tmp:?} → {path:?}"))?;
     Ok(())
 }
 
@@ -242,7 +250,13 @@ pub fn write_display_overrides(overrides: &DisplayOverrides) -> Result<()> {
         fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
     }
     let body = serde_json::to_vec_pretty(overrides)?;
-    fs::write(&path, body).with_context(|| format!("writing {path:?}"))?;
+    // v0.7.0-alpha.8 (review-fix #7): atomic write — consistent with
+    // write_agent_card now that they share the cmd_identity_rename
+    // call path.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, body).with_context(|| format!("writing tmp {tmp:?}"))?;
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("atomic rename {tmp:?} → {path:?}"))?;
     Ok(())
 }
 

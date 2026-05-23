@@ -123,7 +123,16 @@ pub fn write_registry(reg: &SessionRegistry) -> Result<()> {
         std::fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
     }
     let body = serde_json::to_vec_pretty(reg)?;
-    std::fs::write(&path, body).with_context(|| format!("writing session registry {path:?}"))?;
+    // v0.7.0-alpha.8 (review-fix #7): atomic write via tmp+rename so
+    // concurrent unflocked readers (detect_session_wire_home,
+    // list_sessions, cmd_peers) never observe a 0-byte / truncated
+    // registry mid-write. Pre-alpha.8 used std::fs::write which
+    // truncates first — race window where readers saw empty JSON and
+    // fell back to default identity for the write duration.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body).with_context(|| format!("writing tmp session registry {tmp:?}"))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("atomic rename {tmp:?} → {path:?}"))?;
     Ok(())
 }
 

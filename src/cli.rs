@@ -2110,10 +2110,37 @@ fn cmd_identity_rename(
         // Merge: keep existing fields if not explicitly provided.
         let mut existing = config::read_display_overrides().unwrap_or_default();
         if let Some(n) = name {
-            existing.nickname = Some(n);
+            // v0.7.0-alpha.8 (review-fix #1): sanitize at write time and
+            // refuse anything that fully reduces to empty (operator typed
+            // only control chars / escape sequences). Defense against
+            // self-pwn AND silent-no-op writes.
+            let cleaned = crate::character::sanitize_display_text(&n);
+            if cleaned.is_empty() {
+                bail!(
+                    "nickname `{n:?}` is empty after stripping control characters — pick a name with printable codepoints (max {} chars).",
+                    crate::character::MAX_DISPLAY_CHARS
+                );
+            }
+            if cleaned != n {
+                eprintln!(
+                    "wire identity rename: stripped control characters from nickname → `{cleaned}`"
+                );
+            }
+            existing.nickname = Some(cleaned);
         }
         if let Some(e) = emoji {
-            existing.emoji = Some(e);
+            let cleaned = crate::character::sanitize_display_text(&e);
+            if cleaned.is_empty() {
+                bail!(
+                    "emoji `{e:?}` is empty after stripping control characters — pick a printable emoji glyph."
+                );
+            }
+            if cleaned != e {
+                eprintln!(
+                    "wire identity rename: stripped control characters from emoji → `{cleaned}`"
+                );
+            }
+            existing.emoji = Some(cleaned);
         }
         existing
     };
@@ -2284,23 +2311,22 @@ fn cmd_peers(as_json: bool) -> Result<()> {
     } else if peers.is_empty() {
         println!("no peers pinned (run `wire join <code>` to pair)");
     } else {
+        // v0.7.0-alpha.8 (review-fix #3): reuse the character we ALREADY
+        // computed above (from peer's agent-card, honoring override) so
+        // text and JSON output never diverge. Pre-alpha.8 the text loop
+        // recomputed via Character::from_did (no override) — operators
+        // saw different identities depending on --json flag.
         for p in &peers {
-            let did = p["did"].as_str().unwrap_or("");
-            let colored_char = if did.is_empty() {
-                "?".to_string()
-            } else {
-                crate::character::Character::from_did(did).colored()
-            };
-            // Pad based on plain-text width (emoji + 1 + nickname). We
-            // approximate with 22 byte slots to leave room for ANSI escapes.
-            let plain_len = if did.is_empty() {
-                1
-            } else {
-                crate::character::Character::from_did(did)
-                    .short()
-                    .chars()
-                    .count()
-                    + 1 // emoji-wide compensation
+            let char_json = &p["character"];
+            let (colored_char, plain_len): (String, usize) = match char_json {
+                serde_json::Value::Null => ("?".to_string(), 1),
+                v => match serde_json::from_value::<crate::character::Character>(v.clone()) {
+                    Ok(c) => {
+                        let plain = c.short().chars().count() + 1; // +1 emoji-wide compensation
+                        (c.colored(), plain)
+                    }
+                    Err(_) => ("?".to_string(), 1),
+                },
             };
             let pad = 22usize.saturating_sub(plain_len);
             println!(
@@ -2309,7 +2335,7 @@ fn cmd_peers(as_json: bool) -> Result<()> {
                 " ".repeat(pad),
                 p["handle"].as_str().unwrap_or(""),
                 p["tier"].as_str().unwrap_or(""),
-                did,
+                p["did"].as_str().unwrap_or(""),
             );
         }
     }

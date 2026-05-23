@@ -69,20 +69,56 @@ impl Character {
     /// agent-card), we honor it. Otherwise falls back to auto-derived
     /// from their DID — same as `from_did`.
     ///
+    /// v0.7.0-alpha.8 (review-fix #1): peer-published override fields
+    /// are sanitized (control chars stripped, length-capped) before use
+    /// so a malicious peer cannot inject ANSI/OSC escape sequences via
+    /// their display.nickname / display.emoji and execute terminal
+    /// control codes on every `wire peers` / `wire whoami` render.
+    /// Override that fully sanitizes to empty falls back to auto-derived.
+    ///
+    /// v0.7.0-alpha.8 (review-fix #8): missing or non-string `did`
+    /// returns a distinctive "unknown peer" sentinel character rather
+    /// than collapsing all such peers onto the empty-string-derived
+    /// character. Surfaces partially-corrupt pinned cards to operators
+    /// rather than masking them as one fake identity.
+    ///
     /// Backward compat: agent-cards without the `display` field land in
     /// the auto-derived path automatically.
     pub fn from_card(card: &serde_json::Value) -> Self {
-        let did = card.get("did").and_then(|d| d.as_str()).unwrap_or("");
+        let did_opt = card.get("did").and_then(|d| d.as_str());
+        let did = match did_opt {
+            Some(d) if !d.is_empty() => d,
+            _ => return Self::unknown_peer(),
+        };
         let display = card.get("display").and_then(|d| d.as_object());
         let nick = display
             .and_then(|d| d.get("nickname"))
             .and_then(|n| n.as_str())
+            .map(sanitize_display_text)
             .filter(|s| !s.is_empty());
         let emoji = display
             .and_then(|d| d.get("emoji"))
             .and_then(|e| e.as_str())
+            .map(sanitize_display_text)
             .filter(|s| !s.is_empty());
-        Self::from_did_with_override(did, nick, emoji)
+        Self::from_did_with_override(did, nick.as_deref(), emoji.as_deref())
+    }
+
+    /// Sentinel for peers whose pinned agent-card lacks a usable DID.
+    /// Distinct, visible, non-overlapping with the auto-derived space
+    /// (no real DID will hash to the empty string, and the explicit "?"
+    /// emoji isn't in the curated EMOJIS list).
+    fn unknown_peer() -> Self {
+        Self {
+            nickname: "unknown-peer".to_string(),
+            emoji: "❓".to_string(),
+            palette: Palette {
+                primary_hex: "#7d7d7d".to_string(),
+                accent_hex: "#a8a8a8".to_string(),
+                ansi256_primary: 244,
+                ansi256_accent: 248,
+            },
+        }
     }
 
     /// Derive a Character from a DID, optionally overriding the nickname
@@ -166,6 +202,28 @@ impl Character {
             self.palette.ansi256_primary, self.emoji, self.nickname
         )
     }
+}
+
+/// v0.7.0-alpha.8 (review-fix #1): sanitize operator-chosen or peer-
+/// published display text (nickname or emoji) for safe terminal render.
+///
+/// Strips Unicode Control category chars (`is_control()` — covers C0
+/// + DEL + C1 including ESC U+001B which gates ANSI/OSC/CSI escape
+/// sequences), then caps length to `MAX_DISPLAY_CHARS` codepoints so a
+/// malicious peer can't ship a 10MB nickname that destroys the
+/// statusline layout.
+///
+/// Used at write time (`wire identity rename` rejects sanitization-
+/// reduced inputs as an error) and at read time (`Character::from_card`
+/// silently strips for defense-in-depth against pinned cards that
+/// pre-date this validation).
+pub const MAX_DISPLAY_CHARS: usize = 64;
+
+pub fn sanitize_display_text(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_DISPLAY_CHARS)
+        .collect()
 }
 
 /// HSL → RGB. h ∈ [0, 360), s ∈ [0, 1], l ∈ [0, 1]. Returns u8 triplet.
@@ -302,6 +360,7 @@ const EMOJIS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::collections::HashSet;
 
     #[test]
@@ -423,6 +482,94 @@ mod tests {
         assert_eq!(r, 0);
         assert_eq!(g, 0);
         assert_eq!(b, 255);
+    }
+
+    #[test]
+    fn sanitize_strips_ansi_escape() {
+        // The core attack vector: peer publishes display.nickname with
+        // ESC ] 0 ; pwned BEL → terminal renames window. ESC + BEL are
+        // U+001B / U+0007 (control chars); the `]` and `;` and visible
+        // text are printable and survive but are harmless without ESC.
+        let out = sanitize_display_text("\x1b]0;owned\x07");
+        assert!(!out.contains('\x1b'), "ESC must be stripped: {out:?}");
+        assert!(!out.contains('\x07'), "BEL must be stripped: {out:?}");
+        // The visible-but-now-harmless residue.
+        assert_eq!(out, "]0;owned");
+        // CSI sequences also defanged (ESC gone).
+        let out2 = sanitize_display_text("\x1b[2J\x1b[H");
+        assert!(!out2.contains('\x1b'));
+        assert_eq!(out2, "[2J[H");
+        // Newlines / tabs / DEL also stripped.
+        assert_eq!(sanitize_display_text("hello\nworld"), "helloworld");
+        assert_eq!(sanitize_display_text("a\tb\x7fc"), "abc");
+    }
+
+    #[test]
+    fn sanitize_preserves_unicode_emoji_and_text() {
+        assert_eq!(sanitize_display_text("🦊 foxtrot-meadow"), "🦊 foxtrot-meadow");
+        assert_eq!(sanitize_display_text("café résumé"), "café résumé");
+    }
+
+    #[test]
+    fn sanitize_caps_length() {
+        let long = "a".repeat(200);
+        let out = sanitize_display_text(&long);
+        assert_eq!(out.chars().count(), MAX_DISPLAY_CHARS);
+    }
+
+    #[test]
+    fn from_card_with_empty_did_returns_unknown_sentinel() {
+        // The exact silent-collision scenario from review-fix #8: a
+        // pinned peer card with null/missing/empty did used to collapse
+        // every such peer onto from_did("") — same character for all.
+        let card = json!({"handle": "broken"});
+        let c = Character::from_card(&card);
+        assert_eq!(c.nickname, "unknown-peer");
+        assert_eq!(c.emoji, "❓");
+    }
+
+    #[test]
+    fn from_card_with_null_did_returns_unknown_sentinel() {
+        let card = json!({"did": null, "handle": "broken"});
+        let c = Character::from_card(&card);
+        assert_eq!(c.nickname, "unknown-peer");
+    }
+
+    #[test]
+    fn from_card_strips_escape_from_published_nickname() {
+        // Defense-in-depth: even if a malicious peer signed a card with
+        // ANSI escapes in display.nickname before this validation
+        // shipped, we strip them at read time so the operator's
+        // terminal stays safe.
+        let card = json!({
+            "did": "did:wire:malicious-deadbeef",
+            "display": {"nickname": "\x1b]0;OWNED\x07evil", "emoji": "🦊"},
+        });
+        let c = Character::from_card(&card);
+        // ESC + OSC delimiters removed; what's left is the visible text.
+        assert!(!c.nickname.contains('\x1b'));
+        assert!(!c.nickname.contains('\x07'));
+        assert!(c.nickname.contains("OWNED")); // visible text preserved
+        assert_eq!(c.emoji, "🦊");
+    }
+
+    #[test]
+    fn from_card_with_published_override_uses_it() {
+        let card = json!({
+            "did": "did:wire:friend-12345678",
+            "display": {"nickname": "the-forge", "emoji": "🔨"},
+        });
+        let c = Character::from_card(&card);
+        assert_eq!(c.nickname, "the-forge");
+        assert_eq!(c.emoji, "🔨");
+    }
+
+    #[test]
+    fn from_card_without_display_falls_back_to_did() {
+        let card = json!({"did": "did:wire:friend-12345678"});
+        let c = Character::from_card(&card);
+        let auto = Character::from_did("did:wire:friend-12345678");
+        assert_eq!(c, auto);
     }
 
     #[test]
