@@ -3148,16 +3148,20 @@ fn cmd_relay_server(bind: &str, local_only: bool) -> Result<()> {
 /// v0.5.17 loopback-bind guard. Refuses any address whose host portion
 /// resolves to something outside `127.0.0.0/8` or `::1`.
 ///
-/// v0.7.0-alpha.11 (review-fix during cross-machine LAN stress): now
-/// ALSO accepts RFC 1918 private IPv4 addresses (10/8, 172.16/12,
-/// 192.168/16) so `wire relay-server --bind <LAN-IP>:8772 --local-only`
-/// works for the v0.7.0-alpha.9 LAN endpoint feature. The "local-only"
-/// semantics (no phonebook listing, no `.well-known/wire/agent` serve)
-/// still apply — only the loopback-only bind constraint is relaxed to
-/// loopback-or-private-LAN. Public IPv4 binds (8.8.8.8, etc.) and the
-/// wildcards `0.0.0.0`/`::` are still refused — those would publish a
-/// "local-only" relay to the global internet, which is the v0.5.17
-/// security gate's whole point.
+/// v0.7.0-alpha.11: relaxed to also accept RFC 1918 private IPv4
+/// (10/8, 172.16/12, 192.168/16) so `wire relay-server --bind
+/// <LAN-IP>:8772 --local-only` works for the alpha.9 LAN feature.
+///
+/// v0.7.0-alpha.15: also accept RFC 6598 CGNAT (100.64.0.0/10), which
+/// is the IP range Tailscale uses for tailnet addresses. Lets operators
+/// pair wire across machines using their tailnet IPs (e.g. Mac at
+/// 100.96.234.16, Spark at 100.91.57.17) — Tailscale handles
+/// auth + encryption + NAT traversal, wire handles protocol + identity.
+/// Sidesteps host firewall config entirely (utun interface bypass).
+///
+/// Still refuses: public IPv4/IPv6, wildcards (0.0.0.0/::), link-local,
+/// multicast, broadcast. Those would publish a "local-only" relay to
+/// the global internet — the v0.5.17 security gate's whole point.
 fn validate_loopback_bind(bind: &str) -> Result<()> {
     // Split host:port. IPv6 literals use `[::]:port` form.
     let host = if let Some(stripped) = bind.strip_prefix('[') {
@@ -3181,15 +3185,24 @@ fn validate_loopback_bind(bind: &str) -> Result<()> {
     }
     for addr in &resolved {
         let ip = addr.ip();
-        let is_private = match ip {
-            IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
-            IpAddr::V6(v6) => v6.is_loopback(), // ULA detection deferred
+        let is_acceptable = match ip {
+            IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || {
+                        // RFC 6598 CGNAT / Tailscale range: 100.64.0.0/10
+                        let octets = v4.octets();
+                        octets[0] == 100 && (64..=127).contains(&octets[1])
+                    }
+            }
+            IpAddr::V6(v6) => v6.is_loopback(), // ULA + Tailscale-v6 deferred
         };
-        if !is_private {
+        if !is_acceptable {
             bail!(
                 "--local-only refuses non-private bind: {host:?} resolves to {} \
-                 which is not loopback (127/8, ::1) or RFC 1918 private (10/8, 172.16/12, 192.168/16). \
-                 Remove --local-only to bind publicly.",
+                 which is not loopback (127/8, ::1), RFC 1918 private \
+                 (10/8, 172.16/12, 192.168/16), or RFC 6598 CGNAT/Tailscale \
+                 (100.64.0.0/10). Remove --local-only to bind publicly.",
                 ip
             );
         }
