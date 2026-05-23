@@ -11,6 +11,7 @@
 
 pub mod agent_card;
 pub mod canonical;
+pub mod character;
 pub mod cli;
 pub mod config;
 pub mod daemon_stream;

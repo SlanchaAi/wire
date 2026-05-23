@@ -109,6 +109,13 @@ pub fn run() -> Result<()> {
     // unable to tell which identity their monitor was tailing.
     crate::session::maybe_adopt_session_wire_home("mcp");
 
+    // v0.7.0-alpha.2: if auto-detect found no session for this cwd
+    // (including via parent-walk), create one inline so every Claude
+    // tab in a fresh project gets its own wire identity rather than
+    // silently sharing the machine-wide default. Opt out via
+    // `WIRE_AUTO_INIT=0`.
+    crate::cli::maybe_auto_init_cwd_session("mcp");
+
     // v0.6.10: surface multi-agent identity collisions explicitly.
     // Two Claudes (or any MCP-host pair) launched in the same cwd
     // auto-detect into the same wire session and silently share an

@@ -91,6 +91,7 @@ impl ServiceKind {
     /// previously the install detail message named a phantom location
     /// in `~/.cache/wire/` that confused anyone who went looking for
     /// the actual log.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn log_basename(self) -> &'static str {
         match self {
             ServiceKind::Daemon => "wire-daemon.log",

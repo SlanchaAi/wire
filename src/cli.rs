@@ -55,6 +55,14 @@ pub enum Command {
     Whoami {
         #[arg(long)]
         json: bool,
+        /// Print just `<emoji> <nickname>` (e.g. `🦊 foxtrot-meadow`).
+        /// Plain text, no ANSI escapes. Useful for piping into other tools.
+        #[arg(long, conflicts_with = "json")]
+        short: bool,
+        /// Print `<emoji> <nickname>` wrapped in ANSI 256-color escapes.
+        /// Drop into a Claude Code statusline command for live identity display.
+        #[arg(long, conflicts_with_all = ["json", "short"])]
+        colored: bool,
     },
     /// List pinned peers with their tiers and capabilities.
     Peers {
@@ -152,6 +160,13 @@ pub enum Command {
         /// `127.0.0.1:8771` and allocates a local slot automatically.
         #[arg(long)]
         local_only: bool,
+        /// v0.7.0-alpha.16: bind to a Unix Domain Socket instead of TCP.
+        /// When set, --bind is ignored. Implies --local-only semantics
+        /// (no phonebook, no .well-known). Socket is chmod 0600 (owner-
+        /// rw only), giving SO_PEERCRED-equivalent same-uid trust for
+        /// sister sessions. Unix only (Windows refuses).
+        #[arg(long)]
+        uds: Option<std::path::PathBuf>,
     },
     /// Allocate a slot on a relay; bind it to this agent's identity.
     ///
@@ -459,6 +474,14 @@ pub enum Command {
     /// so re-entering the same project reuses the same identity.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// Manage this session's identity display layer (character override).
+    /// v0.7.0-alpha.3: agents can rename themselves — operator or Claude
+    /// itself picks a custom nickname + emoji that overrides the
+    /// auto-derived hash-based defaults.
+    Identity {
+        #[command(subcommand)]
+        cmd: IdentityCommand,
+    },
     /// v0.6.3 (issues #18 / #19 / #20 / #21): orchestration verbs for the
     /// sister-session mesh. `wire mesh status` is the live view of every
     /// paired sister (alias for `wire session mesh-status`); `wire mesh
@@ -722,6 +745,146 @@ pub enum DiagAction {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum IdentityCommand {
+    /// Override the auto-derived nickname and/or emoji. Persists to
+    /// `<WIRE_HOME>/config/wire/display.json`. Local-only; peers still
+    /// see the auto-derived character from your DID (until federation
+    /// publishes overrides in a future release).
+    ///
+    /// Examples:
+    ///   wire identity rename --name foxtrot-meadow --emoji 🦊
+    ///   wire identity rename --emoji 🐉      (keep auto nickname)
+    ///   wire identity rename --random        (re-roll auto from seed; clears overrides)
+    Rename {
+        /// New nickname (any non-empty string; convention is
+        /// `adjective-noun`, e.g. `foxtrot-meadow`). Omit to leave nickname
+        /// at its current value (auto-derived unless previously set).
+        #[arg(long)]
+        name: Option<String>,
+        /// New emoji glyph. Any single grapheme; the curated set is
+        /// recommended for cross-terminal compatibility.
+        #[arg(long)]
+        emoji: Option<String>,
+        /// Clear all overrides; revert to auto-derived from DID hash.
+        /// Mutually exclusive with `--name` / `--emoji`.
+        #[arg(long, conflicts_with_all = ["name", "emoji"])]
+        clear: bool,
+        /// Re-roll: alias for `--clear` plus an explanatory stderr line.
+        /// Auto-derived is itself deterministic, so this just removes
+        /// any previously-set override.
+        #[arg(long, conflicts_with_all = ["name", "emoji", "clear"])]
+        random: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the current character (auto-derived OR override).
+    /// Equivalent to `wire whoami --short` but scoped here for grouping.
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// List all identities on this machine — one row per session, with
+    /// each session's character, DID, federation handle, and cwd. Same
+    /// shape as `wire session list`, scoped here for the v0.7+ noun-
+    /// CLI surface.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Promote this identity to FEDERATION lifecycle: claim a handle on
+    /// the relay so peers can `wire add <name>@<relay-domain>` you.
+    /// Re-claims with current display fields (after `wire identity rename`)
+    /// so the relay always serves the latest signed card. Equivalent to
+    /// `wire claim` but scoped here for the v0.7+ noun-CLI surface.
+    Publish {
+        /// The handle to claim on the relay (e.g. `coffee-ghost`).
+        nick: String,
+        /// Override the relay URL. Defaults to the session's bound relay
+        /// from `wire init --relay <url>`. Public relay if unset.
+        #[arg(long)]
+        relay: Option<String>,
+        /// Public-facing URL for the agent-card location (when the relay
+        /// is behind a CDN with a different public domain).
+        #[arg(long, alias = "public")]
+        public_url: Option<String>,
+        /// Skip listing in the relay's public phonebook. The card is
+        /// still claimable + reachable; just doesn't appear in
+        /// `wireup.net/phonebook` for stranger-discovery.
+        #[arg(long)]
+        hidden: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Destroy a session entirely — keys, agent-card, relay state, daemon.
+    /// Equivalent to `wire session destroy <name>`, scoped here for the
+    /// noun-CLI surface. Requires `--force` (the underlying command does).
+    Destroy {
+        /// Session name to destroy (use `wire identity list` to see).
+        name: String,
+        /// Bypass the confirmation prompt.
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create an identity in an EXPLICIT lifecycle state (vs. the
+    /// implicit `wire init` + `wire claim` flow).
+    /// v0.7.0-alpha.20 closes the v0.7+ identity-first noun-CLI.
+    ///
+    /// `--anonymous` puts the identity in a tmpdir (auto-cleanup on
+    /// next reboot). In-memory semantics not yet supported — the
+    /// pragmatic shape is "tmpdir + sentinel + register-for-cleanup."
+    /// For pure-RAM identities, see v1.0 vision.
+    ///
+    /// `--local` is the explicit form of today's default; identity
+    /// persists to the machine-wide sessions root.
+    Create {
+        /// Session name. Defaults to derived from cwd (anonymous mode
+        /// uses a random name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Create an ANONYMOUS identity (tmpdir-backed, dies on
+        /// reboot, no federation). Mutually exclusive with --local.
+        #[arg(long, conflicts_with = "local")]
+        anonymous: bool,
+        /// Create a LOCAL identity (machine-persistent, no federation).
+        /// Default — explicit flag for clarity.
+        #[arg(long)]
+        local: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Promote an ANONYMOUS identity to LOCAL — move from tmpdir to
+    /// the machine-wide sessions root + register in the cwd map.
+    /// After persist, the identity survives reboot.
+    /// v0.7.0-alpha.20.
+    Persist {
+        /// The anonymous identity's name (from `wire identity list`).
+        name: String,
+        /// Optional rename during persist. Default: keep the anon name.
+        #[arg(long = "as", value_name = "NEW_NAME")]
+        as_name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Demote an identity ONE level in the lifecycle:
+    ///   federation → local: removes the relay slot binding but keeps
+    ///   the keypair + agent-card. Operator can later re-publish with
+    ///   `wire identity publish`. v0.7.0-alpha.20.
+    ///
+    /// (local → anonymous is not exposed; the safer flow is destroy +
+    /// recreate, since "demoting" a persistent identity to ephemeral
+    /// has surprising semantics — what about the keypair? what about
+    /// pinned peers? Better to be explicit with destroy.)
+    Demote {
+        /// Session name to demote.
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum SessionCommand {
     /// Bootstrap a new isolated session in this machine's sessions root.
     /// With no name, derives one from `basename(cwd)` and caches it in
@@ -749,6 +912,32 @@ pub enum SessionCommand {
         /// `wire relay-server --bind 127.0.0.1:8771 --local-only`.
         #[arg(long, default_value = "http://127.0.0.1:8771")]
         local_relay: String,
+        /// v0.7.0-alpha.9: also allocate a slot on a LAN-bound relay
+        /// (must be running e.g. via `wire relay-server --bind <LAN-IP>:8771`).
+        /// Lets other machines on the same network reach this session
+        /// directly without round-tripping the public federation relay
+        /// at https://wireup.net. LAN endpoint is published in the
+        /// agent-card; opt-in per session (default off).
+        #[arg(long)]
+        with_lan: bool,
+        /// v0.7.0-alpha.9: LAN-reachable relay URL (no auto-detect of
+        /// LAN IP — operator must type the address). Example:
+        /// `http://192.168.1.50:8771`. Required when `--with-lan` is set.
+        #[arg(long)]
+        lan_relay: Option<String>,
+        /// v0.7.0-alpha.18: also allocate a slot on a Unix Domain Socket
+        /// relay (must be running e.g. via `wire relay-server --uds
+        /// /tmp/wire.sock`). Same-host, owner-uid-only path that
+        /// bypasses the macOS firewall + Tailscale userspace-netstack
+        /// class of issues entirely for sister-session traffic. UDS
+        /// endpoint is published in the agent-card.
+        #[arg(long)]
+        with_uds: bool,
+        /// v0.7.0-alpha.18: UDS socket path. Required when `--with-uds`
+        /// is set. Example: `/tmp/wire.sock` or
+        /// `~/.wire/local.sock`.
+        #[arg(long)]
+        uds_socket: Option<std::path::PathBuf>,
         /// Skip spawning the session-local daemon. Use when you want
         /// to drive sync explicitly from the agent or test rig.
         #[arg(long)]
@@ -1111,7 +1300,11 @@ pub fn run() -> Result<()> {
                 cmd_status(json)
             }
         }
-        Command::Whoami { json } => cmd_whoami(json),
+        Command::Whoami {
+            json,
+            short,
+            colored,
+        } => cmd_whoami(json, short, colored),
         Command::Peers { json } => cmd_peers(json),
         Command::Send {
             peer,
@@ -1152,7 +1345,11 @@ pub fn run() -> Result<()> {
             ResponderCommand::Get { peer, json } => cmd_responder_get(peer.as_deref(), json),
         },
         Command::Mcp => cmd_mcp(),
-        Command::RelayServer { bind, local_only } => cmd_relay_server(&bind, local_only),
+        Command::RelayServer {
+            bind,
+            local_only,
+            uds,
+        } => cmd_relay_server(&bind, local_only, uds.as_deref()),
         Command::BindRelay {
             url,
             migrate_pinned,
@@ -1251,6 +1448,7 @@ pub fn run() -> Result<()> {
         Command::PairReject { peer, json } => cmd_pair_reject(&peer, json),
         Command::PairListInbound { json } => cmd_pair_list_inbound(json),
         Command::Session(cmd) => cmd_session(cmd),
+        Command::Identity { cmd } => cmd_identity(cmd),
         Command::Mesh(cmd) => cmd_mesh(cmd),
         Command::Invite {
             relay,
@@ -1900,7 +2098,28 @@ fn cmd_status_peer(peer: &str, as_json: bool) -> Result<()> {
 
 // ---------- whoami ----------
 
-fn cmd_whoami(as_json: bool) -> Result<()> {
+/// Return the current cwd with the user's home dir abbreviated to `~/`.
+/// Used in whoami `--short` / `--colored` output so multi-window operators
+/// see *what project* each Claude is working in alongside the character.
+fn current_cwd_display() -> String {
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(_) => return String::from("?"),
+    };
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rel) = cwd.strip_prefix(&home)
+    {
+        // strip_prefix returns "" for cwd == home itself; show "~" then.
+        let rel_str = rel.to_string_lossy();
+        if rel_str.is_empty() {
+            return String::from("~");
+        }
+        return format!("~/{}", rel_str);
+    }
+    cwd.to_string_lossy().into_owned()
+}
+
+fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
     }
@@ -1915,6 +2134,33 @@ fn cmd_whoami(as_json: bool) -> Result<()> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| crate::agent_card::display_handle_from_did(&did).to_string());
+    // v0.7.0-alpha.3: read sidecar display.json for any operator-chosen
+    // override of nickname/emoji. Palette stays auto-derived from DID.
+    let overrides = config::read_display_overrides().unwrap_or_default();
+    let character = crate::character::Character::from_did_with_override(
+        &did,
+        overrides.nickname.as_deref(),
+        overrides.emoji.as_deref(),
+    );
+
+    // v0.7.0-alpha.3: append the current cwd (home-abbreviated to `~/`)
+    // so operators tab-flipping between multiple Claude windows see both
+    // *who* this session is (character) and *what* it's working on (cwd).
+    // The cwd is the OPERATOR's cwd, not WIRE_HOME — gives them the
+    // anchor they're looking for: "🐅 winter-bay · ~/Source/wire".
+    let cwd_display = current_cwd_display();
+
+    // Fast paths used by statuslines, piping, scripts. No agent-card parsing
+    // beyond did — these calls are hot (statusline polls ~300ms).
+    if short {
+        println!("{} · {}", character.short(), cwd_display);
+        return Ok(());
+    }
+    if colored {
+        println!("{} \x1b[2m·\x1b[0m {}", character.colored(), cwd_display);
+        return Ok(());
+    }
+
     let pk_b64 = card
         .get("verify_keys")
         .and_then(Value::as_object)
@@ -1931,6 +2177,7 @@ fn cmd_whoami(as_json: bool) -> Result<()> {
         .unwrap_or_else(|| json!(["wire/v3.1"]));
 
     if as_json {
+        let has_override = overrides.nickname.is_some() || overrides.emoji.is_some();
         println!(
             "{}",
             serde_json::to_string(&json!({
@@ -1941,12 +2188,487 @@ fn cmd_whoami(as_json: bool) -> Result<()> {
                 "public_key_b64": pk_b64,
                 "capabilities": capabilities,
                 "config_dir": config::config_dir()?.to_string_lossy(),
+                "character": character,
+                "character_override": has_override,
             }))?
         );
     } else {
+        println!("{}", character.colored());
         println!("{did} (ed25519:{key_id})");
         println!("fingerprint: {fp}");
         println!("capabilities: {capabilities}");
+    }
+    Ok(())
+}
+
+// ---------- identity (v0.7.0-alpha.3) ----------
+
+fn cmd_identity(cmd: IdentityCommand) -> Result<()> {
+    match cmd {
+        IdentityCommand::Rename {
+            name,
+            emoji,
+            clear,
+            random,
+            json,
+        } => cmd_identity_rename(name, emoji, clear || random, random, json),
+        IdentityCommand::Show { json } => cmd_whoami(json, !json, false),
+        IdentityCommand::List { json } => cmd_session_list(json),
+        IdentityCommand::Publish {
+            nick,
+            relay,
+            public_url,
+            hidden,
+            json,
+        } => cmd_claim(&nick, relay.as_deref(), public_url.as_deref(), hidden, json),
+        IdentityCommand::Destroy { name, force, json } => cmd_session_destroy(&name, force, json),
+        IdentityCommand::Create {
+            name,
+            anonymous,
+            local: _,
+            json,
+        } => cmd_identity_create(name.as_deref(), anonymous, json),
+        IdentityCommand::Persist {
+            name,
+            as_name,
+            json,
+        } => cmd_identity_persist(&name, as_name.as_deref(), json),
+        IdentityCommand::Demote { name, json } => cmd_identity_demote(&name, json),
+    }
+}
+
+/// v0.7.0-alpha.20: anonymous identity = sessions root remapped to a
+/// per-invocation tmpdir. Operator gets a `WIRE_HOME=...` export they
+/// paste into their shell; the identity lives there until reboot
+/// clears /tmp. Persist promotes it to the real sessions root.
+fn cmd_identity_create(name: Option<&str>, anonymous: bool, as_json: bool) -> Result<()> {
+    if anonymous {
+        // Generate a unique tmpdir for this anonymous identity.
+        let rand_suffix = format!("{:08x}", rand::random::<u32>());
+        let anon_name = name
+            .map(crate::session::sanitize_name)
+            .unwrap_or_else(|| format!("anon-{rand_suffix}"));
+        let anon_root = std::env::temp_dir().join(format!("wire-anon-{rand_suffix}"));
+        std::fs::create_dir_all(&anon_root)
+            .with_context(|| format!("creating anon root {anon_root:?}"))?;
+        // Run `wire init <name>` with WIRE_HOME = anon_root/sessions/<name>
+        let session_home = anon_root.join("sessions").join(&anon_name);
+        std::fs::create_dir_all(&session_home)?;
+        let status = run_wire_with_home(&session_home, &["init", &anon_name])?;
+        if !status.success() {
+            bail!("anonymous identity init failed: {status}");
+        }
+        // Register the anonymous name in a SIDE registry so persist
+        // can find it later. Stored at <anon_root>/anon-marker.json.
+        let marker = anon_root.join("anon-marker.json");
+        std::fs::write(
+            &marker,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "name": anon_name,
+                "session_home": session_home.to_string_lossy(),
+                "created_at": time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default(),
+                "kind": "anonymous",
+            }))?,
+        )?;
+        let card = serde_json::from_slice::<Value>(&std::fs::read(
+            session_home
+                .join("config")
+                .join("wire")
+                .join("agent-card.json"),
+        )?)?;
+        let did = card
+            .get("did")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "kind": "anonymous",
+                    "name": anon_name,
+                    "did": did,
+                    "session_home": session_home.to_string_lossy(),
+                    "anon_root": anon_root.to_string_lossy(),
+                }))?
+            );
+        } else {
+            println!("created anonymous identity `{anon_name}` ({did})");
+            println!(
+                "  session_home: {} (dies on reboot — /tmp)",
+                session_home.display()
+            );
+            println!();
+            println!("activate in this shell:");
+            println!("  export WIRE_HOME={}", session_home.display());
+            println!();
+            println!("promote to persistent later with:");
+            println!("  wire identity persist {anon_name}");
+        }
+        return Ok(());
+    }
+    // --local (or default): delegate to existing session new flow.
+    let name_arg = name.map(|s| s.to_string());
+    cmd_session_new(
+        name_arg.as_deref(),
+        "https://wireup.net",
+        false,
+        "http://127.0.0.1:8771",
+        false,
+        None,
+        false,
+        None,
+        true, // no_daemon: identity create just allocates the identity, no daemon
+        true, // local_only: explicit lifecycle
+        as_json,
+    )
+}
+
+/// v0.7.0-alpha.20: promote anonymous → local. Moves session dir from
+/// tmpdir to the persistent sessions root + registers in the cwd map.
+fn cmd_identity_persist(name: &str, as_name: Option<&str>, as_json: bool) -> Result<()> {
+    // Find the anon-marker.json by scanning /tmp/wire-anon-*.
+    let temp = std::env::temp_dir();
+    let mut found: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(&temp)?.flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.starts_with("wire-anon-"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let marker = path.join("anon-marker.json");
+        if let Ok(bytes) = std::fs::read(&marker)
+            && let Ok(json) = serde_json::from_slice::<Value>(&bytes)
+            && json.get("name").and_then(Value::as_str) == Some(name)
+        {
+            let session_home = json
+                .get("session_home")
+                .and_then(Value::as_str)
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| anyhow!("anon-marker {marker:?} missing session_home"))?;
+            found = Some((path, session_home));
+            break;
+        }
+    }
+    let (anon_root, anon_session_home) = found.ok_or_else(|| {
+        anyhow!(
+            "no anonymous identity named `{name}` found in /tmp/wire-anon-* — \
+             run `wire identity list` to see available identities"
+        )
+    })?;
+
+    let new_name = as_name.unwrap_or(name);
+    let new_session_home = crate::session::session_dir(new_name)?;
+    if new_session_home.exists() {
+        bail!(
+            "target session `{new_name}` already exists at {new_session_home:?} — \
+             pick a different name with --as <new-name>"
+        );
+    }
+
+    // Move the session dir from tmpdir to persistent root.
+    if let Some(parent) = new_session_home.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(&anon_session_home, &new_session_home)
+        .with_context(|| format!("rename {anon_session_home:?} → {new_session_home:?}"))?;
+
+    // Clean up the (now-empty) anon root + marker.
+    let _ = std::fs::remove_dir_all(&anon_root);
+
+    // Register cwd → new_name (operator may have cd'd elsewhere; use the
+    // session_home's grandparent as the conceptual "cwd" if no other).
+    let cwd = std::env::current_dir().unwrap_or_else(|_| new_session_home.clone());
+    let cwd_key = cwd.to_string_lossy().into_owned();
+    let new_name_for_reg = new_name.to_string();
+    if let Err(e) = crate::session::update_registry(|reg| {
+        reg.by_cwd.insert(cwd_key, new_name_for_reg);
+        Ok(())
+    }) {
+        eprintln!("wire identity persist: failed to update registry: {e:#}");
+    }
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "kind": "persisted",
+                "from_name": name,
+                "to_name": new_name,
+                "session_home": new_session_home.to_string_lossy(),
+            }))?
+        );
+    } else {
+        println!("persisted anonymous identity `{name}` → local session `{new_name}`");
+        println!(
+            "  session_home: {} (survives reboot)",
+            new_session_home.display()
+        );
+        println!("  registered cwd: {}", cwd.display());
+    }
+    Ok(())
+}
+
+/// v0.7.0-alpha.20: demote federation → local. Removes the federation
+/// slot binding from relay.json (and the legacy top-level fields). Keeps
+/// the keypair + agent-card so re-publish later just calls `wire identity
+/// publish` again. local → anonymous is NOT supported; destroy + recreate
+/// is the safer path for that step-down.
+fn cmd_identity_demote(name: &str, as_json: bool) -> Result<()> {
+    let sessions = crate::session::list_sessions()?;
+    let session = sessions
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| anyhow!("no session named `{name}` (run `wire identity list`)"))?;
+    let relay_state_path = session
+        .home_dir
+        .join("config")
+        .join("wire")
+        .join("relay.json");
+    if !relay_state_path.exists() {
+        bail!("session `{name}` has no relay state — already demoted?");
+    }
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&relay_state_path)?)?;
+    let self_obj = state.get("self").cloned().unwrap_or(Value::Null);
+    let had_fed = self_obj
+        .get("relay_url")
+        .and_then(Value::as_str)
+        .map(|u| {
+            u.starts_with("https://") || (u.starts_with("http://") && !u.contains("127.0.0.1"))
+        })
+        .unwrap_or(false);
+    if !had_fed {
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string(
+                    &json!({"name": name, "status": "no-op", "reason": "no federation slot"})
+                )?
+            );
+        } else {
+            println!("session `{name}` has no federation slot — nothing to demote");
+        }
+        return Ok(());
+    }
+    // Strip federation: remove top-level relay_url/slot_id/slot_token,
+    // remove federation-scope entries from endpoints[].
+    if let Some(self_mut) = state
+        .as_object_mut()
+        .and_then(|m| m.get_mut("self"))
+        .and_then(|s| s.as_object_mut())
+    {
+        self_mut.remove("relay_url");
+        self_mut.remove("slot_id");
+        self_mut.remove("slot_token");
+        if let Some(eps) = self_mut.get_mut("endpoints").and_then(|e| e.as_array_mut()) {
+            eps.retain(|ep| ep.get("scope").and_then(Value::as_str) != Some("federation"));
+        }
+    }
+    std::fs::write(&relay_state_path, serde_json::to_vec_pretty(&state)?)?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(
+                &json!({"name": name, "status": "demoted", "from": "federation", "to": "local"})
+            )?
+        );
+    } else {
+        println!("demoted `{name}` from federation → local");
+        println!("  relay slot binding removed; keypair + agent-card retained");
+        println!("  re-publish with `wire identity publish <nick>`");
+    }
+    Ok(())
+}
+
+fn cmd_identity_rename(
+    name: Option<String>,
+    emoji: Option<String>,
+    clear: bool,
+    random_announce: bool,
+    as_json: bool,
+) -> Result<()> {
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire init <handle>` first");
+    }
+
+    // Read DID once for character derivation in the response.
+    let card = config::read_agent_card()?;
+    let did = card
+        .get("did")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let new_overrides = if clear {
+        config::DisplayOverrides::default()
+    } else {
+        // Merge: keep existing fields if not explicitly provided.
+        let mut existing = config::read_display_overrides().unwrap_or_default();
+        if let Some(n) = name {
+            // v0.7.0-alpha.8 (review-fix #1): sanitize at write time and
+            // refuse anything that fully reduces to empty (operator typed
+            // only control chars / escape sequences). Defense against
+            // self-pwn AND silent-no-op writes.
+            let cleaned = crate::character::sanitize_display_text(&n);
+            if cleaned.is_empty() {
+                bail!(
+                    "nickname `{n:?}` is empty after stripping control characters — pick a name with printable codepoints (max {} chars).",
+                    crate::character::MAX_DISPLAY_CHARS
+                );
+            }
+            if cleaned != n {
+                eprintln!(
+                    "wire identity rename: stripped control characters from nickname → `{cleaned}`"
+                );
+            }
+            existing.nickname = Some(cleaned);
+        }
+        if let Some(e) = emoji {
+            let cleaned = crate::character::sanitize_display_text(&e);
+            if cleaned.is_empty() {
+                bail!(
+                    "emoji `{e:?}` is empty after stripping control characters — pick a printable emoji glyph."
+                );
+            }
+            if cleaned != e {
+                eprintln!(
+                    "wire identity rename: stripped control characters from emoji → `{cleaned}`"
+                );
+            }
+            existing.emoji = Some(cleaned);
+        }
+        existing
+    };
+
+    // If clearing AND no overrides existed AND no flags given, refuse so we
+    // don't silently no-op. Random implies clear with announcement.
+    let no_fields_provided = new_overrides.nickname.is_none()
+        && new_overrides.emoji.is_none()
+        && !clear
+        && !random_announce;
+    if no_fields_provided {
+        bail!("nothing to do — pass --name, --emoji, --clear, or --random");
+    }
+
+    config::write_display_overrides(&new_overrides)?;
+
+    // v0.7.0-alpha.6: publish the override on the agent-card so federated
+    // peers see what we call ourselves, not just the DID-hash default.
+    // Re-signs the card with the same private key the rest of the identity
+    // uses. Backward compat: peers with old wire versions ignore the
+    // unknown `display` field, fall back to auto-derived.
+    //
+    // v0.7.0-alpha.12 (review-fix #134): also push the re-signed card
+    // back to the federation relay so .well-known/wire/agent serves the
+    // updated card. Pre-fix wrote the local card only; federated peers
+    // resolving the handle saw the OLD (pre-rename) card. Best-effort —
+    // failures log to stderr but don't bail (local rename still useful).
+    let signed_card = {
+        let mut card = config::read_agent_card()?;
+        if let Some(card_obj) = card.as_object_mut() {
+            // Strip prior signature; we'll re-sign over the new canonical
+            // form including (or excluding) the display field.
+            card_obj.remove("signature");
+            if new_overrides.nickname.is_none() && new_overrides.emoji.is_none() {
+                card_obj.remove("display");
+            } else {
+                let mut display = serde_json::Map::new();
+                if let Some(n) = &new_overrides.nickname {
+                    display.insert("nickname".into(), Value::String(n.clone()));
+                }
+                if let Some(e) = &new_overrides.emoji {
+                    display.insert("emoji".into(), Value::String(e.clone()));
+                }
+                card_obj.insert("display".into(), Value::Object(display));
+            }
+        }
+        let sk_seed = config::read_private_key()?;
+        let signed = crate::agent_card::sign_agent_card(&card, &sk_seed);
+        config::write_agent_card(&signed)?;
+        signed
+    };
+
+    // Re-publish to federation relay if we're bound. Walks the relay_state
+    // self endpoints — pushes the updated card to whichever federation
+    // relay holds our claimed handle. Local-only sessions skip silently.
+    if let Ok(state) = config::read_relay_state() {
+        let self_obj = state.get("self").cloned().unwrap_or(Value::Null);
+        let fed_url = self_obj.get("relay_url").and_then(Value::as_str);
+        let fed_slot_id = self_obj.get("slot_id").and_then(Value::as_str);
+        let fed_slot_token = self_obj.get("slot_token").and_then(Value::as_str);
+        if let (Some(url), Some(slot_id), Some(slot_token)) = (fed_url, fed_slot_id, fed_slot_token)
+        {
+            // Skip loopback / LAN relays (those don't publish handles to a
+            // public phonebook — they're local-only mode).
+            let is_publishable = url.starts_with("https://")
+                || (url.starts_with("http://")
+                    && !url.contains("127.0.0.1")
+                    && !url.contains("localhost"));
+            if is_publishable {
+                let nick_for_claim = signed_card
+                    .get("handle")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                if let Some(nick) = nick_for_claim {
+                    let client = crate::relay_client::RelayClient::new(url);
+                    match client.handle_claim_v2(
+                        &nick,
+                        slot_id,
+                        slot_token,
+                        None,
+                        &signed_card,
+                        None,
+                    ) {
+                        Ok(_) => {
+                            eprintln!("wire identity rename: re-published updated card to {url}");
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "wire identity rename: failed to re-publish to relay {url}: {e:#} — local rename is in effect; federated peers will see the old card until next `wire claim` succeeds"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if random_announce {
+        eprintln!(
+            "wire identity rename: overrides cleared; falling back to auto-derived character (DID-deterministic, so the character is the same as it was before any rename)."
+        );
+    }
+
+    let character = crate::character::Character::from_did_with_override(
+        &did,
+        new_overrides.nickname.as_deref(),
+        new_overrides.emoji.as_deref(),
+    );
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "did": did,
+                "character": character,
+                "overrides": new_overrides,
+            }))?
+        );
+    } else {
+        println!("renamed → {}", character.colored());
+        eprintln!("  · palette stays DID-derived (sticky color across renames)");
+        eprintln!(
+            "  · re-published to your federation relay (if bound); future federation lookups serve \
+             the updated card. Existing pinned peers have a cached card from pair-time and won't \
+             see the new name until they re-pair OR fetch your card fresh."
+        );
     }
     Ok(())
 }
@@ -2013,11 +2735,25 @@ fn cmd_peers(as_json: bool) -> Result<()> {
             .and_then(|c| c.get("capabilities"))
             .cloned()
             .unwrap_or_else(|| json!([]));
+        // v0.7.0-alpha.6: prefer peer's published character override
+        // (display.nickname / display.emoji on their pinned agent-card).
+        // Falls back to auto-derived if peer hasn't renamed themselves
+        // OR runs an older wire that doesn't publish the field.
+        let character = if did.is_empty() {
+            None
+        } else {
+            let card_obj = agent.get("card");
+            Some(match card_obj {
+                Some(card) => crate::character::Character::from_card(card),
+                None => crate::character::Character::from_did(&did),
+            })
+        };
         peers.push(json!({
             "handle": handle,
             "did": did,
             "tier": tier,
             "capabilities": capabilities,
+            "character": character,
         }));
     }
 
@@ -2026,9 +2762,28 @@ fn cmd_peers(as_json: bool) -> Result<()> {
     } else if peers.is_empty() {
         println!("no peers pinned (run `wire join <code>` to pair)");
     } else {
+        // v0.7.0-alpha.8 (review-fix #3): reuse the character we ALREADY
+        // computed above (from peer's agent-card, honoring override) so
+        // text and JSON output never diverge. Pre-alpha.8 the text loop
+        // recomputed via Character::from_did (no override) — operators
+        // saw different identities depending on --json flag.
         for p in &peers {
+            let char_json = &p["character"];
+            let (colored_char, plain_len): (String, usize) = match char_json {
+                serde_json::Value::Null => ("?".to_string(), 1),
+                v => match serde_json::from_value::<crate::character::Character>(v.clone()) {
+                    Ok(c) => {
+                        let plain = c.short().chars().count() + 1; // +1 emoji-wide compensation
+                        (c.colored(), plain)
+                    }
+                    Err(_) => ("?".to_string(), 1),
+                },
+            };
+            let pad = 22usize.saturating_sub(plain_len);
             println!(
-                "{:<20} {:<10} {}",
+                "{}{}  {:<20} {:<10} {}",
+                colored_char,
+                " ".repeat(pad),
                 p["handle"].as_str().unwrap_or(""),
                 p["tier"].as_str().unwrap_or(""),
                 p["did"].as_str().unwrap_or(""),
@@ -2131,7 +2886,29 @@ fn cmd_send(
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
     }
-    let peer = crate::agent_card::bare_handle(peer);
+    let peer_in = crate::agent_card::bare_handle(peer).to_string();
+    // v0.7.0-alpha.2/.5: nickname-as-handle resolution. Exact handle
+    // match wins; nickname (DID-hash auto-derived) is the fallback.
+    // Ambiguous nicknames (two pinned peers DID-hash to the same
+    // adj-noun pair) fail loudly with disambiguation; unknown handles
+    // pass through (matches existing `wire send` semantics — queue
+    // first, deliver best-effort).
+    let peer = match resolve_peer_handle(&peer_in) {
+        Ok(Some(resolved)) if resolved != peer_in => {
+            eprintln!("wire send: resolved nickname `{peer_in}` → peer `{resolved}`");
+            resolved
+        }
+        Ok(Some(canonical)) => canonical, // exact handle match
+        Ok(None) => peer_in,              // unknown — pass through, downstream errors
+        Err(ResolveError::Ambiguous(candidates)) => bail!(
+            "nickname `{peer_in}` is ambiguous — matches {} pinned peers: {}. \
+             Disambiguate by passing the peer handle (one of those listed) instead of the nickname.",
+            candidates.len(),
+            candidates.join(", ")
+        ),
+        Err(ResolveError::NotFound) => peer_in, // (unreachable for this fn but defensive)
+    };
+    let peer = peer.as_str();
     let sk_seed = config::read_private_key()?;
     let card = config::read_agent_card()?;
     let did = card.get("did").and_then(Value::as_str).unwrap_or("");
@@ -2663,7 +3440,32 @@ fn cmd_mcp() -> Result<()> {
     crate::mcp::run()
 }
 
-fn cmd_relay_server(bind: &str, local_only: bool) -> Result<()> {
+fn cmd_relay_server(bind: &str, local_only: bool, uds: Option<&std::path::Path>) -> Result<()> {
+    // v0.7.0-alpha.16: --uds <path> takes the UDS transport path,
+    // overriding --bind. Implies --local-only semantics. Routed to a
+    // separate serve_uds entry point with a manual hyper accept loop
+    // (axum 0.7's `serve` is TcpListener-only).
+    if let Some(socket_path) = uds {
+        let base = if let Ok(home) = std::env::var("WIRE_HOME") {
+            std::path::PathBuf::from(home)
+                .join("state")
+                .join("wire-relay")
+                .join("uds")
+        } else {
+            dirs::state_dir()
+                .or_else(dirs::data_local_dir)
+                .ok_or_else(|| anyhow::anyhow!("could not resolve XDG_STATE_HOME — set WIRE_HOME"))?
+                .join("wire-relay")
+                .join("uds")
+        };
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return runtime.block_on(crate::relay_server::serve_uds(
+            socket_path.to_path_buf(),
+            base,
+        ));
+    }
     // v0.5.17: --local-only refuses non-loopback binds. Catches the
     // "wait did I just bind a publicly-reachable local-only relay" mistake
     // at startup rather than discovering it via an empty phonebook later.
@@ -2697,10 +3499,22 @@ fn cmd_relay_server(bind: &str, local_only: bool) -> Result<()> {
 }
 
 /// v0.5.17 loopback-bind guard. Refuses any address whose host portion
-/// resolves to something outside `127.0.0.0/8` or `::1`. Specifically
-/// rejects `0.0.0.0`, `::`, `0:0:0:0:0:0:0:0`, and any non-loopback
-/// IPv4/IPv6 literal. Hostname-form addresses (e.g. `localhost`) are
-/// accepted only if they resolve to a loopback address.
+/// resolves to something outside `127.0.0.0/8` or `::1`.
+///
+/// v0.7.0-alpha.11: relaxed to also accept RFC 1918 private IPv4
+/// (10/8, 172.16/12, 192.168/16) so `wire relay-server --bind
+/// <LAN-IP>:8772 --local-only` works for the alpha.9 LAN feature.
+///
+/// v0.7.0-alpha.15: also accept RFC 6598 CGNAT (100.64.0.0/10), which
+/// is the IP range Tailscale uses for tailnet addresses. Lets operators
+/// pair wire across machines using their tailnet IPs (e.g. Mac at
+/// 100.96.234.16, Spark at 100.91.57.17) — Tailscale handles
+/// auth + encryption + NAT traversal, wire handles protocol + identity.
+/// Sidesteps host firewall config entirely (utun interface bypass).
+///
+/// Still refuses: public IPv4/IPv6, wildcards (0.0.0.0/::), link-local,
+/// multicast, broadcast. Those would publish a "local-only" relay to
+/// the global internet — the v0.5.17 security gate's whole point.
 fn validate_loopback_bind(bind: &str) -> Result<()> {
     // Split host:port. IPv6 literals use `[::]:port` form.
     let host = if let Some(stripped) = bind.strip_prefix('[') {
@@ -2713,7 +3527,7 @@ fn validate_loopback_bind(bind: &str) -> Result<()> {
             .map(|(h, _)| h.to_string())
             .unwrap_or_else(|| bind.to_string())
     };
-    use std::net::ToSocketAddrs;
+    use std::net::{IpAddr, ToSocketAddrs};
     let probe = format!("{host}:0");
     let resolved: Vec<_> = probe
         .to_socket_addrs()
@@ -2723,12 +3537,24 @@ fn validate_loopback_bind(bind: &str) -> Result<()> {
         bail!("--local-only: bind host {host:?} resolved to no addresses");
     }
     for addr in &resolved {
-        if !addr.ip().is_loopback() {
+        let ip = addr.ip();
+        let is_acceptable = match ip {
+            IpAddr::V4(v4) => {
+                v4.is_loopback() || v4.is_private() || {
+                    // RFC 6598 CGNAT / Tailscale range: 100.64.0.0/10
+                    let octets = v4.octets();
+                    octets[0] == 100 && (64..=127).contains(&octets[1])
+                }
+            }
+            IpAddr::V6(v6) => v6.is_loopback(), // ULA + Tailscale-v6 deferred
+        };
+        if !is_acceptable {
             bail!(
-                "--local-only refuses non-loopback bind: {host:?} resolves to {} \
-                 which is not in 127.0.0.0/8 or [::1]. Remove --local-only to bind \
-                 publicly, or use 127.0.0.1 / [::1] / localhost.",
-                addr.ip()
+                "--local-only refuses non-private bind: {host:?} resolves to {} \
+                 which is not loopback (127/8, ::1), RFC 1918 private \
+                 (10/8, 172.16/12, 192.168/16), or RFC 6598 CGNAT/Tailscale \
+                 (100.64.0.0/10). Remove --local-only to bind publicly.",
+                ip
             );
         }
     }
@@ -3172,6 +3998,8 @@ fn endpoint_cursor_key(scope: crate::endpoints::EndpointScope) -> String {
     match scope {
         crate::endpoints::EndpointScope::Federation => "last_pulled_event_id".to_string(),
         crate::endpoints::EndpointScope::Local => "last_pulled_event_id_local".to_string(),
+        crate::endpoints::EndpointScope::Lan => "last_pulled_event_id_lan".to_string(),
+        crate::endpoints::EndpointScope::Uds => "last_pulled_event_id_uds".to_string(),
     }
 }
 
@@ -4544,17 +5372,123 @@ fn is_known_relay_domain(peer_domain: &str, our_relay_url: &str) -> bool {
 /// No `.well-known/wire/agent` resolution. Reserved-nick sessions (like
 /// the cwd-derived `wire`) are addressable because the local relay never
 /// needed a public claim for sister coordination.
-fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<()> {
-    // 1. Locate sister session by name.
-    let sessions = crate::session::list_sessions()?;
-    let sister = sessions
+/// v0.7.0-alpha.2/3: resolve an input (session name or character nickname)
+/// to a local sister session.
+///
+/// `wire add --local-sister <name-or-nickname>` and adjacent commands take
+/// either form. Exact session-name matches always win; nickname matches
+/// are a fallback so operators can type "winter-bay" instead of "wire".
+/// When a nickname is ambiguous (two sessions share it, e.g. auto-derived
+/// for one + override on another), returns `Err(ResolveError::Ambiguous)`
+/// with the candidate list so the caller can surface a disambiguation
+/// hint instead of silently picking one.
+fn resolve_local_session<'a>(
+    sessions: &'a [crate::session::SessionInfo],
+    input: &str,
+) -> Result<&'a crate::session::SessionInfo, ResolveError> {
+    // Exact session-name match always wins, even if a nickname elsewhere
+    // also matches. Predictable for scripts and operator muscle memory.
+    if let Some(s) = sessions.iter().find(|s| s.name == input) {
+        return Ok(s);
+    }
+    let nick_matches: Vec<&crate::session::SessionInfo> = sessions
         .iter()
-        .find(|s| s.name == sister_name)
-        .ok_or_else(|| {
-            anyhow!(
-                "no sister session named `{sister_name}` (run `wire session list` to see what's available)"
-            )
-        })?;
+        .filter(|s| {
+            s.character
+                .as_ref()
+                .map(|c| c.nickname == input)
+                .unwrap_or(false)
+        })
+        .collect();
+    match nick_matches.len() {
+        0 => Err(ResolveError::NotFound),
+        1 => Ok(nick_matches[0]),
+        _ => Err(ResolveError::Ambiguous(
+            nick_matches.iter().map(|s| s.name.clone()).collect(),
+        )),
+    }
+}
+
+#[derive(Debug)]
+enum ResolveError {
+    NotFound,
+    Ambiguous(Vec<String>),
+}
+
+/// v0.7.0-alpha.2/.5: resolve a peer input (handle or character nickname)
+/// to a pinned peer's canonical handle.
+///
+/// `wire send <peer>` accepts either the handle the peer registered with
+/// or their character nickname (DID-hash-derived). Exact handle match
+/// always wins. When a nickname matches multiple peers (theoretically
+/// possible via DID-hash collision in the (adj, noun) space), returns
+/// `Ambiguous` so the caller can surface a disambiguation hint instead
+/// of silently picking one.
+///
+/// Only AUTO-DERIVED peer characters are matchable; operator-chosen
+/// overrides on the peer's side live in their local `display.json` and
+/// aren't yet published via agent-card. (That's the v0.7+ federation
+/// lifecycle work — peers publishing overrides so we resolve by what
+/// they call themselves, not just what their DID hashes to.)
+fn resolve_peer_handle(input: &str) -> Result<Option<String>, ResolveError> {
+    let trust = match config::read_trust() {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let agents = match trust.get("agents").and_then(|a| a.as_object()) {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    if agents.contains_key(input) {
+        return Ok(Some(input.to_string()));
+    }
+    let mut nick_matches: Vec<String> = Vec::new();
+    for (handle, agent) in agents.iter() {
+        // v0.7.0-alpha.6: prefer peer's published display nickname over
+        // auto-derived. Allows `wire send <their-chosen-name>` not just
+        // `wire send <their-did-hash-derived-name>`.
+        let character = match agent.get("card") {
+            Some(card) => crate::character::Character::from_card(card),
+            None => match agent.get("did").and_then(Value::as_str) {
+                Some(did) => crate::character::Character::from_did(did),
+                None => continue,
+            },
+        };
+        if character.nickname == input {
+            nick_matches.push(handle.clone());
+        }
+    }
+    match nick_matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(nick_matches.into_iter().next().unwrap())),
+        _ => Err(ResolveError::Ambiguous(nick_matches)),
+    }
+}
+
+fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<()> {
+    // 1. Locate sister session by name OR character nickname.
+    let sessions = crate::session::list_sessions()?;
+    let sister = match resolve_local_session(&sessions, sister_name) {
+        Ok(s) => s,
+        Err(ResolveError::NotFound) => bail!(
+            "no sister session named `{sister_name}` (matched by session name or character nickname). \
+             Run `wire session list` to see what's available."
+        ),
+        Err(ResolveError::Ambiguous(candidates)) => bail!(
+            "nickname `{sister_name}` is ambiguous — matches {} sessions: {}. \
+             Disambiguate by passing the session name (one of those listed) instead of the nickname.",
+            candidates.len(),
+            candidates.join(", ")
+        ),
+    };
+    // If we matched via nickname (not exact name), surface that so the
+    // operator sees what we resolved to. Quiet when names match exactly.
+    if sister.name != sister_name {
+        eprintln!(
+            "wire add: resolved nickname `{sister_name}` → session `{}`",
+            sister.name
+        );
+    }
 
     // 2. Refuse self-pair — operator owns both sides, but a self-loop
     // breaks the bilateral state machine.
@@ -4701,6 +5635,8 @@ fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<()> {
                 "event_id": event_id,
                 "delivered_via": match delivery_endpoint.scope {
                     crate::endpoints::EndpointScope::Local => "local",
+                    crate::endpoints::EndpointScope::Lan => "lan",
+                    crate::endpoints::EndpointScope::Uds => "uds",
                     crate::endpoints::EndpointScope::Federation => "federation",
                 },
                 "status": "drop_sent",
@@ -4709,6 +5645,8 @@ fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<()> {
     } else {
         let scope = match delivery_endpoint.scope {
             crate::endpoints::EndpointScope::Local => "local",
+            crate::endpoints::EndpointScope::Lan => "lan",
+            crate::endpoints::EndpointScope::Uds => "uds",
             crate::endpoints::EndpointScope::Federation => "federation",
         };
         println!(
@@ -5282,13 +6220,18 @@ fn cmd_mesh_route(
     let mut last_err: Option<String> = None;
     let mut via_scope: Option<String> = None;
     for ep in &endpoints {
-        let client = crate::relay_client::RelayClient::new(&ep.relay_url);
-        match client.post_event(&ep.slot_id, &ep.slot_token, &signed) {
+        // v0.7.0-alpha.19: scheme-aware dispatch — `unix://` endpoints
+        // route via uds_request, others via reqwest. Allows peers with
+        // UDS-tagged endpoints in their agent-card to receive events
+        // over the local socket instead of loopback HTTP.
+        match crate::relay_client::post_event_to_endpoint(ep, &signed) {
             Ok(_) => {
                 delivered = true;
                 via_scope = Some(
                     match ep.scope {
                         crate::endpoints::EndpointScope::Local => "local",
+                        crate::endpoints::EndpointScope::Lan => "lan",
+                        crate::endpoints::EndpointScope::Uds => "uds",
                         crate::endpoints::EndpointScope::Federation => "federation",
                     }
                     .to_string(),
@@ -5693,13 +6636,18 @@ fn cmd_mesh_broadcast(
                 let mut last_err: Option<String> = None;
                 let mut delivered_via: Option<String> = None;
                 for ep in &endpoints {
-                    let client = crate::relay_client::RelayClient::new(&ep.relay_url);
-                    match client.post_event(&ep.slot_id, &ep.slot_token, &signed) {
+                    // v0.7.0-alpha.19: scheme-aware dispatch (UDS via
+                    // uds_request, else reqwest). Same as cmd_send's
+                    // single-peer path above; this is the parallel
+                    // multi-peer broadcast loop.
+                    match crate::relay_client::post_event_to_endpoint(ep, &signed) {
                         Ok(_) => {
                             delivered = true;
                             delivered_via = Some(
                                 match ep.scope {
                                     crate::endpoints::EndpointScope::Local => "local",
+                                    crate::endpoints::EndpointScope::Lan => "lan",
+                                    crate::endpoints::EndpointScope::Uds => "uds",
                                     crate::endpoints::EndpointScope::Federation => "federation",
                                 }
                                 .to_string(),
@@ -5805,6 +6753,10 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
             relay,
             with_local,
             local_relay,
+            with_lan,
+            lan_relay,
+            with_uds,
+            uds_socket,
             no_daemon,
             local_only,
             json,
@@ -5813,6 +6765,10 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
             &relay,
             with_local,
             &local_relay,
+            with_lan,
+            lan_relay.as_deref(),
+            with_uds,
+            uds_socket.as_deref(),
             no_daemon,
             local_only,
             json,
@@ -5842,11 +6798,18 @@ fn resolve_session_name(name: Option<&str>) -> Result<String> {
     Ok(crate::session::derive_name_from_cwd(&cwd, &registry))
 }
 
+#[allow(clippy::too_many_arguments)] // 11 transport-mix flags; the v0.8 audit
+// (.planning/research/codebase-audit-2026-05-23.md) recommends a config-struct
+// refactor for v0.8. For v0.7.0 we ship the flag-explosion as-is.
 fn cmd_session_new(
     name_arg: Option<&str>,
     relay: &str,
     with_local: bool,
     local_relay: &str,
+    with_lan: bool,
+    lan_relay: Option<&str>,
+    with_uds: bool,
+    uds_socket: Option<&std::path::Path>,
     no_daemon: bool,
     local_only: bool,
     as_json: bool,
@@ -5854,6 +6817,14 @@ fn cmd_session_new(
     // v0.6.6: --local-only implies --with-local (a federation-free
     // session with no endpoints at all would be unaddressable).
     let with_local = with_local || local_only;
+    // v0.7.0-alpha.9: --with-lan requires --lan-relay <url>.
+    if with_lan && lan_relay.is_none() {
+        bail!("--with-lan requires --lan-relay <url> (e.g. http://192.168.1.50:8771)");
+    }
+    // v0.7.0-alpha.18: --with-uds requires --uds-socket <path>.
+    if with_uds && uds_socket.is_none() {
+        bail!("--with-uds requires --uds-socket <path> (e.g. /tmp/wire.sock)");
+    }
     let cwd = std::env::current_dir().with_context(|| "reading cwd")?;
     let mut registry = crate::session::read_registry().unwrap_or_default();
     let name = match name_arg {
@@ -5985,12 +6956,259 @@ fn cmd_session_new(
         }
     }
 
+    // v0.7.0-alpha.9: also allocate a LAN-bound slot if requested.
+    // Sits AFTER local because cmd_session_new's flow is "add endpoints
+    // alongside existing self.endpoints[]" — order independent post-init.
+    if with_lan && let Some(lan_url) = lan_relay {
+        try_allocate_lan_slot(&session_home, &effective_handle, lan_url);
+    }
+    // v0.7.0-alpha.18: also allocate a UDS slot if requested.
+    if with_uds && let Some(socket_path) = uds_socket {
+        try_allocate_uds_slot(&session_home, &effective_handle, socket_path);
+    }
+
     if !no_daemon {
         ensure_session_daemon(&session_home)?;
     }
 
     let info = render_session_info(&name, &session_home, &cwd)?;
     emit_session_new_result(&info, "created", as_json)
+}
+
+/// v0.7.0-alpha.18: probe + allocate against a UDS-bound relay, then
+/// merge the resulting Uds endpoint into `self.endpoints[]` so paired
+/// sister sessions can route over the local socket instead of loopback
+/// HTTP. Uses the hand-rolled `uds_request` HTTP/1.1 client from
+/// alpha.17 — reqwest has no UDS support.
+///
+/// Non-fatal on probe/alloc failure (mirrors try_allocate_local_slot
+/// and try_allocate_lan_slot semantics): session stays at existing
+/// endpoint mix, operator can retry once the UDS relay is up.
+#[cfg(unix)]
+fn try_allocate_uds_slot(
+    session_home: &std::path::Path,
+    handle: &str,
+    uds_socket: &std::path::Path,
+) {
+    // Probe healthz first so we fail fast with a clear stderr if the
+    // socket doesn't exist OR isn't a wire relay.
+    let healthz = match crate::relay_client::uds_request(uds_socket, "GET", "/healthz", &[], b"") {
+        Ok((200, _)) => true,
+        Ok((status, body)) => {
+            eprintln!(
+                "wire session new: UDS relay probe at {uds_socket:?} returned {status} ({}) — not publishing UDS endpoint",
+                String::from_utf8_lossy(&body)
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!(
+                "wire session new: UDS relay at {uds_socket:?} unreachable ({e:#}) — \
+                 not publishing UDS endpoint. Start one with `wire relay-server --uds <path>`."
+            );
+            return;
+        }
+    };
+    if !healthz {
+        return;
+    }
+
+    // Allocate a slot via the same hand-rolled HTTP/1.1 client.
+    let alloc_body = serde_json::json!({"handle": handle}).to_string();
+    let (status, body) = match crate::relay_client::uds_request(
+        uds_socket,
+        "POST",
+        "/v1/slot/allocate",
+        &[("Content-Type", "application/json")],
+        alloc_body.as_bytes(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "wire session new: UDS relay slot allocation request failed: {e:#} — not publishing UDS endpoint"
+            );
+            return;
+        }
+    };
+    if status >= 300 {
+        eprintln!(
+            "wire session new: UDS relay slot allocation returned {status} ({}) — not publishing UDS endpoint",
+            String::from_utf8_lossy(&body)
+        );
+        return;
+    }
+    let alloc: crate::relay_client::AllocateResponse = match serde_json::from_slice(&body) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("wire session new: UDS relay returned unparseable allocate response: {e:#}");
+            return;
+        }
+    };
+
+    let state_path = session_home.join("config").join("wire").join("relay.json");
+    let mut state: serde_json::Value = std::fs::read(&state_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let mut endpoints: Vec<crate::endpoints::Endpoint> = state
+        .get("self")
+        .and_then(|s| s.get("endpoints"))
+        .and_then(|e| e.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    serde_json::from_value::<crate::endpoints::Endpoint>(v.clone()).ok()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    endpoints.push(crate::endpoints::Endpoint::uds(
+        format!("unix://{}", uds_socket.display()),
+        alloc.slot_id.clone(),
+        alloc.slot_token.clone(),
+    ));
+
+    let self_obj = state
+        .as_object_mut()
+        .expect("relay_state root is an object")
+        .entry("self")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !self_obj.is_object() {
+        *self_obj = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(obj) = self_obj.as_object_mut() {
+        obj.insert(
+            "endpoints".into(),
+            serde_json::to_value(&endpoints).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Err(e) = std::fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&state).expect("relay_state serializable"),
+    ) {
+        eprintln!("wire session new: failed to write {state_path:?}: {e}");
+        return;
+    }
+    eprintln!(
+        "wire session new: UDS slot allocated on unix://{} (slot_id={}) — sister sessions will see this endpoint in your agent-card",
+        uds_socket.display(),
+        alloc.slot_id
+    );
+}
+
+#[cfg(not(unix))]
+fn try_allocate_uds_slot(
+    _session_home: &std::path::Path,
+    _handle: &str,
+    _uds_socket: &std::path::Path,
+) {
+    eprintln!(
+        "wire session new: --with-uds is Unix-only (Windows lacks AF_UNIX in tokio/reqwest); ignoring"
+    );
+}
+
+/// v0.7.0-alpha.9: probe + allocate against a LAN-bound relay, then
+/// merge the resulting Lan endpoint into `self.endpoints[]` so peers
+/// pulling the agent-card see a third reachable address.
+///
+/// Mirrors `try_allocate_local_slot` but tags the endpoint
+/// `EndpointScope::Lan`. Non-fatal: if probe or alloc fails, the
+/// session stays at whatever endpoint mix it already had — operators
+/// can retry with `wire session new --with-lan --lan-relay <url>` once
+/// the LAN relay is up.
+fn try_allocate_lan_slot(session_home: &std::path::Path, handle: &str, lan_relay: &str) {
+    let probe = match crate::relay_client::build_blocking_client(Some(
+        std::time::Duration::from_millis(500),
+    )) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("wire session new: cannot build LAN probe client for {lan_relay}: {e:#}");
+            return;
+        }
+    };
+    let healthz_url = format!("{}/healthz", lan_relay.trim_end_matches('/'));
+    match probe.get(&healthz_url).send() {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => {
+            eprintln!(
+                "wire session new: LAN relay probe at {healthz_url} returned {} — not publishing LAN endpoint",
+                resp.status()
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!(
+                "wire session new: LAN relay at {lan_relay} unreachable ({}) — not publishing LAN endpoint. \
+                 Start one on the LAN-bound interface with `wire relay-server --bind <LAN-IP>:8771 --local-only`.",
+                crate::relay_client::format_transport_error(&anyhow::Error::new(e))
+            );
+            return;
+        }
+    };
+
+    let lan_client = crate::relay_client::RelayClient::new(lan_relay);
+    let alloc = match lan_client.allocate_slot(Some(handle)) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!(
+                "wire session new: LAN relay slot allocation failed: {e:#} — not publishing LAN endpoint"
+            );
+            return;
+        }
+    };
+
+    let state_path = session_home.join("config").join("wire").join("relay.json");
+    let mut state: serde_json::Value = std::fs::read(&state_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    // Read existing endpoints array and add the LAN one. Preserve
+    // federation / local entries already there.
+    let mut endpoints: Vec<crate::endpoints::Endpoint> = state
+        .get("self")
+        .and_then(|s| s.get("endpoints"))
+        .and_then(|e| e.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    serde_json::from_value::<crate::endpoints::Endpoint>(v.clone()).ok()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    endpoints.push(crate::endpoints::Endpoint::lan(
+        lan_relay.trim_end_matches('/').to_string(),
+        alloc.slot_id.clone(),
+        alloc.slot_token.clone(),
+    ));
+
+    let self_obj = state
+        .as_object_mut()
+        .expect("relay_state root is an object")
+        .entry("self")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !self_obj.is_object() {
+        *self_obj = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(obj) = self_obj.as_object_mut() {
+        obj.insert(
+            "endpoints".into(),
+            serde_json::to_value(&endpoints).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Err(e) = std::fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&state).expect("relay_state serializable"),
+    ) {
+        eprintln!("wire session new: failed to write {state_path:?}: {e}");
+        return;
+    }
+    eprintln!(
+        "wire session new: LAN slot allocated on {lan_relay} (slot_id={}) — peers will see this endpoint in your agent-card",
+        alloc.slot_id
+    );
 }
 
 /// v0.5.17: probe the named local relay; if `/healthz` returns ok within
@@ -6214,10 +7432,197 @@ fn run_wire_with_home(
     let status = std::process::Command::new(&bin)
         .env("WIRE_HOME", session_home)
         .env_remove("RUST_LOG")
+        // v0.7.0-alpha.2: subprocess MUST NOT recursively auto-init.
+        // We already own the session; nested init would clobber state.
+        .env("WIRE_AUTO_INIT", "0")
         .args(args)
         .status()
         .with_context(|| format!("spawning `wire {}`", args.join(" ")))?;
     Ok(status)
+}
+
+/// v0.7.0-alpha.2: idempotent per-cwd session creation.
+///
+/// When the auto-detect (`maybe_adopt_session_wire_home`) finds no
+/// registered session for the current cwd — including via parent-walk —
+/// this creates one inline so every Claude tab in a fresh project gets
+/// its own wire identity rather than collapsing onto the machine-wide
+/// default. Without this, multiple Claudes in unwired cwds all render
+/// the same character (the default identity's character), defeating the
+/// "every session looks different" promise.
+///
+/// Opt-out: `WIRE_AUTO_INIT=0` env var (e.g. set in shell profile or
+/// `run_wire_with_home` subprocess context).
+///
+/// Best-effort: any failure (no home dir, name collision pathology,
+/// `wire init` subprocess crash) is logged to stderr and we fall back
+/// to default identity. Must not block MCP startup.
+///
+/// MUST be called BEFORE worker thread spawn (env::set_var safety).
+pub fn maybe_auto_init_cwd_session(label: &str) {
+    if std::env::var("WIRE_HOME").is_ok() {
+        return; // explicit override OR auto-detect already won
+    }
+    if std::env::var("WIRE_AUTO_INIT").as_deref() == Ok("0") {
+        return; // operator opt-out
+    }
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    // Defensive: parent-walk re-check (maybe_adopt_session_wire_home
+    // already runs but we want to be robust to ordering).
+    if crate::session::detect_session_wire_home(&cwd).is_some() {
+        return;
+    }
+
+    // v0.7.0-alpha.12 (review-fix #135): SINGLE global auto-init lock
+    // (was per-name in alpha.3, briefly per-cwd in alpha.12-iter1).
+    // Two different cwds with the same basename (e.g. /a/projx +
+    // /b/projx) used to race outside the lock: both read empty
+    // registry, both derived name="projx", per-name lock didn't help
+    // because they queued on DIFFERENT locks (cwd-A and cwd-B).
+    //
+    // Single lock serializes ALL auto-init across the sessions_root.
+    // Inside the lock: re-read registry, derive_name_from_cwd which
+    // adds path-hash suffix when basename is occupied by another cwd
+    // already committed to the registry. Different cwds get DIFFERENT
+    // names guaranteed.
+    //
+    // Cost: parallel auto-inits in different cwds now serialize
+    // (~hundreds of ms each when local relay is up). Acceptable —
+    // auto-init runs once per cwd per machine; not a hot path.
+    use fs2::FileExt;
+    let sessions_root = match crate::session::sessions_root() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    if let Err(e) = std::fs::create_dir_all(&sessions_root) {
+        eprintln!("wire {label}: auto-init: failed to create sessions root {sessions_root:?}: {e}");
+        return;
+    }
+    let lock_path = sessions_root.join(".auto-init.lock");
+    let lock_file = match std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "wire {label}: auto-init: cannot open lockfile {lock_path:?}: {e} — falling back to default identity"
+            );
+            return;
+        }
+    };
+    if let Err(e) = lock_file.lock_exclusive() {
+        eprintln!(
+            "wire {label}: auto-init: flock {lock_path:?} failed: {e} — falling back to default identity"
+        );
+        return;
+    }
+    // Lock acquired. Read registry + derive name now that all parallel
+    // racers serialize through us — derive_name_from_cwd adds a
+    // path-hash suffix if the basename is already claimed by another
+    // cwd in the (now-stable) registry.
+    let registry = crate::session::read_registry().unwrap_or_default();
+    let name = crate::session::derive_name_from_cwd(&cwd, &registry);
+    let session_home = match crate::session::session_dir(&name) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = fs2::FileExt::unlock(&lock_file);
+            return;
+        }
+    };
+    let agent_card_path = session_home
+        .join("config")
+        .join("wire")
+        .join("agent-card.json");
+    let needs_init = !agent_card_path.exists();
+
+    if needs_init {
+        if let Err(e) = std::fs::create_dir_all(&session_home) {
+            eprintln!(
+                "wire {label}: auto-init: failed to create session dir {session_home:?}: {e}"
+            );
+            let _ = fs2::FileExt::unlock(&lock_file);
+            return;
+        }
+        match run_wire_with_home(&session_home, &["init", &name]) {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                eprintln!(
+                    "wire {label}: auto-init: `wire init {name}` exited non-zero ({status}) — falling back to default identity"
+                );
+                let _ = fs2::FileExt::unlock(&lock_file);
+                return;
+            }
+            Err(e) => {
+                eprintln!(
+                    "wire {label}: auto-init: failed to spawn `wire init {name}`: {e:#} — falling back to default identity"
+                );
+                let _ = fs2::FileExt::unlock(&lock_file);
+                return;
+            }
+        }
+        // Best-effort: allocate a local-relay slot so this auto-init'd
+        // session is addressable by sister sessions. Skipped silently when
+        // the local relay isn't running (the function itself reports to
+        // stderr). Auto-init'd sessions without endpoints can still
+        // surface their character but cannot receive pair_drops until the
+        // operator runs `wire bind-relay` or restarts the local relay.
+        try_allocate_local_slot(
+            &session_home,
+            &name,
+            "https://wireup.net",
+            "http://127.0.0.1:8771",
+        );
+    } else {
+        // Race loser path: peer already created the session. Surface
+        // this honestly so the operator can see we adopted rather than
+        // double-initialized.
+        if std::env::var("WIRE_QUIET_AUTOSESSION").is_err() {
+            eprintln!(
+                "wire {label}: auto-init: session `{name}` already exists (concurrent mcp peer won the race) — adopting"
+            );
+        }
+    }
+    // v0.7.0-alpha.12 (review-fix #135 part 2): register cwd → name
+    // BEFORE releasing the auto-init lock. Pre-fix released the lock
+    // here and committed the registry update afterward — racers in
+    // OTHER cwds with the same basename would acquire the lock,
+    // read the registry (still without our entry), and derive the
+    // SAME name we just claimed. Live regression test caught it:
+    // two cwds /a/projx + /b/projx both got name "projx", both
+    // mapped to the same identity. Update the registry WHILE STILL
+    // holding the auto-init lock so the next racer sees our claim.
+    let cwd_key = cwd.to_string_lossy().into_owned();
+    let name_for_reg = name.clone();
+    if let Err(e) = crate::session::update_registry(|reg| {
+        reg.by_cwd.insert(cwd_key, name_for_reg);
+        Ok(())
+    }) {
+        eprintln!("wire {label}: auto-init: failed to update registry: {e:#}");
+        // proceed — env var still gets set below
+    }
+    // NOW release the lock — racers waiting will see our registry
+    // entry on their re-read.
+    let _ = fs2::FileExt::unlock(&lock_file);
+
+    if std::env::var("WIRE_QUIET_AUTOSESSION").is_err() {
+        eprintln!(
+            "wire {label}: auto-init: created session `{name}` for cwd `{}` → WIRE_HOME=`{}`",
+            cwd.display(),
+            session_home.display()
+        );
+    }
+    // SAFETY: caller contract is "before any thread spawn." MCP::run
+    // calls this immediately after `maybe_adopt_session_wire_home`.
+    unsafe {
+        std::env::set_var("WIRE_HOME", &session_home);
+    }
 }
 
 fn ensure_session_daemon(session_home: &std::path::Path) -> Result<()> {
@@ -6287,10 +7692,33 @@ fn cmd_session_list(as_json: bool) -> Result<()> {
         println!("no sessions on this machine. `wire session new` to create one.");
         return Ok(());
     }
-    println!("{:<24} {:<24} {:<10} CWD", "NAME", "HANDLE", "DAEMON");
+    println!(
+        "{:<22} {:<24} {:<24} {:<10} CWD",
+        "CHARACTER", "NAME", "HANDLE", "DAEMON"
+    );
     for s in items {
+        // ANSI-escape-wrapped character takes more visual width than its
+        // displayed glyph count; pad based on the plain-text form, then
+        // wrap in escapes so the column lines up across rows.
+        let plain = s
+            .character
+            .as_ref()
+            .map(|c| c.short())
+            .unwrap_or_else(|| "?".to_string());
+        let colored = s
+            .character
+            .as_ref()
+            .map(|c| c.colored())
+            .unwrap_or_else(|| "?".to_string());
+        // Approximate display width: emoji renders as ~2 cells in most
+        // terminals; the rest are 1 cell each. We pad to 18 displayed
+        // chars (≈22 byte slots when counting emoji).
+        let displayed_width = plain.chars().count() + 1; // +1 emoji-wide compensation
+        let pad = 22usize.saturating_sub(displayed_width);
         println!(
-            "{:<24} {:<24} {:<10} {}",
+            "{}{}  {:<24} {:<24} {:<10} {}",
+            colored,
+            " ".repeat(pad),
             s.name,
             s.handle.as_deref().unwrap_or("?"),
             if s.daemon_running { "running" } else { "down" },
@@ -6842,6 +8270,8 @@ fn probe_directed_edge(from_state: &Value, to_name: &str, now: u64) -> DirectedE
     let scope = Some(
         match ep.scope {
             crate::endpoints::EndpointScope::Local => "local",
+            crate::endpoints::EndpointScope::Lan => "lan",
+            crate::endpoints::EndpointScope::Uds => "uds",
             crate::endpoints::EndpointScope::Federation => "federation",
         }
         .to_string(),
@@ -7198,13 +8628,12 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
     // time the respawn loop runs, `daemon_running` would always be
     // false and zero sessions would respawn. Capture state up front
     // and respawn whatever was alive at the start.
-    let sessions_to_respawn_after_kill: Vec<std::path::PathBuf> =
-        crate::session::list_sessions()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|s| s.daemon_running)
-            .map(|s| s.home_dir)
-            .collect();
+    let sessions_to_respawn_after_kill: Vec<std::path::PathBuf> = crate::session::list_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| s.daemon_running)
+        .map(|s| s.home_dir)
+        .collect();
 
     if check_only {
         // v0.6.8: also surface session-level state + PATH dupes in --check.

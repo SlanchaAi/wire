@@ -195,7 +195,14 @@ pub fn read_private_key() -> Result<[u8; 32]> {
 pub fn write_agent_card(card: &Value) -> Result<()> {
     let path = agent_card_path()?;
     let body = serde_json::to_vec_pretty(card)?;
-    fs::write(&path, body).with_context(|| format!("writing {path:?}"))?;
+    // v0.7.0-alpha.8 (review-fix #7): atomic write via tmp+rename so
+    // a power-loss / SIGKILL mid-write doesn't leave a 0-byte agent-
+    // card that `is_initialized()` claims is fine but `read_agent_card`
+    // can't parse. `cmd_identity_rename` made this a hot path; the
+    // pre-existing fs::write pattern was a corruption risk every call.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, body).with_context(|| format!("writing tmp {tmp:?}"))?;
+    fs::rename(&tmp, &path).with_context(|| format!("atomic rename {tmp:?} → {path:?}"))?;
     Ok(())
 }
 
@@ -203,6 +210,52 @@ pub fn read_agent_card() -> Result<Value> {
     let path = agent_card_path()?;
     let body = fs::read(&path).with_context(|| format!("reading {path:?}"))?;
     Ok(serde_json::from_slice(&body)?)
+}
+
+// ---------- display overrides (v0.7.0-alpha.3) ----------
+
+/// Path to `display.json` — operator-chosen character nickname + emoji
+/// override. Sidecar to agent-card. NOT signed (display-only, local-only).
+///
+/// Format: `{"nickname": "foxtrot-meadow", "emoji": "🦊"}` — both fields
+/// optional, omitted means use the auto-derived value.
+pub fn display_overrides_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("display.json"))
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DisplayOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
+}
+
+pub fn read_display_overrides() -> Result<DisplayOverrides> {
+    read_display_overrides_at(&display_overrides_path()?)
+}
+
+pub fn read_display_overrides_at(path: &Path) -> Result<DisplayOverrides> {
+    if !path.exists() {
+        return Ok(DisplayOverrides::default());
+    }
+    let body = fs::read(path).with_context(|| format!("reading {path:?}"))?;
+    Ok(serde_json::from_slice(&body)?)
+}
+
+pub fn write_display_overrides(overrides: &DisplayOverrides) -> Result<()> {
+    let path = display_overrides_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
+    }
+    let body = serde_json::to_vec_pretty(overrides)?;
+    // v0.7.0-alpha.8 (review-fix #7): atomic write — consistent with
+    // write_agent_card now that they share the cmd_identity_rename
+    // call path.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, body).with_context(|| format!("writing tmp {tmp:?}"))?;
+    fs::rename(&tmp, &path).with_context(|| format!("atomic rename {tmp:?} → {path:?}"))?;
+    Ok(())
 }
 
 pub fn write_trust(trust: &Value) -> Result<()> {

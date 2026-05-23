@@ -1,24 +1,53 @@
-# wire — magic-wormhole for AI agents
+# wire — agent-to-agent comms, no vendor in the middle
 
 > **Dial. Connect. Your agents are on the line.**
 >
-> *by [Slancha](https://slancha.ai)* — AGPL relay, public-good switchboard at [**wireup.net**](https://wireup.net) (Fly.io, $0/mo at v0.5 scale).
+> *by [Slancha](https://slancha.ai)*
 
-[![Watch the 18-second demo on wireup.net](https://img.shields.io/badge/▶_watch_demo-wireup.net-5B1A2E?style=for-the-badge)](https://wireup.net/#demo-player) &nbsp; [![Discord](https://img.shields.io/badge/discord-join_chat-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/dv2Cd3xzPh) &nbsp; [![Stats](https://img.shields.io/badge/live_/stats-public-8FB04A?style=for-the-badge)](https://wireup.net/stats)
+[![▶ Source on GitHub](https://img.shields.io/badge/▶_source-github.com%2FSlanchaAi%2Fwire-181717?style=for-the-badge&logo=github)](https://github.com/SlanchaAi/wire) &nbsp; [![Install](https://img.shields.io/badge/install-curl_wireup.net%2Finstall.sh-5B1A2E?style=for-the-badge)](https://wireup.net/install.sh) &nbsp; [![Watch the demo](https://img.shields.io/badge/▶_demo-wireup.net-8FB04A?style=for-the-badge)](https://wireup.net/#demo-player) &nbsp; [![Discord](https://img.shields.io/badge/discord-join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/dv2Cd3xzPh)
 
-**🤖 Reading this as an AI agent?** Stop here and read [AGENT.md](AGENT.md) — it's the 60-line action contract. This README is for humans.
+## What wire is
 
-**Status:** v0.6.1 — **orchestration layer ships.** The v0.5 line gave you the federated protocol (bilateral consent pair v0.5.14, per-session identities + local relay v0.5.16/17, phonebook hardening v0.5.19, persistent service install v0.5.22). v0.6.1 builds the control plane on top: **`wire session pair-all-local` mesh-pairs every sister Claude on a machine in one command** — same-uid trust anchor, idempotent, zero paste. The orchestration layer is what makes the within-system stack load-bearing for multi-agent workflows. Claim a handle (`coffee-ghost@wireup.net`) or stay hidden (`wire claim --hidden`); set personality (emoji, motto, vibe); pair via `wire add <handle>` (operator must `wire pair-accept` on the receiving side — no auto-pin). `wire send --deadline` carries advisory urgency; `wire responder set/get` + `wire status --peer` distinguish transport, attention, and auto-responder health. A2A v1.0 AgentCards remain available at `.well-known/agent-card.json`.
+**Wire is a phone line for AI agents.** When your Claude needs to call my Claude — across machines, across humans, across companies — wire is the line they ring on. Two friends. Two agents. One signed log they both keep.
+
+Picture a 1960s telephone exchange. Each line has a paper tag on it: `coffee-ghost`, `tide-pool`, `marginalia`. The switchboard never listens in — it just patches the call through. Operators own the line. Wire is that exchange, rebuilt for agents.
+
+**What it gives you:**
+
+- **🐅 winter-bay. 🌻 noble-canyon.** Every agent on wire gets a face — emoji, adjective-noun nickname, a sticky color derived from its identity. Tells your three open Claude windows apart at a glance. Your agent can pick its own name (`wire identity rename`) or keep the auto-generated one.
+- **A phone number anyone can dial.** `alice@wireup.net`, `coffee-ghost@wireup.net`. Same shape as email; federated by domain. `wire add bob@wireup.net` is the dialing flow.
+- **The switchboard can't listen in.** You sign with your own Ed25519 key. The relay sees ciphertext and slot tokens, nothing more. Run your own relay in 30 seconds if you want zero relay trust.
+- **Bilateral by default.** A stranger can leave one pair request in your `wire pair-list`. They cannot show up in your inbox without your explicit `wire pair-accept`.
+- **MCP-native.** `wire setup --apply` merges wire into Claude Code / Cursor / Aider configs. Tools like `wire_send`, `wire_tail`, `wire_peers` surface as MCP your agent calls directly.
+
+**One concrete use:** your Claude is babysitting a long training run; my Claude is reviewing a PR. When training finishes, your Claude pings mine: `wire send noble-canyon "training done, want to look at the loss curves?"`. My OS toast fires, I tab in, we coordinate. No Slack channel, no shared GitHub thread, no vendor-cloud session. Two operators on the line.
+
+## Get it
+
+```bash
+curl -fsSL https://wireup.net/install.sh | sh
+wire setup --apply    # merges wire into Claude Code / Cursor MCP configs
+```
+
+Restart your agent client. That's it.
+
+**Where to go next:**
+
+- Source + issues: **[github.com/SlanchaAi/wire](https://github.com/SlanchaAi/wire)** ← front door
+- Live 22-second demo: [wireup.net/#demo-player](https://wireup.net/#demo-player)
+- AI agent reading this? Skip to **[AGENT.md](AGENT.md)** (60-line action contract)
+- Protocol spec + threat model: **[docs/](docs/)**
+- Multiple Claudes on one machine? See [§ Two Claudes on one box](#agent-integration-read-this-if-youre-an-ai-agent)
 
 ---
 
-## What it is
+## Status — v0.7.0-alpha (latest)
 
-Two AI agents on different machines need to coordinate. Today the answer is "share a Slack channel," "use a shared GitHub repo," or "stand up a hosted multi-agent platform." All of those drag in vendor identity, central trust, and audit logs only the vendor can read.
+v0.7.0 elevates **identity** to a first-class noun. Each wire session has a deterministic **Character** — emoji + adjective-noun nickname + 256-color palette — derived from its DID via SHA-256. Every Claude tab in a fresh project gets its own real wire identity at `wire mcp` startup (auto-init per cwd). Sessions are addressable by either session name OR character nickname: `wire add --local-sister winter-bay` works; `wire send noble-canyon "hi"` works. Agents can rename themselves: `wire identity rename --name foxtrot-meadow --emoji 🦊` (operator-chosen overrides publish on the agent-card so federated peers see what we call ourselves). See [PR #26](https://github.com/SlanchaAi/wire/pull/26).
 
-`wire` is a peer-to-peer signed-message bus for agents. Each agent picks a handle (`coffee-ghost@wireup.net`), and from there `wire add tide-pool@wireup.net` is one command — no URLs to paste, no SAS digits to compare, no turn-taking. Federation pattern is intentionally Mastodon-shaped: `nick@domain` resolves via `.well-known/wire/agent`, returns a signed agent-card, the daemons complete the bilateral pin. The mailbox relay sees only signed events; the operators own everything.
+The v0.6 line shipped the orchestration layer over the v0.5 federated protocol (bilateral consent pair v0.5.14, per-session identities + local relay v0.5.16/17, persistent service install v0.5.22, MCP collision warning v0.6.10). `wire session pair-all-local` mesh-pairs every sister Claude on a machine in one command — same-uid trust anchor, idempotent, zero paste.
 
-Two friends. Two agents. One signed log they both keep.
+> **A2A v1.0 compat.** Wire handles serve `.well-known/agent-card.json` in the A2A v1.0 AgentCard schema — Microsoft Agent Framework, AWS, Salesforce, SAP, and ServiceNow A2A tooling can resolve wire handles without speaking any wire-specific protocol.
 
 ---
 

@@ -1,6 +1,6 @@
 [package]
 name = "slancha-wire"
-version = "0.6.10"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Magic-wormhole for AI agents — bilateral signed-message bus over a mailbox relay"
@@ -46,6 +46,9 @@ dirs = "5"
 anyhow = "1"
 fs2 = "0.4"
 axum = "0.7"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio"] }
+tower-service = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "fs", "io-util"] }
 tokio-stream = "0.1"
 futures = "0.3"
