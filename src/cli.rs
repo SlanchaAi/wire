@@ -337,6 +337,7 @@ pub enum Command {
     /// for a peer to `pair-join`, exchanges signed agent-cards via SPAKE2 +
     /// ChaCha20-Poly1305. Auto-pins on success. (HUMAN-ONLY — operator must
     /// read the SAS digits aloud and confirm.)
+    #[command(hide = true)] // v0.9 deprecated
     PairHost {
         /// Relay base URL.
         #[arg(long)]
@@ -364,6 +365,7 @@ pub enum Command {
     ///
     /// Aliased as `wire join <code>` for magic-wormhole muscle-memory.
     #[command(alias = "join")]
+    #[command(hide = true)] // v0.9 deprecated
     PairJoin {
         /// Code phrase from the host's `pair-host` output (e.g. `73-2QXC4P`).
         code_phrase: String,
@@ -384,6 +386,7 @@ pub enum Command {
     /// Confirm SAS digits for a detached pending pair. The daemon must be
     /// running for this to do anything — it picks up the confirmation on its
     /// next tick. Mismatch aborts the pair.
+    #[command(hide = true)] // v0.9 deprecated
     PairConfirm {
         /// The code phrase the original `wire pair-host --detach` printed.
         code_phrase: String,
@@ -394,6 +397,7 @@ pub enum Command {
         json: bool,
     },
     /// List all pending detached pair sessions and their state.
+    #[command(hide = true)] // v0.9 deprecated
     PairList {
         /// Emit JSON instead of the table.
         #[arg(long)]
@@ -408,6 +412,7 @@ pub enum Command {
         watch_interval: u64,
     },
     /// Cancel a pending pair. Releases the relay slot and removes the pending file.
+    #[command(hide = true)] // v0.9 deprecated
     PairCancel {
         code_phrase: String,
         #[arg(long)]
@@ -422,6 +427,7 @@ pub enum Command {
     ///   0 — reached target status (or finalized, if target was sas_ready)
     ///   1 — terminated abnormally (aborted, aborted_restart, no such code)
     ///   2 — timeout
+    #[command(hide = true)] // v0.9 deprecated
     PairWatch {
         code_phrase: String,
         /// Target status to wait for. Default: sas_ready.
@@ -475,6 +481,7 @@ pub enum Command {
     /// confirmation, leaving the relay-side slot stuck with "guest already
     /// registered" or "host already registered" until the 5-minute TTL expires.
     /// Either side can call. Idempotent.
+    #[command(hide = true)] // v0.9 deprecated
     PairAbandon {
         /// The code phrase from the original pair-host (e.g. `58-NMTY7A`).
         code_phrase: String,
@@ -487,6 +494,7 @@ pub enum Command {
     /// drives — but doesn't require remembering the peer's relay domain
     /// (the relay coords come from the stored pair_drop). Errors if no
     /// pending-inbound record exists for that peer.
+    #[command(hide = true)] // v0.9 deprecated
     PairAccept {
         /// Bare peer handle (without `@<relay>`).
         peer: String,
@@ -500,6 +508,7 @@ pub enum Command {
     /// <peer>` to delete the record without pairing. The peer never receives
     /// our slot_token; from their side the pair stays pending until they
     /// time out.
+    #[command(hide = true)] // v0.9 deprecated
     PairReject {
         /// Bare peer handle (without `@<relay>`).
         peer: String,
@@ -512,6 +521,7 @@ pub enum Command {
     /// `pair-list --json` shape but for inbound). Use this in scripts that
     /// need to enumerate inbound pair requests without parsing the SPAKE2
     /// table format from `wire pair-list`.
+    #[command(hide = true)] // v0.9 deprecated
     PairListInbound {
         /// Emit JSON.
         #[arg(long)]
@@ -688,6 +698,7 @@ pub enum Command {
     /// Mint a one-paste invite URL. Anyone with this URL can pair to us in a
     /// single step (no SAS digits, no code typing). Auto-inits + auto-allocates
     /// a relay slot on first use. Default TTL 24h, single-use.
+    #[command(hide = true)] // v0.9 deprecated
     Invite {
         /// Override the relay URL for first-time auto-allocation.
         #[arg(long, default_value = "https://wireup.net")]
@@ -1393,10 +1404,10 @@ pub fn run() -> Result<()> {
             json,
             short,
             colored,
-        } => cmd_whoami(json, short, colored),
-        Command::Peers { json } => cmd_peers(json),
-        Command::Pending { json } => cmd_pair_list_inbound(json),
-        Command::Reject { peer, json } => cmd_pair_reject(&peer, json),
+        } => cmd_whoami(json_default(json), short, colored),
+        Command::Peers { json } => cmd_peers(json_default(json)),
+        Command::Pending { json } => cmd_pair_list_inbound(json_default(json)),
+        Command::Reject { peer, json } => cmd_pair_reject(&peer, json_default(json)),
         Command::Send {
             peer,
             kind_or_body,
@@ -1410,13 +1421,13 @@ pub fn run() -> Result<()> {
                 Some(real_body) => (kind_or_body, real_body),
                 None => ("claim".to_string(), kind_or_body),
             };
-            cmd_send(&peer, &kind, &body, deadline.as_deref(), json)
+            cmd_send(&peer, &kind, &body, deadline.as_deref(), json_default(json))
         }
         Command::Dial {
             name,
             message,
             json,
-        } => cmd_dial(&name, message.as_deref(), json),
+        } => cmd_dial(&name, message.as_deref(), json_default(json)),
         Command::Tail { peer, json, limit } => cmd_tail(peer.as_deref(), json, limit),
         Command::Monitor {
             peer,
@@ -1572,10 +1583,11 @@ pub fn run() -> Result<()> {
             // v0.9 smart-dispatch: URL-shaped → federation invite accept;
             // anything else → local pair-accept by name. Routes by input
             // shape so operators don't need to remember two verbs.
+            let j = json_default(json);
             if target.starts_with("wire://pair?") {
-                cmd_accept(&target, json)
+                cmd_accept(&target, j)
             } else {
-                cmd_pair_accept(&target, json)
+                cmd_pair_accept(&target, j)
             }
         }
         Command::Whois {
@@ -1670,31 +1682,42 @@ fn cmd_init(
             config::config_dir()?
         );
     }
-    // v0.9 root-cause fix: refuse to create a slotless session by
-    // default. Pre-v0.9, `wire init <handle>` (no --relay) produced a
-    // session with no inbound slot — peers could not deliver to it,
-    // but pairing + sending operations all returned success, so the
-    // failure was silent and operator-invisible. Root cause of the
-    // 2026-05-23 slancha-api ↔ source incident.
+    // v0.9.1 smart-default reachability. If the operator passed neither
+    // --relay nor --offline, probe the conventional local relay at
+    // http://127.0.0.1:8771 and auto-attach if healthy. Closes the
+    // silent-slotless footgun WITHOUT the v0.9 rejection wall, which
+    // forced operators through a three-flag decision tree on first
+    // invocation. Bare `wire init <handle>` is now ergonomic again
+    // whenever a local relay is running (the common dev setup).
     //
-    // Operators must now name how the session is reachable:
-    //   wire init <handle> --relay <url>   (federation slot)
-    //   wire init <handle> --offline       (intentionally no slot; you
-    //                                       must `wire bind-relay <url>`
-    //                                       before pairing or sends)
-    if relay.is_none() && !offline {
-        bail!(
-            "wire init: refusing to create a session with no inbound slot.\n\
-             Pick one:\n\
-             • `wire init {handle} --relay http://127.0.0.1:8771` — bind a local-relay slot\n\
-             • `wire init {handle} --relay https://wireup.net`   — bind a public federation slot\n\
-             • `wire init {handle} --offline`                     — generate the keypair only \
-             (acknowledges peers will not be able to reach you until you `wire bind-relay <url>` later)\n\
-             \n\
-             Pre-v0.9 the default was slotless and peers silently black-holed inbound. \
-             v0.9 closes that footgun at birth."
-        );
+    // Probe order:
+    //   1. --relay <url>          → use it
+    //   2. --offline               → skip slot allocation (rare power-user)
+    //   3. local relay reachable  → auto-attach + log to stderr
+    //   4. otherwise               → bail with actionable options
+    let mut resolved_relay: Option<String> = relay.map(str::to_string);
+    if resolved_relay.is_none() && !offline {
+        let default_local = "http://127.0.0.1:8771";
+        let client = crate::relay_client::RelayClient::new(default_local);
+        if client.check_healthz().is_ok() {
+            eprintln!(
+                "wire init: local relay at {default_local} reachable — auto-attaching. \
+                 Use --relay <url> to pick a different relay, --offline to skip."
+            );
+            resolved_relay = Some(default_local.to_string());
+        } else {
+            bail!(
+                "wire init: no relay specified and no local relay reachable at \
+                 http://127.0.0.1:8771.\n\
+                 Pick one:\n\
+                 • `wire service install --local-relay` — start the local relay, then re-run\n\
+                 • `wire init {handle} --relay https://wireup.net` — bind to public federation\n\
+                 • `wire init {handle} --offline` — generate keypair only \
+                 (peers cannot reach you until you `wire bind-relay <url>` later)"
+            );
+        }
     }
+    let relay = resolved_relay.as_deref();
 
     config::ensure_dirs()?;
     let (sk_seed, pk_bytes) = generate_keypair();
@@ -9478,6 +9501,26 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// v0.9.1: should this command emit JSON by default?
+///
+/// - `explicit=true` → operator passed `--json`, always JSON.
+/// - non-interactive stdout (pipe, capture, agent shell) → JSON, so
+///   captured output parses cleanly without operators remembering to
+///   append `--json`. Mirrors `gh`, `kubectl`, etc.
+/// - interactive TTY → human format (false).
+/// - `WIRE_NO_AUTO_JSON=1` opts out (back-compat for v0.9 scripts
+///   that parsed the human text by accident).
+fn json_default(explicit: bool) -> bool {
+    if explicit {
+        return true;
+    }
+    if std::env::var("WIRE_NO_AUTO_JSON").is_ok() {
+        return false;
+    }
+    use std::io::IsTerminal;
+    !std::io::stdout().is_terminal()
 }
 
 fn process_alive_pid(pid: u32) -> bool {

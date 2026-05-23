@@ -406,6 +406,111 @@ fn session_destroy_requires_force_flag_v0_5_16() {
 }
 
 #[test]
+fn deprecated_verbs_hidden_from_help_v0_9_1() {
+    // v0.9.1: --help should not list the deprecated pair-* + invite
+    // verbs as their own subcommand entries (lines starting with two
+    // spaces + the verb name + whitespace, which is clap's subcommand-
+    // list format). They MAY still appear inside other commands'
+    // description text (e.g. `pin` mentions pair-host); the test
+    // checks subcommand-listing position, not arbitrary substring.
+    let home = fresh_home();
+    let out = run(&home, &["--help"]);
+    assert!(out.status.success(), "--help failed: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    for hidden in [
+        "pair-host",
+        "pair-join",
+        "pair-accept",
+        "pair-reject",
+        "pair-list-inbound",
+    ] {
+        let leading_pattern = format!("  {hidden} ");
+        assert!(
+            !stdout.contains(&leading_pattern),
+            "--help should hide `{hidden}` from subcommand list (v0.9.1)"
+        );
+    }
+    for visible in ["dial", "send", "pending", "accept", "reject", "whois"] {
+        let leading_pattern = format!("  {visible}");
+        assert!(
+            stdout.contains(&leading_pattern),
+            "--help should list canonical `{visible}` as subcommand"
+        );
+    }
+}
+
+#[test]
+fn deprecated_verbs_still_callable_via_direct_invocation_v0_9_1() {
+    let home = fresh_home();
+    let out = run(&home, &["pair-accept", "--help"]);
+    assert!(out.status.success(), "pair-accept --help: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("Accept a pending-inbound pair request"),
+        "pair-accept help text missing: {stdout}"
+    );
+}
+
+#[test]
+fn init_offline_creates_keypair_without_slot_v0_9_1() {
+    let home = fresh_home();
+    let out = run(&home, &["init", "alice", "--offline", "--json"]);
+    assert!(out.status.success(), "init --offline failed: {:?}", out);
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let did = parsed["did"].as_str().unwrap();
+    assert!(did.starts_with("did:wire:alice-"), "got: {did}");
+    assert!(
+        parsed.get("relay_url").is_none(),
+        "offline init should not have relay_url: {parsed}"
+    );
+}
+
+#[test]
+fn json_emitted_when_stdout_is_piped_v0_9_1() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "alice", "--offline"]);
+    let out = run(&home, &["whoami"]);
+    assert!(out.status.success(), "whoami failed: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|_| panic!("whoami stdout should be JSON when piped — got: {stdout}"));
+    assert!(parsed.get("did").is_some(), "JSON missing did: {parsed}");
+}
+
+#[test]
+fn json_auto_can_be_opted_out_v0_9_1() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "alice", "--offline"]);
+    let out = std::process::Command::new(wire_bin())
+        .args(["whoami"])
+        .env("WIRE_HOME", &home)
+        .env("WIRE_NO_AUTO_JSON", "1")
+        .output()
+        .expect("spawn wire");
+    assert!(out.status.success(), "whoami failed: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("did:wire:alice-"),
+        "WIRE_NO_AUTO_JSON should give human format — got: {stdout}"
+    );
+    assert!(
+        !stdout.trim_start().starts_with('{'),
+        "WIRE_NO_AUTO_JSON should NOT emit JSON — got: {stdout}"
+    );
+}
+
+#[test]
+fn auto_detect_chatter_silent_when_non_interactive_v0_9_1() {
+    let home = fresh_home();
+    let out = run(&home, &["whoami"]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("auto-detected session"),
+        "non-interactive stderr should NOT have auto-detect chatter — got: {stderr}"
+    );
+}
+
+#[test]
 fn session_bind_attaches_existing_session_to_cwd_v0_7_1() {
     // v0.7.1: `wire session bind` adds a cwd → session entry so the
     // walk-up auto-detect resolves to the leaf project rather than an

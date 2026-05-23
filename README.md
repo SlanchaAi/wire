@@ -41,7 +41,16 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.9.0 (latest)
+## Status — v0.9.1 (latest)
+
+v0.9.1 is the first of a six-batch ergonomics pass:
+
+- **Deprecated verbs hidden from `wire --help`.** Still callable; don't clutter the canonical surface.
+- **`wire init` smart-default.** Bare `wire init <handle>` auto-attaches to the local relay at 127.0.0.1:8771 if running. `--offline` opt-in for slotless, `--relay <url>` to override. No more first-time-rejection wall.
+- **JSON when piped.** `wire whoami` / `peers` / `pending` / `accept` / `reject` / `dial` / `send` emit JSON automatically when stdout isn't a TTY (agents in CC's Bash tool stop having to type `--json`). `WIRE_NO_AUTO_JSON=1` opts out.
+- **Quiet auto-detect.** The `wire cli: auto-detected session ...` stderr chatter only emits in interactive TTYs. `WIRE_VERBOSE=1` forces on, `WIRE_QUIET_AUTOSESSION=1` forces off.
+
+## Status — v0.9.0
 
 **Clean cut.** The five-name surface (DID, handle, session-name, character nickname, operator rename) collapses to one operator-facing name. The 12-verb pair cluster collapses to 3.
 
