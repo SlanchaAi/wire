@@ -18,7 +18,7 @@ If both peers are on the same box → **within-system**. If they're on different
 
 ---
 
-## §0 — Within-system mesh (v0.6.6+)
+## §0 — Within-system mesh (v0.6.6+, all platforms in v0.7.2+)
 
 You and the other agents share a machine and a user. The operator drives setup. Total recipe, ONCE per box:
 
@@ -33,9 +33,27 @@ cd ~/code/project-c && wire session new --local-only
 
 # 3. Bilaterally pair every sister with every other (idempotent):
 wire session pair-all-local
+
+# 4. ALWAYS verify after step 3 — `wire session new --local-only` silently
+#    skips the local endpoint if the local-relay isn't running (no error,
+#    no warning), so blind faith in step 1 can leave you with sessions
+#    that exist but can't mesh. If `sessions` is empty or every entry is
+#    in `federation_only`, the local relay never started — go back to
+#    step 1 and check `wire service status --local-relay`.
+wire session list-local --json
 ```
 
 That's it. The operator never paste-shares anything between agents.
+
+**Platform support for `wire service install`:**
+
+| OS | Mechanism | Verify it's running |
+|---|---|---|
+| macOS | launchd plist (`~/Library/LaunchAgents/sh.slancha.wire.local-relay.plist`) | `launchctl list sh.slancha.wire.local-relay` |
+| Linux | systemd `--user` unit (`~/.config/systemd/user/wire-local-relay.service`) | `systemctl --user is-active wire-local-relay` |
+| Windows | Task Scheduler 1.2 XML (task name `wire-local-relay`) — **v0.7.2+** | `schtasks /Query /TN wire-local-relay` |
+
+On Windows pre-v0.7.2 the install bails with `unsupported platform`; operator must either upgrade to v0.7.2+ or run `wire relay-server --bind 127.0.0.1:8771 --local-only` in a separate window as a workaround.
 
 **v0.7.0 — Characters.** Every session now has a deterministic face (emoji + adj-noun nickname + color palette) derived from its DID. Your statusline / `wire whoami` shows yours. Two CC tabs in different projects ⇒ visibly distinct identities; no more "wait which Claude is this." You can rename: `wire identity rename --name foxtrot-meadow --emoji 🦊` (the palette stays DID-stable; the operator-chosen name + emoji get published on your agent-card so federated peers see what you call yourself).
 
