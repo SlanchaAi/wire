@@ -2106,15 +2106,15 @@ fn current_cwd_display() -> String {
         Ok(c) => c,
         Err(_) => return String::from("?"),
     };
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(rel) = cwd.strip_prefix(&home) {
-            // strip_prefix returns "" for cwd == home itself; show "~" then.
-            let rel_str = rel.to_string_lossy();
-            if rel_str.is_empty() {
-                return String::from("~");
-            }
-            return format!("~/{}", rel_str);
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rel) = cwd.strip_prefix(&home)
+    {
+        // strip_prefix returns "" for cwd == home itself; show "~" then.
+        let rel_str = rel.to_string_lossy();
+        if rel_str.is_empty() {
+            return String::from("~");
         }
+        return format!("~/{}", rel_str);
     }
     cwd.to_string_lossy().into_owned()
 }
@@ -2246,7 +2246,7 @@ fn cmd_identity_create(name: Option<&str>, anonymous: bool, as_json: bool) -> Re
         // Generate a unique tmpdir for this anonymous identity.
         let rand_suffix = format!("{:08x}", rand::random::<u32>());
         let anon_name = name
-            .map(|n| crate::session::sanitize_name(n))
+            .map(crate::session::sanitize_name)
             .unwrap_or_else(|| format!("anon-{rand_suffix}"));
         let anon_root = std::env::temp_dir().join(format!("wire-anon-{rand_suffix}"));
         std::fs::create_dir_all(&anon_root)
@@ -6798,6 +6798,9 @@ fn resolve_session_name(name: Option<&str>) -> Result<String> {
     Ok(crate::session::derive_name_from_cwd(&cwd, &registry))
 }
 
+#[allow(clippy::too_many_arguments)] // 11 transport-mix flags; the v0.8 audit
+// (.planning/research/codebase-audit-2026-05-23.md) recommends a config-struct
+// refactor for v0.8. For v0.7.0 we ship the flag-explosion as-is.
 fn cmd_session_new(
     name_arg: Option<&str>,
     relay: &str,

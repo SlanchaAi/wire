@@ -207,8 +207,8 @@ impl Character {
 /// v0.7.0-alpha.8 (review-fix #1): sanitize operator-chosen or peer-
 /// published display text (nickname or emoji) for safe terminal render.
 ///
-/// Strips Unicode Control category chars (`is_control()` — covers C0
-/// + DEL + C1 including ESC U+001B which gates ANSI/OSC/CSI escape
+/// Strips Unicode Control category chars (`is_control()` — covers C0,
+/// DEL, C1 including ESC U+001B which gates ANSI/OSC/CSI escape
 /// sequences), then caps length to `MAX_DISPLAY_CHARS` codepoints so a
 /// malicious peer can't ship a 10MB nickname that destroys the
 /// statusline layout.
