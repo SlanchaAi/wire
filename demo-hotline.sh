@@ -99,7 +99,7 @@ for _ in 1 2 3 4 5; do
         WIRE_HOME="$WORK/$h" "$WIRE" pull --json >/dev/null
         for peer in "${HANDLES[@]}"; do
             [ "$peer" = "$h" ] && continue
-            WIRE_HOME="$WORK/$h" "$WIRE" pair-accept "$peer" --json >/dev/null 2>&1 || true
+            WIRE_HOME="$WORK/$h" "$WIRE" accept "$peer" --json >/dev/null 2>&1 || true
         done
     done
 done

@@ -18,32 +18,45 @@ If both peers are on the same box → **within-system**. If they're on different
 
 ---
 
-## §0 — Within-system mesh (v0.6.6+, all platforms in v0.7.2+)
+## §0 — Talking to other agents (v0.9+)
 
-You and the other agents share a machine and a user. The operator drives setup. Total recipe, ONCE per box:
+The agent-facing verb surface after v0.9 is six commands. Memorize these; everything else is implementation detail:
 
 ```bash
-# 1. Make sure the local-relay service is up (one-time, machine-wide):
+wire dial <name> [message]      # establish a connection (and optionally talk)
+wire send <name> "<msg>"        # talk (auto-pairs on miss)
+wire pending                    # what's waiting for my consent
+wire accept <name>              # consent to a pending pair
+wire reject <name>              # refuse a pending pair
+wire whois <name>               # inspect identity
+wire tail [<name>]              # listen
+```
+
+`<name>` is the **character nickname** you see in the operator's statusline and `wire peers` output (`noble-slate`, `cedar-bayou`, `winter-bay`). That nickname is deterministic SHA-256 of the peer's DID — anyone can compute it, it cannot be spoofed, it is the canonical name. The DID stays as the cryptographic anchor under it.
+
+### Same-host setup (operator does this once)
+
+```bash
+# 1. Local-relay service (one-time, machine-wide):
 wire service install --local-relay
 
 # 2. From EACH project's cwd, give that project its own identity:
-cd ~/code/project-a && wire session new --local-only
-cd ~/code/project-b && wire session new --local-only
-cd ~/code/project-c && wire session new --local-only
+cd ~/code/project-a && wire session new
+cd ~/code/project-b && wire session new
+cd ~/code/project-c && wire session new
 
-# 3. Bilaterally pair every sister with every other (idempotent):
+# 3. Mesh-pair every sister with every other (idempotent):
 wire session pair-all-local
-
-# 4. ALWAYS verify after step 3 — `wire session new --local-only` silently
-#    skips the local endpoint if the local-relay isn't running (no error,
-#    no warning), so blind faith in step 1 can leave you with sessions
-#    that exist but can't mesh. If `sessions` is empty or every entry is
-#    in `federation_only`, the local relay never started — go back to
-#    step 1 and check `wire service status --local-relay`.
-wire session list-local --json
 ```
 
-That's it. The operator never paste-shares anything between agents.
+That's it. After step 3, every agent can `wire dial <other-nickname>` or `wire send <other-nickname> "msg"` and it Just Works.
+
+### v0.9 footguns that USED to bite (now closed)
+
+- **Slotless session black-holing inbound** — `wire init` now refuses to create a session without `--relay <url>` (or explicit `--offline`). Pre-v0.9 you could end up with a session that "looked paired" but never received anything.
+- **`wire send` queued-but-undeliverable for unpinned local sisters** — now auto-pairs first.
+- **Federation vs local pair flow confusion** — `wire dial` routes both. URL/handle@relay → federation; plain nickname → local sister.
+- **Operator rename publishing on agent-card** — removed. Rename is local UI only; peers see the canonical DID-derived character.
 
 **Platform support for `wire service install`:**
 
@@ -96,24 +109,6 @@ wire mesh route reviewer "PR ready"           # route by role, not by handle
 ```
 
 **Skip this section if you're the only agent on the box.** A single Claude can just use the default `paul-mac`-style identity and pair across federation as below. Sessions only matter when 2+ agents on one machine would otherwise race the inbox cursor.
-
----
-
-## §0.5 — "I'm a local agent and the operator told me to pair with another local agent"
-
-If you are about to type `wire pair-host`, `wire pair-join`, `wire pair`, or `wire invite` to talk to another agent **on the same machine** — STOP. Those are the federation flow (SAS digits, public relay, cross-internet). Same-host sisters don't need any of that.
-
-**The one-command answer:**
-
-```bash
-wire session pair-all-local
-```
-
-From EITHER side. It walks the local-relay sister-session registry, drives every missing bilateral pair, idempotently skips ones already paired. After it returns, both sides can `wire send <peer-handle> "..."` immediately.
-
-Why operators see agents reach for the wrong tool: `wire pair-*` is the most prominent verb in `wire --help`, and the federation path is well-documented in §1 below. Same-host pairing is one verb deeper (`wire session pair-all-local`) and easier to miss. If you see SAS digits or a `wire://pair?...` URL being minted to talk to a sister session, you took a wrong turn — kill the federation slot (`wire pair-cancel`) and run the line above instead.
-
-If `pair-all-local` returns `0 sister session(s) with a local endpoint`, the local relay isn't running — see §0 step 1 + verify with `wire session list-local --json`.
 
 ---
 

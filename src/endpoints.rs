@@ -265,6 +265,21 @@ pub fn self_endpoints(relay_state: &Value) -> Vec<Endpoint> {
     all
 }
 
+/// v0.9 canonical single-reader for "my best inbound slot." Returns
+/// the first endpoint from `self_endpoints()` — which is already
+/// priority-ordered (UDS → Local-with-matching-self → LAN →
+/// Federation) AND back-compat-falls-back to legacy top-level fields.
+///
+/// Replaces ad-hoc `self_state["relay_url"].as_str()` reads scattered
+/// through the codebase. Pre-v0.9 those bare reads were the silent-
+/// fail root cause: a session with only `self.endpoints[]` (no legacy
+/// top-level fields) returned empty strings instead of the available
+/// endpoint, and pair_drop_ack / pull / rotate-slot all silently
+/// no-op'd. Always use this from new code.
+pub fn self_primary_endpoint(relay_state: &Value) -> Option<Endpoint> {
+    self_endpoints(relay_state).into_iter().next()
+}
+
 /// Pin a peer's full set of endpoints into `relay_state.json` under
 /// `peers[handle]`. Preserves the v0.5.16-and-earlier `relay_url` /
 /// `slot_id` / `slot_token` top-level fields (pointing at the
