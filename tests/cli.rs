@@ -406,6 +406,101 @@ fn session_destroy_requires_force_flag_v0_5_16() {
 }
 
 #[test]
+fn whois_typo_returns_did_you_mean_v0_9_2() {
+    // v0.9.2: nickname typo → suggestion from local pool. Test setup
+    // pins "alice" as self (handle = "alice"), then queries a typo.
+    let home = fresh_home();
+    let _ = run(&home, &["init", "alice", "--offline"]);
+    // The init also writes alice to the trust ring (self-pin). Query a typo:
+    let out = std::process::Command::new(wire_bin())
+        .args(["whois", "alic"])
+        .env("WIRE_HOME", &home)
+        .env("WIRE_NO_AUTO_JSON", "1")
+        .output()
+        .expect("spawn wire");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("Did you mean") && combined.contains("alice"),
+        "whois typo should suggest closest pinned/sister — got stdout=`{stdout}` stderr=`{stderr}`"
+    );
+}
+
+#[test]
+fn whois_typo_returns_json_success_with_candidates_v0_9_2() {
+    // v0.9.2: in JSON mode, miss returns exit 0 with {found: false,
+    // candidates: [...]} so agents don't need try/catch on a miss.
+    let home = fresh_home();
+    let _ = run(&home, &["init", "alice", "--offline"]);
+    let out = std::process::Command::new(wire_bin())
+        .args(["whois", "alic", "--json"])
+        .env("WIRE_HOME", &home)
+        .output()
+        .expect("spawn wire");
+    assert!(
+        out.status.success(),
+        "whois --json on miss should succeed (exit 0): {:?}",
+        out
+    );
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(parsed["found"], serde_json::Value::Bool(false));
+    let candidates = parsed["candidates"].as_array().unwrap();
+    assert!(
+        candidates.iter().any(|c| c.as_str() == Some("alice")),
+        "candidates should include `alice` for typo `alic`: {parsed}"
+    );
+}
+
+#[test]
+fn deprecation_banner_fires_in_human_mode_v0_9_2() {
+    let home = fresh_home();
+    let out = std::process::Command::new(wire_bin())
+        .args(["pair-accept", "nonexistent-peer"])
+        .env("WIRE_HOME", &home)
+        .env("WIRE_NO_AUTO_JSON", "1")
+        .output()
+        .expect("spawn wire");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("DEPRECATED in v0.9") && stderr.contains("use `wire accept"),
+        "human-mode pair-accept should fire deprecation banner — got: {stderr}"
+    );
+}
+
+#[test]
+fn deprecation_banner_suppressed_in_json_mode_v0_9_2() {
+    let home = fresh_home();
+    let out = std::process::Command::new(wire_bin())
+        .args(["pair-accept", "nonexistent-peer", "--json"])
+        .env("WIRE_HOME", &home)
+        .output()
+        .expect("spawn wire");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("DEPRECATED"),
+        "JSON-mode pair-accept should NOT fire deprecation banner — got: {stderr}"
+    );
+}
+
+#[test]
+fn deprecation_banner_suppressed_when_marker_env_set_v0_9_2() {
+    let home = fresh_home();
+    let out = std::process::Command::new(wire_bin())
+        .args(["pair-accept", "nonexistent-peer"])
+        .env("WIRE_HOME", &home)
+        .env("WIRE_NO_AUTO_JSON", "1")
+        .env("WIRE_DEPRECATION_NAGGED_pair_accept", "1")
+        .output()
+        .expect("spawn wire");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("DEPRECATED"),
+        "WIRE_DEPRECATION_NAGGED_pair_accept=1 should suppress — got: {stderr}"
+    );
+}
+
+#[test]
 fn deprecated_verbs_hidden_from_help_v0_9_1() {
     // v0.9.1: --help should not list the deprecated pair-* + invite
     // verbs as their own subcommand entries (lines starting with two

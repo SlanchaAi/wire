@@ -1552,22 +1552,19 @@ pub fn run() -> Result<()> {
         }
         Command::PairAbandon { code_phrase, relay } => cmd_pair_abandon(&code_phrase, &relay),
         Command::PairAccept { peer, json } => {
-            eprintln!(
-                "wire pair-accept: DEPRECATED in v0.9 — use `wire accept {peer}`. Will be removed in v1.0."
-            );
-            cmd_pair_accept(&peer, json)
+            let j = json_default(json);
+            deprecation_warn("pair-accept", &format!("accept {peer}"), j);
+            cmd_pair_accept(&peer, j)
         }
         Command::PairReject { peer, json } => {
-            eprintln!(
-                "wire pair-reject: DEPRECATED in v0.9 — use `wire reject {peer}`. Will be removed in v1.0."
-            );
-            cmd_pair_reject(&peer, json)
+            let j = json_default(json);
+            deprecation_warn("pair-reject", &format!("reject {peer}"), j);
+            cmd_pair_reject(&peer, j)
         }
         Command::PairListInbound { json } => {
-            eprintln!(
-                "wire pair-list-inbound: DEPRECATED in v0.9 — use `wire pending`. Will be removed in v1.0."
-            );
-            cmd_pair_list_inbound(json)
+            let j = json_default(json);
+            deprecation_warn("pair-list-inbound", "pending", j);
+            cmd_pair_list_inbound(j)
         }
         Command::Session(cmd) => cmd_session(cmd),
         Command::Identity { cmd } => cmd_identity(cmd),
@@ -3189,7 +3186,28 @@ fn cmd_dial(name: &str, message: Option<&str>, as_json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let resolution = resolve_name_to_target(name)?;
+    // v0.9.2 helpful-miss: in JSON mode, a resolution miss returns
+    // success with `{found: false, candidates: [...]}` instead of
+    // erroring. Agents can branch on `found` without wrapping in a
+    // try/catch.
+    let resolution = match resolve_name_to_target(name) {
+        Ok(r) => r,
+        Err(e) if as_json => {
+            let pool = known_local_names();
+            let suggestions = closest_candidates(name, &pool, 3, 3);
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "name_input": name,
+                    "found": false,
+                    "candidates": suggestions,
+                    "error": format!("{e:#}"),
+                }))?
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     let mut steps: Vec<Value> = Vec::new();
 
     match &resolution {
@@ -3268,7 +3286,29 @@ fn cmd_dial(name: &str, message: Option<&str>, as_json: bool) -> Result<()> {
 /// resolution see `cmd_whois` (line 5536+) — the dispatcher chooses
 /// based on whether the input contains `@`.
 fn cmd_whois_local(name: &str, as_json: bool) -> Result<()> {
-    let resolution = resolve_name_to_target(name)?;
+    // v0.9.2 helpful-miss: in JSON mode, a resolution miss returns
+    // success (exit 0) with `{found: false, candidates: [...]}` so
+    // agents don't need try/catch around `wire whois <name>`. In
+    // human mode, the bail's did-you-mean line points at the
+    // closest candidate.
+    let resolution = match resolve_name_to_target(name) {
+        Ok(r) => r,
+        Err(e) if as_json => {
+            let pool = known_local_names();
+            let suggestions = closest_candidates(name, &pool, 3, 3);
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "name_input": name,
+                    "found": false,
+                    "candidates": suggestions,
+                    "error": format!("{e:#}"),
+                }))?
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     match resolution {
         DialTarget::PinnedPeer {
             handle,
@@ -3361,16 +3401,17 @@ fn resolve_name_to_target(name: &str) -> Result<DialTarget> {
         bail!("empty name");
     }
 
-    // 1. Pinned peers — `wire peers` data.
+    // 1. Pinned peers — `wire peers` data. trust.agents is an object
+    // keyed by handle (not an array); iterate as a map.
     if config::is_initialized().unwrap_or(false) {
         let trust = config::read_trust().unwrap_or(serde_json::Value::Null);
-        if let Some(agents) = trust.get("agents").and_then(Value::as_array) {
-            for agent in agents {
+        if let Some(agents) = trust.get("agents").and_then(Value::as_object) {
+            for (handle_key, agent) in agents {
                 let did = agent.get("did").and_then(Value::as_str).unwrap_or("");
                 if did.is_empty() {
                     continue;
                 }
-                let handle = crate::agent_card::display_handle_from_did(did).to_string();
+                let handle = handle_key.clone();
                 let character = crate::character::Character::from_did(did);
                 let tier = agent
                     .get("tier")
@@ -3408,12 +3449,29 @@ fn resolve_name_to_target(name: &str) -> Result<DialTarget> {
         }
     }
 
+    // v0.9.2: fuzzy did-you-mean suggestion on resolution miss. Walks
+    // the union of pinned-peer handles + character nicknames + sister
+    // session names + sister character nicknames, returns up to 3 names
+    // within Levenshtein distance 3 of the operator's typed name.
+    let pool = known_local_names();
+    let suggestions = closest_candidates(name, &pool, 3, 3);
+    if suggestions.is_empty() {
+        bail!(
+            "no peer matched `{name}`.\n\
+             Tried: pinned peers (`wire peers`) + local sister sessions \
+             (`wire session list-local`).\n\
+             For cross-machine federation: `wire dial <handle>@<relay-domain>`."
+        );
+    }
     bail!(
         "no peer matched `{name}`.\n\
-         Tried: pinned peers (`wire peers`) + local sister sessions \
-         (`wire session list-local`).\n\
-         For cross-machine federation: `wire dial <handle>@<relay-domain>` \
-         (note: federation dial isn't implemented yet — use `wire add` directly)."
+         Did you mean: {}?\n\
+         List all: `wire peers`, `wire session list-local`.",
+        suggestions
+            .iter()
+            .map(|s| format!("`{s}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 }
 
@@ -9529,6 +9587,131 @@ fn process_alive_pid(pid: u32) -> bool {
     // uses `tasklist /FI "PID eq <n>"` instead of `kill -0`, which
     // gave a hard-coded false on Windows pre-v0.7.3.
     crate::platform::process_alive(pid)
+}
+
+// ---------- v0.9.2 string-distance + helpful-miss helpers ----------
+
+/// Iterative Levenshtein distance between two strings, case-insensitive.
+/// O(m*n) time, O(min(m, n)) space — fine for the short names wire
+/// resolves against (typically <30 chars).
+fn levenshtein_ci(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.to_ascii_lowercase().chars().collect();
+    let b: Vec<char> = b.to_ascii_lowercase().chars().collect();
+    let (a, b) = if a.len() < b.len() { (a, b) } else { (b, a) };
+    let (m, n) = (a.len(), b.len());
+    if m == 0 {
+        return n;
+    }
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut curr = vec![0usize; m + 1];
+    for j in 1..=n {
+        curr[0] = j;
+        for i in 1..=m {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[i] = std::cmp::min(
+                std::cmp::min(curr[i - 1] + 1, prev[i] + 1),
+                prev[i - 1] + cost,
+            );
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[m]
+}
+
+/// Return up to `max_results` names from `pool` whose edit distance to
+/// `needle` is ≤ `max_distance`, sorted by distance ascending. Used for
+/// "did you mean" suggestions on resolution miss.
+pub fn closest_candidates(
+    needle: &str,
+    pool: &[String],
+    max_distance: usize,
+    max_results: usize,
+) -> Vec<String> {
+    let mut scored: Vec<(usize, &String)> = pool
+        .iter()
+        .map(|c| (levenshtein_ci(needle, c), c))
+        .filter(|(d, _)| *d <= max_distance)
+        .collect();
+    scored.sort_by_key(|(d, _)| *d);
+    scored
+        .into_iter()
+        .take(max_results)
+        .map(|(_, c)| c.clone())
+        .collect()
+}
+
+/// Collect every name that `resolve_name_to_target` would currently
+/// match: pinned-peer handles, pinned-peer character nicknames, sister
+/// session names, sister character nicknames, sister handles. Used for
+/// the `did_you_mean` pool on resolution miss.
+fn known_local_names() -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(trust) = config::read_trust() {
+        // (debug eprintln removed; left bug-trail in commit message)
+        // trust.agents is an object keyed by handle, NOT an array —
+        // shape is `{handle: {did, public_keys, tier}, ...}`. Iterate
+        // the object's keys (which ARE the handles) plus each entry's
+        // did for the DID-derived character nickname.
+        if let Some(agents) = trust.get("agents").and_then(Value::as_object) {
+            for (handle, agent) in agents {
+                names.push(handle.clone());
+                if let Some(did) = agent.get("did").and_then(Value::as_str) {
+                    let ch = crate::character::Character::from_did(did);
+                    names.push(ch.nickname);
+                }
+            }
+        }
+    }
+    if let Ok(sessions) = crate::session::list_sessions() {
+        for s in sessions {
+            names.push(s.name.clone());
+            if let Some(h) = &s.handle {
+                names.push(h.clone());
+            }
+            if let Some(ch) = &s.character {
+                names.push(ch.nickname.clone());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// v0.9.2 deprecation banner with two ergonomic guards:
+/// 1. Suppress in JSON mode (the caller is expected to fold the
+///    deprecation note into its JSON output instead).
+/// 2. Cache once-per-shell-session via a marker env var; subsequent
+///    invocations in the same shell stay silent.
+///
+/// `verb` is the legacy verb name, `replacement` is the canonical one.
+fn deprecation_warn(verb: &str, replacement: &str, json_mode: bool) {
+    if json_mode {
+        return;
+    }
+    // Pull a marker from environment of THIS process. Persistent across
+    // multiple wire invocations only when the shell sets and exports
+    // WIRE_DEPRECATION_NAGGED — operators rarely do, so practically
+    // this nags once per `wire foo` invocation. The single-process
+    // dedup matters most for scripts that call multiple deprecated
+    // verbs in one wire run, which is currently impossible (one verb
+    // per process) but documented for future loop-style wire shells.
+    let key = format!("WIRE_DEPRECATION_NAGGED_{}", verb.replace('-', "_"));
+    if std::env::var(&key).is_ok() {
+        return;
+    }
+    // SAFETY: deprecation_warn is called from sync dispatcher code paths
+    // before any worker thread spawns; env::set_var in Rust 2024 is
+    // safe at that point. Pattern matches maybe_adopt_session_wire_home.
+    unsafe {
+        std::env::set_var(&key, "1");
+    }
+    eprintln!(
+        "wire {verb}: DEPRECATED in v0.9 — use `wire {replacement}`. \
+         Will be removed in v1.0 (target 2026-Q3). \
+         Suppress: set WIRE_DEPRECATION_NAGGED_{}=1.",
+        verb.replace('-', "_")
+    );
 }
 
 // ---------- doctor (single-command diagnostic) ----------
