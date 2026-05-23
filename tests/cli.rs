@@ -406,6 +406,56 @@ fn session_destroy_requires_force_flag_v0_5_16() {
 }
 
 #[test]
+fn accept_invite_verb_exists_v0_9_4() {
+    // v0.9.4: federation invite URL accept gets its own explicit verb.
+    let home = fresh_home();
+    let out = run(&home, &["accept-invite", "--help"]);
+    assert!(out.status.success(), "accept-invite --help: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("federation invite URL"),
+        "accept-invite help missing description: {stdout}"
+    );
+}
+
+#[test]
+fn accept_with_url_emits_deprecation_banner_v0_9_4() {
+    // v0.9.4: `wire accept wire://pair?...` still works (back-compat
+    // with v0.9 smart-dispatch) but emits a deprecation banner
+    // pointing operators at the explicit `wire accept-invite` verb.
+    let home = fresh_home();
+    let out = std::process::Command::new(wire_bin())
+        .args(["accept", "wire://pair?v=1&inv=bogus"])
+        .env("WIRE_HOME", &home)
+        .env("WIRE_NO_AUTO_JSON", "1")
+        .output()
+        .expect("spawn wire");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("DEPRECATED") && stderr.contains("accept-invite"),
+        "accept-with-url should fire deprecation banner — got: {stderr}"
+    );
+}
+
+#[test]
+fn accept_with_name_does_not_emit_deprecation_v0_9_4() {
+    // v0.9.4: `wire accept <name>` (canonical path) does NOT fire the
+    // deprecation banner — only the URL-input back-compat path does.
+    let home = fresh_home();
+    let out = std::process::Command::new(wire_bin())
+        .args(["accept", "nonexistent-peer"])
+        .env("WIRE_HOME", &home)
+        .env("WIRE_NO_AUTO_JSON", "1")
+        .output()
+        .expect("spawn wire");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("DEPRECATED"),
+        "accept-with-name should NOT fire banner — got: {stderr}"
+    );
+}
+
+#[test]
 fn here_prints_self_when_no_neighbors_v0_9_3() {
     let home = fresh_home();
     let _ = run(&home, &["init", "alice", "--offline"]);

@@ -730,21 +730,33 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// v0.9: smart-dispatch `accept`.
+    /// v0.9: accept a pending-inbound pair request by character
+    /// nickname or card handle. Replaces the verbose `wire pair-accept
+    /// <peer>`.
     ///
-    /// - `wire accept <name>` — accept a pending-inbound pair request
-    ///   from a sister session by character nickname / handle. Replaces
-    ///   the verbose `wire pair-accept <peer>`.
-    /// - `wire accept wire://pair?v=1&inv=...` — accept a federation
-    ///   invite URL (v0.4 flow). Pins issuer, sends signed card to
-    ///   issuer's slot. Auto-inits + auto-allocates as needed.
-    ///
-    /// The dispatcher routes by input shape: URL-shaped → federation
-    /// invite path, anything else → pair-accept.
+    /// v0.9.4: the URL-vs-name smart-dispatch from v0.9 is gone. To
+    /// accept a federation invite URL use `wire accept-invite <URL>`
+    /// (split out as an explicit verb to eliminate the input-shape
+    /// ambiguity). `wire accept <URL>` still works for back-compat
+    /// but emits a deprecation banner pointing at `accept-invite`.
     Accept {
-        /// Either: pending peer name (nickname/handle), OR a full wire
-        /// invite URL starting with `wire://pair?...`.
+        /// Pending peer name (character nickname or card handle).
         target: String,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// v0.9.4: accept a federation invite URL minted by `wire invite`.
+    /// Pins issuer, sends signed card to issuer's slot. Auto-inits +
+    /// auto-allocates as needed.
+    ///
+    /// Split out from `wire accept` to eliminate the URL-vs-name
+    /// smart-dispatch ambiguity (peer handles can legitimately collide
+    /// with URL-shaped strings; the explicit verb removes the inference).
+    #[command(alias = "invite-accept")]
+    AcceptInvite {
+        /// The full invite URL (starts with `wire://pair?v=1&inv=...`).
+        url: String,
         /// Emit JSON.
         #[arg(long)]
         json: bool,
@@ -1589,16 +1601,20 @@ pub fn run() -> Result<()> {
             json,
         } => cmd_invite(&relay, ttl, uses, share, json),
         Command::Accept { target, json } => {
-            // v0.9 smart-dispatch: URL-shaped → federation invite accept;
-            // anything else → local pair-accept by name. Routes by input
-            // shape so operators don't need to remember two verbs.
+            // v0.9.4: smart-dispatch retired. `wire accept` always means
+            // pair-accept by name. URL-shaped input gets a deprecation
+            // banner pointing at `wire accept-invite <URL>` and then
+            // (for back-compat with v0.9 scripts) routes to the invite
+            // accept path one last time. v1.0 will reject URLs here.
             let j = json_default(json);
             if target.starts_with("wire://pair?") {
+                deprecation_warn("accept-url", "accept-invite <url>", j);
                 cmd_accept(&target, j)
             } else {
                 cmd_pair_accept(&target, j)
             }
         }
+        Command::AcceptInvite { url, json } => cmd_accept(&url, json_default(json)),
         Command::Whois {
             handle,
             json,
