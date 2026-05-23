@@ -37,6 +37,17 @@ wire session pair-all-local
 
 That's it. The operator never paste-shares anything between agents.
 
+**v0.7.0 — Characters.** Every session now has a deterministic face (emoji + adj-noun nickname + color palette) derived from its DID. Your statusline / `wire whoami` shows yours. Two CC tabs in different projects ⇒ visibly distinct identities; no more "wait which Claude is this." You can rename: `wire identity rename --name foxtrot-meadow --emoji 🦊` (the palette stays DID-stable; the operator-chosen name + emoji get published on your agent-card so federated peers see what you call yourself).
+
+**v0.7.1 — `wire session bind`.** If `wire whoami` from inside a project shows you're sharing a Character with another project, an ancestor cwd (e.g. `~/Source`) is registered and shadowing the leaf. Fix without state loss:
+```bash
+cd <project-root> && wire session bind <name>   # attach an existing session to this cwd
+# or, if no session for this project yet:
+cd <project-root> && wire session new            # auto-derives a name from basename(cwd)
+```
+
+**v0.7.0 — extra transports.** `wire session new --with-uds /tmp/wire.sock` adds a same-host Unix-socket endpoint (bypasses the macOS firewall + Tailscale userspace-netstack class of failures). `wire session new --with-lan --lan-relay http://192.168.1.50:8771` adds a same-network endpoint reachable from other machines on your LAN without round-tripping `wireup.net`. Push dispatch walks endpoints in priority order automatically (UDS → Local → LAN → Federation); you don't pick the transport, the routing layer does.
+
 **What `--local-only` means.** No federation slot allocation, no nick claim attempt against `wireup.net`, no public address. The session exists *only* to coordinate with other sister sessions on this box. Reserved nicks (`wire`, `slancha`, etc.) are allowed because nothing tries to publish them.
 
 **Per-Claude config.** The MCP server auto-detects the right session from `$PWD` (v0.6.1). Claude Code and Cursor both set `$PWD` to the project root, so no `.mcp.json` editing is needed in the common case. Verify with:

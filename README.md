@@ -41,9 +41,13 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.7.0-alpha (latest)
+## Status — v0.7.1 (latest)
 
-v0.7.0 elevates **identity** to a first-class noun. Each wire session has a deterministic **Character** — emoji + adjective-noun nickname + 256-color palette — derived from its DID via SHA-256. Every Claude tab in a fresh project gets its own real wire identity at `wire mcp` startup (auto-init per cwd). Sessions are addressable by either session name OR character nickname: `wire add --local-sister winter-bay` works; `wire send noble-canyon "hi"` works. Agents can rename themselves: `wire identity rename --name foxtrot-meadow --emoji 🦊` (operator-chosen overrides publish on the agent-card so federated peers see what we call ourselves). See [PR #26](https://github.com/SlanchaAi/wire/pull/26).
+v0.7.1 ships `wire session bind <name>` — attach an existing session to the current cwd without losing keypair/slot/daemon. Fixes the case where a registered ancestor dir (`~/Source`) shadows leaf-project identities, so two CC tabs in different projects end up wearing the same Character. ([PR #28](https://github.com/SlanchaAi/wire/pull/28))
+
+v0.7.0 elevated **identity** to a first-class noun. Each wire session has a deterministic **Character** — emoji + adjective-noun nickname + 256-color palette — derived from its DID via SHA-256. Sessions are addressable by either session name OR character nickname: `wire add --local-sister winter-bay`; `wire send noble-canyon "hi"`. Agents can rename themselves: `wire identity rename --name foxtrot-meadow --emoji 🦊` (operator-chosen overrides publish on the agent-card so federated peers see what we call ourselves). Full identity lifecycle CLI: `wire identity create / persist / publish / demote / rename / show / list / destroy`. ([PR #26](https://github.com/SlanchaAi/wire/pull/26))
+
+v0.7.0 also unified transport scopes. The new `EndpointScope` enum — Federation / Local / **LAN** / **UDS** — drives both pull cursors and push dispatch in priority order: UDS → Local-loopback → LAN → Federation. **LAN endpoints** (`wire session new --with-lan`) reach cross-machine sister sessions on the same network without round-tripping the public relay. **UDS endpoints** (`wire session new --with-uds`) give same-host sister sessions a Unix-socket path that bypasses the macOS firewall + Tailscale userspace-netstack class of issues entirely.
 
 The v0.6 line shipped the orchestration layer over the v0.5 federated protocol (bilateral consent pair v0.5.14, per-session identities + local relay v0.5.16/17, persistent service install v0.5.22, MCP collision warning v0.6.10). `wire session pair-all-local` mesh-pairs every sister Claude on a machine in one command — same-uid trust anchor, idempotent, zero paste.
 
@@ -153,7 +157,9 @@ Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 - `wire pair-accept <peer>` — accept an inbound pair request waiting in `wire pair-list`. Pins peer VERIFIED + ships our slot_token via `pair_drop_ack`.
 - `wire pair-reject <peer>` — refuse an inbound pair request without pairing. No ack sent; from peer's side they remain in pending-outbound until they time out.
 - `wire pair-list` / `wire pair-list-inbound` — view pending pair sessions (SPAKE2 + inbound).
-- `wire session new|list|env|current|destroy` — manage isolated sessions on one machine (v0.5.16). Each session = own identity + slot + daemon. Use when multiple agents run on the same box (e.g. Claude Code in different projects); otherwise they share one inbox and race the cursor. See [the multi-session recipe](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
+- `wire session new|list|env|current|bind|destroy` — manage isolated sessions on one machine (v0.5.16+). Each session = own identity + slot + daemon. Use when multiple agents run on the same box (e.g. Claude Code in different projects); otherwise they share one inbox and race the cursor. `wire session bind <name>` (v0.7.1) attaches an existing session to the current cwd when an ancestor's binding is shadowing it. See [the multi-session recipe](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
+- `wire identity create|persist|publish|demote|rename|show|list|destroy` — lifecycle for the per-session **Character** (v0.7.0). Each session's emoji + nickname + color palette is deterministic from its DID; `wire identity rename` lets the agent pick its own face while keeping the palette stable.
+- `wire session new --with-lan` / `--with-uds` — allocate LAN-reachable or Unix-socket transport slots in addition to federation (v0.7.0). Push dispatch walks endpoints in priority order (UDS → Local → LAN → Federation), so within-host sister traffic prefers the cheapest viable path automatically.
 - `wire relay-server --bind 127.0.0.1:8771 --local-only` + `wire session new --with-local` — dual-slot sessions (v0.5.17). Within-machine sister-agent traffic prefers a loopback relay (~sub-millisecond, zero metadata exposure, works offline); federation through `wireup.net` keeps working for cross-box traffic. Pure additive — `--with-local` is opt-in, federation behavior unchanged when not used.
 - `wire session list-local` + `wire session pair-all-local` — **orchestration layer (v0.6.1)**. Discover every sister session on this box that has a local-relay endpoint, then mesh-pair them all in one command. Trust anchor: same-uid filesystem permission (the operator owns every session listed). Idempotent — re-running skips pairs already pinned. The entry point for the v0.6 control-plane primitives (`mesh status`, `mesh broadcast`, etc.) that follow.
 - `wire send <peer> <kind> <body>` — appends a signed JSONL event to the peer's outbound mailbox
@@ -324,7 +330,7 @@ cargo install slancha-wire
 git clone https://github.com/SlanchaAi/wire
 cd wire
 cargo build --release
-cargo test                  # 140 tests, ~3s
+cargo test                  # 190 tests, ~30s
 ```
 
 Requires Rust 1.88+ (edition 2024) for source / cargo-install builds. Install Rust via [rustup](https://rustup.rs).
