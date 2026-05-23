@@ -41,7 +41,9 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.7.1 (latest)
+## Status — v0.7.2 (latest)
+
+v0.7.2 brings **Windows service support** to `wire service install`. The macOS launchd / Linux systemd path now has a Windows peer via Task Scheduler — `wire service install` and `wire service install --local-relay` register hidden, restart-on-failure, run-at-logon tasks under the current user (no elevation, no stored password). Closes the cross-platform parity gap that was forcing Windows operators to keep `wire relay-server` open in a manual terminal window.
 
 v0.7.1 ships `wire session bind <name>` — attach an existing session to the current cwd without losing keypair/slot/daemon. Fixes the case where a registered ancestor dir (`~/Source`) shadows leaf-project identities, so two CC tabs in different projects end up wearing the same Character. ([PR #28](https://github.com/SlanchaAi/wire/pull/28))
 

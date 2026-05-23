@@ -81,6 +81,19 @@ impl ServiceKind {
         }
     }
 
+    /// Windows Task Scheduler task name. v0.7.2: parity with launchd
+    /// labels + systemd unit names. Must be filesystem-safe and stable
+    /// across versions so install / uninstall / status all key on the
+    /// same string. `schtasks /TN` uses backslash as a folder
+    /// separator, so the names are kept flat (no `\wire\daemon`-style
+    /// nesting).
+    fn windows_task_name(self) -> &'static str {
+        match self {
+            ServiceKind::Daemon => "wire-daemon",
+            ServiceKind::LocalRelay => "wire-local-relay",
+        }
+    }
+
     /// Per-kind log file basename. macOS-only — launchd's
     /// `StandardOutPath` directive redirects daemon stdout/stderr to a
     /// real file under `~/Library/Logs/`. On Linux the systemd unit
@@ -244,6 +257,59 @@ pub fn install_kind(kind: ServiceKind) -> Result<ServiceReport> {
             kind: kind_label(kind).into(),
         });
     }
+    if cfg!(target_os = "windows") {
+        let task_name = kind.windows_task_name();
+        let xml = windows_task_xml(kind, &exe_str);
+        // schtasks /Create /XML reads the file at the given path. UTF-8
+        // without BOM is accepted on Win10+; older builds expected
+        // UTF-16LE-BOM. We write UTF-8 — if a user hits a parse error
+        // on an old Windows, the fix is to re-encode the file (or use
+        // /Create with CLI flags), not a code change.
+        let xml_path = std::env::temp_dir().join(format!("{task_name}.xml"));
+        std::fs::write(&xml_path, xml).with_context(|| format!("writing {xml_path:?}"))?;
+        // /F = force-overwrite any prior registration (idempotent).
+        let create = Command::new("schtasks.exe")
+            .args([
+                "/Create",
+                "/TN",
+                task_name,
+                "/XML",
+                xml_path.to_str().unwrap_or(""),
+                "/F",
+            ])
+            .status();
+        let registered = create.map(|s| s.success()).unwrap_or(false);
+        // Run it now so the operator doesn't have to log out + back in.
+        if registered {
+            let _ = Command::new("schtasks.exe")
+                .args(["/Run", "/TN", task_name])
+                .status();
+        }
+        return Ok(ServiceReport {
+            action: "install".into(),
+            platform: "windows-schtasks".into(),
+            unit_path: xml_path.to_string_lossy().to_string(),
+            status: if registered {
+                "registered".into()
+            } else {
+                "written".into()
+            },
+            detail: if registered {
+                format!(
+                    "task `{task_name}` registered + started; will auto-start at logon. \
+                     Check with `schtasks /Query /TN {task_name}` or open Task Scheduler."
+                )
+            } else {
+                format!(
+                    "task XML written to {} but `schtasks /Create` failed — try manually: \
+                     schtasks /Create /TN {task_name} /XML \"{}\" /F",
+                    xml_path.display(),
+                    xml_path.display()
+                )
+            },
+            kind: kind_label(kind).into(),
+        });
+    }
     bail!("wire service install: unsupported platform")
 }
 
@@ -299,6 +365,28 @@ pub fn uninstall_kind(kind: ServiceKind) -> Result<ServiceReport> {
             kind: kind_label(kind).into(),
         });
     }
+    if cfg!(target_os = "windows") {
+        let task_name = kind.windows_task_name();
+        let delete = Command::new("schtasks.exe")
+            .args(["/Delete", "/TN", task_name, "/F"])
+            .status();
+        let removed = delete.map(|s| s.success()).unwrap_or(false);
+        return Ok(ServiceReport {
+            action: "uninstall".into(),
+            platform: "windows-schtasks".into(),
+            unit_path: String::new(),
+            status: if removed {
+                "removed".into()
+            } else {
+                "absent".into()
+            },
+            detail: format!(
+                "schtasks /Delete /TN {task_name} /F (removed={removed}); \
+                 if task was foreign or never registered, `absent` is the expected state"
+            ),
+            kind: kind_label(kind).into(),
+        });
+    }
     bail!("wire service uninstall: unsupported platform")
 }
 
@@ -346,6 +434,34 @@ pub fn status_kind(kind: ServiceKind) -> Result<ServiceReport> {
                 "absent".into()
             },
             detail: format!("unit exists={exists}, is-active={active}"),
+            kind: kind_label(kind).into(),
+        });
+    }
+    if cfg!(target_os = "windows") {
+        let task_name = kind.windows_task_name();
+        // CSV output with no header gives a single row we can parse for
+        // the "Status" column (Ready / Running / Disabled). Missing task
+        // → schtasks exits non-zero, which we treat as `absent`.
+        let query = Command::new("schtasks.exe")
+            .args(["/Query", "/TN", task_name, "/FO", "CSV", "/NH"])
+            .output();
+        let (exists, raw) = match query {
+            Ok(o) if o.status.success() => (true, String::from_utf8_lossy(&o.stdout).into_owned()),
+            _ => (false, String::new()),
+        };
+        let running = raw.to_lowercase().contains("running");
+        return Ok(ServiceReport {
+            action: "status".into(),
+            platform: "windows-schtasks".into(),
+            unit_path: String::new(),
+            status: if running {
+                "running".into()
+            } else if exists {
+                "installed (idle)".into()
+            } else {
+                "absent".into()
+            },
+            detail: format!("schtasks /Query: exists={exists} running={running}"),
             kind: kind_label(kind).into(),
         });
     }
@@ -515,6 +631,83 @@ WantedBy=default.target
     )
 }
 
+/// v0.7.2: Windows Task Scheduler 1.2 schema XML for a wire service.
+/// Mirrors the launchd plist + systemd unit shape: run-at-logon,
+/// auto-restart on failure, hidden console, user-scope LeastPrivilege
+/// with InteractiveToken so we never prompt for a stored password.
+///
+/// The `<Arguments>` field is XML-escaped because args may include
+/// metacharacters like `&` in future flag values.
+///
+/// Returned as a String for `cfg!(test)` cross-target compilation; the
+/// caller writes it to disk via `std::fs::write` which handles encoding.
+fn windows_task_xml(kind: ServiceKind, exe: &str) -> String {
+    let desc = kind.description();
+    let args = kind.binary_args().join(" ");
+    // Escape XML special chars in fields that take operator-influenced
+    // strings. exe is `std::env::current_exe()` (trusted) but args may
+    // grow operator-passed values later.
+    let exe_xml = xml_escape(exe);
+    let args_xml = xml_escape(&args);
+    let desc_xml = xml_escape(desc);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>{desc_xml}</Description>
+    <Author>wire (slancha)</Author>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{exe_xml}</Command>
+      <Arguments>{args_xml}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#
+    )
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,5 +781,58 @@ mod tests {
             ServiceKind::Daemon.log_basename(),
             ServiceKind::LocalRelay.log_basename()
         );
+        assert_ne!(
+            ServiceKind::Daemon.windows_task_name(),
+            ServiceKind::LocalRelay.windows_task_name()
+        );
+    }
+
+    #[test]
+    fn windows_task_xml_for_daemon_contains_required_elements_v0_7_2() {
+        let xml = windows_task_xml(ServiceKind::Daemon, r"C:\Program Files\wire\wire.exe");
+        // Schema declaration + 1.2 task version (Win 7+ / matches what
+        // schtasks /XML expects).
+        assert!(xml.contains(r#"<?xml version="1.0" encoding="UTF-8"?>"#));
+        assert!(xml.contains(r#"<Task version="1.2""#));
+        // Logon-trigger pattern — service starts when the user logs in,
+        // mirroring systemd --user / launchd-user-domain semantics.
+        assert!(xml.contains("<LogonTrigger>"));
+        // User-scope, not elevated. Critical: matches launchd's
+        // gui/<uid> domain and systemd's --user mode.
+        assert!(xml.contains("<RunLevel>LeastPrivilege</RunLevel>"));
+        assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
+        // Hidden console — no flashing cmd window at logon.
+        assert!(xml.contains("<Hidden>true</Hidden>"));
+        // Restart-on-failure parity with `Restart=on-failure` (systemd)
+        // and `KeepAlive` (launchd).
+        assert!(xml.contains("<RestartOnFailure>"));
+        // Battery + network policies relaxed: a laptop unplugging
+        // shouldn't kill the daemon.
+        assert!(xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"));
+        // Actual exec line uses XML-escaped exe path + correct daemon
+        // args.
+        assert!(xml.contains(r"C:\Program Files\wire\wire.exe"));
+        assert!(xml.contains("<Arguments>daemon --interval 5</Arguments>"));
+    }
+
+    #[test]
+    fn windows_task_xml_for_local_relay_uses_correct_args_v0_7_2() {
+        let xml = windows_task_xml(ServiceKind::LocalRelay, r"C:\wire\wire.exe");
+        assert!(xml.contains(r"C:\wire\wire.exe"));
+        assert!(
+            xml.contains("<Arguments>relay-server --bind 127.0.0.1:8771 --local-only</Arguments>")
+        );
+        // Must NOT include daemon args.
+        assert!(!xml.contains("daemon --interval"));
+    }
+
+    #[test]
+    fn xml_escape_handles_xml_metacharacters_v0_7_2() {
+        // Defensive — exe paths today are ASCII Program-Files paths but
+        // future operator-passed args may include `&` or quotes.
+        assert_eq!(xml_escape("a & b"), "a &amp; b");
+        assert_eq!(xml_escape("<tag>"), "&lt;tag&gt;");
+        assert_eq!(xml_escape(r#"say "hi""#), "say &quot;hi&quot;");
+        assert_eq!(xml_escape("it's"), "it&apos;s");
     }
 }
