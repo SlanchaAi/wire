@@ -2157,11 +2157,7 @@ fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
         return Ok(());
     }
     if colored {
-        println!(
-            "{} \x1b[2m·\x1b[0m {}",
-            character.colored(),
-            cwd_display
-        );
+        println!("{} \x1b[2m·\x1b[0m {}", character.colored(), cwd_display);
         return Ok(());
     }
 
@@ -2181,8 +2177,7 @@ fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
         .unwrap_or_else(|| json!(["wire/v3.1"]));
 
     if as_json {
-        let has_override =
-            overrides.nickname.is_some() || overrides.emoji.is_some();
+        let has_override = overrides.nickname.is_some() || overrides.emoji.is_some();
         println!(
             "{}",
             serde_json::to_string(&json!({
@@ -2226,9 +2221,7 @@ fn cmd_identity(cmd: IdentityCommand) -> Result<()> {
             hidden,
             json,
         } => cmd_claim(&nick, relay.as_deref(), public_url.as_deref(), hidden, json),
-        IdentityCommand::Destroy { name, force, json } => {
-            cmd_session_destroy(&name, force, json)
-        }
+        IdentityCommand::Destroy { name, force, json } => cmd_session_destroy(&name, force, json),
         IdentityCommand::Create {
             name,
             anonymous,
@@ -2248,11 +2241,7 @@ fn cmd_identity(cmd: IdentityCommand) -> Result<()> {
 /// per-invocation tmpdir. Operator gets a `WIRE_HOME=...` export they
 /// paste into their shell; the identity lives there until reboot
 /// clears /tmp. Persist promotes it to the real sessions root.
-fn cmd_identity_create(
-    name: Option<&str>,
-    anonymous: bool,
-    as_json: bool,
-) -> Result<()> {
+fn cmd_identity_create(name: Option<&str>, anonymous: bool, as_json: bool) -> Result<()> {
     if anonymous {
         // Generate a unique tmpdir for this anonymous identity.
         let rand_suffix = format!("{:08x}", rand::random::<u32>());
@@ -2284,9 +2273,16 @@ fn cmd_identity_create(
             }))?,
         )?;
         let card = serde_json::from_slice::<Value>(&std::fs::read(
-            session_home.join("config").join("wire").join("agent-card.json"),
+            session_home
+                .join("config")
+                .join("wire")
+                .join("agent-card.json"),
         )?)?;
-        let did = card.get("did").and_then(Value::as_str).unwrap_or("").to_string();
+        let did = card
+            .get("did")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         if as_json {
             println!(
                 "{}",
@@ -2324,8 +2320,8 @@ fn cmd_identity_create(
         None,
         false,
         None,
-        true,  // no_daemon: identity create just allocates the identity, no daemon
-        true,  // local_only: explicit lifecycle
+        true, // no_daemon: identity create just allocates the identity, no daemon
+        true, // local_only: explicit lifecycle
         as_json,
     )
 }
@@ -2409,10 +2405,11 @@ fn cmd_identity_persist(name: &str, as_name: Option<&str>, as_json: bool) -> Res
             }))?
         );
     } else {
+        println!("persisted anonymous identity `{name}` → local session `{new_name}`");
         println!(
-            "persisted anonymous identity `{name}` → local session `{new_name}`"
+            "  session_home: {} (survives reboot)",
+            new_session_home.display()
         );
-        println!("  session_home: {} (survives reboot)", new_session_home.display());
         println!("  registered cwd: {}", cwd.display());
     }
     Ok(())
@@ -2429,7 +2426,11 @@ fn cmd_identity_demote(name: &str, as_json: bool) -> Result<()> {
         .iter()
         .find(|s| s.name == name)
         .ok_or_else(|| anyhow!("no session named `{name}` (run `wire identity list`)"))?;
-    let relay_state_path = session.home_dir.join("config").join("wire").join("relay.json");
+    let relay_state_path = session
+        .home_dir
+        .join("config")
+        .join("wire")
+        .join("relay.json");
     if !relay_state_path.exists() {
         bail!("session `{name}` has no relay state — already demoted?");
     }
@@ -2438,13 +2439,17 @@ fn cmd_identity_demote(name: &str, as_json: bool) -> Result<()> {
     let had_fed = self_obj
         .get("relay_url")
         .and_then(Value::as_str)
-        .map(|u| u.starts_with("https://") || (u.starts_with("http://") && !u.contains("127.0.0.1")))
+        .map(|u| {
+            u.starts_with("https://") || (u.starts_with("http://") && !u.contains("127.0.0.1"))
+        })
         .unwrap_or(false);
     if !had_fed {
         if as_json {
             println!(
                 "{}",
-                serde_json::to_string(&json!({"name": name, "status": "no-op", "reason": "no federation slot"}))?
+                serde_json::to_string(
+                    &json!({"name": name, "status": "no-op", "reason": "no federation slot"})
+                )?
             );
         } else {
             println!("session `{name}` has no federation slot — nothing to demote");
@@ -2453,7 +2458,11 @@ fn cmd_identity_demote(name: &str, as_json: bool) -> Result<()> {
     }
     // Strip federation: remove top-level relay_url/slot_id/slot_token,
     // remove federation-scope entries from endpoints[].
-    if let Some(self_mut) = state.as_object_mut().and_then(|m| m.get_mut("self")).and_then(|s| s.as_object_mut()) {
+    if let Some(self_mut) = state
+        .as_object_mut()
+        .and_then(|m| m.get_mut("self"))
+        .and_then(|s| s.as_object_mut())
+    {
         self_mut.remove("relay_url");
         self_mut.remove("slot_id");
         self_mut.remove("slot_token");
@@ -2466,7 +2475,9 @@ fn cmd_identity_demote(name: &str, as_json: bool) -> Result<()> {
     if as_json {
         println!(
             "{}",
-            serde_json::to_string(&json!({"name": name, "status": "demoted", "from": "federation", "to": "local"}))?
+            serde_json::to_string(
+                &json!({"name": name, "status": "demoted", "from": "federation", "to": "local"})
+            )?
         );
     } else {
         println!("demoted `{name}` from federation → local");
@@ -2592,8 +2603,7 @@ fn cmd_identity_rename(
         let fed_url = self_obj.get("relay_url").and_then(Value::as_str);
         let fed_slot_id = self_obj.get("slot_id").and_then(Value::as_str);
         let fed_slot_token = self_obj.get("slot_token").and_then(Value::as_str);
-        if let (Some(url), Some(slot_id), Some(slot_token)) =
-            (fed_url, fed_slot_id, fed_slot_token)
+        if let (Some(url), Some(slot_id), Some(slot_token)) = (fed_url, fed_slot_id, fed_slot_token)
         {
             // Skip loopback / LAN relays (those don't publish handles to a
             // public phonebook — they're local-only mode).
@@ -2617,9 +2627,7 @@ fn cmd_identity_rename(
                         None,
                     ) {
                         Ok(_) => {
-                            eprintln!(
-                                "wire identity rename: re-published updated card to {url}"
-                            );
+                            eprintln!("wire identity rename: re-published updated card to {url}");
                         }
                         Err(e) => {
                             eprintln!(
@@ -2633,7 +2641,9 @@ fn cmd_identity_rename(
     }
 
     if random_announce {
-        eprintln!("wire identity rename: overrides cleared; falling back to auto-derived character (DID-deterministic, so the character is the same as it was before any rename).");
+        eprintln!(
+            "wire identity rename: overrides cleared; falling back to auto-derived character (DID-deterministic, so the character is the same as it was before any rename)."
+        );
     }
 
     let character = crate::character::Character::from_did_with_override(
@@ -2652,13 +2662,8 @@ fn cmd_identity_rename(
             }))?
         );
     } else {
-        println!(
-            "renamed → {}",
-            character.colored()
-        );
-        eprintln!(
-            "  · palette stays DID-derived (sticky color across renames)"
-        );
+        println!("renamed → {}", character.colored());
+        eprintln!("  · palette stays DID-derived (sticky color across renames)");
         eprintln!(
             "  · re-published to your federation relay (if bound); future federation lookups serve \
              the updated card. Existing pinned peers have a cached card from pair-time and won't \
@@ -2894,7 +2899,7 @@ fn cmd_send(
             resolved
         }
         Ok(Some(canonical)) => canonical, // exact handle match
-        Ok(None) => peer_in,               // unknown — pass through, downstream errors
+        Ok(None) => peer_in,              // unknown — pass through, downstream errors
         Err(ResolveError::Ambiguous(candidates)) => bail!(
             "nickname `{peer_in}` is ambiguous — matches {} pinned peers: {}. \
              Disambiguate by passing the peer handle (one of those listed) instead of the nickname.",
@@ -3435,11 +3440,7 @@ fn cmd_mcp() -> Result<()> {
     crate::mcp::run()
 }
 
-fn cmd_relay_server(
-    bind: &str,
-    local_only: bool,
-    uds: Option<&std::path::Path>,
-) -> Result<()> {
+fn cmd_relay_server(bind: &str, local_only: bool, uds: Option<&std::path::Path>) -> Result<()> {
     // v0.7.0-alpha.16: --uds <path> takes the UDS transport path,
     // overriding --bind. Implies --local-only semantics. Routed to a
     // separate serve_uds entry point with a manual hyper accept loop
@@ -3539,13 +3540,11 @@ fn validate_loopback_bind(bind: &str) -> Result<()> {
         let ip = addr.ip();
         let is_acceptable = match ip {
             IpAddr::V4(v4) => {
-                v4.is_loopback()
-                    || v4.is_private()
-                    || {
-                        // RFC 6598 CGNAT / Tailscale range: 100.64.0.0/10
-                        let octets = v4.octets();
-                        octets[0] == 100 && (64..=127).contains(&octets[1])
-                    }
+                v4.is_loopback() || v4.is_private() || {
+                    // RFC 6598 CGNAT / Tailscale range: 100.64.0.0/10
+                    let octets = v4.octets();
+                    octets[0] == 100 && (64..=127).contains(&octets[1])
+                }
             }
             IpAddr::V6(v6) => v6.is_loopback(), // ULA + Tailscale-v6 deferred
         };
@@ -6957,15 +6956,11 @@ fn cmd_session_new(
     // v0.7.0-alpha.9: also allocate a LAN-bound slot if requested.
     // Sits AFTER local because cmd_session_new's flow is "add endpoints
     // alongside existing self.endpoints[]" — order independent post-init.
-    if with_lan
-        && let Some(lan_url) = lan_relay
-    {
+    if with_lan && let Some(lan_url) = lan_relay {
         try_allocate_lan_slot(&session_home, &effective_handle, lan_url);
     }
     // v0.7.0-alpha.18: also allocate a UDS slot if requested.
-    if with_uds
-        && let Some(socket_path) = uds_socket
-    {
+    if with_uds && let Some(socket_path) = uds_socket {
         try_allocate_uds_slot(&session_home, &effective_handle, socket_path);
     }
 
@@ -7042,9 +7037,7 @@ fn try_allocate_uds_slot(
     let alloc: crate::relay_client::AllocateResponse = match serde_json::from_slice(&body) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!(
-                "wire session new: UDS relay returned unparseable allocate response: {e:#}"
-            );
+            eprintln!("wire session new: UDS relay returned unparseable allocate response: {e:#}");
             return;
         }
     };
@@ -7061,7 +7054,9 @@ fn try_allocate_uds_slot(
         .and_then(|e| e.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| serde_json::from_value::<crate::endpoints::Endpoint>(v.clone()).ok())
+                .filter_map(|v| {
+                    serde_json::from_value::<crate::endpoints::Endpoint>(v.clone()).ok()
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -7119,11 +7114,7 @@ fn try_allocate_uds_slot(
 /// session stays at whatever endpoint mix it already had — operators
 /// can retry with `wire session new --with-lan --lan-relay <url>` once
 /// the LAN relay is up.
-fn try_allocate_lan_slot(
-    session_home: &std::path::Path,
-    handle: &str,
-    lan_relay: &str,
-) {
+fn try_allocate_lan_slot(session_home: &std::path::Path, handle: &str, lan_relay: &str) {
     let probe = match crate::relay_client::build_blocking_client(Some(
         std::time::Duration::from_millis(500),
     )) {
@@ -7178,7 +7169,9 @@ fn try_allocate_lan_slot(
         .and_then(|e| e.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| serde_json::from_value::<crate::endpoints::Endpoint>(v.clone()).ok())
+                .filter_map(|v| {
+                    serde_json::from_value::<crate::endpoints::Endpoint>(v.clone()).ok()
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -7502,9 +7495,7 @@ pub fn maybe_auto_init_cwd_session(label: &str) {
         Err(_) => return,
     };
     if let Err(e) = std::fs::create_dir_all(&sessions_root) {
-        eprintln!(
-            "wire {label}: auto-init: failed to create sessions root {sessions_root:?}: {e}"
-        );
+        eprintln!("wire {label}: auto-init: failed to create sessions root {sessions_root:?}: {e}");
         return;
     }
     let lock_path = sessions_root.join(".auto-init.lock");
@@ -7542,7 +7533,10 @@ pub fn maybe_auto_init_cwd_session(label: &str) {
             return;
         }
     };
-    let agent_card_path = session_home.join("config").join("wire").join("agent-card.json");
+    let agent_card_path = session_home
+        .join("config")
+        .join("wire")
+        .join("agent-card.json");
     let needs_init = !agent_card_path.exists();
 
     if needs_init {
@@ -8631,13 +8625,12 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
     // time the respawn loop runs, `daemon_running` would always be
     // false and zero sessions would respawn. Capture state up front
     // and respawn whatever was alive at the start.
-    let sessions_to_respawn_after_kill: Vec<std::path::PathBuf> =
-        crate::session::list_sessions()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|s| s.daemon_running)
-            .map(|s| s.home_dir)
-            .collect();
+    let sessions_to_respawn_after_kill: Vec<std::path::PathBuf> = crate::session::list_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| s.daemon_running)
+        .map(|s| s.home_dir)
+        .collect();
 
     if check_only {
         // v0.6.8: also surface session-level state + PATH dupes in --check.

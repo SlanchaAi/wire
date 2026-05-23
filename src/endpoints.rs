@@ -298,7 +298,10 @@ pub fn pin_peer_endpoints(
     } else if let Some(lan_ep) = endpoints.iter().find(|e| e.scope == EndpointScope::Lan) {
         entry.insert("relay_url".into(), Value::String(lan_ep.relay_url.clone()));
         entry.insert("slot_id".into(), Value::String(lan_ep.slot_id.clone()));
-        entry.insert("slot_token".into(), Value::String(lan_ep.slot_token.clone()));
+        entry.insert(
+            "slot_token".into(),
+            Value::String(lan_ep.slot_token.clone()),
+        );
     } else if let Some(loc) = endpoints.iter().find(|e| e.scope == EndpointScope::Local) {
         // No federation, no LAN? Local is the only option. Unusual
         // (peer would only be reachable from same loopback), but keeps
@@ -358,10 +361,26 @@ mod tests {
             }
         });
         let eps = peer_endpoints_in_priority_order(&state, "alice");
-        assert_eq!(eps.len(), 3, "Local(matched) + Lan + Federation all reachable");
-        assert_eq!(eps[0].scope, EndpointScope::Local, "loopback wins (same-machine)");
-        assert_eq!(eps[1].scope, EndpointScope::Lan, "Lan second (same-network)");
-        assert_eq!(eps[2].scope, EndpointScope::Federation, "Federation last (anywhere)");
+        assert_eq!(
+            eps.len(),
+            3,
+            "Local(matched) + Lan + Federation all reachable"
+        );
+        assert_eq!(
+            eps[0].scope,
+            EndpointScope::Local,
+            "loopback wins (same-machine)"
+        );
+        assert_eq!(
+            eps[1].scope,
+            EndpointScope::Lan,
+            "Lan second (same-network)"
+        );
+        assert_eq!(
+            eps[2].scope,
+            EndpointScope::Federation,
+            "Federation last (anywhere)"
+        );
     }
 
     #[test]
@@ -386,7 +405,11 @@ mod tests {
         });
         let eps = peer_endpoints_in_priority_order(&state, "alice");
         assert_eq!(eps.len(), 2);
-        assert_eq!(eps[0].scope, EndpointScope::Lan, "Lan preferred over Federation");
+        assert_eq!(
+            eps[0].scope,
+            EndpointScope::Lan,
+            "Lan preferred over Federation"
+        );
         assert_eq!(eps[1].scope, EndpointScope::Federation);
     }
 
@@ -398,12 +421,23 @@ mod tests {
         // reachable; Local loopback wouldn't be).
         let mut state = json!({});
         let endpoints = vec![
-            Endpoint::lan("http://192.168.1.50:8771".to_string(), "lan-slot".to_string(), "lan-tok".to_string()),
-            Endpoint::local("http://127.0.0.1:8771".to_string(), "loop-slot".to_string(), "loop-tok".to_string()),
+            Endpoint::lan(
+                "http://192.168.1.50:8771".to_string(),
+                "lan-slot".to_string(),
+                "lan-tok".to_string(),
+            ),
+            Endpoint::local(
+                "http://127.0.0.1:8771".to_string(),
+                "loop-slot".to_string(),
+                "loop-tok".to_string(),
+            ),
         ];
         pin_peer_endpoints(&mut state, "alice", &endpoints).unwrap();
         let alice = &state["peers"]["alice"];
-        assert_eq!(alice["relay_url"], "http://192.168.1.50:8771", "LAN wins legacy fields");
+        assert_eq!(
+            alice["relay_url"], "http://192.168.1.50:8771",
+            "LAN wins legacy fields"
+        );
         assert_eq!(alice["slot_id"], "lan-slot");
     }
 

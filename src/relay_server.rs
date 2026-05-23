@@ -2164,9 +2164,7 @@ pub async fn serve_uds(socket_path: PathBuf, state_dir: PathBuf) -> Result<()> {
     // 0600: owner-rw only. Trust anchor is the kernel-attested peer uid
     // (SO_PEERCRED equivalent); chmod is defense-in-depth.
     use std::os::unix::fs::PermissionsExt;
-    if let Err(e) =
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
-    {
+    if let Err(e) = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)) {
         eprintln!(
             "wire relay-server (UDS): chmod 0600 on {socket_path:?} failed: {e} — \
              socket may be accessible to other uids. Investigate."
@@ -2197,12 +2195,11 @@ pub async fn serve_uds(socket_path: PathBuf, state_dir: PathBuf) -> Result<()> {
                 Err(infallible) => match infallible {},
             };
             let io = TokioIo::new(stream);
-            let hyper_service = hyper::service::service_fn(
-                move |req: hyper::Request<hyper::body::Incoming>| {
+            let hyper_service =
+                hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                     let mut svc = tower_service.clone();
                     async move { Service::call(&mut svc, req).await }
-                },
-            );
+                });
             tokio::task::spawn(async move {
                 if let Err(e) = http1::Builder::new()
                     .serve_connection(io, hyper_service)

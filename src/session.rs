@@ -131,8 +131,7 @@ pub fn write_registry(reg: &SessionRegistry) -> Result<()> {
     // fell back to default identity for the write duration.
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, body).with_context(|| format!("writing tmp session registry {tmp:?}"))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("atomic rename {tmp:?} → {path:?}"))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("atomic rename {tmp:?} → {path:?}"))?;
     Ok(())
 }
 
@@ -313,10 +312,9 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
         let daemon_running = check_daemon_live(&path);
         // v0.7.0-alpha.3: read this session's display.json for any
         // operator-chosen nickname/emoji overrides.
-        let display_overrides_path =
-            path.join("config").join("wire").join("display.json");
-        let overrides = crate::config::read_display_overrides_at(&display_overrides_path)
-            .unwrap_or_default();
+        let display_overrides_path = path.join("config").join("wire").join("display.json");
+        let overrides =
+            crate::config::read_display_overrides_at(&display_overrides_path).unwrap_or_default();
         let character = did.as_deref().map(|d| {
             crate::character::Character::from_did_with_override(
                 d,

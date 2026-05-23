@@ -151,8 +151,8 @@ pub fn uds_request(
 ) -> Result<(u16, Vec<u8>)> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
-    let mut stream = UnixStream::connect(socket_path)
-        .with_context(|| format!("connect UDS {socket_path:?}"))?;
+    let mut stream =
+        UnixStream::connect(socket_path).with_context(|| format!("connect UDS {socket_path:?}"))?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
     let mut req = String::with_capacity(256 + headers.len() * 32 + body.len());
@@ -665,28 +665,28 @@ mod uds_tests {
 
     #[test]
     fn uds_request_round_trips_200_with_body() {
-        let tmpdir = std::env::temp_dir().join(format!(
-            "wire-uds-test-{}",
-            rand::random::<u32>()
-        ));
+        let tmpdir = std::env::temp_dir().join(format!("wire-uds-test-{}", rand::random::<u32>()));
         std::fs::create_dir_all(&tmpdir).unwrap();
         let sock = tmpdir.join("rt.sock");
         let _ = std::fs::remove_file(&sock);
         spawn_canned_uds_server(sock.clone(), 200, r#"{"ok":true}"#);
         // Give the server a moment to bind.
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let (status, body) = uds_request(&sock, "POST", "/v1/test", &[("Content-Type", "application/json")], b"{}")
-            .expect("uds_request succeeds");
+        let (status, body) = uds_request(
+            &sock,
+            "POST",
+            "/v1/test",
+            &[("Content-Type", "application/json")],
+            b"{}",
+        )
+        .expect("uds_request succeeds");
         assert_eq!(status, 200);
         assert_eq!(body, br#"{"ok":true}"#);
     }
 
     #[test]
     fn uds_request_surfaces_non_2xx_status() {
-        let tmpdir = std::env::temp_dir().join(format!(
-            "wire-uds-test-{}",
-            rand::random::<u32>()
-        ));
+        let tmpdir = std::env::temp_dir().join(format!("wire-uds-test-{}", rand::random::<u32>()));
         std::fs::create_dir_all(&tmpdir).unwrap();
         let sock = tmpdir.join("err.sock");
         let _ = std::fs::remove_file(&sock);
@@ -704,7 +704,10 @@ mod uds_tests {
         let _ = std::fs::remove_file(nope);
         let err = uds_request(nope, "GET", "/", &[], b"").unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("connect UDS"), "expected connect error, got: {msg}");
+        assert!(
+            msg.contains("connect UDS"),
+            "expected connect error, got: {msg}"
+        );
     }
 }
 

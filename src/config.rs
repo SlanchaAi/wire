@@ -202,8 +202,7 @@ pub fn write_agent_card(card: &Value) -> Result<()> {
     // pre-existing fs::write pattern was a corruption risk every call.
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, body).with_context(|| format!("writing tmp {tmp:?}"))?;
-    fs::rename(&tmp, &path)
-        .with_context(|| format!("atomic rename {tmp:?} → {path:?}"))?;
+    fs::rename(&tmp, &path).with_context(|| format!("atomic rename {tmp:?} → {path:?}"))?;
     Ok(())
 }
 
@@ -255,8 +254,7 @@ pub fn write_display_overrides(overrides: &DisplayOverrides) -> Result<()> {
     // call path.
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, body).with_context(|| format!("writing tmp {tmp:?}"))?;
-    fs::rename(&tmp, &path)
-        .with_context(|| format!("atomic rename {tmp:?} → {path:?}"))?;
+    fs::rename(&tmp, &path).with_context(|| format!("atomic rename {tmp:?} → {path:?}"))?;
     Ok(())
 }
 
