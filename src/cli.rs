@@ -5922,8 +5922,11 @@ fn cmd_mesh_route(
     let mut last_err: Option<String> = None;
     let mut via_scope: Option<String> = None;
     for ep in &endpoints {
-        let client = crate::relay_client::RelayClient::new(&ep.relay_url);
-        match client.post_event(&ep.slot_id, &ep.slot_token, &signed) {
+        // v0.7.0-alpha.19: scheme-aware dispatch — `unix://` endpoints
+        // route via uds_request, others via reqwest. Allows peers with
+        // UDS-tagged endpoints in their agent-card to receive events
+        // over the local socket instead of loopback HTTP.
+        match crate::relay_client::post_event_to_endpoint(ep, &signed) {
             Ok(_) => {
                 delivered = true;
                 via_scope = Some(
@@ -6335,8 +6338,11 @@ fn cmd_mesh_broadcast(
                 let mut last_err: Option<String> = None;
                 let mut delivered_via: Option<String> = None;
                 for ep in &endpoints {
-                    let client = crate::relay_client::RelayClient::new(&ep.relay_url);
-                    match client.post_event(&ep.slot_id, &ep.slot_token, &signed) {
+                    // v0.7.0-alpha.19: scheme-aware dispatch (UDS via
+                    // uds_request, else reqwest). Same as cmd_send's
+                    // single-peer path above; this is the parallel
+                    // multi-peer broadcast loop.
+                    match crate::relay_client::post_event_to_endpoint(ep, &signed) {
                         Ok(_) => {
                             delivered = true;
                             delivered_via = Some(

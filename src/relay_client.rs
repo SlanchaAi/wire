@@ -195,6 +195,46 @@ pub fn uds_request(
     Ok((status, body))
 }
 
+/// v0.7.0-alpha.19: scheme-aware POST helper that dispatches to either
+/// reqwest (for `http(s)://...`) OR the hand-rolled `uds_request` (for
+/// `unix:///path/to/sock`). Lets the daemon + cmd_send walk a peer's
+/// pinned endpoints uniformly without each call site having to detect
+/// scheme + branch.
+///
+/// Used by the routing layer to send signed events to a peer's slot
+/// regardless of which transport scope the peer is reachable on. UDS
+/// path uses the alpha.17 client; TCP path uses the existing
+/// RelayClient::post_event flow.
+pub fn post_event_to_endpoint(
+    endpoint: &crate::endpoints::Endpoint,
+    event: &Value,
+) -> Result<PostEventResponse> {
+    #[cfg(unix)]
+    if let Some(socket_path) = endpoint.relay_url.strip_prefix("unix://") {
+        let body = serde_json::json!({"event": event}).to_string();
+        let auth_header = format!("Bearer {}", endpoint.slot_token);
+        let (status, body) = uds_request(
+            std::path::Path::new(socket_path),
+            "POST",
+            &format!("/v1/events/{}", endpoint.slot_id),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &auth_header),
+            ],
+            body.as_bytes(),
+        )?;
+        if !(200..300).contains(&status) {
+            return Err(anyhow!(
+                "post_event (uds {socket_path}) failed: {status}: {}",
+                String::from_utf8_lossy(&body)
+            ));
+        }
+        return Ok(serde_json::from_slice(&body)?);
+    }
+    let client = RelayClient::new(&endpoint.relay_url);
+    client.post_event(&endpoint.slot_id, &endpoint.slot_token, event)
+}
+
 impl RelayClient {
     pub fn new(base_url: &str) -> Self {
         let client = build_blocking_client(Some(std::time::Duration::from_secs(30)))
