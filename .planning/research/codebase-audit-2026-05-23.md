@@ -191,3 +191,49 @@ Wire is not broken. The protocol works, the threat model is locked, the operator
 What it has is the wear of a project that grew from "let two agents pair via SAS" to "federated multi-machine multi-transport identity layer with character display" in ~6 months of fast-iteration. The protocol layer absorbed the growth gracefully; the plumbing layer is creaking. The three P0 refactors (module split, SQLite, narrowed public API) are the cheapest way to set up v0.8+ for the next 6 months without slowing feature work.
 
 If I had a free hand: I'd ship v0.7.0 as-is, spend two weeks on the P0 refactors, then resume feature work from a cleaner base. That's the pragmatic plan; "redesign from scratch" rarely produces shippable work, and wire's architecture is fundamentally sound. The structure is what needs the love.
+
+---
+
+## Critique round (second pass)
+
+Sending the audit through 5 hostile personas surfaced real iterations. Captured here so future readers don't take the first-pass conclusions at face value.
+
+**1. Sequence the P0s, don't parallel-fire.** First pass treated three P0s as a batch. They're not — different durations, different risk profiles, different prerequisites. Revised order:
+
+| Order | Refactor | Why first |
+|---|---|---|
+| 1st | **Narrow public API to 5 namespaces** (1-2 days) | Cheapest. Zero behavior change. Frees the other two refactors from breaking external surface contracts. Should ship in the same release as v0.7.0 if possible. |
+| 2nd | **Module split** (3-5 days) | Mechanical. Zero behavior change. Unblocks parallel work + test locality. Run AFTER the API narrow so the module boundary work is also a chance to mark visibility. |
+| 3rd | **State layer → SQLite** (7-10 days, revised UP from 5-7) | Highest cost, highest risk. Needs migration safety story (dual-read mode, rollback). Should ship in v0.8.x not v0.8.0 — bench first, prove the win, then commit. |
+
+**2. SQLite section was over-confident.** First pass said "no more flock ceremony." Wrong — SQLite uses its own OS-level file locks; WAL mode reduces contention but doesn't eliminate it. Multi-daemon writes to the same db file still serialize. The win is the locking *shape* (clean transactions, no manual flock helpers), not lock-freedom. Plus operational tax: PRAGMA tuning, WAL checkpoint cadence, sqlite version compat. **Recommendation:** benchmark write-contention with 5 daemons + 20 sessions before committing the migration. If JSON+flock is within 2× SQLite throughput at expected concurrency, don't bother — the wins are correctness (no unprotected `write_relay_state` calls) which can also be solved by an audit + wrapper. SQLite is a structural answer to a correctness problem; might be over-engineered.
+
+**3. Migration safety story missing.** v0.8 SQLite migration must include:
+- Dual-read mode (read both JSON and SQLite during transition; SQLite wins on conflict)
+- One-shot migration command (`wire session migrate-to-sqlite`) with `--dry-run`
+- Rollback path: if migration fails mid-session, restore from a `.pre-migrate-backup/` snapshot
+- Version-compat: v0.7 binaries reading v0.8 SQLite files should fail gracefully ("session needs older wire — pin v0.7 or upgrade")
+
+Without these, the migration is operator-hostile.
+
+**4. Public API narrow needs deprecation cycle.** First pass said "nothing depends on wire as a library yet." Probably true today but operators DO `cargo doc --open` and look at the re-exports. Hard-removing `pub use endpoints::*` in v0.8 will break anyone who copy-pasted that import. Soft-deprecate first (`#[deprecated(note = "wire::endpoints will be private in v0.9")]` for one release), then remove.
+
+**5. Operator pain validation gap.** Audit ranked wear items by gut feel + agent consensus, not by actual incident frequency. What does the operator incident log show? If "two Claudes in same cwd" was the highest-frequency real issue (v0.6.10's collision warning) and "atomic write of agent-card" was theoretical (no SIGKILL incidents reported), then prioritize accordingly. The audit lacked this data. **Action:** before committing P0 budget, do a 1-day pass through GitHub issues + Slack/Discord support logs + the CHANGELOG's bug-fix entries to quantify which classes of wear actually bite.
+
+**6. Protocol-layer claim of "well-engineered" was trust-but-don't-audit.** The audit cited test coverage + threat model existence as evidence; didn't actually re-read canonical.rs or signing.rs against attack vectors (Bleichenbacher-style malleability, signature stripping in JSON nesting, etc.). Wire's protocol layer is probably fine — it's been live for months and built on libraries (ed25519-dalek, spake2) with their own audit history — but the audit's "preserve" recommendation is based on absence-of-known-bugs, not presence-of-positive-audit. **Recommendation:** before v1.0 ship, separate paid security-audit pass (Cure53 / Trail of Bits / NCC Group / independent crypto auditor) focused on the protocol crate. Out of scope for v0.8 work.
+
+**7. Drop the brand-marketing line.** "Lean into character system for v1.0 marketing" doesn't belong in a codebase audit. Cut from synthesis. Belongs in `.planning/marketing/` if anywhere.
+
+### Net change to P0 priority
+
+After critique:
+
+| Priority | Refactor | Effort | Window |
+|---|---|---|---|
+| **P0 (do for v0.7.0 if possible)** | Narrow public API to 5 namespaces + soft-deprecate the rest | 1-2 days | v0.7.0 patch release |
+| **P0 (v0.8.0)** | Module split for cli.rs + relay_server.rs | 3-5 days | v0.8.0 |
+| **P1 (v0.8.x, post-bench)** | State layer → SQLite (only if write-contention bench justifies) | 7-10 days + migration | v0.8.x |
+| **P1 (v0.8.0)** | Audit + wrap unprotected `write_relay_state` calls (interim correctness fix; ships even if SQLite doesn't) | 1 day | v0.8.0 |
+| **P0 (pre-v1.0)** | External security audit of protocol crate | Engaged separately | pre-v1.0 |
+
+The critique round's biggest insight: **the audit was too confident on SQLite specifically.** Module split + API narrow are uncontroversial wins. SQLite migration is a real bet that should be bench-validated before being committed to a release plan. The interim "audit + wrap unprotected writes" gets correctness without the structural change.
