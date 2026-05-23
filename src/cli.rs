@@ -827,6 +827,61 @@ pub enum IdentityCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Create an identity in an EXPLICIT lifecycle state (vs. the
+    /// implicit `wire init` + `wire claim` flow).
+    /// v0.7.0-alpha.20 closes the v0.7+ identity-first noun-CLI.
+    ///
+    /// `--anonymous` puts the identity in a tmpdir (auto-cleanup on
+    /// next reboot). In-memory semantics not yet supported — the
+    /// pragmatic shape is "tmpdir + sentinel + register-for-cleanup."
+    /// For pure-RAM identities, see v1.0 vision.
+    ///
+    /// `--local` is the explicit form of today's default; identity
+    /// persists to the machine-wide sessions root.
+    Create {
+        /// Session name. Defaults to derived from cwd (anonymous mode
+        /// uses a random name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Create an ANONYMOUS identity (tmpdir-backed, dies on
+        /// reboot, no federation). Mutually exclusive with --local.
+        #[arg(long, conflicts_with = "local")]
+        anonymous: bool,
+        /// Create a LOCAL identity (machine-persistent, no federation).
+        /// Default — explicit flag for clarity.
+        #[arg(long)]
+        local: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Promote an ANONYMOUS identity to LOCAL — move from tmpdir to
+    /// the machine-wide sessions root + register in the cwd map.
+    /// After persist, the identity survives reboot.
+    /// v0.7.0-alpha.20.
+    Persist {
+        /// The anonymous identity's name (from `wire identity list`).
+        name: String,
+        /// Optional rename during persist. Default: keep the anon name.
+        #[arg(long = "as", value_name = "NEW_NAME")]
+        as_name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Demote an identity ONE level in the lifecycle:
+    ///   federation → local: removes the relay slot binding but keeps
+    ///   the keypair + agent-card. Operator can later re-publish with
+    ///   `wire identity publish`. v0.7.0-alpha.20.
+    ///
+    /// (local → anonymous is not exposed; the safer flow is destroy +
+    /// recreate, since "demoting" a persistent identity to ephemeral
+    /// has surprising semantics — what about the keypair? what about
+    /// pinned peers? Better to be explicit with destroy.)
+    Demote {
+        /// Session name to demote.
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2174,7 +2229,251 @@ fn cmd_identity(cmd: IdentityCommand) -> Result<()> {
         IdentityCommand::Destroy { name, force, json } => {
             cmd_session_destroy(&name, force, json)
         }
+        IdentityCommand::Create {
+            name,
+            anonymous,
+            local: _,
+            json,
+        } => cmd_identity_create(name.as_deref(), anonymous, json),
+        IdentityCommand::Persist {
+            name,
+            as_name,
+            json,
+        } => cmd_identity_persist(&name, as_name.as_deref(), json),
+        IdentityCommand::Demote { name, json } => cmd_identity_demote(&name, json),
     }
+}
+
+/// v0.7.0-alpha.20: anonymous identity = sessions root remapped to a
+/// per-invocation tmpdir. Operator gets a `WIRE_HOME=...` export they
+/// paste into their shell; the identity lives there until reboot
+/// clears /tmp. Persist promotes it to the real sessions root.
+fn cmd_identity_create(
+    name: Option<&str>,
+    anonymous: bool,
+    as_json: bool,
+) -> Result<()> {
+    if anonymous {
+        // Generate a unique tmpdir for this anonymous identity.
+        let rand_suffix = format!("{:08x}", rand::random::<u32>());
+        let anon_name = name
+            .map(|n| crate::session::sanitize_name(n))
+            .unwrap_or_else(|| format!("anon-{rand_suffix}"));
+        let anon_root = std::env::temp_dir().join(format!("wire-anon-{rand_suffix}"));
+        std::fs::create_dir_all(&anon_root)
+            .with_context(|| format!("creating anon root {anon_root:?}"))?;
+        // Run `wire init <name>` with WIRE_HOME = anon_root/sessions/<name>
+        let session_home = anon_root.join("sessions").join(&anon_name);
+        std::fs::create_dir_all(&session_home)?;
+        let status = run_wire_with_home(&session_home, &["init", &anon_name])?;
+        if !status.success() {
+            bail!("anonymous identity init failed: {status}");
+        }
+        // Register the anonymous name in a SIDE registry so persist
+        // can find it later. Stored at <anon_root>/anon-marker.json.
+        let marker = anon_root.join("anon-marker.json");
+        std::fs::write(
+            &marker,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "name": anon_name,
+                "session_home": session_home.to_string_lossy(),
+                "created_at": time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default(),
+                "kind": "anonymous",
+            }))?,
+        )?;
+        let card = serde_json::from_slice::<Value>(&std::fs::read(
+            session_home.join("config").join("wire").join("agent-card.json"),
+        )?)?;
+        let did = card.get("did").and_then(Value::as_str).unwrap_or("").to_string();
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "kind": "anonymous",
+                    "name": anon_name,
+                    "did": did,
+                    "session_home": session_home.to_string_lossy(),
+                    "anon_root": anon_root.to_string_lossy(),
+                }))?
+            );
+        } else {
+            println!("created anonymous identity `{anon_name}` ({did})");
+            println!(
+                "  session_home: {} (dies on reboot — /tmp)",
+                session_home.display()
+            );
+            println!();
+            println!("activate in this shell:");
+            println!("  export WIRE_HOME={}", session_home.display());
+            println!();
+            println!("promote to persistent later with:");
+            println!("  wire identity persist {anon_name}");
+        }
+        return Ok(());
+    }
+    // --local (or default): delegate to existing session new flow.
+    let name_arg = name.map(|s| s.to_string());
+    cmd_session_new(
+        name_arg.as_deref(),
+        "https://wireup.net",
+        false,
+        "http://127.0.0.1:8771",
+        false,
+        None,
+        false,
+        None,
+        true,  // no_daemon: identity create just allocates the identity, no daemon
+        true,  // local_only: explicit lifecycle
+        as_json,
+    )
+}
+
+/// v0.7.0-alpha.20: promote anonymous → local. Moves session dir from
+/// tmpdir to the persistent sessions root + registers in the cwd map.
+fn cmd_identity_persist(name: &str, as_name: Option<&str>, as_json: bool) -> Result<()> {
+    // Find the anon-marker.json by scanning /tmp/wire-anon-*.
+    let temp = std::env::temp_dir();
+    let mut found: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(&temp)?.flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.starts_with("wire-anon-"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let marker = path.join("anon-marker.json");
+        if let Ok(bytes) = std::fs::read(&marker)
+            && let Ok(json) = serde_json::from_slice::<Value>(&bytes)
+            && json.get("name").and_then(Value::as_str) == Some(name)
+        {
+            let session_home = json
+                .get("session_home")
+                .and_then(Value::as_str)
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| anyhow!("anon-marker {marker:?} missing session_home"))?;
+            found = Some((path, session_home));
+            break;
+        }
+    }
+    let (anon_root, anon_session_home) = found.ok_or_else(|| {
+        anyhow!(
+            "no anonymous identity named `{name}` found in /tmp/wire-anon-* — \
+             run `wire identity list` to see available identities"
+        )
+    })?;
+
+    let new_name = as_name.unwrap_or(name);
+    let new_session_home = crate::session::session_dir(new_name)?;
+    if new_session_home.exists() {
+        bail!(
+            "target session `{new_name}` already exists at {new_session_home:?} — \
+             pick a different name with --as <new-name>"
+        );
+    }
+
+    // Move the session dir from tmpdir to persistent root.
+    if let Some(parent) = new_session_home.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(&anon_session_home, &new_session_home)
+        .with_context(|| format!("rename {anon_session_home:?} → {new_session_home:?}"))?;
+
+    // Clean up the (now-empty) anon root + marker.
+    let _ = std::fs::remove_dir_all(&anon_root);
+
+    // Register cwd → new_name (operator may have cd'd elsewhere; use the
+    // session_home's grandparent as the conceptual "cwd" if no other).
+    let cwd = std::env::current_dir().unwrap_or_else(|_| new_session_home.clone());
+    let cwd_key = cwd.to_string_lossy().into_owned();
+    let new_name_for_reg = new_name.to_string();
+    if let Err(e) = crate::session::update_registry(|reg| {
+        reg.by_cwd.insert(cwd_key, new_name_for_reg);
+        Ok(())
+    }) {
+        eprintln!("wire identity persist: failed to update registry: {e:#}");
+    }
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "kind": "persisted",
+                "from_name": name,
+                "to_name": new_name,
+                "session_home": new_session_home.to_string_lossy(),
+            }))?
+        );
+    } else {
+        println!(
+            "persisted anonymous identity `{name}` → local session `{new_name}`"
+        );
+        println!("  session_home: {} (survives reboot)", new_session_home.display());
+        println!("  registered cwd: {}", cwd.display());
+    }
+    Ok(())
+}
+
+/// v0.7.0-alpha.20: demote federation → local. Removes the federation
+/// slot binding from relay.json (and the legacy top-level fields). Keeps
+/// the keypair + agent-card so re-publish later just calls `wire identity
+/// publish` again. local → anonymous is NOT supported; destroy + recreate
+/// is the safer path for that step-down.
+fn cmd_identity_demote(name: &str, as_json: bool) -> Result<()> {
+    let sessions = crate::session::list_sessions()?;
+    let session = sessions
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| anyhow!("no session named `{name}` (run `wire identity list`)"))?;
+    let relay_state_path = session.home_dir.join("config").join("wire").join("relay.json");
+    if !relay_state_path.exists() {
+        bail!("session `{name}` has no relay state — already demoted?");
+    }
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&relay_state_path)?)?;
+    let self_obj = state.get("self").cloned().unwrap_or(Value::Null);
+    let had_fed = self_obj
+        .get("relay_url")
+        .and_then(Value::as_str)
+        .map(|u| u.starts_with("https://") || (u.starts_with("http://") && !u.contains("127.0.0.1")))
+        .unwrap_or(false);
+    if !had_fed {
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({"name": name, "status": "no-op", "reason": "no federation slot"}))?
+            );
+        } else {
+            println!("session `{name}` has no federation slot — nothing to demote");
+        }
+        return Ok(());
+    }
+    // Strip federation: remove top-level relay_url/slot_id/slot_token,
+    // remove federation-scope entries from endpoints[].
+    if let Some(self_mut) = state.as_object_mut().and_then(|m| m.get_mut("self")).and_then(|s| s.as_object_mut()) {
+        self_mut.remove("relay_url");
+        self_mut.remove("slot_id");
+        self_mut.remove("slot_token");
+        if let Some(eps) = self_mut.get_mut("endpoints").and_then(|e| e.as_array_mut()) {
+            eps.retain(|ep| ep.get("scope").and_then(Value::as_str) != Some("federation"));
+        }
+    }
+    std::fs::write(&relay_state_path, serde_json::to_vec_pretty(&state)?)?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({"name": name, "status": "demoted", "from": "federation", "to": "local"}))?
+        );
+    } else {
+        println!("demoted `{name}` from federation → local");
+        println!("  relay slot binding removed; keypair + agent-card retained");
+        println!("  re-publish with `wire identity publish <nick>`");
+    }
+    Ok(())
 }
 
 fn cmd_identity_rename(
