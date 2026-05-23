@@ -57,7 +57,11 @@ async fn daemon_once_drives_full_sync_after_pairing() {
     let paul = fresh_dir("paul-daemon");
     let willard = fresh_dir("willard-daemon");
     assert!(wire(&paul, &["init", "paul", "--offline"]).status.success());
-    assert!(wire(&willard, &["init", "willard", "--offline"]).status.success());
+    assert!(
+        wire(&willard, &["init", "willard", "--offline"])
+            .status
+            .success()
+    );
 
     // Pair
     let mut host = std::process::Command::new(wire_bin())
@@ -156,7 +160,11 @@ async fn rotate_slot_after_pairing_orphans_old_slot() {
     let paul = fresh_dir("paul-rotate");
     let willard = fresh_dir("willard-rotate");
     assert!(wire(&paul, &["init", "paul", "--offline"]).status.success());
-    assert!(wire(&willard, &["init", "willard", "--offline"]).status.success());
+    assert!(
+        wire(&willard, &["init", "willard", "--offline"])
+            .status
+            .success()
+    );
 
     // Pair via existing helper logic (inlined from other tests).
     let mut host = std::process::Command::new(wire_bin())
@@ -269,8 +277,16 @@ async fn paul_pair_hosts_willard_joins_then_send_round_trips() {
     // ---- 2. init both sides ----
     let paul_home = fresh_dir("paul");
     let willard_home = fresh_dir("willard");
-    assert!(wire(&paul_home, &["init", "paul", "--offline"]).status.success());
-    assert!(wire(&willard_home, &["init", "willard", "--offline"]).status.success());
+    assert!(
+        wire(&paul_home, &["init", "paul", "--offline"])
+            .status
+            .success()
+    );
+    assert!(
+        wire(&willard_home, &["init", "willard", "--offline"])
+            .status
+            .success()
+    );
 
     // ---- 3. start pair-host in background; capture stderr to learn the code ----
     let mut host_proc = Command::new(wire_bin())
