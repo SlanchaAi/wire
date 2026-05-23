@@ -172,49 +172,108 @@ fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
     16 + 36 * q(r) + 6 * q(g) + q(b)
 }
 
-/// 120 short, neutral adjectives. Nature, abstract, gentle tone.
+/// ~256 short, neutral adjectives. Nature, abstract, texture, mood.
+/// v0.7.0-alpha.4: doubled from the alpha.1 set of 120 to widen the
+/// combinatorial space and reduce nickname collisions at scale.
 const ADJECTIVES: &[&str] = &[
-    "amber", "azure", "balmy", "blithe", "brisk", "calm", "cedar", "chill", "cinder", "clear",
-    "coral", "cosmic", "crisp", "dawn", "deep", "dusky", "dewy", "drift", "ember", "emerald",
-    "feral", "ferny", "festive", "fjord", "foxtrot", "frosty", "gentle", "ginger", "glassy",
-    "glint", "gold", "grove", "harbor", "hazel", "heath", "hush", "ivory", "jade", "kelp",
-    "kindly", "lavender", "linen", "lonely", "loud", "lucid", "lunar", "marble", "marsh",
-    "meadow", "mellow", "mild", "minted", "misty", "moonlit", "morning", "mossy", "muted",
-    "neon", "nimble", "noble", "north", "olive", "onyx", "opal", "outback", "pearl", "pewter",
-    "pine", "placid", "plum", "prairie", "quiet", "raven", "redwood", "river", "rosy", "ruby",
-    "rustic", "sage", "salt", "sandy", "scarlet", "sea", "shadow", "shore", "silken", "silver",
-    "slate", "smoky", "soft", "solar", "spruce", "starry", "steady", "stone", "summer",
-    "sunlit", "swift", "tawny", "teal", "thistle", "topaz", "twilight", "umber", "valley",
-    "velvet", "verdant", "vesper", "violet", "vivid", "warm", "willow", "windy", "winter",
-    "wisp", "woven", "wren", "yarrow", "yonder", "zen", "zephyr",
+    "agate", "alpine", "amber", "ancient", "antique", "arctic", "ashen", "auburn", "autumn",
+    "azure", "balmy", "blithe", "brave", "breezy", "briar", "bright", "brisk", "bronze",
+    "brushed", "bubbling", "burnished", "calm", "candle", "cedar", "chestnut", "chill",
+    "chipper", "cinder", "clay", "clear", "cliffside", "cobalt", "copper", "coral", "cordial",
+    "cosmic", "crimson", "crisp", "crystal", "curious", "dapper", "dappled", "dawn",
+    "daydream", "deep", "delta", "dewy", "distant", "drift", "drowsy", "dune", "dusky",
+    "eager", "echoing", "ember", "emerald", "feral", "ferny", "festive", "fjord", "flaxen",
+    "fluted", "fond", "forest", "foxtrot", "fragrant", "frosted", "frosty", "garnet",
+    "gentle", "ginger", "glacial", "glassy", "gleaming", "glint", "glossy", "gold", "graceful",
+    "granite", "grove", "hammered", "harbor", "hardy", "hazel", "heath", "honey", "humble",
+    "hush", "indigo", "ivory", "jade", "jaunty", "juniper", "keen", "kelp", "kindly", "knit",
+    "lacquered", "lapis", "lavender", "leaden", "lichen", "lilac", "linen", "lively", "lonely",
+    "lucid", "lunar", "marble", "marsh", "meadow", "mellow", "merry", "mild", "minted",
+    "misted", "misty", "moonlit", "morning", "mossy", "muted", "neon", "nimble", "noble",
+    "north", "ochre", "olive", "onyx", "opal", "orchid", "outback", "pearl", "pearled",
+    "peat", "petal", "pewter", "pine", "placid", "plucky", "plum", "polar", "polished",
+    "poppy", "prairie", "primrose", "prussian", "purpled", "quartz", "quiet", "quill",
+    "raven", "reckless", "redwood", "restless", "ribbon", "river", "rosemary", "rosy",
+    "ruby", "rusted", "rustic", "russet", "saffron", "sage", "salt", "sandy", "satin",
+    "scarlet", "sea", "shaded", "shadow", "shimmer", "shining", "shore", "silken", "silver",
+    "skylit", "slate", "slatey", "smoky", "smolder", "snowy", "soft", "solar", "splendid",
+    "spruce", "starry", "steadfast", "steady", "sterling", "stone", "sturdy", "sublime",
+    "summer", "sunlit", "sunny", "supple", "sweetbay", "swift", "tawny", "teal", "tender",
+    "terra", "thistle", "thrushlike", "tidal", "tinder", "tinkling", "topaz", "torrid",
+    "tranquil", "trillium", "twilight", "umber", "valley", "velvet", "vernal", "verdant",
+    "vesper", "vibrant", "violet", "vivid", "warm", "warmer", "weathered", "westwind",
+    "whispered", "wildflower", "willow", "winterly", "windy", "winter", "wisp", "withered",
+    "witty", "woodland", "woven", "wren", "wry", "yarrow", "yonder", "zen", "zephyr",
 ];
 
-/// 120 short, evocative nouns. Geographic features, weather, materials, fauna.
+/// ~256 short, evocative nouns. Geographic features, weather, materials,
+/// flora, fauna, objects, light.
+/// v0.7.0-alpha.4: doubled from the alpha.1 set of 120.
 const NOUNS: &[&str] = &[
-    "ash", "atlas", "bay", "beacon", "birch", "blossom", "bough", "branch", "brook", "canyon",
-    "cedar", "cinder", "cirrus", "cliff", "comet", "compass", "coral", "cove", "creek", "crest",
-    "crow", "cypress", "delta", "dew", "dune", "ember", "fern", "field", "finch", "fjord",
-    "flame", "flax", "fleck", "fog", "foam", "forest", "fox", "frost", "garnet", "geyser",
-    "glade", "glen", "glimmer", "grove", "harbor", "haze", "heath", "hollow", "hush", "ivy",
-    "jasper", "juniper", "kelp", "kettle", "knoll", "lake", "lark", "laurel", "leaf", "ledge",
-    "lichen", "linden", "loft", "lotus", "lupin", "maple", "marsh", "meadow", "mesa", "mist",
-    "moor", "moss", "moth", "mountain", "nettle", "oak", "ocean", "opal", "orchard", "owl",
-    "palm", "petal", "pine", "plain", "pond", "poppy", "quartz", "quill", "raven", "reef",
-    "ridge", "river", "rook", "sage", "sand", "savanna", "shale", "sheaf", "shore", "shrub",
-    "sky", "slate", "spruce", "starling", "stone", "summit", "swallow", "thicket", "thrush",
-    "tide", "topaz", "trout", "valley", "vesper", "vine", "wave", "willow", "wisp", "wren",
+    "anchor", "ash", "aspen", "atlas", "aurora", "badger", "bark", "bay", "bayou", "beacon",
+    "beaver", "bell", "birch", "bison", "blossom", "bough", "branch", "breeze", "briar",
+    "brook", "bud", "bunting", "burrow", "butte", "caldera", "camellia", "canyon", "cardinal",
+    "caribou", "cedar", "chime", "chinook", "cinder", "cirrus", "cliff", "cloudburst",
+    "comet", "compass", "copper", "coral", "cove", "creek", "crest", "cricket", "crow",
+    "cumulus", "cyclone", "cypress", "dale", "delta", "dew", "dewdrop", "dolphin", "dove",
+    "dragonfly", "dune", "dusk", "eagle", "ember", "fern", "field", "finch", "fjord", "flame",
+    "flax", "fleck", "fog", "foam", "forest", "fox", "frost", "garnet", "gander", "geode",
+    "geyser", "glade", "gleam", "glen", "glimmer", "gorge", "grove", "hare", "harbor", "haze",
+    "headland", "hearth", "heath", "heron", "hollow", "hummingbird", "ibis", "iris", "ivy",
+    "jasmine", "jasper", "jay", "juniper", "kelp", "kestrel", "kettle", "kingfisher", "knoll",
+    "lagoon", "lake", "lantern", "lark", "laurel", "leaf", "leaflet", "ledge", "lichen",
+    "lily", "linden", "lion", "loft", "loon", "lotus", "lupin", "lynx", "magnolia", "magpie",
+    "maple", "marmot", "marsh", "meadow", "meadowlark", "mesa", "mist", "moor", "moss",
+    "moth", "mountain", "narwhal", "nettle", "nightingale", "nimbus", "oak", "ocean",
+    "ochre", "opal", "orchard", "orchid", "oriole", "otter", "owl", "palm", "pelican",
+    "petal", "pine", "pinion", "plain", "plateau", "plover", "pond", "poppy", "prairie",
+    "prism", "puffin", "quartz", "quill", "raindrop", "rapid", "raven", "ravine", "redwood",
+    "reef", "ridge", "river", "robin", "rook", "rosemary", "rowan", "sable", "saffron", "sage",
+    "salmon", "sand", "sandbar", "sandpiper", "sapling", "savanna", "scrub", "sea", "shadow",
+    "shale", "shard", "sheaf", "shore", "shrub", "sky", "slate", "snowdrop", "snowfall",
+    "snowflake", "sparrow", "spindle", "spire", "spring", "sprout", "spruce", "squall",
+    "starling", "starshine", "steppe", "stone", "stratus", "summit", "swallow", "swift",
+    "tarn", "tern", "thaw", "thicket", "thistle", "thrush", "tide", "tideline", "tinder",
+    "topaz", "tournesol", "trillium", "trout", "tundra", "twilight", "twig", "valley",
+    "vesper", "vine", "violet", "wallaby", "warbler", "wave", "weasel", "whirlwind", "willow",
+    "wisp", "wolf", "wood", "wren", "yarrow", "yew", "zephyr",
 ];
 
-/// 64 curated emojis. All single Unicode codepoint (or VS-16 qualified) —
+/// ~144 curated emojis. All single Unicode codepoint —
 /// no flags, no skin tone, no ZWJ family/profession sequences. Render
-/// consistently across iTerm, Terminal.app, Alacritty, kitty, GNOME Terminal,
-/// Konsole, and tmux. Themed: animals, nature, abstract.
+/// consistently across iTerm, Terminal.app, Alacritty, kitty, GNOME
+/// Terminal, Konsole, and tmux.
+/// v0.7.0-alpha.4: more than doubled from the alpha.1 set of 64. Themed
+/// across animals (fauna heavy because they're the most evocative),
+/// flora, weather/sky, food, music, and abstract symbols.
 const EMOJIS: &[&str] = &[
-    "🦊", "🐺", "🦅", "🦉", "🐝", "🐻", "🦌", "🐢", "🐙", "🐬", "🦋", "🐸", "🦔", "🦣", "🦏",
-    "🐅", "🐆", "🐊", "🦓", "🦒", "🦘", "🐈", "🐇", "🦦", "🦥", "🦡", "🦢", "🦩", "🐉", "🦕",
-    "🦎", "🐍", "🦂", "🦀", "🦞", "🐳", "🐡", "🦈", "🦭", "🐧", "🦃", "🦚", "🦜", "🦤", "🦆",
-    "🌲", "🌳", "🌴", "🌵", "🌷", "🌸", "🌺", "🌻", "🍄", "🌿", "🌱", "🍃", "🌊", "🌋", "🌙",
-    "🌟", "🌈", "🔥", "💎",
+    // Animals — mammals
+    "🦊", "🐺", "🐻", "🐅", "🐆", "🦓", "🦒", "🦌", "🦘", "🐇", "🦔", "🦣", "🦏", "🐈", "🐱",
+    "🐶", "🐰", "🦦", "🦥", "🦡", "🦨", "🦄", "🐴", "🐗", "🐘", "🦬", "🦫", "🐪", "🦙",
+    "🐭", "🐹", "🐀",
+    // Animals — birds
+    "🦅", "🦉", "🦢", "🦩", "🐧", "🦃", "🦚", "🦜", "🦤", "🦆", "🐓", "🐔", "🐦", "🪶",
+    // Animals — reptiles + amphibians
+    "🐊", "🦎", "🐍", "🐢", "🦕", "🦖", "🐸",
+    // Animals — sea
+    "🐙", "🐬", "🐳", "🐋", "🐡", "🦈", "🦭", "🐟", "🐠", "🦀", "🦞", "🦐", "🐚",
+    // Animals — bugs
+    "🐝", "🦋", "🐌", "🐞", "🦗", "🕷", "🦂",
+    // Plants — trees
+    "🌲", "🌳", "🌴", "🌵", "🌱", "🌿", "🍃", "🍀", "🍁", "🍂",
+    // Plants — flowers
+    "🌷", "🌸", "🌺", "🌻", "🌼", "🌹", "🪻", "🪷", "🍄",
+    // Plants — fruits
+    "🍇", "🍈", "🍉", "🍊", "🍋", "🍌", "🍍", "🥭", "🍎", "🍏", "🍐", "🍑", "🍒", "🍓", "🫐",
+    "🥝",
+    // Weather + sky
+    "🌊", "🌋", "🌙", "🌟", "🌈", "🔥", "❄", "💧", "⚡", "☀", "☁", "⛄",
+    // Light + abstract
+    "💎", "🪄", "🔮", "🧿", "🌠",
+    // Music
+    "🎵", "🎶", "🎷", "🎸", "🎹", "🎺", "🎻", "🥁", "🪕", "🪈",
+    // Objects + travel
+    "⚓", "🧭", "🏺", "🪴", "🗿", "🛡", "🗝", "🎲", "🎭", "🎨", "🎯", "🪐",
 ];
 
 #[cfg(test)]

@@ -12,6 +12,22 @@ The first orchestration primitive is `wire session pair-all-local`: zero-paste b
 
 The v0.6 line landed the control plane (orchestration primitives over the bilateral protocol). v0.7 elevates **identity** to a first-class noun. After 4 rounds of persona critique ([issue #24](https://github.com/SlanchaAi/wire/issues/24)) and a 13-system survey of the wider ecosystem ([issue #25](https://github.com/SlanchaAi/wire/issues/25)), the locked direction is: identity is the noun, transport is the verb, mesh is the application. v0.6's `session` abstraction was conflating five concerns; v0.7 untangles them with a clear three-state identity lifecycle (anonymous / local / federation) and a path to operator-friendly cross-machine portability.
 
+### v0.7.0-alpha.4 — wider character variety (9.4× combo space)
+
+Stress testing surfaced a 5.24% nickname-emoji-triple collision rate at 100k samples (alpha.1 word lists: 120 adj × 120 noun × 64 emoji = 921k combos). The numbers were fine for practical multi-Claude usage (~0.04% at 20 sessions per host) but the cap felt small.
+
+Expanded the curated lists:
+- **adjectives:** 120 → 243 (textures, moods, light, weather)
+- **nouns:** 120 → 242 (more flora, fauna, landscape, weather, light)
+- **emojis:** 64 → 147 (mammals, birds, reptiles, sea life, bugs, fruits, plants, music, abstract — still single-codepoint terminal-stable, no flags / ZWJ / skin tones)
+- **combo space:** 921k → 8.64M (9.4×)
+- **collision rate at 100k:** 5.24% → 0.59%
+- **birthday-50%:** 1,132 DIDs → 3,469 DIDs
+
+**Behavior change to flag:** characters are still deterministic per DID, but the *function from DID to character changed* because list lengths shifted. Existing identities now render different characters than they did under alpha.1-.3. On the developer's laptop the migration looked like: `🐅 winter-bay → 🛡 noble-creek`, `🌻 noble-canyon → 🪐 pewter-ocean`, etc.
+
+If you want to keep the alpha.1 characters for sessions that already exist, write `display.json` overrides pinning their old nickname + emoji before upgrading. New sessions automatically use the wider lists.
+
 ### v0.7.0-alpha.2 — characters that actually identify (parent-walk + auto-init + nickname resolver)
 
 alpha.1 shipped the character primitive but left three holes that defeated the whole "every Claude session looks different" point:
