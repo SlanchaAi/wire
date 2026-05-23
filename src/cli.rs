@@ -2175,7 +2175,13 @@ fn cmd_identity_rename(
     // Re-signs the card with the same private key the rest of the identity
     // uses. Backward compat: peers with old wire versions ignore the
     // unknown `display` field, fall back to auto-derived.
-    {
+    //
+    // v0.7.0-alpha.12 (review-fix #134): also push the re-signed card
+    // back to the federation relay so .well-known/wire/agent serves the
+    // updated card. Pre-fix wrote the local card only; federated peers
+    // resolving the handle saw the OLD (pre-rename) card. Best-effort —
+    // failures log to stderr but don't bail (local rename still useful).
+    let signed_card = {
         let mut card = config::read_agent_card()?;
         if let Some(card_obj) = card.as_object_mut() {
             // Strip prior signature; we'll re-sign over the new canonical
@@ -2197,6 +2203,55 @@ fn cmd_identity_rename(
         let sk_seed = config::read_private_key()?;
         let signed = crate::agent_card::sign_agent_card(&card, &sk_seed);
         config::write_agent_card(&signed)?;
+        signed
+    };
+
+    // Re-publish to federation relay if we're bound. Walks the relay_state
+    // self endpoints — pushes the updated card to whichever federation
+    // relay holds our claimed handle. Local-only sessions skip silently.
+    if let Ok(state) = config::read_relay_state() {
+        let self_obj = state.get("self").cloned().unwrap_or(Value::Null);
+        let fed_url = self_obj.get("relay_url").and_then(Value::as_str);
+        let fed_slot_id = self_obj.get("slot_id").and_then(Value::as_str);
+        let fed_slot_token = self_obj.get("slot_token").and_then(Value::as_str);
+        if let (Some(url), Some(slot_id), Some(slot_token)) =
+            (fed_url, fed_slot_id, fed_slot_token)
+        {
+            // Skip loopback / LAN relays (those don't publish handles to a
+            // public phonebook — they're local-only mode).
+            let is_publishable = url.starts_with("https://")
+                || (url.starts_with("http://")
+                    && !url.contains("127.0.0.1")
+                    && !url.contains("localhost"));
+            if is_publishable {
+                let nick_for_claim = signed_card
+                    .get("handle")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                if let Some(nick) = nick_for_claim {
+                    let client = crate::relay_client::RelayClient::new(url);
+                    match client.handle_claim_v2(
+                        &nick,
+                        slot_id,
+                        slot_token,
+                        None,
+                        &signed_card,
+                        None,
+                    ) {
+                        Ok(_) => {
+                            eprintln!(
+                                "wire identity rename: re-published updated card to {url}"
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "wire identity rename: failed to re-publish to relay {url}: {e:#} — local rename is in effect; federated peers will see the old card until next `wire claim` succeeds"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if random_announce {
@@ -2227,9 +2282,9 @@ fn cmd_identity_rename(
             "  · palette stays DID-derived (sticky color across renames)"
         );
         eprintln!(
-            "  · published to your agent-card; NEW pairs see this character. Existing pinned peers \
-             have a cached card from pair-time — they will only see the new name after they re-pair \
-             with you (e.g. `wire add --local-sister <yourname>` from their side)."
+            "  · re-published to your federation relay (if bound); future federation lookups serve \
+             the updated card. Existing pinned peers have a cached card from pair-time and won't \
+             see the new name until they re-pair OR fetch your card fresh."
         );
     }
     Ok(())
