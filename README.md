@@ -41,7 +41,15 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.7.5 (latest)
+## Status — v0.8.0 (latest)
+
+v0.8.0 collapses peer addressing to one canonical verb: **`wire dial <nickname>`**. Operators only type the name they see (`noble-slate`, `cedar-bayou`, `winter-bay`); wire resolves it to a peer (pinned-peer table → local sister registry), drives the right pair flow if needed, optionally queues a first message. The DID stays as the underlying cryptographic anchor; the character nickname IS the operator-facing immutable name.
+
+`wire whois <name>` is the inspector — resolves any name (nickname / handle / session / DID, or `nick@relay-domain` for federation) and prints the full identity row: emoji, character nickname, handle, DID, palette, reachability.
+
+This closes the multi-name fragmentation that hit @paul + @noble-slate during the 2026-05-23 incident. The five-name surface (DID, handle, session, character nickname, operator rename) collapses to one operator-facing name.
+
+
 
 v0.7.5 fixes the silent-fail pair handshake. Before: pair-accept on a session created with `--with-local` (only `self.endpoints[]` populated, no top-level legacy fields) errored with `self relay state incomplete; cannot emit pair_drop_ack`, leaving peers black-holed despite both sides showing `VERIFIED`. Fix: `send_pair_drop_ack` now reads `self.endpoints[0]` as a fallback. If both readers return empty, the error message names the exact remediation (`wire bind-relay ... --migrate-pinned`).
 

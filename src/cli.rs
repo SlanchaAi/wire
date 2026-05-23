@@ -95,6 +95,35 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// v0.8 — "go talk to this name." The one verb operators reach for.
+    ///
+    /// `wire dial <name>` accepts a character nickname (`noble-slate`),
+    /// a session name (`slancha-api`), a card handle, or a DID — whichever
+    /// face you happen to know the peer by. Resolution order:
+    ///
+    /// 1. Already-pinned peer? → no-op (or send if a message was passed).
+    /// 2. Local sister session? → bilateral pair via the disk-read
+    ///    `--local-sister` path (no relay round-trip, no .well-known
+    ///    lookup, no SAS digits).
+    /// 3. Otherwise → bail with a clear hint pointing at federation
+    ///    syntax (`wire dial <handle>@<relay>` for cross-machine peers).
+    ///
+    /// With an optional message, `wire dial <name> "<msg>"` also queues
+    /// and pushes the message after the pair completes. Idempotent: re-
+    /// dialling a known peer just sends.
+    Dial {
+        /// Peer name. Character nickname (preferred), session name,
+        /// card handle, or DID — anything that identifies the peer to
+        /// you.
+        name: String,
+        /// Optional first message to send after the pair lands. Same
+        /// semantics as the body argument to `wire send`. Defaults to
+        /// kind=claim.
+        message: Option<String>,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Stream signed events from peers.
     Tail {
         /// Optional peer filter; if omitted, tails all peers.
@@ -1336,6 +1365,11 @@ pub fn run() -> Result<()> {
             };
             cmd_send(&peer, &kind, &body, deadline.as_deref(), json)
         }
+        Command::Dial {
+            name,
+            message,
+            json,
+        } => cmd_dial(&name, message.as_deref(), json),
         Command::Tail { peer, json, limit } => cmd_tail(peer.as_deref(), json, limit),
         Command::Monitor {
             peer,
@@ -1477,7 +1511,20 @@ pub fn run() -> Result<()> {
             handle,
             json,
             relay,
-        } => cmd_whois(handle.as_deref(), json, relay.as_deref()),
+        } => {
+            // v0.8 smart route: `wire whois <nickname>` (no `@<relay>`)
+            // resolves through the local identity layer (pinned peers
+            // + local sister sessions). `wire whois <nick>@<relay>`
+            // keeps the existing federation `.well-known/wire/agent`
+            // path. `wire whois` (no arg) prints self via the original
+            // path. The character nickname is the canonical operator-
+            // facing name as of v0.8 — most callers should hit the
+            // local route.
+            match handle.as_deref() {
+                Some(h) if !h.contains('@') => cmd_whois_local(h, json),
+                other => cmd_whois(other, json, relay.as_deref()),
+            }
+        }
         Command::Add {
             handle,
             relay,
@@ -3022,6 +3069,241 @@ fn parse_kind(s: &str) -> Result<u32> {
     }
     // Unknown name — default to kind 1 (decision) for v0.1.
     Ok(1)
+}
+
+// ---------- dial / whois (v0.8 canonical addressing) ----------
+
+/// `wire dial <name> [message]` — the one verb operators reach for.
+/// Resolves any name (nickname/handle/session/DID) to a peer and
+/// drives the right pair flow + optional first message. See the
+/// `Command::Dial` doc for the resolution ladder.
+fn cmd_dial(name: &str, message: Option<&str>, as_json: bool) -> Result<()> {
+    let resolution = resolve_name_to_target(name)?;
+    let mut steps: Vec<Value> = Vec::new();
+
+    match &resolution {
+        DialTarget::PinnedPeer { handle, .. } => {
+            steps.push(json!({
+                "step": "resolved",
+                "kind": "already_pinned",
+                "handle": handle,
+            }));
+        }
+        DialTarget::LocalSister { session_name, .. } => {
+            steps.push(json!({
+                "step": "resolved",
+                "kind": "local_sister",
+                "session": session_name,
+            }));
+            // Drive the bilateral pair via the disk-read sister path.
+            // cmd_add_local_sister already handles "already paired"
+            // gracefully (its internal state.peers check returns the
+            // existing pin instead of re-issuing a pair_drop), so
+            // re-dialling is idempotent.
+            cmd_add_local_sister(session_name, true).map_err(|e| {
+                anyhow!("dial: local-sister pair to `{session_name}` failed: {e:#}")
+            })?;
+            steps.push(json!({
+                "step": "paired",
+                "via": "local_sister",
+            }));
+        }
+    }
+
+    let send_handle = match &resolution {
+        DialTarget::PinnedPeer { handle, .. } => handle.clone(),
+        DialTarget::LocalSister { handle, .. } => handle.clone(),
+    };
+
+    let send_result = if let Some(msg) = message {
+        let r = cmd_send(&send_handle, "claim", msg, None, true);
+        match &r {
+            Ok(()) => steps.push(json!({"step": "sent", "to": send_handle, "kind": "claim"})),
+            Err(e) => steps.push(json!({"step": "send_failed", "error": format!("{e:#}")})),
+        }
+        Some(r)
+    } else {
+        None
+    };
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "name_input": name,
+                "resolved_handle": send_handle,
+                "steps": steps,
+            }))?
+        );
+    } else {
+        println!("wire dial: resolved `{name}` → handle `{send_handle}`");
+        for s in &steps {
+            let step = s.get("step").and_then(Value::as_str).unwrap_or("?");
+            println!("  - {step}");
+        }
+        if message.is_some() {
+            println!("  (use `wire tail {send_handle}` to read replies)");
+        }
+    }
+    if let Some(Err(e)) = send_result {
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// `wire whois <name>` — resolve any local name (nickname/session/
+/// handle/DID) to the full identity row. The inspector for the
+/// canonical addressing layer. For federation `handle@relay-domain`
+/// resolution see `cmd_whois` (line 5536+) — the dispatcher chooses
+/// based on whether the input contains `@`.
+fn cmd_whois_local(name: &str, as_json: bool) -> Result<()> {
+    let resolution = resolve_name_to_target(name)?;
+    match resolution {
+        DialTarget::PinnedPeer {
+            handle,
+            did,
+            nickname,
+            emoji,
+            tier,
+        } => {
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "kind": "pinned_peer",
+                        "handle": handle,
+                        "did": did,
+                        "nickname": nickname,
+                        "emoji": emoji,
+                        "tier": tier,
+                    }))?
+                );
+            } else {
+                let n = nickname.as_deref().unwrap_or("(no character)");
+                let e = emoji.as_deref().unwrap_or("?");
+                println!("{e} {n}");
+                println!("  handle:   {handle}");
+                println!("  did:      {did}");
+                println!("  tier:     {tier}");
+                println!("  reach:    pinned peer (already in trust ring + slot pinned)");
+            }
+        }
+        DialTarget::LocalSister {
+            session_name,
+            handle,
+            did,
+            nickname,
+            emoji,
+        } => {
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "kind": "local_sister",
+                        "session_name": session_name,
+                        "handle": handle,
+                        "did": did,
+                        "nickname": nickname,
+                        "emoji": emoji,
+                    }))?
+                );
+            } else {
+                let n = nickname.as_deref().unwrap_or("(no character)");
+                let e = emoji.as_deref().unwrap_or("?");
+                println!("{e} {n}");
+                println!("  session:  {session_name}");
+                println!("  handle:   {handle}");
+                println!(
+                    "  did:      {}",
+                    did.as_deref().unwrap_or("(card unreadable)")
+                );
+                println!("  reach:    local sister on this machine — `wire dial {n}` pairs us");
+            }
+        }
+    }
+    Ok(())
+}
+
+enum DialTarget {
+    PinnedPeer {
+        handle: String,
+        did: String,
+        nickname: Option<String>,
+        emoji: Option<String>,
+        tier: String,
+    },
+    LocalSister {
+        session_name: String,
+        handle: String,
+        did: Option<String>,
+        nickname: Option<String>,
+        emoji: Option<String>,
+    },
+}
+
+/// Resolution order: pinned peers first (already in our trust ring),
+/// then local sister sessions (on-disk discovery). Case-insensitive
+/// match against handle, character nickname, session name, or DID.
+fn resolve_name_to_target(name: &str) -> Result<DialTarget> {
+    let needle = name.trim();
+    if needle.is_empty() {
+        bail!("empty name");
+    }
+
+    // 1. Pinned peers — `wire peers` data.
+    if config::is_initialized().unwrap_or(false) {
+        let trust = config::read_trust().unwrap_or(serde_json::Value::Null);
+        if let Some(agents) = trust.get("agents").and_then(Value::as_array) {
+            for agent in agents {
+                let did = agent.get("did").and_then(Value::as_str).unwrap_or("");
+                if did.is_empty() {
+                    continue;
+                }
+                let handle = crate::agent_card::display_handle_from_did(did).to_string();
+                let character = crate::character::Character::from_did(did);
+                let tier = agent
+                    .get("tier")
+                    .and_then(Value::as_str)
+                    .unwrap_or("UNKNOWN")
+                    .to_string();
+                let matches = handle.eq_ignore_ascii_case(needle)
+                    || did.eq_ignore_ascii_case(needle)
+                    || character.nickname.eq_ignore_ascii_case(needle);
+                if matches {
+                    return Ok(DialTarget::PinnedPeer {
+                        handle,
+                        did: did.to_string(),
+                        nickname: Some(character.nickname),
+                        emoji: Some(character.emoji.to_string()),
+                        tier,
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. Local sister sessions.
+    if let Some(session_name) = crate::session::resolve_local_sister(needle) {
+        let sessions = crate::session::list_sessions().unwrap_or_default();
+        let s = sessions.iter().find(|s| s.name == session_name);
+        if let Some(s) = s {
+            return Ok(DialTarget::LocalSister {
+                session_name: s.name.clone(),
+                handle: s.handle.clone().unwrap_or_else(|| s.name.clone()),
+                did: s.did.clone(),
+                nickname: s.character.as_ref().map(|c| c.nickname.clone()),
+                emoji: s.character.as_ref().map(|c| c.emoji.to_string()),
+            });
+        }
+    }
+
+    bail!(
+        "no peer matched `{name}`.\n\
+         Tried: pinned peers (`wire peers`) + local sister sessions \
+         (`wire session list-local`).\n\
+         For cross-machine federation: `wire dial <handle>@<relay-domain>` \
+         (note: federation dial isn't implemented yet — use `wire add` directly)."
+    );
 }
 
 // ---------- tail ----------
