@@ -406,6 +406,100 @@ fn session_destroy_requires_force_flag_v0_5_16() {
 }
 
 #[test]
+fn session_bind_attaches_existing_session_to_cwd_v0_7_1() {
+    // v0.7.1: `wire session bind` adds a cwd → session entry so the
+    // walk-up auto-detect resolves to the leaf project rather than an
+    // already-registered ancestor.
+    let home = fresh_home();
+    write_session_fixture(&home, "wire", None);
+    let project_cwd = tempfile::tempdir().unwrap();
+
+    let out = Command::new(wire_bin())
+        .args(["session", "bind", "wire", "--json"])
+        .env("WIRE_HOME", &home)
+        .env_remove("RUST_LOG")
+        .current_dir(project_cwd.path())
+        .output()
+        .expect("failed to spawn wire");
+    assert!(out.status.success(), "bind failed: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed["session"], "wire");
+    assert_eq!(parsed["changed"], true);
+    assert!(parsed["previous"].is_null());
+
+    let registry: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.join("sessions").join("registry.json")).unwrap(),
+    )
+    .unwrap();
+    let by_cwd = registry["by_cwd"].as_object().unwrap();
+    let canonical_cwd = std::fs::canonicalize(project_cwd.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let raw_cwd = project_cwd.path().to_string_lossy().into_owned();
+    // The CLI records cwd as it sees it from std::env::current_dir(); on
+    // macOS the tempdir is symlinked under /private/var, so accept either
+    // the canonical or raw form.
+    let stored = by_cwd
+        .keys()
+        .find(|k| **k == canonical_cwd || **k == raw_cwd)
+        .unwrap_or_else(|| panic!("registry missing cwd entry: {by_cwd:?}"));
+    assert_eq!(by_cwd[stored], "wire");
+}
+
+#[test]
+fn session_bind_errors_on_unknown_session_v0_7_1() {
+    let home = fresh_home();
+    let project_cwd = tempfile::tempdir().unwrap();
+
+    let out = Command::new(wire_bin())
+        .args(["session", "bind", "ghost"])
+        .env("WIRE_HOME", &home)
+        .env_remove("RUST_LOG")
+        .current_dir(project_cwd.path())
+        .output()
+        .expect("failed to spawn wire");
+    assert!(!out.status.success(), "bind should fail: {:?}", out);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("ghost"),
+        "stderr should name session: {stderr}"
+    );
+    assert!(
+        stderr.contains("wire session new") || stderr.contains("does not exist"),
+        "stderr should hint: {stderr}"
+    );
+}
+
+#[test]
+fn session_bind_is_idempotent_when_already_bound_v0_7_1() {
+    let home = fresh_home();
+    write_session_fixture(&home, "wire", None);
+    let project_cwd = tempfile::tempdir().unwrap();
+
+    // First bind succeeds + sets changed=true.
+    let _ = Command::new(wire_bin())
+        .args(["session", "bind", "wire", "--json"])
+        .env("WIRE_HOME", &home)
+        .current_dir(project_cwd.path())
+        .output()
+        .expect("first bind");
+
+    // Second bind is a no-op + sets changed=false.
+    let out = Command::new(wire_bin())
+        .args(["session", "bind", "wire", "--json"])
+        .env("WIRE_HOME", &home)
+        .current_dir(project_cwd.path())
+        .output()
+        .expect("second bind");
+    assert!(out.status.success(), "second bind: {:?}", out);
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("valid json on second bind");
+    assert_eq!(parsed["changed"], false);
+}
+
+#[test]
 fn session_destroy_with_force_removes_state_and_registry_entry_v0_5_16() {
     let home = fresh_home();
     let session_home = write_session_fixture(&home, "wire", Some("/Users/paul/Source/wire"));

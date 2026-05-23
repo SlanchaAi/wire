@@ -1040,6 +1040,21 @@ pub enum SessionCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Attach an existing session to the current cwd in the registry,
+    /// so subsequent auto-detect from this cwd resolves to that session
+    /// instead of walking up to an ancestor's binding. Use when an
+    /// ancestor dir (e.g. `~/Source`) is already registered and is
+    /// shadowing per-project identities for cwds beneath it. Idempotent;
+    /// re-binding to the same name is a no-op. Re-binding to a different
+    /// name overwrites the prior entry with a stderr warning.
+    Bind {
+        /// Session name to bind. Must already exist (run `wire session
+        /// new <name>` first if not). With no name, auto-derives from
+        /// `basename(cwd)` and errors if no session of that name exists.
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Tear down a session: kills its daemon (if running), deletes its
     /// state directory, and removes it from the registry. Requires
     /// `--force` because state loss is unrecoverable (keypair gone).
@@ -6785,8 +6800,76 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
         }
         SessionCommand::Env { name, json } => cmd_session_env(name.as_deref(), json),
         SessionCommand::Current { json } => cmd_session_current(json),
+        SessionCommand::Bind { name, json } => cmd_session_bind(name.as_deref(), json),
         SessionCommand::Destroy { name, force, json } => cmd_session_destroy(&name, force, json),
     }
+}
+
+fn cmd_session_bind(name_arg: Option<&str>, json: bool) -> Result<()> {
+    let cwd = std::env::current_dir().with_context(|| "reading cwd")?;
+    let cwd_str = cwd.to_string_lossy().into_owned();
+
+    let resolved_name = match name_arg {
+        Some(n) => crate::session::sanitize_name(n),
+        None => crate::session::sanitize_name(
+            cwd.file_name()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| anyhow!("cwd has no basename to derive session name from"))?,
+        ),
+    };
+
+    let session_home = crate::session::session_dir(&resolved_name)?;
+    if !session_home.exists() {
+        bail!(
+            "session `{resolved_name}` does not exist (looked at {}). Create it first with `wire session new {resolved_name}` or pass an existing name.",
+            session_home.display()
+        );
+    }
+
+    let prior = crate::session::read_registry()
+        .ok()
+        .and_then(|r| r.by_cwd.get(&cwd_str).cloned());
+    if prior.as_deref() == Some(resolved_name.as_str()) {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "cwd": cwd_str,
+                    "session": resolved_name,
+                    "changed": false,
+                }))?
+            );
+        } else {
+            println!("cwd `{cwd_str}` already bound to session `{resolved_name}` (no change)");
+        }
+        return Ok(());
+    }
+    if let Some(prior_name) = &prior {
+        eprintln!(
+            "wire session bind: cwd `{cwd_str}` was bound to `{prior_name}`; overwriting with `{resolved_name}`."
+        );
+    }
+
+    crate::session::update_registry(|reg| {
+        reg.by_cwd.insert(cwd_str.clone(), resolved_name.clone());
+        Ok(())
+    })?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "cwd": cwd_str,
+                "session": resolved_name,
+                "changed": true,
+                "previous": prior,
+            }))?
+        );
+    } else {
+        println!("bound cwd `{cwd_str}` → session `{resolved_name}`");
+        println!("(next `wire` invocation from this cwd will auto-detect into this session)");
+    }
+    Ok(())
 }
 
 fn resolve_session_name(name: Option<&str>) -> Result<String> {
