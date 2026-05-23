@@ -127,6 +127,51 @@ pub fn write_registry(reg: &SessionRegistry) -> Result<()> {
     Ok(())
 }
 
+/// v0.7.0-alpha.3: flock'd read-modify-write of the session registry.
+///
+/// `write_registry` alone is not safe under concurrency — multiple MCP
+/// processes auto-initing in parallel each read an old snapshot, mutate
+/// their copy, and write back, losing N-1 updates. This helper acquires
+/// an exclusive flock on a sibling lockfile, re-reads inside the lock,
+/// applies the caller's modifier, writes atomically, and releases.
+///
+/// Modeled on `config::update_relay_state`. Lock contention is bounded:
+/// modifications are pure HashMap operations, write is whole-file at
+/// roughly the registry size (KBs, not MBs).
+pub fn update_registry<F>(modifier: F) -> Result<()>
+where
+    F: FnOnce(&mut SessionRegistry) -> Result<()>,
+{
+    use fs2::FileExt;
+    let path = registry_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
+    }
+    let lock_path = path.with_extension("lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening {lock_path:?}"))?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("flock {lock_path:?}"))?;
+    // Re-read INSIDE the lock — any prior snapshot would race.
+    let mut reg = read_registry().unwrap_or_default();
+    let result = modifier(&mut reg);
+    let write_result = if result.is_ok() {
+        write_registry(&reg)
+    } else {
+        Ok(())
+    };
+    let _ = fs2::FileExt::unlock(&lock_file);
+    result?;
+    write_result?;
+    Ok(())
+}
+
 /// Sanitize an arbitrary string to a session-name-safe form: lowercase
 /// ASCII alphanumeric + `-` + `_`, replace other chars with `-`,
 /// dedupe consecutive dashes, trim leading/trailing dashes, max 32 chars.
@@ -220,6 +265,10 @@ pub struct SessionInfo {
     /// actually a live process (best-effort, not POSIX-portable but
     /// matches the existing `wire status` / `wire doctor` checks).
     pub daemon_running: bool,
+    /// Display character (nickname + emoji + color palette) derived from
+    /// the session's DID. `None` when the session has no agent-card yet
+    /// (pre-init). Lazy-computed at read time; never persisted to disk.
+    pub character: Option<crate::character::Character>,
 }
 
 /// Enumerate every on-disk session by reading `sessions_root()`. Cross-
@@ -253,6 +302,19 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
         let card_path = path.join("config").join("wire").join("agent-card.json");
         let (did, handle) = read_card_identity(&card_path);
         let daemon_running = check_daemon_live(&path);
+        // v0.7.0-alpha.3: read this session's display.json for any
+        // operator-chosen nickname/emoji overrides.
+        let display_overrides_path =
+            path.join("config").join("wire").join("display.json");
+        let overrides = crate::config::read_display_overrides_at(&display_overrides_path)
+            .unwrap_or_default();
+        let character = did.as_deref().map(|d| {
+            crate::character::Character::from_did_with_override(
+                d,
+                overrides.nickname.as_deref(),
+                overrides.emoji.as_deref(),
+            )
+        });
         out.push(SessionInfo {
             name: name.clone(),
             cwd: name_to_cwd.get(&name).cloned(),
@@ -260,6 +322,7 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
             did,
             handle,
             daemon_running,
+            character,
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -471,13 +534,24 @@ pub fn list_local_sessions() -> Result<LocalSessionListing> {
 /// inboxes when the operator expected a per-session view.
 pub fn detect_session_wire_home(cwd: &std::path::Path) -> Option<PathBuf> {
     let registry = read_registry().ok()?;
-    let cwd_str = cwd.to_string_lossy().into_owned();
-    let session_name = registry.by_cwd.get(&cwd_str)?;
-    let session_home = session_dir(session_name).ok()?;
-    if !session_home.exists() {
-        return None;
+    // v0.7.0-alpha.2: walk up parent dirs. Subdirs of a registered cwd
+    // inherit their parent's wire identity (e.g.
+    // `~/Source/slancha-business/tools/recon` → `slancha-business` session).
+    // Without this, subdirs all fell back to the machine-wide default
+    // identity, which silently collapsed multiple Claude sessions onto the
+    // same DID + character.
+    let mut probe: Option<&std::path::Path> = Some(cwd);
+    while let Some(path) = probe {
+        let path_str = path.to_string_lossy().into_owned();
+        if let Some(session_name) = registry.by_cwd.get(&path_str) {
+            let session_home = session_dir(session_name).ok()?;
+            if session_home.exists() {
+                return Some(session_home);
+            }
+        }
+        probe = path.parent();
     }
-    Some(session_home)
+    None
 }
 
 /// v0.6.10: warn at MCP/CLI startup if another `wire mcp` process is

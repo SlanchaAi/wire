@@ -205,6 +205,47 @@ pub fn read_agent_card() -> Result<Value> {
     Ok(serde_json::from_slice(&body)?)
 }
 
+// ---------- display overrides (v0.7.0-alpha.3) ----------
+
+/// Path to `display.json` — operator-chosen character nickname + emoji
+/// override. Sidecar to agent-card. NOT signed (display-only, local-only).
+///
+/// Format: `{"nickname": "foxtrot-meadow", "emoji": "🦊"}` — both fields
+/// optional, omitted means use the auto-derived value.
+pub fn display_overrides_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("display.json"))
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DisplayOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
+}
+
+pub fn read_display_overrides() -> Result<DisplayOverrides> {
+    read_display_overrides_at(&display_overrides_path()?)
+}
+
+pub fn read_display_overrides_at(path: &Path) -> Result<DisplayOverrides> {
+    if !path.exists() {
+        return Ok(DisplayOverrides::default());
+    }
+    let body = fs::read(path).with_context(|| format!("reading {path:?}"))?;
+    Ok(serde_json::from_slice(&body)?)
+}
+
+pub fn write_display_overrides(overrides: &DisplayOverrides) -> Result<()> {
+    let path = display_overrides_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
+    }
+    let body = serde_json::to_vec_pretty(overrides)?;
+    fs::write(&path, body).with_context(|| format!("writing {path:?}"))?;
+    Ok(())
+}
+
 pub fn write_trust(trust: &Value) -> Result<()> {
     let path = trust_path()?;
     let body = serde_json::to_vec_pretty(trust)?;

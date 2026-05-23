@@ -55,6 +55,14 @@ pub enum Command {
     Whoami {
         #[arg(long)]
         json: bool,
+        /// Print just `<emoji> <nickname>` (e.g. `🦊 foxtrot-meadow`).
+        /// Plain text, no ANSI escapes. Useful for piping into other tools.
+        #[arg(long, conflicts_with = "json")]
+        short: bool,
+        /// Print `<emoji> <nickname>` wrapped in ANSI 256-color escapes.
+        /// Drop into a Claude Code statusline command for live identity display.
+        #[arg(long, conflicts_with_all = ["json", "short"])]
+        colored: bool,
     },
     /// List pinned peers with their tiers and capabilities.
     Peers {
@@ -459,6 +467,14 @@ pub enum Command {
     /// so re-entering the same project reuses the same identity.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// Manage this session's identity display layer (character override).
+    /// v0.7.0-alpha.3: agents can rename themselves — operator or Claude
+    /// itself picks a custom nickname + emoji that overrides the
+    /// auto-derived hash-based defaults.
+    Identity {
+        #[command(subcommand)]
+        cmd: IdentityCommand,
+    },
     /// v0.6.3 (issues #18 / #19 / #20 / #21): orchestration verbs for the
     /// sister-session mesh. `wire mesh status` is the live view of every
     /// paired sister (alias for `wire session mesh-status`); `wire mesh
@@ -716,6 +732,47 @@ pub enum DiagAction {
     Disable,
     /// Report whether diag is currently enabled + the file's size.
     Status {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IdentityCommand {
+    /// Override the auto-derived nickname and/or emoji. Persists to
+    /// `<WIRE_HOME>/config/wire/display.json`. Local-only; peers still
+    /// see the auto-derived character from your DID (until federation
+    /// publishes overrides in a future release).
+    ///
+    /// Examples:
+    ///   wire identity rename --name foxtrot-meadow --emoji 🦊
+    ///   wire identity rename --emoji 🐉      (keep auto nickname)
+    ///   wire identity rename --random        (re-roll auto from seed; clears overrides)
+    Rename {
+        /// New nickname (any non-empty string; convention is
+        /// `adjective-noun`, e.g. `foxtrot-meadow`). Omit to leave nickname
+        /// at its current value (auto-derived unless previously set).
+        #[arg(long)]
+        name: Option<String>,
+        /// New emoji glyph. Any single grapheme; the curated set is
+        /// recommended for cross-terminal compatibility.
+        #[arg(long)]
+        emoji: Option<String>,
+        /// Clear all overrides; revert to auto-derived from DID hash.
+        /// Mutually exclusive with `--name` / `--emoji`.
+        #[arg(long, conflicts_with_all = ["name", "emoji"])]
+        clear: bool,
+        /// Re-roll: alias for `--clear` plus an explanatory stderr line.
+        /// Auto-derived is itself deterministic, so this just removes
+        /// any previously-set override.
+        #[arg(long, conflicts_with_all = ["name", "emoji", "clear"])]
+        random: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the current character (auto-derived OR override).
+    /// Equivalent to `wire whoami --short` but scoped here for grouping.
+    Show {
         #[arg(long)]
         json: bool,
     },
@@ -1111,7 +1168,11 @@ pub fn run() -> Result<()> {
                 cmd_status(json)
             }
         }
-        Command::Whoami { json } => cmd_whoami(json),
+        Command::Whoami {
+            json,
+            short,
+            colored,
+        } => cmd_whoami(json, short, colored),
         Command::Peers { json } => cmd_peers(json),
         Command::Send {
             peer,
@@ -1251,6 +1312,7 @@ pub fn run() -> Result<()> {
         Command::PairReject { peer, json } => cmd_pair_reject(&peer, json),
         Command::PairListInbound { json } => cmd_pair_list_inbound(json),
         Command::Session(cmd) => cmd_session(cmd),
+        Command::Identity { cmd } => cmd_identity(cmd),
         Command::Mesh(cmd) => cmd_mesh(cmd),
         Command::Invite {
             relay,
@@ -1900,7 +1962,28 @@ fn cmd_status_peer(peer: &str, as_json: bool) -> Result<()> {
 
 // ---------- whoami ----------
 
-fn cmd_whoami(as_json: bool) -> Result<()> {
+/// Return the current cwd with the user's home dir abbreviated to `~/`.
+/// Used in whoami `--short` / `--colored` output so multi-window operators
+/// see *what project* each Claude is working in alongside the character.
+fn current_cwd_display() -> String {
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(_) => return String::from("?"),
+    };
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rel) = cwd.strip_prefix(&home) {
+            // strip_prefix returns "" for cwd == home itself; show "~" then.
+            let rel_str = rel.to_string_lossy();
+            if rel_str.is_empty() {
+                return String::from("~");
+            }
+            return format!("~/{}", rel_str);
+        }
+    }
+    cwd.to_string_lossy().into_owned()
+}
+
+fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
     }
@@ -1915,6 +1998,37 @@ fn cmd_whoami(as_json: bool) -> Result<()> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| crate::agent_card::display_handle_from_did(&did).to_string());
+    // v0.7.0-alpha.3: read sidecar display.json for any operator-chosen
+    // override of nickname/emoji. Palette stays auto-derived from DID.
+    let overrides = config::read_display_overrides().unwrap_or_default();
+    let character = crate::character::Character::from_did_with_override(
+        &did,
+        overrides.nickname.as_deref(),
+        overrides.emoji.as_deref(),
+    );
+
+    // v0.7.0-alpha.3: append the current cwd (home-abbreviated to `~/`)
+    // so operators tab-flipping between multiple Claude windows see both
+    // *who* this session is (character) and *what* it's working on (cwd).
+    // The cwd is the OPERATOR's cwd, not WIRE_HOME — gives them the
+    // anchor they're looking for: "🐅 winter-bay · ~/Source/wire".
+    let cwd_display = current_cwd_display();
+
+    // Fast paths used by statuslines, piping, scripts. No agent-card parsing
+    // beyond did — these calls are hot (statusline polls ~300ms).
+    if short {
+        println!("{} · {}", character.short(), cwd_display);
+        return Ok(());
+    }
+    if colored {
+        println!(
+            "{} \x1b[2m·\x1b[0m {}",
+            character.colored(),
+            cwd_display
+        );
+        return Ok(());
+    }
+
     let pk_b64 = card
         .get("verify_keys")
         .and_then(Value::as_object)
@@ -1931,6 +2045,8 @@ fn cmd_whoami(as_json: bool) -> Result<()> {
         .unwrap_or_else(|| json!(["wire/v3.1"]));
 
     if as_json {
+        let has_override =
+            overrides.nickname.is_some() || overrides.emoji.is_some();
         println!(
             "{}",
             serde_json::to_string(&json!({
@@ -1941,12 +2057,103 @@ fn cmd_whoami(as_json: bool) -> Result<()> {
                 "public_key_b64": pk_b64,
                 "capabilities": capabilities,
                 "config_dir": config::config_dir()?.to_string_lossy(),
+                "character": character,
+                "character_override": has_override,
             }))?
         );
     } else {
+        println!("{}", character.colored());
         println!("{did} (ed25519:{key_id})");
         println!("fingerprint: {fp}");
         println!("capabilities: {capabilities}");
+    }
+    Ok(())
+}
+
+// ---------- identity (v0.7.0-alpha.3) ----------
+
+fn cmd_identity(cmd: IdentityCommand) -> Result<()> {
+    match cmd {
+        IdentityCommand::Rename {
+            name,
+            emoji,
+            clear,
+            random,
+            json,
+        } => cmd_identity_rename(name, emoji, clear || random, random, json),
+        IdentityCommand::Show { json } => cmd_whoami(json, !json, false),
+    }
+}
+
+fn cmd_identity_rename(
+    name: Option<String>,
+    emoji: Option<String>,
+    clear: bool,
+    random_announce: bool,
+    as_json: bool,
+) -> Result<()> {
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire init <handle>` first");
+    }
+
+    // Read DID once for character derivation in the response.
+    let card = config::read_agent_card()?;
+    let did = card
+        .get("did")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let new_overrides = if clear {
+        config::DisplayOverrides::default()
+    } else {
+        // Merge: keep existing fields if not explicitly provided.
+        let mut existing = config::read_display_overrides().unwrap_or_default();
+        if let Some(n) = name {
+            existing.nickname = Some(n);
+        }
+        if let Some(e) = emoji {
+            existing.emoji = Some(e);
+        }
+        existing
+    };
+
+    // If clearing AND no overrides existed AND no flags given, refuse so we
+    // don't silently no-op. Random implies clear with announcement.
+    let no_fields_provided = new_overrides.nickname.is_none()
+        && new_overrides.emoji.is_none()
+        && !clear
+        && !random_announce;
+    if no_fields_provided {
+        bail!("nothing to do — pass --name, --emoji, --clear, or --random");
+    }
+
+    config::write_display_overrides(&new_overrides)?;
+
+    if random_announce {
+        eprintln!("wire identity rename: overrides cleared; falling back to auto-derived character (DID-deterministic, so the character is the same as it was before any rename).");
+    }
+
+    let character = crate::character::Character::from_did_with_override(
+        &did,
+        new_overrides.nickname.as_deref(),
+        new_overrides.emoji.as_deref(),
+    );
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "did": did,
+                "character": character,
+                "overrides": new_overrides,
+            }))?
+        );
+    } else {
+        println!(
+            "renamed → {}  (palette stays DID-derived; peers still see auto-derived character until federation publishes overrides)",
+            character.colored()
+        );
     }
     Ok(())
 }
@@ -2013,11 +2220,19 @@ fn cmd_peers(as_json: bool) -> Result<()> {
             .and_then(|c| c.get("capabilities"))
             .cloned()
             .unwrap_or_else(|| json!([]));
+        // v0.7.0-alpha.2: derive peer character from peer DID so
+        // operators see the same nickname their peer renders locally.
+        let character = if did.is_empty() {
+            None
+        } else {
+            Some(crate::character::Character::from_did(&did))
+        };
         peers.push(json!({
             "handle": handle,
             "did": did,
             "tier": tier,
             "capabilities": capabilities,
+            "character": character,
         }));
     }
 
@@ -2027,11 +2242,31 @@ fn cmd_peers(as_json: bool) -> Result<()> {
         println!("no peers pinned (run `wire join <code>` to pair)");
     } else {
         for p in &peers {
+            let did = p["did"].as_str().unwrap_or("");
+            let colored_char = if did.is_empty() {
+                "?".to_string()
+            } else {
+                crate::character::Character::from_did(did).colored()
+            };
+            // Pad based on plain-text width (emoji + 1 + nickname). We
+            // approximate with 22 byte slots to leave room for ANSI escapes.
+            let plain_len = if did.is_empty() {
+                1
+            } else {
+                crate::character::Character::from_did(did)
+                    .short()
+                    .chars()
+                    .count()
+                    + 1 // emoji-wide compensation
+            };
+            let pad = 22usize.saturating_sub(plain_len);
             println!(
-                "{:<20} {:<10} {}",
+                "{}{}  {:<20} {:<10} {}",
+                colored_char,
+                " ".repeat(pad),
                 p["handle"].as_str().unwrap_or(""),
                 p["tier"].as_str().unwrap_or(""),
-                p["did"].as_str().unwrap_or(""),
+                did,
             );
         }
     }
@@ -2131,7 +2366,20 @@ fn cmd_send(
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
     }
-    let peer = crate::agent_card::bare_handle(peer);
+    let peer_in = crate::agent_card::bare_handle(peer).to_string();
+    // v0.7.0-alpha.2: nickname-as-handle resolution. If the input matches
+    // a pinned peer's character nickname (derived from their DID), swap
+    // to the canonical handle for downstream lookups. Surface the
+    // resolution to stderr so operators see the indirection.
+    let peer = match resolve_peer_handle(&peer_in) {
+        Some(resolved) if resolved != peer_in => {
+            eprintln!("wire send: resolved nickname `{peer_in}` → peer `{resolved}`");
+            resolved
+        }
+        Some(canonical) => canonical, // exact handle match
+        None => peer_in,               // pass through; downstream will error if truly unknown
+    };
+    let peer = peer.as_str();
     let sk_seed = config::read_private_key()?;
     let card = config::read_agent_card()?;
     let did = card.get("did").and_then(Value::as_str).unwrap_or("");
@@ -4544,17 +4792,98 @@ fn is_known_relay_domain(peer_domain: &str, our_relay_url: &str) -> bool {
 /// No `.well-known/wire/agent` resolution. Reserved-nick sessions (like
 /// the cwd-derived `wire`) are addressable because the local relay never
 /// needed a public claim for sister coordination.
-fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<()> {
-    // 1. Locate sister session by name.
-    let sessions = crate::session::list_sessions()?;
-    let sister = sessions
+/// v0.7.0-alpha.2/3: resolve an input (session name or character nickname)
+/// to a local sister session.
+///
+/// `wire add --local-sister <name-or-nickname>` and adjacent commands take
+/// either form. Exact session-name matches always win; nickname matches
+/// are a fallback so operators can type "winter-bay" instead of "wire".
+/// When a nickname is ambiguous (two sessions share it, e.g. auto-derived
+/// for one + override on another), returns `Err(ResolveError::Ambiguous)`
+/// with the candidate list so the caller can surface a disambiguation
+/// hint instead of silently picking one.
+fn resolve_local_session<'a>(
+    sessions: &'a [crate::session::SessionInfo],
+    input: &str,
+) -> Result<&'a crate::session::SessionInfo, ResolveError> {
+    // Exact session-name match always wins, even if a nickname elsewhere
+    // also matches. Predictable for scripts and operator muscle memory.
+    if let Some(s) = sessions.iter().find(|s| s.name == input) {
+        return Ok(s);
+    }
+    let nick_matches: Vec<&crate::session::SessionInfo> = sessions
         .iter()
-        .find(|s| s.name == sister_name)
-        .ok_or_else(|| {
-            anyhow!(
-                "no sister session named `{sister_name}` (run `wire session list` to see what's available)"
-            )
-        })?;
+        .filter(|s| {
+            s.character
+                .as_ref()
+                .map(|c| c.nickname == input)
+                .unwrap_or(false)
+        })
+        .collect();
+    match nick_matches.len() {
+        0 => Err(ResolveError::NotFound),
+        1 => Ok(nick_matches[0]),
+        _ => Err(ResolveError::Ambiguous(
+            nick_matches.iter().map(|s| s.name.clone()).collect(),
+        )),
+    }
+}
+
+#[derive(Debug)]
+enum ResolveError {
+    NotFound,
+    Ambiguous(Vec<String>),
+}
+
+/// v0.7.0-alpha.2: resolve a peer input (handle or character nickname)
+/// to a pinned peer's canonical handle.
+///
+/// `wire send <peer>` accepts either the handle the peer registered with
+/// or their character nickname (derived from their DID). Returns the
+/// canonical handle for downstream lookups, or None if no peer matches.
+fn resolve_peer_handle(input: &str) -> Option<String> {
+    let trust = config::read_trust().ok()?;
+    let agents = trust.get("agents")?.as_object()?;
+    // Exact handle match wins.
+    if agents.contains_key(input) {
+        return Some(input.to_string());
+    }
+    // Fallback: scan peers, compute character per DID, match nickname.
+    for (handle, agent) in agents.iter() {
+        if let Some(did) = agent.get("did").and_then(Value::as_str) {
+            let character = crate::character::Character::from_did(did);
+            if character.nickname == input {
+                return Some(handle.clone());
+            }
+        }
+    }
+    None
+}
+
+fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<()> {
+    // 1. Locate sister session by name OR character nickname.
+    let sessions = crate::session::list_sessions()?;
+    let sister = match resolve_local_session(&sessions, sister_name) {
+        Ok(s) => s,
+        Err(ResolveError::NotFound) => bail!(
+            "no sister session named `{sister_name}` (matched by session name or character nickname). \
+             Run `wire session list` to see what's available."
+        ),
+        Err(ResolveError::Ambiguous(candidates)) => bail!(
+            "nickname `{sister_name}` is ambiguous — matches {} sessions: {}. \
+             Disambiguate by passing the session name (one of those listed) instead of the nickname.",
+            candidates.len(),
+            candidates.join(", ")
+        ),
+    };
+    // If we matched via nickname (not exact name), surface that so the
+    // operator sees what we resolved to. Quiet when names match exactly.
+    if sister.name != sister_name {
+        eprintln!(
+            "wire add: resolved nickname `{sister_name}` → session `{}`",
+            sister.name
+        );
+    }
 
     // 2. Refuse self-pair — operator owns both sides, but a self-loop
     // breaks the bilateral state machine.
@@ -6214,10 +6543,183 @@ fn run_wire_with_home(
     let status = std::process::Command::new(&bin)
         .env("WIRE_HOME", session_home)
         .env_remove("RUST_LOG")
+        // v0.7.0-alpha.2: subprocess MUST NOT recursively auto-init.
+        // We already own the session; nested init would clobber state.
+        .env("WIRE_AUTO_INIT", "0")
         .args(args)
         .status()
         .with_context(|| format!("spawning `wire {}`", args.join(" ")))?;
     Ok(status)
+}
+
+/// v0.7.0-alpha.2: idempotent per-cwd session creation.
+///
+/// When the auto-detect (`maybe_adopt_session_wire_home`) finds no
+/// registered session for the current cwd — including via parent-walk —
+/// this creates one inline so every Claude tab in a fresh project gets
+/// its own wire identity rather than collapsing onto the machine-wide
+/// default. Without this, multiple Claudes in unwired cwds all render
+/// the same character (the default identity's character), defeating the
+/// "every session looks different" promise.
+///
+/// Opt-out: `WIRE_AUTO_INIT=0` env var (e.g. set in shell profile or
+/// `run_wire_with_home` subprocess context).
+///
+/// Best-effort: any failure (no home dir, name collision pathology,
+/// `wire init` subprocess crash) is logged to stderr and we fall back
+/// to default identity. Must not block MCP startup.
+///
+/// MUST be called BEFORE worker thread spawn (env::set_var safety).
+pub fn maybe_auto_init_cwd_session(label: &str) {
+    if std::env::var("WIRE_HOME").is_ok() {
+        return; // explicit override OR auto-detect already won
+    }
+    if std::env::var("WIRE_AUTO_INIT").as_deref() == Ok("0") {
+        return; // operator opt-out
+    }
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    // Defensive: parent-walk re-check (maybe_adopt_session_wire_home
+    // already runs but we want to be robust to ordering).
+    if crate::session::detect_session_wire_home(&cwd).is_some() {
+        return;
+    }
+
+    let registry = crate::session::read_registry().unwrap_or_default();
+    let name = crate::session::derive_name_from_cwd(&cwd, &registry);
+    let session_home = match crate::session::session_dir(&name) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    // v0.7.0-alpha.3: name-scoped exclusive flock guards the init
+    // section. Multiple `wire mcp` processes auto-initing in the SAME
+    // cwd (derive the SAME name) would otherwise race past the
+    // `is_initialized()` check inside `wire init`, each overwrite the
+    // agent-card, and orphan slot allocations on the local relay. The
+    // flock serializes them; loser blocks, then re-checks
+    // `agent_card_path.exists()` post-lock and adopts the winner's
+    // identity. Lock is name-scoped so different cwds (different names)
+    // never block each other.
+    use fs2::FileExt;
+    let sessions_root = match crate::session::sessions_root() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    if let Err(e) = std::fs::create_dir_all(&sessions_root) {
+        eprintln!(
+            "wire {label}: auto-init: failed to create sessions root {sessions_root:?}: {e}"
+        );
+        return;
+    }
+    let lock_path = sessions_root.join(format!(".auto-init.{name}.lock"));
+    let lock_file = match std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "wire {label}: auto-init: cannot open lockfile {lock_path:?}: {e} — falling back to default identity"
+            );
+            return;
+        }
+    };
+    if let Err(e) = lock_file.lock_exclusive() {
+        eprintln!(
+            "wire {label}: auto-init: flock {lock_path:?} failed: {e} — falling back to default identity"
+        );
+        return;
+    }
+    // Lock acquired. Re-check `needs_init` INSIDE the lock — if a
+    // racing peer already won, the agent-card now exists and we just
+    // need to register cwd → name and adopt their identity.
+    let agent_card_path = session_home.join("config").join("wire").join("agent-card.json");
+    let needs_init = !agent_card_path.exists();
+
+    if needs_init {
+        if let Err(e) = std::fs::create_dir_all(&session_home) {
+            eprintln!(
+                "wire {label}: auto-init: failed to create session dir {session_home:?}: {e}"
+            );
+            let _ = fs2::FileExt::unlock(&lock_file);
+            return;
+        }
+        match run_wire_with_home(&session_home, &["init", &name]) {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                eprintln!(
+                    "wire {label}: auto-init: `wire init {name}` exited non-zero ({status}) — falling back to default identity"
+                );
+                let _ = fs2::FileExt::unlock(&lock_file);
+                return;
+            }
+            Err(e) => {
+                eprintln!(
+                    "wire {label}: auto-init: failed to spawn `wire init {name}`: {e:#} — falling back to default identity"
+                );
+                let _ = fs2::FileExt::unlock(&lock_file);
+                return;
+            }
+        }
+        // Best-effort: allocate a local-relay slot so this auto-init'd
+        // session is addressable by sister sessions. Skipped silently when
+        // the local relay isn't running (the function itself reports to
+        // stderr). Auto-init'd sessions without endpoints can still
+        // surface their character but cannot receive pair_drops until the
+        // operator runs `wire bind-relay` or restarts the local relay.
+        try_allocate_local_slot(
+            &session_home,
+            &name,
+            "https://wireup.net",
+            "http://127.0.0.1:8771",
+        );
+    } else {
+        // Race loser path: peer already created the session. Surface
+        // this honestly so the operator can see we adopted rather than
+        // double-initialized.
+        if std::env::var("WIRE_QUIET_AUTOSESSION").is_err() {
+            eprintln!(
+                "wire {label}: auto-init: session `{name}` already exists (concurrent mcp peer won the race) — adopting"
+            );
+        }
+    }
+    // RAII drop would release the lock, but be explicit since we're
+    // about to do non-trivial work that doesn't need it.
+    let _ = fs2::FileExt::unlock(&lock_file);
+
+    // Register cwd → name so subsequent invocations short-circuit via
+    // the parent-walk detect. v0.7.0-alpha.3: use the flock'd
+    // update_registry so concurrent auto-inits across DIFFERENT cwds
+    // don't trample each other's registry entries (stress test 2 found
+    // this — 20 parallel inits, 17 entries persisted).
+    let cwd_key = cwd.to_string_lossy().into_owned();
+    let name_for_reg = name.clone();
+    if let Err(e) = crate::session::update_registry(|reg| {
+        reg.by_cwd.insert(cwd_key, name_for_reg);
+        Ok(())
+    }) {
+        eprintln!("wire {label}: auto-init: failed to update registry: {e:#}");
+        // proceed — env var still gets set below
+    }
+
+    if std::env::var("WIRE_QUIET_AUTOSESSION").is_err() {
+        eprintln!(
+            "wire {label}: auto-init: created session `{name}` for cwd `{}` → WIRE_HOME=`{}`",
+            cwd.display(),
+            session_home.display()
+        );
+    }
+    // SAFETY: caller contract is "before any thread spawn." MCP::run
+    // calls this immediately after `maybe_adopt_session_wire_home`.
+    unsafe {
+        std::env::set_var("WIRE_HOME", &session_home);
+    }
 }
 
 fn ensure_session_daemon(session_home: &std::path::Path) -> Result<()> {
@@ -6287,10 +6789,33 @@ fn cmd_session_list(as_json: bool) -> Result<()> {
         println!("no sessions on this machine. `wire session new` to create one.");
         return Ok(());
     }
-    println!("{:<24} {:<24} {:<10} CWD", "NAME", "HANDLE", "DAEMON");
+    println!(
+        "{:<22} {:<24} {:<24} {:<10} CWD",
+        "CHARACTER", "NAME", "HANDLE", "DAEMON"
+    );
     for s in items {
+        // ANSI-escape-wrapped character takes more visual width than its
+        // displayed glyph count; pad based on the plain-text form, then
+        // wrap in escapes so the column lines up across rows.
+        let plain = s
+            .character
+            .as_ref()
+            .map(|c| c.short())
+            .unwrap_or_else(|| "?".to_string());
+        let colored = s
+            .character
+            .as_ref()
+            .map(|c| c.colored())
+            .unwrap_or_else(|| "?".to_string());
+        // Approximate display width: emoji renders as ~2 cells in most
+        // terminals; the rest are 1 cell each. We pad to 18 displayed
+        // chars (≈22 byte slots when counting emoji).
+        let displayed_width = plain.chars().count() + 1; // +1 emoji-wide compensation
+        let pad = 22usize.saturating_sub(displayed_width);
         println!(
-            "{:<24} {:<24} {:<10} {}",
+            "{}{}  {:<24} {:<24} {:<10} {}",
+            colored,
+            " ".repeat(pad),
             s.name,
             s.handle.as_deref().unwrap_or("?"),
             if s.daemon_running { "running" } else { "down" },

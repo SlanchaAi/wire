@@ -8,6 +8,93 @@ The v0.5 line shipped the protocol: bilateral signed-message bus, federated hand
 
 The first orchestration primitive is `wire session pair-all-local`: zero-paste bilateral pairing across every sister session on a machine. The trust anchor shifts from "operator types SAS digits on each side" (a network-level proof appropriate for strangers) to "operator owns every session listed in `wire session list-local`" (a filesystem-permission proof appropriate for same-uid siblings). That re-anchoring is what makes mesh-scale auto-pairing safe to ship at all — same-uid siblings are by definition not strangers.
 
+## v0.7 — identity-first
+
+The v0.6 line landed the control plane (orchestration primitives over the bilateral protocol). v0.7 elevates **identity** to a first-class noun. After 4 rounds of persona critique ([issue #24](https://github.com/SlanchaAi/wire/issues/24)) and a 13-system survey of the wider ecosystem ([issue #25](https://github.com/SlanchaAi/wire/issues/25)), the locked direction is: identity is the noun, transport is the verb, mesh is the application. v0.6's `session` abstraction was conflating five concerns; v0.7 untangles them with a clear three-state identity lifecycle (anonymous / local / federation) and a path to operator-friendly cross-machine portability.
+
+### v0.7.0-alpha.2 — characters that actually identify (parent-walk + auto-init + nickname resolver)
+
+alpha.1 shipped the character primitive but left three holes that defeated the whole "every Claude session looks different" point:
+
+1. **Subdir cwd auto-detect didn't walk up parents.** `~/Source/slancha-business/tools/recon` fell through to the machine-wide default identity instead of inheriting `slancha-business`. So multiple Claude tabs in subdirs of registered cwds all collapsed onto the same default character.
+2. **No auto-init for unwired cwds.** Open Claude in a fresh project (`~/Source/slancha-api` with no prior `wire session new`) → MCP auto-detect failed → fallback to the machine-wide default identity. Every unwired cwd showed the same default character.
+3. **Characters weren't addressable.** `wire add --local-sister <session-name>` worked, but `wire add --local-sister <nickname>` didn't. Defeated the "they find each other by name" promise.
+
+This alpha fixes all three. Combined, every Claude tab in any cwd gets a real unique wire identity at startup, with a sticky character, addressable by either session name or nickname.
+
+**Fix 1 — parent-walk in `detect_session_wire_home`** (`src/session.rs`). The cwd auto-detect now walks up parent directories looking for any registered session. First match wins. Subdirs of a registered cwd inherit their parent's identity. Defensive against pathological registry states (broken session_dir paths) — falls through to the next parent.
+
+**Fix 2 — auto-init per cwd on `wire mcp` startup** (`src/cli.rs::maybe_auto_init_cwd_session`, called from `src/mcp.rs::run`). When `wire mcp` starts in a cwd that has no registered session (after parent-walk), it idempotently creates one:
+- Session name: `sanitize(basename(cwd))` with the existing path-hash collision suffix
+- Spawns `wire init <name>` in the new session's `WIRE_HOME` (identity + keypair + agent-card)
+- Best-effort `try_allocate_local_slot` against `http://127.0.0.1:8771` so the new session is reachable by sister sessions when the local relay is running
+- Registers `cwd → name` so subsequent invocations short-circuit via parent-walk
+- Sets `WIRE_HOME` for the current process
+
+Opt-out: `WIRE_AUTO_INIT=0` in env. `run_wire_with_home` automatically sets this in spawned subprocesses to prevent recursive init.
+
+This is the MCP-startup-only path. CLI invocations (`wire whoami` etc.) do NOT auto-init — they just adopt whatever session exists. The asymmetry is intentional: MCP is the persistent agent surface and represents the operator's intent to use wire in this cwd; CLI is incidental.
+
+**Fix 3 — nickname-as-handle resolver** (`src/cli.rs::resolve_local_session` + `::resolve_peer_handle`). Two new resolvers:
+- `resolve_local_session(sessions, input)` — input matches a `SessionInfo` by either `.name` (exact) or `.character.nickname`. Used by `wire add --local-sister`.
+- `resolve_peer_handle(input)` — input matches a pinned peer in trust state by either canonical handle (exact) or character nickname (derived from peer's DID). Used by `wire send`.
+
+Both surface the resolution to stderr when nickname matched (not exact name), so operators see the indirection.
+
+`wire peers` now shows each peer's character (emoji + nickname colored) as the leading column. Same shape as `wire session list` from alpha.1. The peer's character is derived from their DID locally — no agent-card change required, peers don't need to ship characters to each other (yet — that lands when federation lifecycle materializes in v0.7.0 proper).
+
+**End-to-end demo on the developer's laptop after alpha.2 install:**
+
+```
+$ cd ~/Source/slancha-api  # never had a wire session
+$ wire mcp                  # auto-creates `slancha-api` session, allocates local slot
+wire mcp: auto-init: created session `slancha-api` for cwd ... → WIRE_HOME=...
+wire session new: local slot allocated on http://127.0.0.1:8771 (slot_id=...)
+
+$ wire whoami --short
+🌊 quiet-leaf
+
+$ wire add --local-sister winter-bay   # nickname, not session name
+wire add: resolved nickname `winter-bay` → session `wire`
+→ pinned peer locally → pair_drop delivered...
+
+$ wire peers
+🌻 noble-canyon          slancha-business    VERIFIED
+🐅 winter-bay            wire                VERIFIED
+```
+
+Five sessions on the machine, five unique characters, all reachable via local relay, all addressable by either session name or character nickname.
+
+### v0.7.0-alpha.1 — character: nickname + emoji + color per identity
+
+Every wire identity now has a **character** — a deterministic nickname (adjective-noun), emoji, and color palette derived from the agent's DID via SHA-256. Same DID → same character forever, across restarts, machine migration, and process boundaries. The character is the human-facing handle the operator sees in terminals; the DID is what peers see on the wire. Display-layer only — protocol semantics are untouched.
+
+Why ship this first: with multiple Claude Code sessions on one machine, visual disambiguation was the immediate operator pain. v0.6.10's collision warning made the problem honest; v0.7.0 gives operators a name and a color so they can tell `🐅 winter-bay` apart from `🌻 noble-canyon` at a glance.
+
+**New CLI surface:**
+```
+wire whoami --short      # 🐅 winter-bay (plain text)
+wire whoami --colored    # 🐅 winter-bay with ANSI 256-color escapes (for statuslines)
+wire whoami --json       # existing JSON output, plus `.character` field
+wire whoami              # default text output, now prepends colored character
+
+wire session list        # adds CHARACTER column showing every session's emoji+nickname colored
+```
+
+**New statusline integration:** drop `wire whoami --colored` into `~/.claude/settings.json`'s `statusLine.command` field for live identity display in the Claude Code TUI. See `docs/STATUSLINE.md` for the integration recipe plus a tmux pane-border tinting example.
+
+**Character generation.** ~120 curated adjectives × 120 curated nouns (~14,400 combinations), 64 single-codepoint terminal-stable emojis, HSL hash → hex + ANSI 256 with saturation 0.55-0.80 and lightness 0.50-0.65 (terminal-readable on both light and dark backgrounds). All deterministic, all derived at read time — wire never persists characters to disk, so future word-list / palette tweaks affect new identities without re-keying old ones.
+
+**Field naming: `persona` not `soul`.** Per the 13-system survey ([issue #25](https://github.com/SlanchaAi/wire/issues/25)), Letta uses `persona` as its canonical block label — the unbranded baseline term. `soul` is branded to specific harnesses (OpenClaw, Hermes-Agent, SoulSpec). Future `Identity` fields landing in v0.7.0 proper (`persona_url`, `persona_sha256`, `persona_spec`, `persona_slot`) will follow this convention.
+
+**What this alpha does NOT ship** (deferred to v0.7.0 proper):
+- `persona_url` / `persona_sha256` / `persona_spec` / `persona_slot` fields on Identity. Schema-only additions; UX wires up in v0.7.2 with `WIRE_AS=<tag>` and `wire launch --as <tag>`.
+- `wire identity` CLI subcommand. Today characters are read via `wire whoami` / `wire session list`. v0.7.0 proper adds `wire identity list / show / rename / persist / publish`.
+- `wire identity rename --random` / `--name <name>` / `--emoji <e>` overrides. The auto-generated character is sticky for now — re-rolling will land alongside the identity CLI.
+- Federation lifecycle (anonymous / local / federation states). v0.6.x sessions auto-map to local identities; lifecycle states materialize when the identity CLI lands.
+
+Cargo.toml stays at `0.6.10` in this alpha — bump to `0.7.0` lands when the full identity CLI and lifecycle are ready. Operators tracking `main` get the character UX immediately; the formal v0.7.0 release ships once the full identity layer is in.
+
 ### v0.6.10 — MCP identity-collision warning (visibility, not auto-magic)
 
 After four rounds of persona critique on how to fix the multi-agent-same-cwd UX (recap in [issue #24](https://github.com/SlanchaAi/wire/issues/24)), the smallest right intervention turned out to be: **make the collision visible**. Don't try to auto-disambiguate via terminal env vars, wrapper scripts, or per-host adapter chains. Just print a clear stderr warning when two `wire mcp` processes share an effective `WIRE_HOME`, telling the operator exactly how to opt into a separate identity.
