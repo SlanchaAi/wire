@@ -41,7 +41,9 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.7.4 (latest)
+## Status — v0.7.5 (latest)
+
+v0.7.5 fixes the silent-fail pair handshake. Before: pair-accept on a session created with `--with-local` (only `self.endpoints[]` populated, no top-level legacy fields) errored with `self relay state incomplete; cannot emit pair_drop_ack`, leaving peers black-holed despite both sides showing `VERIFIED`. Fix: `send_pair_drop_ack` now reads `self.endpoints[0]` as a fallback. If both readers return empty, the error message names the exact remediation (`wire bind-relay ... --migrate-pinned`).
 
 v0.7.4 lets you address a peer by **character nickname only**. `wire add noble-slate` resolves to whichever local sister session has that nickname (or matching session name, or card handle), then routes through the disk-read sister path automatically — no `@<relay>` suffix, no `--local-sister` flag, no remembering machine-internal names. Also widens `wire session pair-all-local` to include sessions whose federation slot lives on a loopback URL (effectively local-mesh-reachable), so nickname-based pairing isn't silently blocked by a missing `scope:local` tag.
 
