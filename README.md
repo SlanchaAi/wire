@@ -41,7 +41,16 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.9.1 (latest)
+## Status — v0.9.2 (latest)
+
+v0.9.2 makes resolution failures helpful:
+
+- **Did-you-mean on typos.** `wire whois nobl-slat` → "Did you mean: `noble-slate`?". Levenshtein distance ≤ 3 against the union of pinned-peer handles + character nicknames + sister sessions.
+- **JSON-mode misses return success.** `wire whois nobl-slat --json` → `{found: false, candidates: ["noble-slate"], ...}` with exit 0. Agents stop wrapping resolution in try/catch.
+- **Deprecation banner suppressed in JSON mode.** Operator/script using `--json` (or piped stdout) doesn't get the banner polluting captured output.
+- **Deprecation banner once per shell session.** `WIRE_DEPRECATION_NAGGED_<verb>=1` (auto-set inside one process; export to suppress across a shell) prevents the same nag firing N times.
+
+## Status — v0.9.1
 
 v0.9.1 is the first of a six-batch ergonomics pass:
 
