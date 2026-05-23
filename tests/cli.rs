@@ -72,7 +72,7 @@ fn whoami_before_init_errors() {
 #[test]
 fn init_creates_keypair_and_card() {
     let home = fresh_home();
-    let out = run(&home, &["init", "paul", "--json"]);
+    let out = run(&home, &["init", "paul", "--offline", "--json"]);
     assert!(out.status.success(), "init failed: {:?}", out);
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -92,8 +92,8 @@ fn init_creates_keypair_and_card() {
 #[test]
 fn init_twice_refuses_to_clobber() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
-    let out = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
+    let out = run(&home, &["init", "paul", "--offline"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("already initialized"), "stderr: {stderr}");
@@ -102,7 +102,7 @@ fn init_twice_refuses_to_clobber() {
 #[test]
 fn whoami_after_init_returns_did_and_fingerprint() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     let out = run(&home, &["whoami", "--json"]);
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
@@ -121,7 +121,7 @@ fn peers_empty_after_init_is_self_filtered() {
     // After `wire init paul`, trust contains paul (self-attested ATTESTED).
     // `wire peers` filters self out, so we expect an empty list.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     let out = run(&home, &["peers", "--json"]);
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
@@ -132,7 +132,7 @@ fn peers_empty_after_init_is_self_filtered() {
 #[test]
 fn send_writes_to_outbox() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     let out = run(
         &home,
         &[
@@ -201,7 +201,7 @@ fn pair_list_inbound_surfaces_pending_v0_5_14() {
     // record is enumerable + the back-compat `pair-list --json` shape is
     // preserved for existing scripts.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     write_pending_inbound_fixture(&home, "stranger");
     let out = run(&home, &["pair-list-inbound", "--json"]);
     assert!(out.status.success(), "pair-list-inbound failed: {:?}", out);
@@ -228,7 +228,7 @@ fn status_reports_pending_inbound_count_v0_5_14() {
     // SPAKE2 pending_pairs.total so monitoring + dashboards can distinguish
     // "stranger requests awaiting accept" from "active SPAKE2 sessions".
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     write_pending_inbound_fixture(&home, "alice");
     write_pending_inbound_fixture(&home, "bob");
     let out = run(&home, &["status", "--json"]);
@@ -251,7 +251,7 @@ fn pair_reject_deletes_pending_inbound_v0_5_14() {
     // `wire pair-reject <peer>` removes the pending record. After reject,
     // pair-list MUST NOT show the peer and the on-disk file MUST be gone.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     write_pending_inbound_fixture(&home, "spammer");
     let path = home.join("state/wire/pending-inbound-pairs/spammer.json");
     assert!(path.exists(), "fixture file should exist pre-reject");
@@ -632,7 +632,7 @@ fn pair_accept_errors_cleanly_when_no_pending_request_v0_5_14() {
     // must point the operator at wire pair-list-inbound + wire add as
     // the correct paths instead.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     let out = run(&home, &["pair-accept", "ghost"]);
     assert!(!out.status.success(), "expected failure: {:?}", out);
     let stderr = String::from_utf8(out.stderr).unwrap();
@@ -651,7 +651,7 @@ fn pair_reject_idempotent_on_missing_peer_v0_5_14() {
     // No-op reject for an unknown peer returns success with rejected=false,
     // not an error. This keeps operator scripts simple.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     let out = run(&home, &["pair-reject", "ghost", "--json"]);
     assert!(out.status.success(), "pair-reject failed: {:?}", out);
     let s = String::from_utf8(out.stdout).unwrap();
@@ -668,7 +668,7 @@ fn send_with_fqdn_peer_normalizes_to_bare_handle_outbox() {
     // stuck silently for 25 min in the field report. Bare-handle
     // normalization at send time is the on-disk-contract enforcement.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     let out = run(
         &home,
         &[
@@ -700,7 +700,7 @@ fn send_with_fqdn_peer_normalizes_to_bare_handle_outbox() {
 #[test]
 fn send_deadline_writes_signed_time_sensitive_until() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     let deadline = "2030-01-02T03:04:05Z";
     let out = run(
         &home,
@@ -735,7 +735,7 @@ fn send_deadline_writes_signed_time_sensitive_until() {
 fn send_idempotent_under_identical_body() {
     // The same body produces the same event_id (content-addressed).
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     let out1 = run(
         &home,
         &["send", "willard", "decision", "fixed-body", "--json"],
@@ -758,7 +758,7 @@ fn send_idempotent_under_identical_body() {
 #[test]
 fn verify_round_trips_a_send() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     let _ = run(&home, &["send", "paul", "decision", "self-test", "--json"]);
     // Drop the queued event into a temp file and verify it.
     let outbox = home.join("state/wire/outbox/paul.jsonl");
@@ -779,7 +779,7 @@ fn verify_round_trips_a_send() {
 #[test]
 fn verify_rejects_tampered_event() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     let _ = run(&home, &["send", "paul", "decision", "original", "--json"]);
     let outbox = home.join("state/wire/outbox/paul.jsonl");
     let line = std::fs::read_to_string(&outbox).unwrap();
@@ -821,7 +821,7 @@ fn mcp_initialize_then_tools_list_round_trip() {
     use std::process::Stdio;
 
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
 
     let mut child = Command::new(wire_bin())
         .arg("mcp")
@@ -886,7 +886,7 @@ fn mcp_tools_call_wire_whoami() {
     use std::process::Stdio;
 
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
 
     let mut child = Command::new(wire_bin())
         .arg("mcp")
@@ -1007,7 +1007,7 @@ fn status_before_init_says_not_initialized() {
 #[test]
 fn status_after_init_shows_did_and_zero_peers() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     let out = run(&home, &["status", "--json"]);
     assert!(out.status.success());
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -1025,7 +1025,7 @@ fn status_after_init_shows_did_and_zero_peers() {
 #[test]
 fn forget_peer_removes_pinned_record() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     // Manually write a peer pin into trust (simulating a prior pair) without
     // running the full SAS flow.
     let trust_path = home.join("config/wire/trust.json");
@@ -1049,7 +1049,7 @@ fn forget_peer_removes_pinned_record() {
 #[test]
 fn forget_peer_unknown_returns_removed_false() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     let out = run(&home, &["forget-peer", "ghost", "--json"]);
     assert!(out.status.success());
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -1059,7 +1059,7 @@ fn forget_peer_unknown_returns_removed_false() {
 #[test]
 fn forget_peer_purge_deletes_jsonl_files() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     // send to peer to materialize outbox file
     let _ = run(&home, &["send", "willard", "decision", "stuff"]);
     let outbox_path = home.join("state/wire/outbox/willard.jsonl");
@@ -1086,7 +1086,7 @@ fn forget_peer_purge_deletes_jsonl_files() {
 #[test]
 fn status_after_send_shows_outbox_depth() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul"]);
+    let _ = run(&home, &["init", "paul", "--offline"]);
     let _ = run(&home, &["send", "willard", "decision", "hello"]);
     let _ = run(&home, &["send", "willard", "decision", "world"]);
     let out = run(&home, &["status", "--json"]);

@@ -63,8 +63,8 @@ async fn paul_sends_to_willard_via_relay_and_willard_verifies() {
     // ---------- 2. init paul + willard ----------
     let paul_home = fresh_dir("paul");
     let willard_home = fresh_dir("willard");
-    assert!(wire(&paul_home, &["init", "paul"]).status.success());
-    assert!(wire(&willard_home, &["init", "willard"]).status.success());
+    assert!(wire(&paul_home, &["init", "paul", "--offline"]).status.success());
+    assert!(wire(&willard_home, &["init", "willard", "--offline"]).status.success());
 
     // ---------- 3. each binds a slot on the relay ----------
     let paul_bind = wire(&paul_home, &["bind-relay", &relay_url, "--json"]);
@@ -196,7 +196,7 @@ async fn pull_rejects_event_with_unknown_signer() {
 
     // willard inits + binds, but does NOT pin paul's card.
     let willard_home = fresh_dir("willard-unknown");
-    assert!(wire(&willard_home, &["init", "willard"]).status.success());
+    assert!(wire(&willard_home, &["init", "willard", "--offline"]).status.success());
     assert!(
         wire(&willard_home, &["bind-relay", &relay_url])
             .status
@@ -205,7 +205,7 @@ async fn pull_rejects_event_with_unknown_signer() {
 
     // Paul (separate) sends a real signed event into willard's slot via add-peer-slot.
     let paul_home = fresh_dir("paul-unknown");
-    assert!(wire(&paul_home, &["init", "paul"]).status.success());
+    assert!(wire(&paul_home, &["init", "paul", "--offline"]).status.success());
     assert!(
         wire(&paul_home, &["bind-relay", &relay_url])
             .status
@@ -267,7 +267,7 @@ async fn responder_health_cli_set_get_roundtrip() {
     let relay_url = format!("http://{addr}");
 
     let paul_home = fresh_dir("paul-responder");
-    assert!(wire(&paul_home, &["init", "paul"]).status.success());
+    assert!(wire(&paul_home, &["init", "paul", "--offline"]).status.success());
     assert!(
         wire(&paul_home, &["bind-relay", &relay_url])
             .status
@@ -310,8 +310,8 @@ async fn status_peer_json_reports_three_health_layers() {
 
     let paul_home = fresh_dir("paul-status-peer");
     let willard_home = fresh_dir("willard-status-peer");
-    assert!(wire(&paul_home, &["init", "paul"]).status.success());
-    assert!(wire(&willard_home, &["init", "willard"]).status.success());
+    assert!(wire(&paul_home, &["init", "paul", "--offline"]).status.success());
+    assert!(wire(&willard_home, &["init", "willard", "--offline"]).status.success());
     assert!(
         wire(&paul_home, &["bind-relay", &relay_url])
             .status

@@ -279,7 +279,7 @@ async fn full_pair_flow_via_mcp_with_correct_sas_finalizes() {
 
     // Init guest via CLI (simulates separate machine)
     let init_g = Command::new(wire_bin())
-        .args(["init", "willard"])
+        .args(["init", "willard", "--offline"])
         .env("WIRE_HOME", &guest_home)
         .output()
         .unwrap();
@@ -407,7 +407,7 @@ async fn pair_confirm_with_wrong_digits_aborts_session() {
     .unwrap();
 
     let init_g = Command::new(wire_bin())
-        .args(["init", "willard"])
+        .args(["init", "willard", "--offline"])
         .env("WIRE_HOME", &guest_home)
         .output()
         .unwrap();
@@ -509,7 +509,7 @@ async fn mcp_resources_list_includes_inbox_per_peer_after_pairing() {
     .unwrap();
 
     let init_g = Command::new(wire_bin())
-        .args(["init", "willard"])
+        .args(["init", "willard", "--offline"])
         .env("WIRE_HOME", &guest_home)
         .output()
         .unwrap();
@@ -968,7 +968,7 @@ fn concurrent_outbox_appends_do_not_corrupt_lines() {
 
     // First init the identity so outbox dir exists with proper perms
     let init = Command::new(wire_bin())
-        .args(["init", "alice"])
+        .args(["init", "alice", "--offline"])
         .env("WIRE_HOME", &home)
         .output()
         .unwrap();
