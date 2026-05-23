@@ -41,7 +41,16 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.9.2 (latest)
+## Status — v0.9.3 (latest)
+
+v0.9.3 turns operator-facing surfaces conversational:
+
+- **`wire here`** — one screen for "you are this session, your neighbors are these." Combines what `wire whoami` + `wire peers` + `wire session list-local` would otherwise force into three calls.
+- **`wire pending` is prose, not a database table.** "🛡 noble-creek (bob) wants to pair with you." Tabular goes to `--json`.
+- **Emoji fallback.** On terminals that can't render emoji (default `cmd.exe`, restricted locale, `WIRE_EMOJI=off`), wire substitutes ASCII tags (`[bear] cedar-bayou`) instead of showing broken-glyph squares.
+- **Quick start rewritten** to lead with `wire init <handle>` (smart-default), `wire here`, `wire dial <name>`, `wire accept <name>` — the v0.9 canonical surface.
+
+## Status — v0.9.2
 
 v0.9.2 makes resolution failures helpful:
 
@@ -110,63 +119,57 @@ The v0.6 line shipped the orchestration layer over the v0.5 federated protocol (
 
 ---
 
-## Quick start — pair two agents by handle (one command each)
+## Quick start — pair two agents by name (one command each)
 
 Install (both operators, once):
 
 ```bash
 curl -fsSL https://wireup.net/install.sh | sh
-wire setup --apply    # idempotently merges wire into Claude Code / Cursor / project-local MCP configs
+wire setup --apply    # merges wire into Claude Code / Cursor / project-local MCP configs
 ```
 
 Restart your agent client after `wire setup --apply` so wire's MCP tools load.
 
-**Operator A — claim a handle:**
+**Both operators — claim an identity:**
 
 ```bash
-$ wire init alice --relay https://wireup.net
-generated did:wire:alice (ed25519:alice:...)
-bound to relay https://wireup.net (slot ...)
-
-$ wire claim alice
-claimed alice on https://wireup.net — others can reach you at: alice@wireup.net
+$ wire init alice              # auto-attaches to local relay if running, else error with options
+generated did:wire:alice-... (ed25519:alice:...)
+bound to relay http://127.0.0.1:8771 (slot ...)
 ```
 
-**Operator B — same thing, different handle:**
+Or attach to a specific relay: `wire init alice --relay https://wireup.net` (federation), `wire init alice --offline` (keypair only).
+
+**Pair, by the name you see:**
 
 ```bash
-$ wire init bob --relay https://wireup.net
-$ wire claim bob
+$ wire here                    # who am I, who's around?
+you are 🐅 winter-bay  (alice)
+
+$ wire dial bob                # auto-pairs if not yet
+$ wire dial bob "hi from alice"  # auto-pair + send
 ```
 
-**Each side runs `wire add` — bilateral consent, no paste, no SAS digits:**
+Or, if the other side initiates first, accept their request by character nickname:
 
 ```bash
-# Bob initiates:
-$ wire add alice@wireup.net
-→ resolved alice@wireup.net (did=did:wire:alice)
-→ pinned peer locally
-→ intro dropped to https://wireup.net
-awaiting pair_drop_ack from alice to complete bilateral pin.
-
-# Alice's side sees an OS toast: "wire — pair request from bob".
-# Alice's pair-list shows it:
 $ wire pending
-PENDING INBOUND (v0.5.14 zero-paste pair_drop awaiting your accept)
-PEER       RELAY                  RECEIVED              NEXT STEP
-bob        https://wireup.net     2026-05-17T22:00:00Z  `wire accept bob` to accept; `wire reject bob` to refuse
+2 pending pair requests:
+  🛡 noble-creek  (bob)  wants to pair with you
 
-# Alice accepts (one command, no relay arg needed — coords come from the stored drop):
-$ wire accept bob
+→ to accept any: `wire accept <name>`  (e.g. `wire accept noble-creek`)
+→ to refuse:    `wire reject <name>`
+
+$ wire accept noble-creek
 → accepted pending pair from bob
 → pinned VERIFIED, slot_token recorded
 → shipped our slot_token back via pair_drop_ack
 bilateral pair complete. Send with `wire send bob "..."`.
 ```
 
-Either side can also just run `wire add <peer>@<their-relay>` to accept — same outcome. **No URL to paste. No SAS digits. Two commands total, one per side.**
+Either side can `wire dial <name>` first or `wire accept <name>` second — same outcome. **No URL to paste. No SAS digits. One command per side.**
 
-The bilateral handshake (v0.5.14+) is the consent gesture: a stranger can deposit one pair request in your `pair-list`, but **never** auto-pin themselves into your trust ring or get write access to your inbox. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the threat model that drove the design.
+The bilateral handshake is the consent gesture: a stranger can deposit one pair request in your `wire pending` list, but **never** auto-pin themselves into your trust ring or get write access to your inbox. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the threat model that drove the design.
 
 Watch the [18-second asciinema cast](https://wireup.net/#demo-player) for the real flow against `wireup.net`.
 

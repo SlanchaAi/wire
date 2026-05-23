@@ -253,6 +253,119 @@ fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
     16 + 36 * q(r) + 6 * q(g) + q(b)
 }
 
+/// v0.9.3: emoji-rendering capability probe.
+///
+/// Returns `true` when the operator's terminal is likely to render
+/// emoji (UTF-8 locale OR a known-modern TERM/TERM_PROGRAM). On a
+/// fresh Windows 10 `cmd.exe` with the default raster font this
+/// returns `false`, allowing `emoji_with_fallback` to substitute an
+/// ASCII tag (`[bear]`) so first-time UX isn't broken squares.
+///
+/// Override knobs (highest priority first):
+///   `WIRE_EMOJI=on`  — force emoji glyphs
+///   `WIRE_EMOJI=off` — force ASCII fallback
+///
+/// Defaults to allowing emoji unless we can prove the terminal can't.
+pub fn terminal_supports_emoji() -> bool {
+    if let Ok(v) = std::env::var("WIRE_EMOJI") {
+        return matches!(v.as_str(), "on" | "1" | "true");
+    }
+    // Modern terminals tagged via TERM_PROGRAM all render emoji.
+    if std::env::var("TERM_PROGRAM").is_ok() {
+        return true;
+    }
+    if let Ok(term) = std::env::var("TERM") {
+        let t = term.to_ascii_lowercase();
+        // Anything reporting xterm-256color / *-256color is modern
+        // enough for emoji rendering on every OS we ship to.
+        if t.contains("256color") || t.contains("kitty") || t.contains("alacritty") {
+            return true;
+        }
+    }
+    // UTF-8 locale is a strong signal even on cmd.exe-class shells.
+    for var in ["LC_ALL", "LC_CTYPE", "LANG"] {
+        if let Ok(v) = std::env::var(var)
+            && (v.contains("UTF-8") || v.contains("utf8"))
+        {
+            return true;
+        }
+    }
+    // On Windows we conservatively default to NO emoji unless the
+    // operator opted in via WIRE_EMOJI=on. Most cmd.exe sessions
+    // render `🐻` as a hollow box; better to print `[bear]` than
+    // mystery glyphs.
+    if cfg!(windows) {
+        return false;
+    }
+    // POSIX systems without TERM/LANG signal: lean optimistic.
+    true
+}
+
+/// v0.9.3: render `[<word>]` ASCII fallback when terminal_supports_emoji
+/// returns false. The word is the emoji's canonical short-name from a
+/// tiny built-in lookup; unknown emoji fall back to `[*]`.
+///
+/// Returns the emoji glyph unchanged when rendering is supported.
+pub fn emoji_with_fallback(ch: &Character) -> String {
+    if terminal_supports_emoji() {
+        return ch.emoji.clone();
+    }
+    // Map every character-system emoji to an ASCII short-name. The
+    // list mirrors EMOJIS in this file; any glyph not in the lookup
+    // becomes `[*]`.
+    let label: &str = match ch.emoji.as_str() {
+        "🐻" => "bear",
+        "🐅" => "tiger",
+        "🦊" => "fox",
+        "🦔" => "hedgehog",
+        "🐦" => "bird",
+        "🦉" => "owl",
+        "🐺" => "wolf",
+        "🦌" => "deer",
+        "🐢" => "turtle",
+        "🦎" => "lizard",
+        "🐍" => "snake",
+        "🐳" => "whale",
+        "🐬" => "dolphin",
+        "🐠" => "fish",
+        "🐌" => "snail",
+        "🦋" => "butterfly",
+        "🌳" => "tree",
+        "🌲" => "evergreen",
+        "🌴" => "palm",
+        "🌵" => "cactus",
+        "🌾" => "grain",
+        "🌻" => "sunflower",
+        "🌷" => "tulip",
+        "🌹" => "rose",
+        "🌸" => "blossom",
+        "🍄" => "mushroom",
+        "🍇" => "grapes",
+        "🍓" => "berry",
+        "🍒" => "cherry",
+        "🍋" => "lemon",
+        "🌙" => "moon",
+        "⭐" => "star",
+        "🌟" => "sparkle",
+        "✨" => "shimmer",
+        "☄" => "comet",
+        "🪐" => "ringed-planet",
+        "🛰" => "satellite",
+        "🛡" => "shield",
+        "⚓" => "anchor",
+        "⚙" => "gear",
+        "🕯" => "candle",
+        "🪴" => "potted-plant",
+        "🪨" => "rock",
+        "👻" => "ghost",
+        "📖" => "book",
+        "🔭" => "telescope",
+        "🌊" => "wave",
+        _ => "*",
+    };
+    format!("[{label}]")
+}
+
 /// ~256 short, neutral adjectives. Nature, abstract, texture, mood.
 /// v0.7.0-alpha.4: doubled from the alpha.1 set of 120 to widen the
 /// combinatorial space and reduce nickname collisions at scale.
