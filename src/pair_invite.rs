@@ -663,23 +663,52 @@ pub fn send_pair_drop_ack(
     let our_handle = crate::agent_card::display_handle_from_did(&our_did).to_string();
     let relay_state = config::read_relay_state()?;
     let self_state = relay_state.get("self").cloned().unwrap_or(Value::Null);
-    let our_relay = self_state
+    // v0.7.5 silent-fail fix: prefer top-level legacy fields (v0.5.16
+    // and earlier writers), fall back to the first endpoint in
+    // self.endpoints[] (v0.5.17+ dual-slot writers). Pre-v0.7.5 this
+    // function ONLY read the legacy fields, so any session created
+    // with `--with-local` / `--with-uds` / `--with-lan` (which only
+    // populate endpoints[]) hit `self relay state incomplete; cannot
+    // emit pair_drop_ack` and silently black-holed every pair attempt.
+    // Logged as FM3 + the slancha-api ↔ source incident 2026-05-23.
+    let mut our_relay = self_state
         .get("relay_url")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let our_slot_id = self_state
+    let mut our_slot_id = self_state
         .get("slot_id")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let our_slot_token = self_state
+    let mut our_slot_token = self_state
         .get("slot_token")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
     if our_relay.is_empty() || our_slot_id.is_empty() || our_slot_token.is_empty() {
-        bail!("self relay state incomplete; cannot emit pair_drop_ack");
+        // Try v0.5.17+ endpoints[] form. Pick the first endpoint —
+        // priority is preserved in self_endpoints() returned order
+        // (UDS / Local / LAN / Federation, lowest-friction first), so
+        // pair_drop_ack rides the same priority routing as send.
+        let eps = crate::endpoints::self_endpoints(&relay_state);
+        if let Some(ep) = eps.first() {
+            our_relay = ep.relay_url.clone();
+            our_slot_id = ep.slot_id.clone();
+            our_slot_token = ep.slot_token.clone();
+        }
+    }
+    if our_relay.is_empty() || our_slot_id.is_empty() || our_slot_token.is_empty() {
+        // STILL empty after both readers — the session genuinely has
+        // no inbound slot. This is the "agent without inbound mailbox"
+        // footgun. Refuse loudly with the exact remediation rather
+        // than the prior vague "self relay state incomplete" message.
+        bail!(
+            "this session has no inbound slot configured — peers cannot deliver to us.\n\
+             Fix: `wire bind-relay http://127.0.0.1:8771 --migrate-pinned` \
+             (allocates a slot and re-publishes our card to all pinned peers).\n\
+             Then re-run the pair flow. See WIRE_PAIRING_INCIDENT_2026-05-23 for context."
+        );
     }
 
     let sk_seed = config::read_private_key()?;

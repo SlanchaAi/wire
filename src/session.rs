@@ -281,6 +281,64 @@ pub struct SessionInfo {
 
 /// Enumerate every on-disk session by reading `sessions_root()`. Cross-
 /// references the registry so each entry's `cwd` is filled in when known.
+/// v0.7.4: true iff the URL targets a loopback host (127.0.0.0/8 or
+/// [::1] or `localhost`). Used to detect "this Federation-scope slot
+/// is actually on a loopback relay" — those sessions are local-mesh
+/// candidates even though they're not tagged `local`.
+///
+/// Best-effort string match; we don't need full URL parsing for this
+/// because the relay URL is wire-controlled and follows a predictable
+/// shape (`http://<host>[:<port>][/path]`).
+fn url_is_loopback(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let after_scheme = match lower.split_once("://") {
+        Some((_, rest)) => rest,
+        None => lower.as_str(),
+    };
+    // Bracketed IPv6 literal: `[::1]:8771` keeps brackets in host slice.
+    if let Some(rest) = after_scheme.strip_prefix('[') {
+        return rest
+            .split_once(']')
+            .map(|(host, _)| host == "::1")
+            .unwrap_or(false);
+    }
+    let host = after_scheme.split(['/', ':']).next().unwrap_or("");
+    host == "localhost" || host == "127.0.0.1" || host.starts_with("127.")
+}
+
+/// v0.7.4: resolve an operator-typed name to a local sister session.
+/// Input may be the session NAME (e.g. `slancha-api`), the card
+/// HANDLE (usually equal to the name), or the character NICKNAME
+/// (e.g. `noble-slate`). Returns the session NAME suitable for the
+/// `--local-sister` add path. Case-insensitive. None on no match.
+///
+/// Designed for `wire add <input>` ergonomics — the operator should
+/// be able to type whatever face wire put on the peer (statusline
+/// nickname, session list emoji+name) and have wire find it.
+pub fn resolve_local_sister(input: &str) -> Option<String> {
+    let needle = input.trim();
+    if needle.is_empty() {
+        return None;
+    }
+    let sessions = list_sessions().ok()?;
+    for s in &sessions {
+        if s.name.eq_ignore_ascii_case(needle) {
+            return Some(s.name.clone());
+        }
+        if let Some(h) = &s.handle
+            && h.eq_ignore_ascii_case(needle)
+        {
+            return Some(s.name.clone());
+        }
+        if let Some(ch) = &s.character
+            && ch.nickname.eq_ignore_ascii_case(needle)
+        {
+            return Some(s.name.clone());
+        }
+    }
+    None
+}
+
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
     let root = sessions_root()?;
     if !root.exists() {
@@ -474,7 +532,21 @@ pub fn list_local_sessions() -> Result<LocalSessionListing> {
         let endpoints = read_session_endpoints(&s.home_dir);
         let local_eps: Vec<Endpoint> = endpoints
             .into_iter()
-            .filter(|e| matches!(e.scope, EndpointScope::Local))
+            .filter(|e| {
+                // v0.7.4: include any session whose endpoint URL is a
+                // loopback address even if it's tagged Federation, not
+                // Local. This catches the legitimate-but-misshapen case
+                // where `wire init --relay http://127.0.0.1:8771` was run
+                // without `--with-local`, leaving the session with a
+                // loopback federation slot that's effectively local-mesh-
+                // reachable. Pre-v0.7.4 the strict scope-only filter
+                // silently excluded those sessions from `pair-all-local`,
+                // making nickname-based pairing fail for no operator-
+                // visible reason.
+                matches!(e.scope, EndpointScope::Local)
+                    || (matches!(e.scope, EndpointScope::Federation)
+                        && url_is_loopback(&e.relay_url))
+            })
             .collect();
         if local_eps.is_empty() {
             federation_only.push(FederationOnlySessionView {
@@ -709,6 +781,22 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn url_is_loopback_recognises_v4_v6_and_localhost_v0_7_4() {
+        assert!(url_is_loopback("http://127.0.0.1:8771"));
+        assert!(url_is_loopback("http://127.1.2.3"));
+        assert!(url_is_loopback("http://localhost:9000"));
+        assert!(url_is_loopback("https://localhost/v1"));
+        assert!(url_is_loopback("http://[::1]:8771"));
+        // Case-insensitive.
+        assert!(url_is_loopback("HTTP://LOCALHOST:8771"));
+        // Non-loopback negatives — must NOT be flagged.
+        assert!(!url_is_loopback("https://wireup.net"));
+        assert!(!url_is_loopback("http://192.168.1.50:8771"));
+        assert!(!url_is_loopback("http://10.0.0.5"));
+        assert!(!url_is_loopback("https://relay.example.com"));
+    }
 
     #[test]
     fn sanitize_handles_unicode_and_long_names() {
