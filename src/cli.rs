@@ -776,6 +776,50 @@ pub enum IdentityCommand {
         #[arg(long)]
         json: bool,
     },
+    /// List all identities on this machine — one row per session, with
+    /// each session's character, DID, federation handle, and cwd. Same
+    /// shape as `wire session list`, scoped here for the v0.7+ noun-
+    /// CLI surface.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Promote this identity to FEDERATION lifecycle: claim a handle on
+    /// the relay so peers can `wire add <name>@<relay-domain>` you.
+    /// Re-claims with current display fields (after `wire identity rename`)
+    /// so the relay always serves the latest signed card. Equivalent to
+    /// `wire claim` but scoped here for the v0.7+ noun-CLI surface.
+    Publish {
+        /// The handle to claim on the relay (e.g. `coffee-ghost`).
+        nick: String,
+        /// Override the relay URL. Defaults to the session's bound relay
+        /// from `wire init --relay <url>`. Public relay if unset.
+        #[arg(long)]
+        relay: Option<String>,
+        /// Public-facing URL for the agent-card location (when the relay
+        /// is behind a CDN with a different public domain).
+        #[arg(long, alias = "public")]
+        public_url: Option<String>,
+        /// Skip listing in the relay's public phonebook. The card is
+        /// still claimable + reachable; just doesn't appear in
+        /// `wireup.net/phonebook` for stranger-discovery.
+        #[arg(long)]
+        hidden: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Destroy a session entirely — keys, agent-card, relay state, daemon.
+    /// Equivalent to `wire session destroy <name>`, scoped here for the
+    /// noun-CLI surface. Requires `--force` (the underlying command does).
+    Destroy {
+        /// Session name to destroy (use `wire identity list` to see).
+        name: String,
+        /// Bypass the confirmation prompt.
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2095,6 +2139,17 @@ fn cmd_identity(cmd: IdentityCommand) -> Result<()> {
             json,
         } => cmd_identity_rename(name, emoji, clear || random, random, json),
         IdentityCommand::Show { json } => cmd_whoami(json, !json, false),
+        IdentityCommand::List { json } => cmd_session_list(json),
+        IdentityCommand::Publish {
+            nick,
+            relay,
+            public_url,
+            hidden,
+            json,
+        } => cmd_claim(&nick, relay.as_deref(), public_url.as_deref(), hidden, json),
+        IdentityCommand::Destroy { name, force, json } => {
+            cmd_session_destroy(&name, force, json)
+        }
     }
 }
 
