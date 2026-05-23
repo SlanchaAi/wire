@@ -6845,22 +6845,22 @@ pub fn maybe_auto_init_cwd_session(label: &str) {
         return;
     }
 
-    let registry = crate::session::read_registry().unwrap_or_default();
-    let name = crate::session::derive_name_from_cwd(&cwd, &registry);
-    let session_home = match crate::session::session_dir(&name) {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-
-    // v0.7.0-alpha.3: name-scoped exclusive flock guards the init
-    // section. Multiple `wire mcp` processes auto-initing in the SAME
-    // cwd (derive the SAME name) would otherwise race past the
-    // `is_initialized()` check inside `wire init`, each overwrite the
-    // agent-card, and orphan slot allocations on the local relay. The
-    // flock serializes them; loser blocks, then re-checks
-    // `agent_card_path.exists()` post-lock and adopts the winner's
-    // identity. Lock is name-scoped so different cwds (different names)
-    // never block each other.
+    // v0.7.0-alpha.12 (review-fix #135): SINGLE global auto-init lock
+    // (was per-name in alpha.3, briefly per-cwd in alpha.12-iter1).
+    // Two different cwds with the same basename (e.g. /a/projx +
+    // /b/projx) used to race outside the lock: both read empty
+    // registry, both derived name="projx", per-name lock didn't help
+    // because they queued on DIFFERENT locks (cwd-A and cwd-B).
+    //
+    // Single lock serializes ALL auto-init across the sessions_root.
+    // Inside the lock: re-read registry, derive_name_from_cwd which
+    // adds path-hash suffix when basename is occupied by another cwd
+    // already committed to the registry. Different cwds get DIFFERENT
+    // names guaranteed.
+    //
+    // Cost: parallel auto-inits in different cwds now serialize
+    // (~hundreds of ms each when local relay is up). Acceptable —
+    // auto-init runs once per cwd per machine; not a hot path.
     use fs2::FileExt;
     let sessions_root = match crate::session::sessions_root() {
         Ok(r) => r,
@@ -6872,7 +6872,7 @@ pub fn maybe_auto_init_cwd_session(label: &str) {
         );
         return;
     }
-    let lock_path = sessions_root.join(format!(".auto-init.{name}.lock"));
+    let lock_path = sessions_root.join(".auto-init.lock");
     let lock_file = match std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -6894,9 +6894,19 @@ pub fn maybe_auto_init_cwd_session(label: &str) {
         );
         return;
     }
-    // Lock acquired. Re-check `needs_init` INSIDE the lock — if a
-    // racing peer already won, the agent-card now exists and we just
-    // need to register cwd → name and adopt their identity.
+    // Lock acquired. Read registry + derive name now that all parallel
+    // racers serialize through us — derive_name_from_cwd adds a
+    // path-hash suffix if the basename is already claimed by another
+    // cwd in the (now-stable) registry.
+    let registry = crate::session::read_registry().unwrap_or_default();
+    let name = crate::session::derive_name_from_cwd(&cwd, &registry);
+    let session_home = match crate::session::session_dir(&name) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = fs2::FileExt::unlock(&lock_file);
+            return;
+        }
+    };
     let agent_card_path = session_home.join("config").join("wire").join("agent-card.json");
     let needs_init = !agent_card_path.exists();
 
@@ -6947,15 +6957,15 @@ pub fn maybe_auto_init_cwd_session(label: &str) {
             );
         }
     }
-    // RAII drop would release the lock, but be explicit since we're
-    // about to do non-trivial work that doesn't need it.
-    let _ = fs2::FileExt::unlock(&lock_file);
-
-    // Register cwd → name so subsequent invocations short-circuit via
-    // the parent-walk detect. v0.7.0-alpha.3: use the flock'd
-    // update_registry so concurrent auto-inits across DIFFERENT cwds
-    // don't trample each other's registry entries (stress test 2 found
-    // this — 20 parallel inits, 17 entries persisted).
+    // v0.7.0-alpha.12 (review-fix #135 part 2): register cwd → name
+    // BEFORE releasing the auto-init lock. Pre-fix released the lock
+    // here and committed the registry update afterward — racers in
+    // OTHER cwds with the same basename would acquire the lock,
+    // read the registry (still without our entry), and derive the
+    // SAME name we just claimed. Live regression test caught it:
+    // two cwds /a/projx + /b/projx both got name "projx", both
+    // mapped to the same identity. Update the registry WHILE STILL
+    // holding the auto-init lock so the next racer sees our claim.
     let cwd_key = cwd.to_string_lossy().into_owned();
     let name_for_reg = name.clone();
     if let Err(e) = crate::session::update_registry(|reg| {
@@ -6965,6 +6975,9 @@ pub fn maybe_auto_init_cwd_session(label: &str) {
         eprintln!("wire {label}: auto-init: failed to update registry: {e:#}");
         // proceed — env var still gets set below
     }
+    // NOW release the lock — racers waiting will see our registry
+    // entry on their re-read.
+    let _ = fs2::FileExt::unlock(&lock_file);
 
     if std::env::var("WIRE_QUIET_AUTOSESSION").is_err() {
         eprintln!(
