@@ -203,23 +203,16 @@ fn pair_list_inbound_surfaces_pending_v0_5_14() {
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
     write_pending_inbound_fixture(&home, "stranger");
-    let out = run(&home, &["pair-list-inbound", "--json"]);
-    assert!(out.status.success(), "pair-list-inbound failed: {:?}", out);
+    // v0.10: migrated from `wire pair-list-inbound` (removed) to
+    // `wire pending`. Same underlying handler; canonical verb.
+    let out = run(&home, &["pending", "--json"]);
+    assert!(out.status.success(), "pending failed: {:?}", out);
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
     let arr = parsed.as_array().expect("flat array of pending-inbound");
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["peer_handle"], "stranger");
     assert_eq!(arr[0]["peer_slot_token"], "token-xyz");
-
-    // Back-compat: `pair-list --json` MUST still emit a flat SPAKE2 array
-    // (empty here, no SPAKE2 session active). Scripts pinning the v0.5.13-
-    // and-earlier shape stay working.
-    let out2 = run(&home, &["pair-list", "--json"]);
-    assert!(out2.status.success());
-    let s2 = String::from_utf8(out2.stdout).unwrap();
-    let parsed2: serde_json::Value = serde_json::from_str(&s2).unwrap();
-    assert!(parsed2.as_array().expect("flat array").is_empty());
 }
 
 #[test]
@@ -256,8 +249,9 @@ fn pair_reject_deletes_pending_inbound_v0_5_14() {
     let path = home.join("state/wire/pending-inbound-pairs/spammer.json");
     assert!(path.exists(), "fixture file should exist pre-reject");
 
-    let out = run(&home, &["pair-reject", "spammer", "--json"]);
-    assert!(out.status.success(), "pair-reject failed: {:?}", out);
+    // v0.10: migrated from `wire pair-reject` (removed) to `wire reject`.
+    let out = run(&home, &["reject", "spammer", "--json"]);
+    assert!(out.status.success(), "reject failed: {:?}", out);
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
     assert_eq!(parsed["rejected"], true);
@@ -266,8 +260,8 @@ fn pair_reject_deletes_pending_inbound_v0_5_14() {
         "pending file should be deleted after reject"
     );
 
-    // pair-list-inbound is now empty.
-    let out2 = run(&home, &["pair-list-inbound", "--json"]);
+    // pending list is now empty.
+    let out2 = run(&home, &["pending", "--json"]);
     let s2 = String::from_utf8(out2.stdout).unwrap();
     let parsed2: serde_json::Value = serde_json::from_str(&s2).unwrap();
     assert!(parsed2.as_array().unwrap().is_empty());
@@ -403,6 +397,59 @@ fn session_destroy_requires_force_flag_v0_5_16() {
     assert!(stderr.contains("--force"), "stderr: {stderr}");
     // State must still be on disk.
     assert!(session_home.exists(), "session dir should not be deleted");
+}
+
+#[test]
+fn legacy_pair_verbs_still_callable_but_hidden_v0_10() {
+    // v0.10: legacy pair-* verbs stay callable for back-compat (v1.0
+    // removes them). They're hidden from --help (v0.9.1) and fire a
+    // deprecation banner on use (v0.9.2). This test asserts the
+    // back-compat contract: direct invocation still resolves.
+    let home = fresh_home();
+    for verb in [
+        "pair-host",
+        "pair-join",
+        "pair-accept",
+        "pair-reject",
+        "pair-list-inbound",
+    ] {
+        let out = run(&home, &[verb, "--help"]);
+        assert!(
+            out.status.success(),
+            "v0.10 must keep `{verb}` callable for back-compat (v1.0 removes)"
+        );
+    }
+}
+
+#[test]
+fn send_no_auto_pair_flag_exists_v0_10() {
+    let home = fresh_home();
+    let out = run(&home, &["send", "--help"]);
+    assert!(out.status.success(), "send --help: {:?}", out);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("--no-auto-pair"),
+        "send help should mention --no-auto-pair — got: {stdout}"
+    );
+}
+
+#[test]
+fn pair_hidden_from_help_v0_10() {
+    let home = fresh_home();
+    let out = run(&home, &["--help"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    // `pair` was the megacommand — now hidden.
+    assert!(
+        !stdout.contains("  pair  ") && !stdout.contains("  pair\n"),
+        "v0.10 should hide `pair` from --help — got: {stdout}"
+    );
+    // Still callable directly.
+    let out = run(&home, &["pair", "--help"]);
+    assert!(
+        out.status.success(),
+        "wire pair --help should still work (back-compat): {:?}",
+        out
+    );
 }
 
 #[test]
@@ -659,53 +706,10 @@ fn whois_typo_returns_json_success_with_candidates_v0_9_2() {
     );
 }
 
-#[test]
-fn deprecation_banner_fires_in_human_mode_v0_9_2() {
-    let home = fresh_home();
-    let out = std::process::Command::new(wire_bin())
-        .args(["pair-accept", "nonexistent-peer"])
-        .env("WIRE_HOME", &home)
-        .env("WIRE_NO_AUTO_JSON", "1")
-        .output()
-        .expect("spawn wire");
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(
-        stderr.contains("DEPRECATED in v0.9") && stderr.contains("use `wire accept"),
-        "human-mode pair-accept should fire deprecation banner — got: {stderr}"
-    );
-}
-
-#[test]
-fn deprecation_banner_suppressed_in_json_mode_v0_9_2() {
-    let home = fresh_home();
-    let out = std::process::Command::new(wire_bin())
-        .args(["pair-accept", "nonexistent-peer", "--json"])
-        .env("WIRE_HOME", &home)
-        .output()
-        .expect("spawn wire");
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(
-        !stderr.contains("DEPRECATED"),
-        "JSON-mode pair-accept should NOT fire deprecation banner — got: {stderr}"
-    );
-}
-
-#[test]
-fn deprecation_banner_suppressed_when_marker_env_set_v0_9_2() {
-    let home = fresh_home();
-    let out = std::process::Command::new(wire_bin())
-        .args(["pair-accept", "nonexistent-peer"])
-        .env("WIRE_HOME", &home)
-        .env("WIRE_NO_AUTO_JSON", "1")
-        .env("WIRE_DEPRECATION_NAGGED_pair_accept", "1")
-        .output()
-        .expect("spawn wire");
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(
-        !stderr.contains("DEPRECATED"),
-        "WIRE_DEPRECATION_NAGGED_pair_accept=1 should suppress — got: {stderr}"
-    );
-}
+// v0.10: pair-accept verb removed entirely, so the v0.9.2 deprecation-
+// banner tests (which exercised pair-accept) are obsolete. The
+// deprecation_warn helper is still exercised by the `accept <URL>`
+// back-compat path — covered by accept_with_url_emits_deprecation_banner_v0_9_4.
 
 #[test]
 fn deprecated_verbs_hidden_from_help_v0_9_1() {
@@ -741,17 +745,9 @@ fn deprecated_verbs_hidden_from_help_v0_9_1() {
     }
 }
 
-#[test]
-fn deprecated_verbs_still_callable_via_direct_invocation_v0_9_1() {
-    let home = fresh_home();
-    let out = run(&home, &["pair-accept", "--help"]);
-    assert!(out.status.success(), "pair-accept --help: {:?}", out);
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(
-        stdout.contains("Accept a pending-inbound pair request"),
-        "pair-accept help text missing: {stdout}"
-    );
-}
+// v0.10: pair-accept removed entirely. The v0.9.1 "still callable
+// via direct invocation" guarantee is no longer applicable;
+// legacy_pair_verbs_removed_from_dispatch_v0_10 asserts the new contract.
 
 #[test]
 fn init_offline_creates_keypair_without_slot_v0_9_1() {
@@ -1033,34 +1029,27 @@ fn session_list_local_redacts_slot_token_in_json_v0_5_19() {
 }
 
 #[test]
-fn pair_accept_errors_cleanly_when_no_pending_request_v0_5_14() {
-    // `wire pair-accept <peer>` must fail loudly when there's no pending-
-    // inbound record for that peer — never silently succeed. The error
-    // must point the operator at wire pair-list-inbound + wire add as
-    // the correct paths instead.
+fn accept_errors_cleanly_when_no_pending_request_v0_5_14() {
+    // v0.10: migrated from `wire pair-accept` (removed) to `wire accept`.
+    // Same loud-fail semantics — must NEVER silently succeed.
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
-    let out = run(&home, &["pair-accept", "ghost"]);
+    let out = run(&home, &["accept", "ghost"]);
     assert!(!out.status.success(), "expected failure: {:?}", out);
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
         stderr.contains("no pending pair request from ghost"),
         "stderr should explain the missing record: {stderr}"
     );
-    assert!(
-        stderr.contains("wire pair-list-inbound") || stderr.contains("wire add"),
-        "stderr should hint at the right command: {stderr}"
-    );
 }
 
 #[test]
-fn pair_reject_idempotent_on_missing_peer_v0_5_14() {
-    // No-op reject for an unknown peer returns success with rejected=false,
-    // not an error. This keeps operator scripts simple.
+fn reject_idempotent_on_missing_peer_v0_5_14() {
+    // v0.10: migrated from `wire pair-reject` to `wire reject`. Idempotent.
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
-    let out = run(&home, &["pair-reject", "ghost", "--json"]);
-    assert!(out.status.success(), "pair-reject failed: {:?}", out);
+    let out = run(&home, &["reject", "ghost", "--json"]);
+    assert!(out.status.success(), "reject failed: {:?}", out);
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
     assert_eq!(parsed["rejected"], false);

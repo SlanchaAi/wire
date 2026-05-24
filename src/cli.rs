@@ -142,6 +142,12 @@ pub enum Command {
         /// Advisory deadline: duration (`30m`, `2h`, `1d`) or RFC3339 timestamp.
         #[arg(long)]
         deadline: Option<String>,
+        /// v0.10: skip the v0.9 auto-pair-on-miss behavior. Send fails
+        /// loudly if the peer isn't pinned yet. Use when you want strict
+        /// "no implicit dialing" semantics — scripts that error vs.
+        /// performing a side-effecting pair as a fallback.
+        #[arg(long)]
+        no_auto_pair: bool,
         /// Emit JSON.
         #[arg(long)]
         json: bool,
@@ -474,6 +480,11 @@ pub enum Command {
     /// Examples:
     ///   wire pair paul                          # host a new pair on default relay
     ///   wire pair willard --code 58-NMTY7A      # join paul's pair
+    ///
+    /// v0.10: hidden from --help. Federation pair flow is now
+    /// `wire dial <handle>@<relay>` + `wire accept-invite <URL>`.
+    /// `wire pair` stays callable for back-compat scripts; v1.0 removes.
+    #[command(hide = true)] // v0.10 deprecated — use `wire dial <h>@<relay>`
     Pair {
         /// Short handle for this agent (becomes did:wire:<handle>). Used by init
         /// step if no identity exists; ignored if already initialized.
@@ -1464,6 +1475,7 @@ pub fn run() -> Result<()> {
             kind_or_body,
             body,
             deadline,
+            no_auto_pair,
             json,
         } => {
             // P0.S: smart-positional API. `wire send peer body` =
@@ -1472,7 +1484,14 @@ pub fn run() -> Result<()> {
                 Some(real_body) => (kind_or_body, real_body),
                 None => ("claim".to_string(), kind_or_body),
             };
-            cmd_send(&peer, &kind, &body, deadline.as_deref(), json_default(json))
+            cmd_send(
+                &peer,
+                &kind,
+                &body,
+                deadline.as_deref(),
+                no_auto_pair,
+                json_default(json),
+            )
         }
         Command::Dial {
             name,
@@ -3115,6 +3134,10 @@ fn cmd_send(
     kind: &str,
     body_arg: &str,
     deadline: Option<&str>,
+    // v0.10: when true, refuse to auto-pair on miss; fail loudly so
+    // scripts can branch on the error instead of accepting an implicit
+    // side effect.
+    no_auto_pair: bool,
     as_json: bool,
 ) -> Result<()> {
     if !config::is_initialized()? {
@@ -3155,8 +3178,16 @@ fn cmd_send(
         .map(|peers| peers.contains_key(&peer))
         .unwrap_or(false);
     if !peer_is_pinned && let Some(sister_name) = crate::session::resolve_local_sister(&peer) {
+        if no_auto_pair {
+            bail!(
+                "wire send: `{peer}` resolves to local sister `{sister_name}` but is not pinned, \
+                 and --no-auto-pair was passed. Run `wire dial {peer}` first, \
+                 then re-run send."
+            );
+        }
         eprintln!(
-            "wire send: `{peer}` not pinned yet — auto-pairing via local-sister `{sister_name}` first."
+            "wire send: `{peer}` not pinned yet — auto-pairing via local-sister `{sister_name}` first. \
+             Pass --no-auto-pair to refuse implicit dialing."
         );
         cmd_add_local_sister(&sister_name, true).map_err(|e| {
             anyhow!("wire send: auto-pair to local sister `{sister_name}` failed: {e:#}")
@@ -3466,7 +3497,7 @@ fn cmd_dial(name: &str, message: Option<&str>, as_json: bool) -> Result<()> {
         if let Some(msg) = message {
             // Peer handle for send = the nick part before the `@`.
             let bare = name.split('@').next().unwrap_or(name);
-            cmd_send(bare, "claim", msg, None, as_json)?;
+            cmd_send(bare, "claim", msg, None, false, as_json)?;
         }
         return Ok(());
     }
@@ -3530,7 +3561,7 @@ fn cmd_dial(name: &str, message: Option<&str>, as_json: bool) -> Result<()> {
     };
 
     let send_result = if let Some(msg) = message {
-        let r = cmd_send(&send_handle, "claim", msg, None, true);
+        let r = cmd_send(&send_handle, "claim", msg, None, false, true);
         match &r {
             Ok(()) => steps.push(json!({"step": "sent", "to": send_handle, "kind": "claim"})),
             Err(e) => steps.push(json!({"step": "send_failed", "error": format!("{e:#}")})),
