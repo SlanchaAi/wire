@@ -64,6 +64,22 @@ fn read_handle(home: &PathBuf) -> String {
     card["handle"].as_str().unwrap().to_string()
 }
 
+/// v0.11: read the DID-derived character handle for a session by its
+/// on-disk session name. Used by tests that did `wire session new
+/// <name>` and then need to look up the actual peer handle.
+fn handle_for_session(root: &PathBuf, session_name: &str) -> String {
+    let card_path = root
+        .join("sessions")
+        .join(session_name)
+        .join("config")
+        .join("wire")
+        .join("agent-card.json");
+    let bytes = std::fs::read(&card_path)
+        .unwrap_or_else(|e| panic!("agent-card at {card_path:?}: {e}"));
+    let card: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    card["handle"].as_str().unwrap().to_string()
+}
+
 fn wait_until<F: FnMut() -> bool>(deadline: Instant, mut f: F) -> bool {
     while Instant::now() < deadline {
         if f() {
@@ -312,8 +328,19 @@ async fn pair_all_local_mesh_pairs_every_sister_session_v0_6_0() {
     assert_eq!(summary["pairs_failed"].as_u64().unwrap_or(0), 0);
 
     // Each session's relay.json should list the other two as peers.
+    // v0.11: peer entries are keyed by the peer's CARD HANDLE (DID-
+    // derived character), not the session name. We look up each
+    // session's actual handle and assert on that.
     let sessions_root = home.join("sessions");
-    for name in &["alpha", "beth", "charlie"] {
+    let handle_alpha = handle_for_session(&home, "alpha");
+    let handle_beth = handle_for_session(&home, "beth");
+    let handle_charlie = handle_for_session(&home, "charlie");
+    let session_handles: [(&str, &str); 3] = [
+        ("alpha", handle_alpha.as_str()),
+        ("beth", handle_beth.as_str()),
+        ("charlie", handle_charlie.as_str()),
+    ];
+    for (name, _self_handle) in &session_handles {
         let relay_path = sessions_root
             .join(name)
             .join("config")
@@ -325,13 +352,13 @@ async fn pair_all_local_mesh_pairs_every_sister_session_v0_6_0() {
         let peers = state["peers"]
             .as_object()
             .expect("session must have peers map");
-        for other in &["alpha", "beth", "charlie"] {
-            if other == name {
+        for (other_name, other_handle) in &session_handles {
+            if other_name == name {
                 continue;
             }
             assert!(
-                peers.contains_key(*other),
-                "session {name} missing peer {other}: peers={:?}",
+                peers.contains_key(*other_handle),
+                "session {name} missing peer {other_name} (handle {other_handle}): peers={:?}",
                 peers.keys().collect::<Vec<_>>()
             );
         }

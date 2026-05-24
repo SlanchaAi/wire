@@ -8644,10 +8644,15 @@ fn cmd_session_pair_all_local(
             let b = &sessions[j];
             attempted += 1;
 
-            // Already-paired check: if A's relay-state has B's nick in
-            // peers AND vice versa, skip.
-            let a_pinned_b = session_has_peer(&a.home_dir, &b.name);
-            let b_pinned_a = session_has_peer(&b.home_dir, &a.name);
+            // Already-paired check: if A's relay-state has B's CARD
+            // HANDLE in peers AND vice versa, skip. v0.11: peer keys
+            // are character handles (not session names), so we use
+            // each side's handle field (already on the LocalSessionView)
+            // for the lookup rather than the session name.
+            let a_handle = a.handle.as_deref().unwrap_or(a.name.as_str());
+            let b_handle = b.handle.as_deref().unwrap_or(b.name.as_str());
+            let a_pinned_b = session_has_peer(&a.home_dir, b_handle);
+            let b_pinned_a = session_has_peer(&b.home_dir, a_handle);
             if a_pinned_b && b_pinned_a {
                 skipped_already += 1;
                 per_pair.push(json!({
