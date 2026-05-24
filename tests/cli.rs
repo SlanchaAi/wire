@@ -79,7 +79,7 @@ fn init_creates_keypair_and_card() {
     {
         // v0.5.7+: DID is pubkey-suffixed (`did:wire:paul-<8hex>`).
         let d = parsed["did"].as_str().unwrap();
-        assert!(d.starts_with("did:wire:paul-"), "got: {d}");
+        assert!(d.starts_with("did:wire:") && d.len() > 17, "v0.11: handle = DID-derived character, expected `did:wire:<word-word>-<8hex>`, got: {d}");
     }
     assert!(parsed["fingerprint"].as_str().unwrap().len() == 8);
 
@@ -110,9 +110,15 @@ fn whoami_after_init_returns_did_and_fingerprint() {
     {
         // v0.5.7+: DID is pubkey-suffixed (`did:wire:paul-<8hex>`).
         let d = parsed["did"].as_str().unwrap();
-        assert!(d.starts_with("did:wire:paul-"), "got: {d}");
+        assert!(d.starts_with("did:wire:") && d.len() > 17, "v0.11: handle = DID-derived character, expected `did:wire:<word-word>-<8hex>`, got: {d}");
     }
-    assert_eq!(parsed["handle"], "paul");
+    {
+        // v0.11: handle = DID-derived character, not operator-typed "paul".
+        let h = parsed["handle"].as_str().unwrap();
+        let d = parsed["did"].as_str().unwrap();
+        assert!(!h.is_empty(), "handle should be non-empty: {h}");
+        assert!(d.contains(h), "did slug must contain handle: did={d} handle={h}");
+    }
     assert!(parsed["capabilities"].is_array());
 }
 
@@ -159,7 +165,7 @@ fn send_writes_to_outbox() {
     let event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     {
         let from = event["from"].as_str().unwrap();
-        assert!(from.starts_with("did:wire:paul-"), "from: {from}");
+        assert!(from.starts_with("did:wire:"), "from: {from}");
     }
     // `to` is constructed at send time from the peer-handle the operator
     // typed; sender doesn't know the peer's pubkey yet, so the legacy
@@ -591,6 +597,12 @@ fn accept_with_name_does_not_emit_deprecation_v0_9_4() {
 fn here_prints_self_when_no_neighbors_v0_9_3() {
     let home = fresh_home();
     let _ = run(&home, &["init", "alice", "--offline"]);
+    // v0.11: handle is DID-derived character, not "alice". Discover it
+    // via whoami first so the assertion stays correct.
+    let whoami = run(&home, &["whoami", "--json"]);
+    let card: serde_json::Value = serde_json::from_slice(&whoami.stdout).unwrap();
+    let canonical = card["handle"].as_str().unwrap().to_string();
+
     let out = std::process::Command::new(wire_bin())
         .args(["here"])
         .env("WIRE_HOME", &home)
@@ -600,12 +612,10 @@ fn here_prints_self_when_no_neighbors_v0_9_3() {
         .expect("spawn wire");
     assert!(out.status.success(), "here failed: {:?}", out);
     let stdout = String::from_utf8(out.stdout).unwrap();
-    // Self line present.
     assert!(
-        stdout.contains("you are") && stdout.contains("alice"),
-        "here should show self — got: {stdout}"
+        stdout.contains("you are") && stdout.contains(&canonical),
+        "here should show self with canonical handle `{canonical}` — got: {stdout}"
     );
-    // Empty-mesh hint present.
     assert!(
         stdout.contains("no neighbors yet"),
         "here should explain empty mesh state — got: {stdout}"
@@ -623,9 +633,12 @@ fn here_json_includes_self_sisters_peers_v0_9_3() {
         .expect("spawn wire");
     assert!(out.status.success(), "here --json failed: {:?}", out);
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    // Required shape.
     assert!(parsed.get("self").is_some(), "self field: {parsed}");
-    assert!(parsed["self"]["handle"].as_str() == Some("alice"));
+    // v0.11: handle = DID-derived character. Assert non-empty + matches
+    // DID slug rather than pinning operator-typed name.
+    let h = parsed["self"]["handle"].as_str().unwrap();
+    let d = parsed["self"]["did"].as_str().unwrap();
+    assert!(!h.is_empty() && d.contains(h), "self handle/did mismatch: {parsed}");
     assert!(
         parsed.get("sister_sessions").is_some(),
         "sister_sessions field"
@@ -661,13 +674,20 @@ fn emoji_fallback_returns_ascii_tag_when_terminal_off_v0_9_3() {
 
 #[test]
 fn whois_typo_returns_did_you_mean_v0_9_2() {
-    // v0.9.2: nickname typo → suggestion from local pool. Test setup
-    // pins "alice" as self (handle = "alice"), then queries a typo.
+    // v0.9.2 (updated v0.11): nickname typo → suggestion from local
+    // pool. v0.11 made handle = DID-derived character, so we discover
+    // the actual character from whoami first, then query a typo of it.
     let home = fresh_home();
     let _ = run(&home, &["init", "alice", "--offline"]);
-    // The init also writes alice to the trust ring (self-pin). Query a typo:
+    let whoami = run(&home, &["whoami", "--json"]);
+    let card: serde_json::Value = serde_json::from_slice(&whoami.stdout).unwrap();
+    let canonical = card["handle"].as_str().unwrap().to_string();
+    assert!(canonical.contains('-'), "expected adj-noun handle: {canonical}");
+    // Query a 1-char typo: drop the last char.
+    let typo = &canonical[..canonical.len() - 1];
+
     let out = std::process::Command::new(wire_bin())
-        .args(["whois", "alic"])
+        .args(["whois", typo])
         .env("WIRE_HOME", &home)
         .env("WIRE_NO_AUTO_JSON", "1")
         .output()
@@ -676,19 +696,25 @@ fn whois_typo_returns_did_you_mean_v0_9_2() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     let combined = format!("{stdout}{stderr}");
     assert!(
-        combined.contains("Did you mean") && combined.contains("alice"),
-        "whois typo should suggest closest pinned/sister — got stdout=`{stdout}` stderr=`{stderr}`"
+        combined.contains("Did you mean") && combined.contains(&canonical),
+        "whois typo `{typo}` should suggest canonical `{canonical}` — got stdout=`{stdout}` stderr=`{stderr}`"
     );
 }
 
 #[test]
 fn whois_typo_returns_json_success_with_candidates_v0_9_2() {
-    // v0.9.2: in JSON mode, miss returns exit 0 with {found: false,
-    // candidates: [...]} so agents don't need try/catch on a miss.
+    // v0.9.2 (updated v0.11): JSON-mode miss returns exit 0 with
+    // {found: false, candidates: [...]} containing the operator's
+    // DID-derived character.
     let home = fresh_home();
     let _ = run(&home, &["init", "alice", "--offline"]);
+    let whoami = run(&home, &["whoami", "--json"]);
+    let card: serde_json::Value = serde_json::from_slice(&whoami.stdout).unwrap();
+    let canonical = card["handle"].as_str().unwrap().to_string();
+    let typo = &canonical[..canonical.len() - 1];
+
     let out = std::process::Command::new(wire_bin())
-        .args(["whois", "alic", "--json"])
+        .args(["whois", typo, "--json"])
         .env("WIRE_HOME", &home)
         .output()
         .expect("spawn wire");
@@ -701,8 +727,10 @@ fn whois_typo_returns_json_success_with_candidates_v0_9_2() {
     assert_eq!(parsed["found"], serde_json::Value::Bool(false));
     let candidates = parsed["candidates"].as_array().unwrap();
     assert!(
-        candidates.iter().any(|c| c.as_str() == Some("alice")),
-        "candidates should include `alice` for typo `alic`: {parsed}"
+        candidates
+            .iter()
+            .any(|c| c.as_str() == Some(canonical.as_str())),
+        "candidates should include canonical `{canonical}` for typo `{typo}`: {parsed}"
     );
 }
 
@@ -751,12 +779,17 @@ fn deprecated_verbs_hidden_from_help_v0_9_1() {
 
 #[test]
 fn init_offline_creates_keypair_without_slot_v0_9_1() {
+    // v0.11: operator-typed `alice` is ignored; DID slug uses the
+    // DID-derived character. Assert shape, not the operator's input.
     let home = fresh_home();
     let out = run(&home, &["init", "alice", "--offline", "--json"]);
     assert!(out.status.success(), "init --offline failed: {:?}", out);
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let did = parsed["did"].as_str().unwrap();
-    assert!(did.starts_with("did:wire:alice-"), "got: {did}");
+    assert!(
+        did.starts_with("did:wire:") && did.len() > 17,
+        "v0.11: expected `did:wire:<word-word>-<8hex>`, got: {did}"
+    );
     assert!(
         parsed.get("relay_url").is_none(),
         "offline init should not have relay_url: {parsed}"
@@ -787,9 +820,10 @@ fn json_auto_can_be_opted_out_v0_9_1() {
         .expect("spawn wire");
     assert!(out.status.success(), "whoami failed: {:?}", out);
     let stdout = String::from_utf8(out.stdout).unwrap();
+    // v0.11: human format prints DID with character handle, not "alice".
     assert!(
-        stdout.contains("did:wire:alice-"),
-        "WIRE_NO_AUTO_JSON should give human format — got: {stdout}"
+        stdout.contains("did:wire:"),
+        "WIRE_NO_AUTO_JSON should give human format with `did:` line — got: {stdout}"
     );
     assert!(
         !stdout.trim_start().starts_with('{'),
@@ -1314,9 +1348,15 @@ fn mcp_tools_call_wire_whoami() {
     {
         // v0.5.7+: DID is pubkey-suffixed (`did:wire:paul-<8hex>`).
         let d = parsed["did"].as_str().unwrap();
-        assert!(d.starts_with("did:wire:paul-"), "got: {d}");
+        assert!(d.starts_with("did:wire:") && d.len() > 17, "v0.11: handle = DID-derived character, expected `did:wire:<word-word>-<8hex>`, got: {d}");
     }
-    assert_eq!(parsed["handle"], "paul");
+    {
+        // v0.11: handle = DID-derived character, not operator-typed "paul".
+        let h = parsed["handle"].as_str().unwrap();
+        let d = parsed["did"].as_str().unwrap();
+        assert!(!h.is_empty(), "handle should be non-empty: {h}");
+        assert!(d.contains(h), "did slug must contain handle: did={d} handle={h}");
+    }
 }
 
 #[test]
@@ -1411,7 +1451,7 @@ fn status_after_init_shows_did_and_zero_peers() {
     {
         // v0.5.7+: DID is pubkey-suffixed (`did:wire:paul-<8hex>`).
         let d = parsed["did"].as_str().unwrap();
-        assert!(d.starts_with("did:wire:paul-"), "got: {d}");
+        assert!(d.starts_with("did:wire:") && d.len() > 17, "v0.11: handle = DID-derived character, expected `did:wire:<word-word>-<8hex>`, got: {d}");
     }
     assert_eq!(parsed["peers"].as_array().unwrap().len(), 0);
     assert_eq!(parsed["self_relay"], serde_json::Value::Null);

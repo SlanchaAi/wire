@@ -879,46 +879,7 @@ pub enum DiagAction {
 
 #[derive(Subcommand, Debug)]
 pub enum IdentityCommand {
-    /// v0.10.1: hidden from --help. The rename only affects YOUR local
-    /// display surface — peers cannot reach you by the renamed nickname
-    /// because v0.9 stopped publishing the override on the agent-card.
-    /// "If you can't call someone via a rename, don't let them rename
-    /// the wire": v1.0 will remove this verb entirely. For now it stays
-    /// callable so existing renames don't disappear out from under
-    /// operators, but the on-call-time warning explains the truth.
-    ///
-    /// Override the local-display nickname and/or emoji. Persists to
-    /// `<WIRE_HOME>/config/wire/display.json`. LOCAL DISPLAY ONLY:
-    /// peers see the auto-derived character from your DID.
-    ///
-    /// Examples:
-    ///   wire identity rename --name foxtrot-meadow --emoji 🦊
-    ///   wire identity rename --emoji 🐉      (keep auto nickname)
-    ///   wire identity rename --random        (re-roll auto from seed; clears overrides)
-    #[command(hide = true)] // v0.10.1 deprecated — rename doesn't propagate to peers
-    Rename {
-        /// New nickname (any non-empty string; convention is
-        /// `adjective-noun`, e.g. `foxtrot-meadow`). Omit to leave nickname
-        /// at its current value (auto-derived unless previously set).
-        #[arg(long)]
-        name: Option<String>,
-        /// New emoji glyph. Any single grapheme; the curated set is
-        /// recommended for cross-terminal compatibility.
-        #[arg(long)]
-        emoji: Option<String>,
-        /// Clear all overrides; revert to auto-derived from DID hash.
-        /// Mutually exclusive with `--name` / `--emoji`.
-        #[arg(long, conflicts_with_all = ["name", "emoji"])]
-        clear: bool,
-        /// Re-roll: alias for `--clear` plus an explanatory stderr line.
-        /// Auto-derived is itself deterministic, so this just removes
-        /// any previously-set override.
-        #[arg(long, conflicts_with_all = ["name", "emoji", "clear"])]
-        random: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Print the current character (auto-derived OR override).
+    /// Print the current character (DID-derived, the only name).
     /// Equivalent to `wire whoami --short` but scoped here for grouping.
     Show {
         #[arg(long)]
@@ -1853,16 +1814,43 @@ fn cmd_init(
     let (sk_seed, pk_bytes) = generate_keypair();
     config::write_private_key(&sk_seed)?;
 
-    let card = build_agent_card(handle, &pk_bytes, name, None, None);
+    // v0.11 ONE-NAME: derive the character nickname from a synthetic DID
+    // using the freshly-generated pubkey, then USE THE CHARACTER as the
+    // canonical handle. The operator-typed `handle` arg becomes either:
+    //   - identical to character (already-canonical input — no-op), OR
+    //   - overridden in favor of character (operator-typed name was a
+    //     vanity layer that would never have been federation-reachable).
+    // Either way, agent-card.handle ends up == character, and every
+    // downstream surface (relay phonebook, .well-known, dial/send) keys
+    // on the same name an operator sees in their statusline.
+    //
+    // Per the v0.11 directive: "If you can't call someone via a name,
+    // don't let them have it as a name." Operator-typed handles violated
+    // that rule because the character was the displayed name but the
+    // handle was the addressable one. Now they're the same string.
+    let synth_did = crate::agent_card::did_for_with_key(handle, &pk_bytes);
+    let character = crate::character::Character::from_did(&synth_did);
+    let canonical_handle: &str = &character.nickname;
+    if canonical_handle != handle {
+        eprintln!(
+            "wire init: v0.11 one-name rule — operator-typed `{handle}` ignored in favor of \
+             DID-derived character `{canonical_handle}`. Peers will reach you as `{canonical_handle}`."
+        );
+    }
+
+    let card = build_agent_card(canonical_handle, &pk_bytes, name, None, None);
     let signed = sign_agent_card(&card, &sk_seed);
     config::write_agent_card(&signed)?;
 
     let mut trust = empty_trust();
-    add_self_to_trust(&mut trust, handle, &pk_bytes);
+    add_self_to_trust(&mut trust, canonical_handle, &pk_bytes);
     config::write_trust(&trust)?;
 
     let fp = fingerprint(&pk_bytes);
-    let key_id = make_key_id(handle, &pk_bytes);
+    let key_id = make_key_id(canonical_handle, &pk_bytes);
+    // Rebind `handle` for the rest of cmd_init so downstream prints,
+    // relay-state writes, etc. all reference the canonical name.
+    let handle = canonical_handle;
 
     // If --relay was passed, also bind a slot inline so init+bind happen in one step.
     let mut relay_info: Option<(String, String)> = None;
@@ -2451,14 +2439,10 @@ fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| crate::agent_card::display_handle_from_did(&did).to_string());
-    // v0.7.0-alpha.3: read sidecar display.json for any operator-chosen
-    // override of nickname/emoji. Palette stays auto-derived from DID.
-    let overrides = config::read_display_overrides().unwrap_or_default();
-    let character = crate::character::Character::from_did_with_override(
-        &did,
-        overrides.nickname.as_deref(),
-        overrides.emoji.as_deref(),
-    );
+    // v0.11: character is purely DID-derived. No overrides — the
+    // operator-rename verb is gone and display.json reads are stripped
+    // because they introduced a second name that peers couldn't find.
+    let character = crate::character::Character::from_did(&did);
 
     // v0.7.0-alpha.3: append the current cwd (home-abbreviated to `~/`)
     // so operators tab-flipping between multiple Claude windows see both
@@ -2494,7 +2478,10 @@ fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
         .unwrap_or_else(|| json!(["wire/v3.1"]));
 
     if as_json {
-        let has_override = overrides.nickname.is_some() || overrides.emoji.is_some();
+        // v0.11: character_override is always false now (no rename verb,
+        // no display.json reads). Field stays for back-compat with v0.10
+        // JSON consumers that key off it.
+        let has_override = false;
         println!(
             "{}",
             serde_json::to_string(&json!({
@@ -2522,13 +2509,12 @@ fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
 
 fn cmd_identity(cmd: IdentityCommand) -> Result<()> {
     match cmd {
-        IdentityCommand::Rename {
-            name,
-            emoji,
-            clear,
-            random,
-            json,
-        } => cmd_identity_rename(name, emoji, clear || random, random, json),
+        // v0.11: IdentityCommand::Rename deleted. The character is the
+        // one canonical name (DID-derived); a local-display rename
+        // would create a second name peers can't find, violating the
+        // "names must be findable" invariant. Aliases (if needed
+        // later) become relay-claimed entries that ARE findable —
+        // a different architectural shape from rename.
         IdentityCommand::Show { json } => cmd_whoami(json, !json, false),
         IdentityCommand::List { json } => cmd_session_list(json),
         IdentityCommand::Publish {
@@ -2804,161 +2790,6 @@ fn cmd_identity_demote(name: &str, as_json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_identity_rename(
-    name: Option<String>,
-    emoji: Option<String>,
-    clear: bool,
-    random_announce: bool,
-    as_json: bool,
-) -> Result<()> {
-    if !config::is_initialized()? {
-        bail!("not initialized — run `wire init <handle>` first");
-    }
-    // v0.10.1: rename is a misleading affordance — operators picking a
-    // custom name expect peers to find them by it, but v0.9 made
-    // rename local-display-only. Loudly surface the truth.
-    // Suppress in JSON mode (machine reads `character_override` field).
-    if !as_json {
-        eprintln!(
-            "wire identity rename: LOCAL DISPLAY ONLY.\n  \
-             Peers cannot reach you by the renamed nickname — they see your canonical \
-             character (DID-derived). Run `wire whoami --json | jq .character` to see \
-             what the world calls you.\n  \
-             v1.0 will remove this verb entirely (\"if it can't find you, it shouldn't \
-             rename you\"). Use rename only as a personal-UI preference for your own \
-             statusline."
-        );
-    }
-
-    // Read DID once for character derivation in the response.
-    let card = config::read_agent_card()?;
-    let did = card
-        .get("did")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-
-    let new_overrides = if clear {
-        config::DisplayOverrides::default()
-    } else {
-        // Merge: keep existing fields if not explicitly provided.
-        let mut existing = config::read_display_overrides().unwrap_or_default();
-        if let Some(n) = name {
-            // v0.7.0-alpha.8 (review-fix #1): sanitize at write time and
-            // refuse anything that fully reduces to empty (operator typed
-            // only control chars / escape sequences). Defense against
-            // self-pwn AND silent-no-op writes.
-            let cleaned = crate::character::sanitize_display_text(&n);
-            if cleaned.is_empty() {
-                bail!(
-                    "nickname `{n:?}` is empty after stripping control characters — pick a name with printable codepoints (max {} chars).",
-                    crate::character::MAX_DISPLAY_CHARS
-                );
-            }
-            if cleaned != n {
-                eprintln!(
-                    "wire identity rename: stripped control characters from nickname → `{cleaned}`"
-                );
-            }
-            existing.nickname = Some(cleaned);
-        }
-        if let Some(e) = emoji {
-            let cleaned = crate::character::sanitize_display_text(&e);
-            if cleaned.is_empty() {
-                bail!(
-                    "emoji `{e:?}` is empty after stripping control characters — pick a printable emoji glyph."
-                );
-            }
-            if cleaned != e {
-                eprintln!(
-                    "wire identity rename: stripped control characters from emoji → `{cleaned}`"
-                );
-            }
-            existing.emoji = Some(cleaned);
-        }
-        existing
-    };
-
-    // If clearing AND no overrides existed AND no flags given, refuse so we
-    // don't silently no-op. Random implies clear with announcement.
-    let no_fields_provided = new_overrides.nickname.is_none()
-        && new_overrides.emoji.is_none()
-        && !clear
-        && !random_announce;
-    if no_fields_provided {
-        bail!("nothing to do — pass --name, --emoji, --clear, or --random");
-    }
-
-    config::write_display_overrides(&new_overrides)?;
-
-    // v0.9: rename is LOCAL-DISPLAY ONLY. The agent-card's published
-    // identity is the DID-derived character (deterministic SHA-256
-    // hash → adj-noun + emoji + palette). Operator-typed overrides
-    // affect only THIS machine's UI — statusline, `wire whoami`,
-    // `wire peers` output. Federated peers ALWAYS see the canonical
-    // DID-derived character.
-    //
-    // Why: keeping rename publishable created a five-name surface
-    // (DID, handle, session-name, character-nickname, operator-rename)
-    // where operator-rename could be ANYTHING, breaking the "one
-    // immutable canonical name per identity" promise. v0.9 collapses
-    // the surface: the DID-derived character is THE name peers know
-    // you by. Local rename is your editor preference for your own
-    // surface, full stop.
-    //
-    // Pre-v0.9 (v0.7.0-alpha.6 through v0.8) republished the rewritten
-    // card to the federation relay's phonebook. That code path is
-    // removed deliberately; no agent-card mutation happens here
-    // anymore.
-    eprintln!(
-        "wire identity rename: applied as LOCAL display override only. \
-         Federated peers continue to see the DID-derived character. \
-         (Removed in v0.9: the rewrite-card + republish-to-relay flow.)"
-    );
-
-    if random_announce {
-        eprintln!(
-            "wire identity rename: overrides cleared; falling back to auto-derived character (DID-deterministic, so the character is the same as it was before any rename)."
-        );
-    }
-
-    let character = crate::character::Character::from_did_with_override(
-        &did,
-        new_overrides.nickname.as_deref(),
-        new_overrides.emoji.as_deref(),
-    );
-
-    if as_json {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "did": did,
-                "character": character,
-                "overrides": new_overrides,
-            }))?
-        );
-    } else {
-        println!("renamed (locally) → {}", character.colored());
-        eprintln!("  · palette stays DID-derived (sticky color across renames)");
-        eprintln!("  · NOT published to peers (v0.9+ rename is local-display only)");
-    }
-    Ok(())
-}
-
-// ---------- peers ----------
-
-/// P0.Y (0.5.11): effective tier shown to operators. `wire add` pins a
-/// peer's card into trust at VERIFIED immediately, but the bilateral pin
-/// isn't complete until that peer's `pair_drop_ack` arrives carrying their
-/// slot_token. Until then we CAN'T send to them. Displaying VERIFIED is
-/// misleading — spark observed this in real usage.
-///
-/// Effective rules:
-///   trust.tier == VERIFIED + relay_state.peers[h].slot_token empty -> "PENDING_ACK"
-///   otherwise -> raw trust tier (UNTRUSTED / VERIFIED / etc.)
-///
-/// Strictly a display concern — trust state machine itself is untouched
-/// so existing promote/demote logic still works.
 fn effective_peer_tier(trust: &Value, relay_state: &Value, handle: &str) -> String {
     let raw = crate::trust::get_tier(trust, handle);
     if raw != "VERIFIED" {
@@ -3338,12 +3169,8 @@ fn cmd_here(as_json: bool) -> Result<()> {
         let character = if did.is_empty() {
             None
         } else {
-            let overrides = config::read_display_overrides().unwrap_or_default();
-            Some(crate::character::Character::from_did_with_override(
-                &did,
-                overrides.nickname.as_deref(),
-                overrides.emoji.as_deref(),
-            ))
+            // v0.11: DID-derived only. No display.json overrides.
+            Some(crate::character::Character::from_did(&did))
         };
         (did, handle, character)
     } else {

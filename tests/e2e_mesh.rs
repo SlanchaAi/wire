@@ -48,6 +48,17 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
     out
 }
 
+/// v0.11: read the DID-derived character handle from an
+/// initialized session. Required because v0.11 stops using the
+/// operator-typed init handle (`paul`/`willard`/etc.) — the actual
+/// handle on the agent-card is derived from the keypair.
+fn read_handle(home: &PathBuf) -> String {
+    let out = wire(home, &["whoami", "--json"]);
+    assert!(out.status.success(), "whoami failed: {:?}", out);
+    let card: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    card["handle"].as_str().unwrap().to_string()
+}
+
 /// Drive a single SAS pairing between two homes against a relay.
 /// `host_home` runs `pair-host`; `guest_home` runs `pair-join` with the
 /// captured code phrase. Returns Ok(()) iff both processes exit 0 and
@@ -153,16 +164,19 @@ async fn three_party_mesh_of_bilateral_round_trips() {
     let willard = fresh_dir("willard");
     let carol = fresh_dir("carol");
     assert!(wire(&paul, &["init", "paul", "--offline"]).status.success());
+    let paul_h = read_handle(&paul);
     assert!(
         wire(&willard, &["init", "willard", "--offline"])
             .status
             .success()
     );
+    let willard_h = read_handle(&willard);
     assert!(
         wire(&carol, &["init", "carol", "--offline"])
             .status
             .success()
     );
+    let carol_h = read_handle(&carol);
 
     // ---- 3. three pairwise pairings (mesh of bilaterals) ----
     drive_pairing(&paul, &willard, &relay_url);
@@ -171,9 +185,9 @@ async fn three_party_mesh_of_bilateral_round_trips() {
 
     // ---- 4. each agent now has the other two pinned ----
     for (home, expected_peers) in [
-        (&paul, vec!["willard", "carol"]),
-        (&willard, vec!["paul", "carol"]),
-        (&carol, vec!["paul", "willard"]),
+        (&paul, vec![&willard_h, &carol_h]),
+        (&willard, vec![&paul_h, &carol_h]),
+        (&carol, vec![&paul_h, &willard_h]),
     ] {
         let trust: Value = serde_json::from_str(
             &std::fs::read_to_string(home.join("config/wire/trust.json")).unwrap(),
@@ -201,34 +215,34 @@ async fn three_party_mesh_of_bilateral_round_trips() {
     // ---- 5. criss-cross sends: each agent fires one event to each peer ----
     // paul -> willard, paul -> carol
     assert!(
-        wire(&paul, &["send", "willard", "decision", "P->W"])
+        wire(&paul, &["send", &willard_h, "decision", "P->W"])
             .status
             .success()
     );
     assert!(
-        wire(&paul, &["send", "carol", "decision", "P->C"])
+        wire(&paul, &["send", &carol_h, "decision", "P->C"])
             .status
             .success()
     );
     // willard -> paul, willard -> carol
     assert!(
-        wire(&willard, &["send", "paul", "decision", "W->P"])
+        wire(&willard, &["send", &paul_h, "decision", "W->P"])
             .status
             .success()
     );
     assert!(
-        wire(&willard, &["send", "carol", "decision", "W->C"])
+        wire(&willard, &["send", &carol_h, "decision", "W->C"])
             .status
             .success()
     );
     // carol -> paul, carol -> willard
     assert!(
-        wire(&carol, &["send", "paul", "decision", "C->P"])
+        wire(&carol, &["send", &paul_h, "decision", "C->P"])
             .status
             .success()
     );
     assert!(
-        wire(&carol, &["send", "willard", "decision", "C->W"])
+        wire(&carol, &["send", &willard_h, "decision", "C->W"])
             .status
             .success()
     );
@@ -270,12 +284,12 @@ async fn three_party_mesh_of_bilateral_round_trips() {
             .collect()
     }
 
-    assert_eq!(tail_bodies(&paul, "willard"), vec!["W->P".to_string()]);
-    assert_eq!(tail_bodies(&paul, "carol"), vec!["C->P".to_string()]);
-    assert_eq!(tail_bodies(&willard, "paul"), vec!["P->W".to_string()]);
-    assert_eq!(tail_bodies(&willard, "carol"), vec!["C->W".to_string()]);
-    assert_eq!(tail_bodies(&carol, "paul"), vec!["P->C".to_string()]);
-    assert_eq!(tail_bodies(&carol, "willard"), vec!["W->C".to_string()]);
+    assert_eq!(tail_bodies(&paul, &willard_h), vec!["W->P".to_string()]);
+    assert_eq!(tail_bodies(&paul, &carol_h), vec!["C->P".to_string()]);
+    assert_eq!(tail_bodies(&willard, &paul_h), vec!["P->W".to_string()]);
+    assert_eq!(tail_bodies(&willard, &carol_h), vec!["C->W".to_string()]);
+    assert_eq!(tail_bodies(&carol, &paul_h), vec!["P->C".to_string()]);
+    assert_eq!(tail_bodies(&carol, &willard_h), vec!["W->C".to_string()]);
 
     // ---- 9. cross-confirmation: each agent's tail (no filter) shows exactly 2 events ----
     for home in [&paul, &willard, &carol] {

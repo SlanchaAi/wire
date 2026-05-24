@@ -55,6 +55,17 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
     out
 }
 
+/// v0.11: read the DID-derived character handle from an
+/// initialized session. Required because v0.11 stops using the
+/// operator-typed init handle ("paul"/"willard"/etc.) — the actual
+/// handle on the agent-card is derived from the keypair.
+fn read_handle(home: &PathBuf) -> String {
+    let out = wire(home, &["whoami", "--json"]);
+    assert!(out.status.success(), "whoami failed: {:?}", out);
+    let card: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    card["handle"].as_str().unwrap().to_string()
+}
+
 /// Spin an in-process federation relay (full routes). Returns the
 /// `http://...` URL string.
 async fn spawn_federation_relay() -> String {
@@ -163,8 +174,9 @@ async fn dual_slot_send_prefers_local_endpoint() {
             .status
             .success()
     );
+    let alice_h = read_handle(&alice);
     assert!(
-        wire(&alice, &["claim", "alice", "--relay", &fed])
+        wire(&alice, &["claim", &alice_h, "--relay", &fed])
             .status
             .success()
     );
@@ -173,15 +185,16 @@ async fn dual_slot_send_prefers_local_endpoint() {
             .status
             .success()
     );
+    let bob_h = read_handle(&bob);
     assert!(
-        wire(&bob, &["claim", "bob", "--relay", &fed])
+        wire(&bob, &["claim", &bob_h, "--relay", &fed])
             .status
             .success()
     );
 
     // Patch in local endpoints for both.
-    add_local_endpoint(&alice, "alice", &local).await;
-    add_local_endpoint(&bob, "bob", &local).await;
+    add_local_endpoint(&alice, &alice_h, &local).await;
+    add_local_endpoint(&bob, &bob_h, &local).await;
 
     // Alice sends pair_drop. The body should carry endpoints[] because
     // alice's self.endpoints now has two entries.
@@ -204,7 +217,7 @@ async fn dual_slot_send_prefers_local_endpoint() {
     // it inline via `wire pull` then `wire pair-accept`.
     let pull_out = wire(&bob, &["pull", "--json"]);
     assert!(pull_out.status.success(), "bob pull failed: {pull_out:?}");
-    let accept_out = wire(&bob, &["pair-accept", "alice", "--json"]);
+    let accept_out = wire(&bob, &["pair-accept", &alice_h, "--json"]);
     assert!(
         accept_out.status.success(),
         "bob pair-accept failed: {accept_out:?}"
@@ -216,7 +229,7 @@ async fn dual_slot_send_prefers_local_endpoint() {
 
     // Assert bob's relay_state has both endpoints for alice.
     let bob_state = read_relay_state(&bob);
-    let alice_eps = bob_state["peers"]["alice"]["endpoints"]
+    let alice_eps = bob_state["peers"][&alice_h]["endpoints"]
         .as_array()
         .expect("alice should have endpoints[] in bob's state");
     assert_eq!(
@@ -236,7 +249,7 @@ async fn dual_slot_send_prefers_local_endpoint() {
     assert!(
         wire(
             &alice,
-            &["send", "bob", "claim", "dual-slot hello", "--json"]
+            &["send", &bob_h, "claim", "dual-slot hello", "--json"]
         )
         .status
         .success()
@@ -278,8 +291,10 @@ async fn dual_slot_send_falls_back_to_federation_on_local_failure() {
             .status
             .success()
     );
+    let alice_h = read_handle(&alice);
+    let _ = &alice_h; // v0.11 unused-var hush
     assert!(
-        wire(&alice, &["claim", "alice", "--relay", &fed])
+        wire(&alice, &["claim", &alice_h, "--relay", &fed])
             .status
             .success()
     );
@@ -288,14 +303,16 @@ async fn dual_slot_send_falls_back_to_federation_on_local_failure() {
             .status
             .success()
     );
+    let bob_h = read_handle(&bob);
+    let _ = &bob_h; // v0.11 unused-var hush
     assert!(
-        wire(&bob, &["claim", "bob", "--relay", &fed])
+        wire(&bob, &["claim", &bob_h, "--relay", &fed])
             .status
             .success()
     );
 
-    add_local_endpoint(&alice, "alice", &local).await;
-    add_local_endpoint(&bob, "bob", &local).await;
+    add_local_endpoint(&alice, &alice_h, &local).await;
+    add_local_endpoint(&bob, &bob_h, &local).await;
 
     // Pair bilateral.
     let fed_ip = fed
@@ -314,7 +331,7 @@ async fn dual_slot_send_falls_back_to_federation_on_local_failure() {
     );
     assert!(wire(&bob, &["pull", "--json"]).status.success());
     assert!(
-        wire(&bob, &["pair-accept", "alice", "--json"])
+        wire(&bob, &["pair-accept", &alice_h, "--json"])
             .status
             .success()
     );
@@ -323,7 +340,7 @@ async fn dual_slot_send_falls_back_to_federation_on_local_failure() {
     // Patch Alice's view of bob's local endpoint to a port that nothing
     // listens on — simulates "local relay went down for bob".
     let mut alice_state = read_relay_state(&alice);
-    let bob_eps = alice_state["peers"]["bob"]["endpoints"]
+    let bob_eps = alice_state["peers"][&bob_h]["endpoints"]
         .as_array_mut()
         .expect("bob endpoints[] in alice state");
     for ep in bob_eps.iter_mut() {
@@ -336,7 +353,7 @@ async fn dual_slot_send_falls_back_to_federation_on_local_failure() {
     // Send + push: local should fail (port 1 closed), federation should
     // succeed.
     assert!(
-        wire(&alice, &["send", "bob", "claim", "fallback test", "--json"])
+        wire(&alice, &["send", &bob_h, "claim", "fallback test", "--json"])
             .status
             .success()
     );
@@ -371,8 +388,10 @@ async fn dual_slot_back_compat_v0_5_16_peer_routes_via_federation() {
             .status
             .success()
     );
+    let alice_h = read_handle(&alice);
+    let _ = &alice_h; // v0.11 unused-var hush
     assert!(
-        wire(&alice, &["claim", "alice", "--relay", &fed])
+        wire(&alice, &["claim", &alice_h, "--relay", &fed])
             .status
             .success()
     );
@@ -381,14 +400,16 @@ async fn dual_slot_back_compat_v0_5_16_peer_routes_via_federation() {
             .status
             .success()
     );
+    let bob_h = read_handle(&bob);
+    let _ = &bob_h; // v0.11 unused-var hush
     assert!(
-        wire(&bob, &["claim", "bob", "--relay", &fed])
+        wire(&bob, &["claim", &bob_h, "--relay", &fed])
             .status
             .success()
     );
 
     // Alice gets dual slots; bob stays federation-only (v0.5.16 shape).
-    add_local_endpoint(&alice, "alice", &local).await;
+    add_local_endpoint(&alice, &alice_h, &local).await;
 
     let fed_ip = fed
         .trim_start_matches("http://")
@@ -406,7 +427,7 @@ async fn dual_slot_back_compat_v0_5_16_peer_routes_via_federation() {
     );
     assert!(wire(&bob, &["pull", "--json"]).status.success());
     assert!(
-        wire(&bob, &["pair-accept", "alice", "--json"])
+        wire(&bob, &["pair-accept", &alice_h, "--json"])
             .status
             .success()
     );
@@ -416,7 +437,7 @@ async fn dual_slot_back_compat_v0_5_16_peer_routes_via_federation() {
     // bob has no local slot. After alice pulls the ack, alice's view of
     // bob should have one endpoint, scope=federation.
     let alice_state = read_relay_state(&alice);
-    let bob_eps = alice_state["peers"]["bob"]["endpoints"].as_array();
+    let bob_eps = alice_state["peers"][&bob_h]["endpoints"].as_array();
     // Either endpoints[] is a single federation entry, OR the legacy
     // top-level fields are populated and endpoints[] is absent — both
     // are valid back-compat shapes for routing.
@@ -432,7 +453,7 @@ async fn dual_slot_back_compat_v0_5_16_peer_routes_via_federation() {
     assert!(
         wire(
             &alice,
-            &["send", "bob", "claim", "back-compat test", "--json"]
+            &["send", &bob_h, "claim", "back-compat test", "--json"]
         )
         .status
         .success()

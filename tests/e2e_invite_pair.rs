@@ -42,6 +42,17 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
     out
 }
 
+/// v0.11: read the DID-derived character handle from an
+/// initialized session. Required because v0.11 stops using the
+/// operator-typed init handle (`paul`/`willard`/etc.) — the actual
+/// handle on the agent-card is derived from the keypair.
+fn read_handle(home: &PathBuf) -> String {
+    let out = wire(home, &["whoami", "--json"]);
+    assert!(out.status.success(), "whoami failed: {:?}", out);
+    let card: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    card["handle"].as_str().unwrap().to_string()
+}
+
 struct DaemonGuard(Child);
 impl Drop for DaemonGuard {
     fn drop(&mut self) {
@@ -95,11 +106,13 @@ async fn invite_url_one_paste_pair_e2e() {
             .status
             .success()
     );
+    let paul_h = read_handle(&paul);
     assert!(
         wire(&willard, &["init", "willard", "--relay", &relay_url])
             .status
             .success()
     );
+    let willard_h = read_handle(&willard);
 
     // paul daemon must run so it pulls pair_drop events from its own slot.
     let _paul_d = spawn_daemon(&paul);
@@ -141,12 +154,12 @@ async fn invite_url_one_paste_pair_e2e() {
     // observable as flakiness).
     let willard_pinned = wait_until(Instant::now() + Duration::from_secs(20), || {
         let peers = wire(&paul, &["peers", "--json"]);
-        if !String::from_utf8_lossy(&peers.stdout).contains("willard") {
+        if !String::from_utf8_lossy(&peers.stdout).contains(&willard_h) {
             return false;
         }
         let relay_str =
             std::fs::read_to_string(paul.join("config/wire/relay.json")).unwrap_or_default();
-        relay_str.contains("willard")
+        relay_str.contains(&willard_h)
     });
     if !willard_pinned {
         eprintln!("--- paul trust.json ---");
@@ -174,11 +187,11 @@ async fn invite_url_one_paste_pair_e2e() {
     let relay_str =
         std::fs::read_to_string(paul.join("config/wire/relay.json")).unwrap_or_default();
     assert!(
-        trust_str.contains("willard"),
+        trust_str.contains(&willard_h),
         "paul trust missing willard: {trust_str}"
     );
     assert!(
-        relay_str.contains("willard"),
+        relay_str.contains(&willard_h),
         "paul relay.json missing willard: {relay_str}"
     );
 
@@ -186,7 +199,7 @@ async fn invite_url_one_paste_pair_e2e() {
     assert!(
         wire(
             &willard,
-            &["send", "paul", "decision", "hello from willard via invite"]
+            &["send", &paul_h, "decision", "hello from willard via invite"]
         )
         .status
         .success()
@@ -209,7 +222,7 @@ async fn invite_url_one_paste_pair_e2e() {
     assert!(
         wire(
             &paul,
-            &["send", "willard", "decision", "ack from paul via invite"]
+            &["send", &willard_h, "decision", "ack from paul via invite"]
         )
         .status
         .success()
@@ -248,6 +261,8 @@ async fn expired_invite_rejected_on_accept() {
             .status
             .success()
     );
+    let paul_h = read_handle(&paul);
+    let _ = &paul_h; // v0.11 unused-var hush
 
     let out = wire(
         &paul,
@@ -288,6 +303,8 @@ async fn accept_zero_config_auto_init() {
             .status
             .success()
     );
+    let paul_h = read_handle(&paul);
+    let _ = &paul_h; // v0.11 unused-var hush
     let _paul_d = spawn_daemon(&paul);
 
     let mint = wire(&paul, &["invite", "--relay", &relay_url, "--json"]);
@@ -313,8 +330,8 @@ async fn accept_zero_config_auto_init() {
             return false;
         };
         let agents = v["agents"].as_object().cloned().unwrap_or_default();
-        // Self is "paul" + at least one other.
-        agents.keys().any(|k| k != "paul")
+        // Self is &paul_h + at least one other.
+        agents.keys().any(|k| k != &paul_h)
     });
     assert!(pinned, "paul never pinned the bare zero-config peer");
 }

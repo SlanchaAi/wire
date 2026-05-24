@@ -43,6 +43,17 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
     out
 }
 
+/// v0.11: read the DID-derived character handle from an
+/// initialized session. Required because v0.11 stops using the
+/// operator-typed init handle ("paul"/"willard"/etc.) — the actual
+/// handle on the agent-card is derived from the keypair.
+fn read_handle(home: &PathBuf) -> String {
+    let out = wire(home, &["whoami", "--json"]);
+    assert!(out.status.success(), "whoami failed: {:?}", out);
+    let card: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    card["handle"].as_str().unwrap().to_string()
+}
+
 fn wait_until<F: Fn() -> bool>(deadline: Instant, f: F) -> bool {
     while Instant::now() < deadline {
         if f() {
