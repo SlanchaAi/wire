@@ -9122,28 +9122,48 @@ fn drive_bilateral_pair(
         Ok(())
     };
 
-    // 1. A initiates via --local-sister (reads B's card + endpoints
-    // from disk, pins, delivers pair_drop direct to B's local slot)
-    // → 2. NO separate push needed — `wire add --local-sister` does
-    // the slot POST inline. Keeping a no-op push so the step count
-    // matches the old federation flow for log/error continuity.
+    // v0.11: each session's agent-card.handle is the DID-derived
+    // character, not the session name. pair-accept lookups key on the
+    // CARD HANDLE, so we discover each side's canonical handle from
+    // its agent-card on disk before driving the pair flow.
+    let read_card_handle = |home: &std::path::Path| -> Result<String> {
+        let card_path = home.join("config").join("wire").join("agent-card.json");
+        let bytes = std::fs::read(&card_path)
+            .with_context(|| format!("reading agent-card at {card_path:?}"))?;
+        let card: Value = serde_json::from_slice(&bytes)?;
+        card.get("handle")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("agent-card at {card_path:?} missing `handle` field"))
+    };
+    let a_handle = read_card_handle(a_home)
+        .with_context(|| format!("session {a_name} (a): read agent-card.handle"))?;
+    let b_handle = read_card_handle(b_home)
+        .with_context(|| format!("session {b_name} (b): read agent-card.handle"))?;
+
+    // 1. A initiates via --local-sister (uses the session NAME for
+    // the registry lookup; cmd_add_local_sister auto-resolves
+    // session→handle internally).
     run(a_home, &["add", b_name, "--local-sister", "--json"])
         .with_context(|| format!("step 1/8: {a_name} `wire add {b_name} --local-sister`"))?;
 
     // 3. settle so pair_drop reaches B's slot
     std::thread::sleep(Duration::from_secs(settle_secs));
 
-    // 4. B pulls pair_drop → 5. B pair-accept (pins A) → 6. B push pair_drop_ack
+    // 4. B pulls pair_drop → 5. B pair-accept (pins A by CARD HANDLE,
+    // not by session name — under v0.11 these differ) → 6. B push ack
     run(b_home, &["pull", "--json"]).with_context(|| format!("step 4/8: {b_name} `wire pull`"))?;
-    run(b_home, &["pair-accept", a_name, "--json"])
-        .with_context(|| format!("step 5/8: {b_name} `wire pair-accept {a_name}`"))?;
+    run(b_home, &["pair-accept", &a_handle, "--json"])
+        .with_context(|| format!("step 5/8: {b_name} `wire pair-accept {a_handle}` (a session={a_name})"))?;
     run(b_home, &["push", "--json"]).with_context(|| format!("step 6/8: {b_name} `wire push`"))?;
 
     // 7. settle so ack reaches A's slot
     std::thread::sleep(Duration::from_secs(settle_secs));
 
-    // 8. A pulls ack (pins B with the slot_token + endpoints[] from the ack)
+    // 8. A pulls ack (pins B by CARD HANDLE)
     run(a_home, &["pull", "--json"]).with_context(|| format!("step 8/8: {a_name} `wire pull`"))?;
+    // suppress unused warning when both handles are consumed
+    let _ = &b_handle;
 
     Ok(())
 }
