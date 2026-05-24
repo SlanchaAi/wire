@@ -9682,18 +9682,37 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
     };
     let cli_version = env!("CARGO_PKG_VERSION").to_string();
 
-    // 2b. v0.6.9: snapshot which sessions HAD a running daemon BEFORE
-    // we kill anything. Step 3's pgrep+SIGTERM also kills session-owned
-    // daemons (they share the `wire daemon` command line), so by the
-    // time the respawn loop runs, `daemon_running` would always be
-    // false and zero sessions would respawn. Capture state up front
-    // and respawn whatever was alive at the start.
-    let sessions_to_respawn_after_kill: Vec<std::path::PathBuf> = crate::session::list_sessions()
+    // 2b. v0.13.2 (B fix — session-scoped upgrade). `wire upgrade` now
+    // refreshes THIS session's daemon, not the whole box. The old box-wide
+    // design (kill every `wire daemon` process, wipe every session's pidfile,
+    // respawn every session) was wrong for a multi-session / shared-relay box
+    // AND broke on Windows: the CIM scan can't match the quoted
+    // `"...\wire.exe" daemon` command line (no contiguous `wire daemon`), so it
+    // found nothing to kill, then the respawn loop ACCUMULATED daemons
+    // (glossy-magnolia: 2->5->8->11). The kill set is now:
+    //   (a) THIS session's own daemon, via its pidfile pid — reliable and
+    //       CIM-independent; plus
+    //   (b) TRUE orphans: `wire daemon` pids owned by NO session.
+    // It SPARES sibling sessions' daemons AND the shared loopback relay-server
+    // (killing it would break every same-box session's routing).
+    let my_daemon_pid = record.pid();
+    let owned_session_pids: std::collections::HashSet<u32> = crate::session::list_sessions()
         .unwrap_or_default()
-        .into_iter()
-        .filter(|s| s.daemon_running)
-        .map(|s| s.home_dir)
+        .iter()
+        .filter_map(|s| crate::session::session_daemon_pid(&s.home_dir))
         .collect();
+    let mut kill_set: Vec<u32> = Vec::new();
+    if let Some(p) = my_daemon_pid {
+        kill_set.push(p);
+    }
+    for p in &daemon_pids {
+        if !owned_session_pids.contains(p) && Some(*p) != my_daemon_pid {
+            kill_set.push(*p); // true orphan — owned by no session
+        }
+    }
+    kill_set.sort_unstable();
+    kill_set.dedup();
+    // relay_pids are intentionally NOT killed — the local relay is shared.
 
     if check_only {
         // v0.6.8: also surface session-level state + PATH dupes in --check.
@@ -9737,7 +9756,7 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
             "running_relay_servers": relay_pids,
             "pidfile_version": recorded_version,
             "cli_version": cli_version,
-            "would_kill": running_pids,
+            "would_kill": kill_set,
             "would_refresh_services": installed_service_kinds,
             "session_daemons_running": sessions_with_daemons,
             "path_binaries": path_dupes,
@@ -9803,7 +9822,7 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
     // `taskkill /T /PID` (kills the process tree, important for
     // relay-server's hyper worker threads).
     let mut killed: Vec<u32> = Vec::new();
-    for pid in &running_pids {
+    for pid in &kill_set {
         if crate::platform::kill_process(*pid, false) {
             killed.push(*pid);
         }
@@ -9838,21 +9857,12 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         let _ = std::fs::remove_file(&pidfile);
     }
 
-    // 4b. v0.6.8/9 stale-cleanup: wipe every session's pidfile (step 3's
-    // pgrep+SIGTERM has already killed the processes; pidfile tombstones
-    // would otherwise block ensure_session_daemon's "already running"
-    // short-circuit). The respawn list comes from the v0.6.9 pre-kill
-    // snapshot above — checking `daemon_running` here would always
-    // return false because we just killed them.
-    if let Ok(sessions) = crate::session::list_sessions() {
-        for s in &sessions {
-            let session_pidfile = s.home_dir.join("state").join("wire").join("daemon.pid");
-            if session_pidfile.exists() {
-                let _ = std::fs::remove_file(&session_pidfile);
-            }
-        }
-    }
-    let session_daemons_to_respawn = sessions_to_respawn_after_kill;
+    // 4b. v0.13.2: session-scoped — only THIS session's pidfile is wiped
+    // (already removed at step 4 above). We deliberately DO NOT touch sibling
+    // sessions' pidfiles: their daemons were spared, so wiping their pidfiles
+    // would make them look down and the old box-wide respawn would spawn
+    // duplicates (the accumulation bug). Each sibling refreshes itself on its
+    // own `wire upgrade`.
 
     // 4c. v0.6.8 PATH duplicate-binary detection. If `wire` resolves to
     // multiple distinct files on $PATH, surface the conflict — operators
@@ -9929,25 +9939,11 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
     //    and short-circuits to "already running".)
     let spawned = crate::ensure_up::ensure_daemon_running()?;
 
-    // 5b. v0.6.8: respawn each session daemon under the new binary.
-    // Reuses `ensure_session_daemon` — same code path `wire session new`
-    // takes for the initial spawn (writes versioned pidfile, opens log,
-    // detaches). Best effort: failure of one session's respawn doesn't
-    // abort the upgrade for the others.
-    let mut session_respawns: Vec<Value> = Vec::new();
-    for home in &session_daemons_to_respawn {
-        match ensure_session_daemon(home) {
-            Ok(()) => session_respawns.push(json!({
-                "session_home": home.to_string_lossy(),
-                "status": "respawned",
-            })),
-            Err(e) => session_respawns.push(json!({
-                "session_home": home.to_string_lossy(),
-                "status": "failed",
-                "error": format!("{e:#}"),
-            })),
-        }
-    }
+    // 5b. v0.13.2: session-scoped — no sibling respawn. `ensure_daemon_running`
+    // above already respawned THIS session's daemon; sibling sessions were
+    // spared (never killed), so there is nothing to respawn for them. Each
+    // refreshes itself on its own `wire upgrade`.
+    let session_respawns: Vec<Value> = Vec::new();
 
     let new_record = crate::ensure_up::read_pid_record("daemon");
     let new_pid = new_record.pid();
