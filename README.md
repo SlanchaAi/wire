@@ -41,7 +41,17 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.9.5 (latest)
+## Status — v0.10.0 (latest)
+
+v0.10 wraps the ergonomics pass:
+
+- **`Pair` megacommand hidden from `--help`.** Federation pair is now `wire dial <handle>@<relay>` + `wire accept-invite <URL>`. Old `wire pair` stays callable for back-compat scripts; v1.0 removes.
+- **`wire send --no-auto-pair`** opts out of the v0.9 auto-pair-on-miss behavior. Strict scripts that don't want side-effecting implicit pairs.
+- **`CHANGELOG.md`** generated from the v0.7.0+ tag history.
+
+Pragmatic note: the v0.10 plan included full removal of the 11 deprecated pair-* verbs from dispatch. That broke the e2e_detached_pair / e2e_invite_pair / e2e_handle_pair test suites (which exercise the SPAKE2 flows). Rolled back to "hidden, deprecated, still callable" — same operator surface as v0.9.1 plus the Pair hide. True removal happens in v1.0 with a proper test migration pass.
+
+## Status — v0.9.5
 
 v0.9.5 adds discovery + onboarding ergonomics:
 
