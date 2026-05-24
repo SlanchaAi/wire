@@ -8,6 +8,14 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.12.1] — 2026-05-24
+
+**v0.12.1 — `wire up` claims the persona; phonebook shows the face.** Closes the last one-name gap from v0.12.
+
+Fixed:
+- **`wire up <nick>@<relay>` now claims your DID-derived PERSONA, not the typed `<nick>`.** Under the v0.11 one-name rule the typed nick is vestigial (it can't select an identity), but `up`'s claim step was still registering it on the relay — re-opening a two-name split (claimed handle ≠ persona). `up` now resolves the persona from the freshly-inited card and claims that. It also no longer bails when the typed nick differs from the existing persona (the mismatch isn't an error — the nick is ignored).
+- **Phonebook (`/v1/handles`) now shows the DID-derived emoji next to every name**, even when the claimant set no explicit profile emoji. The relay computes `Character::from_did(did).emoji` as a fallback, so `🦨 pine-puffin` renders instead of a bare `pine-puffin`.
+
 ## [v0.12.0] — 2026-05-24
 
 **v0.12 — additive multi-relay, zero-config dual-bind, persona surfacing.** Onboarding and identity-surface polish on top of the v0.11 one-name rule.

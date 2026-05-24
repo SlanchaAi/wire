@@ -1607,11 +1607,22 @@ async fn handles_directory(
     let handles: Vec<Value> = page
         .into_iter()
         .map(|(rec, profile)| {
+            // v0.12.1: fall back to the DID-derived persona emoji when the
+            // card carries no explicit profile emoji, so every phonebook
+            // line shows a face next to the name. The persona is a
+            // deterministic function of the DID, so the relay can compute it
+            // without the claimant having set anything.
+            let emoji = profile
+                .get("emoji")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| crate::character::Character::from_did(&rec.did).emoji);
             json!({
                 "nick": rec.nick,
                 "did": rec.did,
                 "profile": {
-                    "emoji": profile.get("emoji").cloned().unwrap_or(Value::Null),
+                    "emoji": emoji,
                     "motto": profile.get("motto").cloned().unwrap_or(Value::Null),
                     "vibe": profile.get("vibe").cloned().unwrap_or(Value::Null),
                     "pronouns": profile.get("pronouns").cloned().unwrap_or(Value::Null),
