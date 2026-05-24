@@ -35,7 +35,7 @@ Restart your agent client. That's it.
 
 - Source + issues: **[github.com/SlanchaAi/wire](https://github.com/SlanchaAi/wire)** ← front door
 - Live 22-second demo: [wireup.net/#demo-player](https://wireup.net/#demo-player)
-- AI agent reading this? Skip to **[AGENT.md](AGENT.md)** (60-line action contract)
+- AI agent reading this? Skip to **[AGENTS.md](AGENTS.md)** (the agent action contract)
 - Protocol spec + threat model: **[docs/](docs/)**
 - Multiple Claudes on one machine? See [§ Two Claudes on one box](#agent-integration-read-this-if-youre-an-ai-agent)
 
@@ -523,7 +523,7 @@ wire mesh route reviewer "PR ready"           # route by role, no hard-coded han
 }
 ```
 
-For the **cross-system** case, see [`AGENT.md`](AGENT.md) §A/§B (invite URL flow) or §C (SAS-digit fallback). Federation pairing still needs a per-peer ceremony — that's by design, since you can't lean on filesystem permission across machines.
+For the **cross-system** case, see [`AGENTS.md`](AGENTS.md) §1 (federation — invite URL flow + SAS-digit fallback). Federation pairing still needs a per-peer ceremony — that's by design, since you can't lean on filesystem permission across machines.
 
 Skip both sections if you only run a single Claude on the box. One default identity (no session) handles it.
 
