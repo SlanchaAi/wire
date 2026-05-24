@@ -11086,16 +11086,19 @@ fn cmd_setup_statusline(apply: bool, remove: bool) -> Result<()> {
         .ok_or_else(|| anyhow!("cannot locate Claude config dir (set $CLAUDE_CONFIG_DIR)"))?;
     let settings_path = cfg_dir.join("settings.json");
     let script_path = cfg_dir.join("wire-statusline.sh");
-    // Claude Code runs the statusLine command through a shell; on Windows it
-    // executes via Git Bash. A bare `bash` works when it's on PATH (the
-    // standard Git-Bash setup); otherwise point statusLine.command at the
-    // full bash.exe path. Script path is quoted for spaces.
-    let command = format!("bash \"{}\"", script_path.display());
+    // Resolve the shell invocation. On Windows a bare `bash` resolves to
+    // System32\bash.exe (WSL) — wrong environment, Windows paths invalid,
+    // statusline breaks — so we emit the absolute git-bash path. On Unix a
+    // bare `bash <script>` is correct. Script path is quoted for spaces.
+    let (command, command_warn) = statusline_command(&script_path);
 
     println!("wire setup --statusline\n");
     println!("Claude config dir: {}", cfg_dir.display());
     println!("  renderer:  {}", script_path.display());
     println!("  settings:  {}", settings_path.display());
+    if let Some(w) = &command_warn {
+        println!("  ⚠ {w}");
+    }
     println!();
 
     if remove {
@@ -11213,6 +11216,66 @@ fn remove_statusline_entry(path: &std::path::Path) -> Result<bool> {
     let out = serde_json::to_string_pretty(&cfg)? + "\n";
     std::fs::write(path, out).context("writing settings.json")?;
     Ok(true)
+}
+
+/// Build the `statusLine.command` string for this platform. Returns the
+/// command plus an optional warning to surface to the operator.
+fn statusline_command(script_path: &std::path::Path) -> (String, Option<String>) {
+    #[cfg(windows)]
+    {
+        match resolve_git_bash() {
+            Some(bash) => (format!("\"{}\" \"{}\"", bash, script_path.display()), None),
+            None => (
+                format!("bash \"{}\"", script_path.display()),
+                Some(
+                    "could not locate git-bash; using bare `bash`. On Windows that may resolve to \
+                     WSL (System32\\bash.exe) and the statusline will be blank — install Git for \
+                     Windows or set statusLine.command to your git-bash bash.exe path."
+                        .to_string(),
+                ),
+            ),
+        }
+    }
+    #[cfg(unix)]
+    {
+        (format!("bash \"{}\"", script_path.display()), None)
+    }
+}
+
+/// Locate the git-bash `bash.exe` on Windows, avoiding the WSL launcher at
+/// `System32\bash.exe`. Claude Code's statusLine command needs the real
+/// git-bash so the renderer runs in a POSIX-ish env with valid paths.
+#[cfg(windows)]
+fn resolve_git_bash() -> Option<String> {
+    use std::path::PathBuf;
+    // 1. `where.exe bash` — take the first hit that is NOT under System32
+    //    (that one is the WSL `bash.exe` launcher).
+    if let Ok(out) = std::process::Command::new("where.exe").arg("bash").output()
+        && out.status.success()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let p = line.trim();
+            if !p.is_empty() && !p.to_lowercase().contains("\\system32\\") {
+                return Some(p.to_string());
+            }
+        }
+    }
+    // 2. Common Git-for-Windows install locations.
+    let candidates = [
+        std::env::var("ProgramFiles")
+            .ok()
+            .map(|p| format!("{p}\\Git\\bin\\bash.exe")),
+        std::env::var("ProgramFiles(x86)")
+            .ok()
+            .map(|p| format!("{p}\\Git\\bin\\bash.exe")),
+        std::env::var("LocalAppData")
+            .ok()
+            .map(|p| format!("{p}\\Programs\\Git\\bin\\bash.exe")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|c| PathBuf::from(c).exists())
 }
 
 #[cfg(test)]

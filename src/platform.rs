@@ -91,9 +91,16 @@ pub fn find_processes_by_cmdline(pattern: &str) -> Vec<u32> {
         // single-quoted PS strings, the only escape is `''` for a
         // literal single quote; we replace pre-emptively.
         let escaped = pattern.replace('\'', "''");
+        // Two guards beyond the cmdline match (v0.13.2, glossy-magnolia repro):
+        //   - `$_.Name -like 'wire*'` — only wire processes count. Without it
+        //     the query SELF-MATCHED: this very PowerShell process's command
+        //     line contains the `-like '*wire daemon*'` pattern literal, so it
+        //     showed up as a phantom "orphan daemon" with a new pid every call
+        //     (and `wire doctor` FAILed on every healthy box).
+        //   - `$_.ProcessId -ne $PID` — belt-and-suspenders self-exclusion.
         let ps = format!(
             "Get-CimInstance Win32_Process | \
-             Where-Object {{ $_.CommandLine -like '*{escaped}*' }} | \
+             Where-Object {{ $_.Name -like 'wire*' -and $_.ProcessId -ne $PID -and $_.CommandLine -like '*{escaped}*' }} | \
              Select-Object -ExpandProperty ProcessId"
         );
         Command::new("powershell.exe")
