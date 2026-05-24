@@ -8,6 +8,19 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.11.0] — 2026-05-23
+
+**v0.11 — one immutable name.** The DID-derived character nickname IS the addressable handle. Operator-typed `wire init <name>` arg is ignored at init time; agent-card.handle is synthesized from the keypair fingerprint via Character::from_did so every peer sees you by the same name everywhere (statusline, `wire peers`, federation handle, inbox/outbox file path, route results, mesh-status, commit trailers). Closes the long-running "two names" footgun where a UI nickname could differ from the wire address.
+
+Breaking:
+- `wire identity rename` removed — there is no separate rename verb. If you want a different face, regenerate your identity (new DID → new character).
+- `agent-card.handle` no longer reflects the `wire init <name>` argument. It is `Character::from_did(synthesized_did).nickname`. Init now prints "operator-typed `<X>` ignored in favor of DID-derived character `<Y>`. Peers will reach you as `<Y>`" when the two differ.
+- Production code paths (already-paired check in `session pair-all-local`, `drive_bilateral_pair`, `cmd_session_mesh_status`) now key the in-memory peers map by handle, not session name — previously they conflated session name with handle and the local-sister pair-accept could fail when a session's directory name differed from its character.
+
+Compat:
+- `Character::from_did` now seeds from the 8-hex fingerprint suffix only (not the full DID string) to break the circular dependency where handle change → DID change → character change → infinite loop. Legacy DIDs without the `-<fp>` suffix fall through to the v0.10 seed-the-whole-DID behavior.
+- Federation flow (`wire add <h>@<host>`) is unchanged on the wire — peers still reach you by your card handle, which is now always the character.
+
 ## [v0.9.5] — 2026-05-23
 
 v0.9.5 — shell completions (bash/zsh/fish/elvish/powershell) + interactive init prompt

@@ -143,8 +143,8 @@ async fn invite_url_one_paste_pair_e2e() {
     let accept: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
     let pw = accept["paired_with"].as_str().expect("paired_with string");
     assert!(
-        pw.starts_with("did:wire:paul-"),
-        "expected pubkey-suffixed paul DID, got: {pw}"
+        pw.starts_with(&format!("did:wire:{paul_h}-")),
+        "expected pubkey-suffixed paul DID (handle={paul_h}), got: {pw}"
     );
 
     // 3. Wait for paul daemon to pull + consume pair_drop → pin willard.
@@ -210,13 +210,13 @@ async fn invite_url_one_paste_pair_e2e() {
             .join("state")
             .join("wire")
             .join("inbox")
-            .join("willard.jsonl");
+            .join(format!("{willard_h}.jsonl"));
         p.exists()
             && std::fs::read_to_string(&p)
                 .map(|s| s.contains("hello from willard"))
                 .unwrap_or(false)
     });
-    assert!(paul_got, "paul never received willard's message");
+    assert!(paul_got, "paul never received willard's ({willard_h}) message");
 
     // 5. paul → willard (paul has willard pinned via daemon-consumed drop).
     assert!(
@@ -234,13 +234,13 @@ async fn invite_url_one_paste_pair_e2e() {
             .join("state")
             .join("wire")
             .join("inbox")
-            .join("paul.jsonl");
+            .join(format!("{paul_h}.jsonl"));
         p.exists()
             && std::fs::read_to_string(&p)
                 .map(|s| s.contains("ack from paul"))
                 .unwrap_or(false)
     });
-    assert!(willard_got, "willard never received paul's ack");
+    assert!(willard_got, "willard never received paul's ({paul_h}) ack");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

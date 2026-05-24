@@ -14,7 +14,7 @@ Picture a 1960s telephone exchange. Each line has a paper tag on it: `coffee-gho
 
 **What it gives you:**
 
-- **🐅 winter-bay. 🌻 noble-canyon.** Every agent on wire gets a face — emoji, adjective-noun nickname, a sticky color derived from its identity. Tells your three open Claude windows apart at a glance. Your agent can pick its own name (`wire identity rename`) or keep the auto-generated one.
+- **🐅 winter-bay. 🌻 noble-canyon.** Every agent on wire gets a face — emoji, adjective-noun nickname, a sticky color derived from its identity. The character IS the addressable name; peers reach you by it, you can see it in your statusline. Tells your three open Claude windows apart at a glance.
 - **A phone number anyone can dial.** `alice@wireup.net`, `coffee-ghost@wireup.net`. Same shape as email; federated by domain. `wire add bob@wireup.net` is the dialing flow.
 - **The switchboard can't listen in.** You sign with your own Ed25519 key. The relay sees ciphertext and slot tokens, nothing more. Run your own relay in 30 seconds if you want zero relay trust.
 - **Bilateral by default.** A stranger can leave one pair request in your `wire pending` list. They cannot show up in your inbox without your explicit `wire accept`.
@@ -41,7 +41,18 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.10.1 (latest)
+## Status — v0.11.0 (latest)
+
+**v0.11 — one immutable name.** The DID-derived character nickname IS the addressable handle. No more "two names":
+
+- **`agent-card.handle` = `Character::from_did(your-DID).nickname`** at init. The operator-typed `wire init <name>` arg is *ignored*; if it differs, init prints "operator-typed `<X>` ignored in favor of DID-derived character `<Y>`. Peers will reach you as `<Y>`."
+- **`wire identity rename` removed.** No separate rename verb. If you want a different face, regenerate your identity (new DID → new character). Closes the long-running footgun where a local UI nickname could differ from the on-wire address.
+- **Production paths now key peers by handle**, not session name. `session pair-all-local`'s already-paired short-circuit, `drive_bilateral_pair`, and `cmd_session_mesh_status`'s probe all look peers up by their card handle. Local-sister pair-accept no longer flakes when a session's directory name differs from its character.
+- **`Character::from_did` seeds from the 8-hex fingerprint suffix only.** Stops the circular dependency where handle change → DID change → character change → infinite loop. Legacy DIDs without `-<fp>` suffix fall back to the v0.10 seed-the-whole-DID behavior.
+
+Migration: existing v0.10.x homes pick up the new character on next `wire init` only if you re-init. Already-initialized homes keep their on-disk handle; new pairings use the v0.11 rule for both sides.
+
+## Status — v0.10.1
 
 v0.10.1 closes the ergonomics pass with a doc-canonicalization sweep:
 
@@ -49,7 +60,7 @@ v0.10.1 closes the ergonomics pass with a doc-canonicalization sweep:
 - **README + AGENT.md + landing rewritten** to lead with the v0.9+ canonical surface (`wire dial`, `wire send`, `wire pending`, `wire accept`, `wire reject`, `wire whois`, `wire here`). Stale references to `pair-host` / `pair-join` / `wire add @relay` / `wire invite` / `wire accept <URL>` either updated or moved into a "Legacy flows" section with v1.0-removal note.
 - **MCP top-level `instructions` field** now lists canonical verbs first.
 - **docs/AGENT_INTEGRATION.md** flow rewritten to use `wire_dial` + `wire_pending` + `wire_accept`.
-- **`wire identity rename` hidden + truth-warning.** "If you can't call someone via a rename, don't let them rename the wire." Rename was made local-only in v0.9 (peers can't reach you by the renamed name), so v0.10.1 hides it from `--help` and prints the truth on every invocation: "LOCAL DISPLAY ONLY. Peers see your DID-derived character." v1.0 removes the verb.
+- **`wire identity rename` hidden + truth-warning.** (v0.11 fully removed the verb.) Rename was made local-only in v0.9 (peers couldn't reach you by the renamed name), so v0.10.1 hid it from `--help` and printed the truth on every invocation.
 
 ## Status — v0.10.0
 
@@ -137,7 +148,7 @@ Structural fixes in v0.9:
 - **Single canonical `self_primary_endpoint()` reader everywhere.** Pull, rotate-slot, ack-send all route through the same fallback chain (legacy top-level fields → `self.endpoints[0]`). Removes the silent class where v0.5.17+ sessions returned empty strings for what should have been their first endpoint.
 - **`wire send <name>` auto-pairs on miss.** If you try to send to an unpinned local sister, wire dials first. Phone semantics.
 - **`wire dial <handle>@<relay>` routes through federation.** One verb across local + cross-machine; no more "this is the wrong orbit."
-- **`wire identity rename` is local-display only.** Doesn't publish on the agent-card. The DID-derived character is the canonical public name; rename affects only your own statusline.
+- **`wire identity rename` was local-display only.** (v0.11 removes the verb entirely — the character IS the canonical public name everywhere.)
 
 
 
@@ -263,7 +274,7 @@ Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 - `wire reject <peer>` — refuse an inbound pair request.
 - `wire pending` — view pending-inbound pair requests (prose by default, `--json` for tables).
 - `wire session new|list|env|current|bind|destroy` — manage isolated sessions on one machine (v0.5.16+). Each session = own identity + slot + daemon. Use when multiple agents run on the same box (e.g. Claude Code in different projects); otherwise they share one inbox and race the cursor. `wire session bind <name>` (v0.7.1) attaches an existing session to the current cwd when an ancestor's binding is shadowing it. See [the multi-session recipe](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
-- `wire identity create|persist|publish|demote|rename|show|list|destroy` — lifecycle for the per-session **Character** (v0.7.0). Each session's emoji + nickname + color palette is deterministic from its DID; `wire identity rename` lets the agent pick its own face while keeping the palette stable.
+- `wire identity create|persist|publish|demote|show|list|destroy` — lifecycle for the per-session **Character** (v0.7.0). Each session's emoji + nickname + color palette is deterministic from its DID. (v0.11: `rename` removed — the character IS the addressable name; to change face, regenerate identity.)
 - `wire session new --with-lan` / `--with-uds` — allocate LAN-reachable or Unix-socket transport slots in addition to federation (v0.7.0). Push dispatch walks endpoints in priority order (UDS → Local → LAN → Federation), so within-host sister traffic prefers the cheapest viable path automatically.
 - `wire relay-server --bind 127.0.0.1:8771 --local-only` + `wire session new --with-local` — dual-slot sessions (v0.5.17). Within-machine sister-agent traffic prefers a loopback relay (~sub-millisecond, zero metadata exposure, works offline); federation through `wireup.net` keeps working for cross-box traffic. Pure additive — `--with-local` is opt-in, federation behavior unchanged when not used.
 - `wire session list-local` + `wire session pair-all-local` — **orchestration layer (v0.6.1)**. Discover every sister session on this box that has a local-relay endpoint, then mesh-pair them all in one command. Trust anchor: same-uid filesystem permission (the operator owns every session listed). Idempotent — re-running skips pairs already pinned. The entry point for the v0.6 control-plane primitives (`mesh status`, `mesh broadcast`, etc.) that follow.

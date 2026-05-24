@@ -396,7 +396,7 @@ async fn paul_pair_hosts_willard_joins_then_send_round_trips() {
         serde_json::from_str(host_stdout.trim().lines().last().unwrap()).unwrap();
     let host_paired = host_final["paired_with"].as_str().unwrap();
     assert!(
-        host_paired.starts_with("did:wire:willard-"),
+        host_paired.starts_with(&format!("did:wire:{willard_h}-")),
         "got: {host_paired}"
     );
 
@@ -405,7 +405,7 @@ async fn paul_pair_hosts_willard_joins_then_send_round_trips() {
         serde_json::from_str(join_stdout.trim().lines().last().unwrap()).unwrap();
     let join_paired = join_final["paired_with"].as_str().unwrap();
     assert!(
-        join_paired.starts_with("did:wire:paul-"),
+        join_paired.starts_with(&format!("did:wire:{paul_h}-")),
         "got: {join_paired}"
     );
 

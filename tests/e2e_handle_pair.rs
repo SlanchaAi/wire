@@ -76,13 +76,16 @@ async fn wire_add_zero_paste_e2e() {
     let relay_url = format!("http://{addr}");
     let host_only = addr.ip().to_string(); // for handle's domain part
 
-    // A: init + profile + claim nick.
+    // A: init + profile + claim nick. v0.11: capture the actual card
+    // handle (DID-derived character); operator-typed "coffee-ghost" is
+    // ignored at init time.
     let a = fresh_dir("coffee-ghost");
     assert!(
         wire(&a, &["init", "coffee-ghost", "--relay", &relay_url])
             .status
             .success()
     );
+    let a_h = read_handle(&a);
     assert!(
         wire(&a, &["profile", "set", "emoji", "👻"])
             .status
@@ -101,7 +104,7 @@ async fn wire_add_zero_paste_e2e() {
             &a,
             &[
                 "claim",
-                "coffee-ghost",
+                &a_h,
                 "--public-url",
                 &relay_url,
                 "--json"
@@ -118,9 +121,10 @@ async fn wire_add_zero_paste_e2e() {
             .status
             .success()
     );
+    let b_h = read_handle(&b);
 
-    // B: ONE command. wire add coffee-ghost@<host>.
-    let handle = format!("coffee-ghost@{host_only}");
+    // B: ONE command. wire add <a_h>@<host>.
+    let handle = format!("{a_h}@{host_only}");
     let out = wire(&b, &["add", &handle, "--relay", &relay_url, "--json"]);
     assert!(
         out.status.success(),
@@ -129,9 +133,9 @@ async fn wire_add_zero_paste_e2e() {
     );
     let added: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
     {
-        // v0.5.7+: DID is pubkey-suffixed.
+        // v0.5.7+: DID is pubkey-suffixed. v0.11: handle = character.
         let pw = added["paired_with"].as_str().unwrap();
-        assert!(pw.starts_with("did:wire:coffee-ghost-"), "got: {pw}");
+        assert!(pw.starts_with(&format!("did:wire:{a_h}-")), "got: {pw}");
     }
 
     // v0.5.14 bilateral gate: A pulls → pair_drop lands in pending-inbound
@@ -141,16 +145,16 @@ async fn wire_add_zero_paste_e2e() {
         let _ = wire(&a, &["pull", "--json"]);
         let p = wire(&a, &["pair-list-inbound", "--json"]);
         let body = String::from_utf8_lossy(&p.stdout);
-        body.contains("night-train")
+        body.contains(b_h.as_str())
     });
     assert!(
         a_has_pending_b,
-        "A never received a pending-inbound pair_drop from B"
+        "A never received a pending-inbound pair_drop from B ({b_h})"
     );
 
     // A explicitly accepts — the bilateral gate's consent step. Only after
     // this does A pin B and emit pair_drop_ack with A's endpoints.
-    let accept_out = wire(&a, &["pair-accept", "night-train", "--json"]);
+    let accept_out = wire(&a, &["pair-accept", &b_h, "--json"]);
     assert!(
         accept_out.status.success(),
         "pair-accept failed: {}",
@@ -160,9 +164,9 @@ async fn wire_add_zero_paste_e2e() {
     // Now A should have pinned B.
     let a_pinned_b = wait_until(Instant::now() + Duration::from_secs(5), || {
         let p = wire(&a, &["peers", "--json"]);
-        String::from_utf8_lossy(&p.stdout).contains("night-train")
+        String::from_utf8_lossy(&p.stdout).contains(b_h.as_str())
     });
-    assert!(a_pinned_b, "A never pinned B post-pair-accept");
+    assert!(a_pinned_b, "A never pinned B ({b_h}) post-pair-accept");
 
     // B pulls → consumes pair_drop_ack → relay-state gains A's slot_token.
     let b_got_token = wait_until(Instant::now() + Duration::from_secs(15), || {
@@ -170,7 +174,7 @@ async fn wire_add_zero_paste_e2e() {
         let relay_json =
             std::fs::read_to_string(b.join("config/wire/relay.json")).unwrap_or_default();
         let v: Value = serde_json::from_str(&relay_json).unwrap_or(Value::Null);
-        v["peers"]["coffee-ghost"]["slot_token"]
+        v["peers"][a_h.as_str()]["slot_token"]
             .as_str()
             .map(|t| !t.is_empty())
             .unwrap_or(false)
@@ -184,7 +188,7 @@ async fn wire_add_zero_paste_e2e() {
     assert!(
         wire(
             &b,
-            &["send", "coffee-ghost", "decision", "hello via wire add"]
+            &["send", &a_h, "decision", "hello via wire add"]
         )
         .status
         .success()
@@ -192,7 +196,7 @@ async fn wire_add_zero_paste_e2e() {
     let _ = wire(&b, &["push", "--json"]);
     let a_got = wait_until(Instant::now() + Duration::from_secs(15), || {
         let _ = wire(&a, &["pull", "--json"]);
-        let p = a.join("state/wire/inbox/night-train.jsonl");
+        let p = a.join(format!("state/wire/inbox/{b_h}.jsonl"));
         p.exists()
             && std::fs::read_to_string(&p)
                 .map(|s| s.contains("hello via wire add"))
@@ -204,7 +208,7 @@ async fn wire_add_zero_paste_e2e() {
     assert!(
         wire(
             &a,
-            &["send", "night-train", "decision", "ack from coffee-ghost"]
+            &["send", &b_h, "decision", "ack from coffee-ghost"]
         )
         .status
         .success()
@@ -212,7 +216,7 @@ async fn wire_add_zero_paste_e2e() {
     let _ = wire(&a, &["push", "--json"]);
     let b_got = wait_until(Instant::now() + Duration::from_secs(15), || {
         let _ = wire(&b, &["pull", "--json"]);
-        let p = b.join("state/wire/inbox/coffee-ghost.jsonl");
+        let p = b.join(format!("state/wire/inbox/{a_h}.jsonl"));
         p.exists()
             && std::fs::read_to_string(&p)
                 .map(|s| s.contains("ack from coffee-ghost"))

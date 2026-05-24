@@ -591,11 +591,11 @@ async fn detached_pair_two_concurrent_hosts_against_two_guests() {
         })
         .unwrap_or_default();
     assert!(
-        handles.contains(&"alice".to_string()),
-        "paul missing alice: {handles:?}"
+        handles.contains(&alice_h),
+        "paul missing alice ({alice_h}): {handles:?}"
     );
     assert!(
-        handles.contains(&"bob".to_string()),
-        "paul missing bob: {handles:?}"
+        handles.contains(&bob_h),
+        "paul missing bob ({bob_h}): {handles:?}"
     );
 }

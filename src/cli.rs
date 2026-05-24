@@ -8846,8 +8846,14 @@ fn cmd_session_mesh_status(stale_secs: u64, as_json: bool) -> Result<()> {
         for j in (i + 1)..sstates.len() {
             let a = &sstates[i];
             let b = &sstates[j];
-            let a_to_b = probe_directed_edge(&a.relay_state, &b.view.name, now);
-            let b_to_a = probe_directed_edge(&b.relay_state, &a.view.name, now);
+            // v0.11: relay-state.peers is keyed by the peer's CARD HANDLE
+            // (DID-derived character), not the session name. Look the
+            // peer up by its handle (with a session-name fallback for
+            // pre-v0.11 sessions that haven't re-init'd yet).
+            let b_key = b.view.handle.as_deref().unwrap_or(b.view.name.as_str());
+            let a_key = a.view.handle.as_deref().unwrap_or(a.view.name.as_str());
+            let a_to_b = probe_directed_edge(&a.relay_state, b_key, now);
+            let b_to_a = probe_directed_edge(&b.relay_state, a_key, now);
 
             let bilateral = a_to_b.pinned && b_to_a.pinned;
             // Scope = the most-local scope available in either direction.
