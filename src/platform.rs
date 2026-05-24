@@ -90,14 +90,24 @@ pub fn find_processes_by_cmdline(pattern: &str) -> Vec<u32> {
         // Single-quote the pattern in the PowerShell string. Inside
         // single-quoted PS strings, the only escape is `''` for a
         // literal single quote; we replace pre-emptively.
-        let escaped = pattern.replace('\'', "''");
-        // Two guards beyond the cmdline match (v0.13.2, glossy-magnolia repro):
+        // The Windows process image is `wire.exe`, so a Unix-style full
+        // pattern like "wire daemon" does NOT match the actual command line
+        // "wire.exe daemon" (the ".exe " breaks the contiguous match). Match
+        // the wire image by Name and the ROLE/subcommand (the pattern minus a
+        // leading "wire ") in the command line. Without this, find returned
+        // nothing for the real daemon on Windows, so `wire upgrade` killed no
+        // daemons and they ACCUMULATED (glossy-magnolia: 2->3->4->5 over three
+        // upgrade cycles — the exact multi-daemon cursor race doctor warns of).
+        //
+        // Two further guards (glossy-magnolia repro):
         //   - `$_.Name -like 'wire*'` — only wire processes count. Without it
-        //     the query SELF-MATCHED: this very PowerShell process's command
-        //     line contains the `-like '*wire daemon*'` pattern literal, so it
-        //     showed up as a phantom "orphan daemon" with a new pid every call
-        //     (and `wire doctor` FAILed on every healthy box).
+        //     the query SELF-MATCHED: this PowerShell process's own command
+        //     line contains the pattern literal, so it showed up as a phantom
+        //     "orphan daemon" with a new pid every call (doctor FAILed on
+        //     every healthy box).
         //   - `$_.ProcessId -ne $PID` — belt-and-suspenders self-exclusion.
+        let role = pattern.strip_prefix("wire ").unwrap_or(pattern);
+        let escaped = role.replace('\'', "''");
         let ps = format!(
             "Get-CimInstance Win32_Process | \
              Where-Object {{ $_.Name -like 'wire*' -and $_.ProcessId -ne $PID -and $_.CommandLine -like '*{escaped}*' }} | \

@@ -3882,7 +3882,20 @@ fn cmd_monitor(
     let sleep_dur = std::time::Duration::from_millis(interval_ms.max(50));
 
     loop {
-        let events = w.poll()?;
+        // Never die silently. wisp-blossom (Win10) saw `wire monitor` exit 1
+        // with ZERO bytes on stdout+stderr when a cursor-block (untrusted
+        // signer's pair event) tripped the watcher — a silent death looks
+        // identical to "still watching" and breaks the sister-collab model.
+        // Surface the reason and KEEP watching instead of propagating a fatal
+        // `?` that some callers swallow.
+        let events = match w.poll() {
+            Ok(evs) => evs,
+            Err(e) => {
+                eprintln!("wire monitor: poll error (continuing to watch): {e:#}");
+                std::thread::sleep(sleep_dur);
+                continue;
+            }
+        };
         let mut wrote = false;
         for ev in events {
             if let Some(filter) = peer_filter
