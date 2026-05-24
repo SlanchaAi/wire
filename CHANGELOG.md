@@ -8,6 +8,15 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.12.2] — 2026-05-24
+
+**v0.12.2 — persona rename cleanup.** Finishes the `character` → `persona` surface rename from v0.12.
+
+Fixed:
+- `wire session list` / `wire here` column header was still `CHARACTER` → now `PERSONA`.
+- `wire init` one-name message said "DID-derived character" → "DID-derived persona".
+- `docs/STATUSLINE.md` jq examples read the old `.character.palette` JSON key (returns `null` since v0.12's key rename) → fixed to `.persona.palette`, with persona terminology throughout and a naming note.
+
 ## [v0.12.1] — 2026-05-24
 
 **v0.12.1 — `wire up` claims the persona; phonebook shows the face.** Closes the last one-name gap from v0.12.
