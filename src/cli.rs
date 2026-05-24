@@ -4278,7 +4278,7 @@ fn cmd_bind_relay(
     migrate_pinned: bool,
     as_json: bool,
 ) -> Result<()> {
-    use crate::endpoints::{self_endpoints, Endpoint};
+    use crate::endpoints::{Endpoint, self_endpoints};
 
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
@@ -4379,7 +4379,10 @@ fn cmd_bind_relay(
             }))?
         );
     } else {
-        println!("bound {scope_str} slot on {normalized} (slot {})", alloc.slot_id);
+        println!(
+            "bound {scope_str} slot on {normalized} (slot {})",
+            alloc.slot_id
+        );
         println!(
             "self now has {n} endpoint(s): {list}",
             n = eps.len(),
@@ -10612,11 +10615,8 @@ fn cmd_up(
         // Fresh box (no pinned peers yet) — migrate_pinned irrelevant.
         // Pass `false` so the safety check kicks in if state was non-empty.
         cmd_bind_relay(
-            &relay_url,
-            /* scope */ None, // infer from URL (federation for wireup.net)
-            /* replace */ false,
-            /* migrate_pinned */ false,
-            /* as_json */ false,
+            &relay_url, /* scope */ None, // infer from URL (federation for wireup.net)
+            /* replace */ false, /* migrate_pinned */ false, /* as_json */ false,
         )?;
         step("bind-relay", format!("bound to {relay_url}"));
     } else if bound_relay != relay_url {

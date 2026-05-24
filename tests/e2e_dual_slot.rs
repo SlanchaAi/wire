@@ -187,11 +187,11 @@ async fn bind_relay_is_additive_keeps_federation_and_local() {
         .as_array()
         .expect("self.endpoints[] present after additive bind");
     assert_eq!(eps.len(), 2, "expected federation + local, got {eps:?}");
-    let scopes: Vec<&str> = eps
-        .iter()
-        .map(|e| e["scope"].as_str().unwrap())
-        .collect();
-    assert!(scopes.contains(&"federation"), "federation slot kept: {scopes:?}");
+    let scopes: Vec<&str> = eps.iter().map(|e| e["scope"].as_str().unwrap()).collect();
+    assert!(
+        scopes.contains(&"federation"),
+        "federation slot kept: {scopes:?}"
+    );
     assert!(scopes.contains(&"local"), "local slot added: {scopes:?}");
     // Legacy top-level fields must still point at the federation endpoint.
     assert_eq!(
@@ -235,7 +235,10 @@ async fn up_opportunistically_dual_binds_local_relay() {
     let eps = state["self"]["endpoints"]
         .as_array()
         .expect("self.endpoints[] present after up --with-local");
-    let urls: Vec<&str> = eps.iter().map(|e| e["relay_url"].as_str().unwrap()).collect();
+    let urls: Vec<&str> = eps
+        .iter()
+        .map(|e| e["relay_url"].as_str().unwrap())
+        .collect();
     assert!(
         urls.iter().any(|u| *u == fed.trim_end_matches('/')),
         "federation slot present: {urls:?}"
@@ -247,7 +250,10 @@ async fn up_opportunistically_dual_binds_local_relay() {
 
     // v0.12.1: `up` claims the PERSONA, not the typed nick "alice".
     let persona = read_handle(&home);
-    assert_ne!(persona, "alice", "persona is DID-derived, not the typed nick");
+    assert_ne!(
+        persona, "alice",
+        "persona is DID-derived, not the typed nick"
+    );
     let client = reqwest::Client::new();
     let r_persona = client
         .get(format!("{fed}/.well-known/wire/agent"))

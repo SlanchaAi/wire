@@ -232,7 +232,10 @@ async fn wire_init_binds_additional_relay_when_already_initialized() {
             Duration::from_secs(10),
         )
         .expect("init binds relay A");
-    assert_eq!(r1["relay_url"].as_str().unwrap(), relay_a.trim_end_matches('/'));
+    assert_eq!(
+        r1["relay_url"].as_str().unwrap(),
+        relay_a.trim_end_matches('/')
+    );
     assert!(r1["slot_id"].as_str().is_some(), "slot allocated on A");
 
     // Already initialized + a DIFFERENT relay: must bind B (the old no-op).
@@ -263,8 +266,14 @@ async fn wire_init_binds_additional_relay_when_already_initialized() {
         .iter()
         .map(|e| e["relay_url"].as_str().unwrap().to_string())
         .collect();
-    assert!(urls.iter().any(|u| u == relay_a.trim_end_matches('/')), "A kept: {urls:?}");
-    assert!(urls.iter().any(|u| u == relay_b.trim_end_matches('/')), "B added: {urls:?}");
+    assert!(
+        urls.iter().any(|u| u == relay_a.trim_end_matches('/')),
+        "A kept: {urls:?}"
+    );
+    assert!(
+        urls.iter().any(|u| u == relay_b.trim_end_matches('/')),
+        "B added: {urls:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -274,19 +283,33 @@ async fn wire_whoami_exposes_persona() {
     // `wire whoami`/`here`/`peers` already include it; the MCP did not.
     let home = fresh_dir("whoami-persona");
     let mut mcp = McpProc::spawn(&home);
-    mcp.tool_call(1, "wire_init", json!({"handle": "alice"}), Duration::from_secs(5))
-        .expect("init");
+    mcp.tool_call(
+        1,
+        "wire_init",
+        json!({"handle": "alice"}),
+        Duration::from_secs(5),
+    )
+    .expect("init");
     let me = mcp
         .tool_call(2, "wire_whoami", json!({}), Duration::from_secs(5))
         .expect("whoami");
     let persona = &me["persona"];
-    assert!(persona.is_object(), "whoami must include persona object: {me}");
     assert!(
-        persona["nickname"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        persona.is_object(),
+        "whoami must include persona object: {me}"
+    );
+    assert!(
+        persona["nickname"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         "persona.nickname present: {persona}"
     );
     assert!(
-        persona["emoji"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        persona["emoji"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         "persona.emoji present: {persona}"
     );
 }
@@ -299,17 +322,30 @@ async fn wire_dial_reads_name_arg_not_handle() {
     // `name` now and surface an honest resolution error instead.
     let home = fresh_dir("dial-name");
     let mut mcp = McpProc::spawn(&home);
-    mcp.tool_call(1, "wire_init", json!({"handle": "alice"}), Duration::from_secs(5))
-        .expect("init");
+    mcp.tool_call(
+        1,
+        "wire_init",
+        json!({"handle": "alice"}),
+        Duration::from_secs(5),
+    )
+    .expect("init");
 
     let err = mcp
-        .tool_call(2, "wire_dial", json!({"name": "ghost-peer"}), Duration::from_secs(5))
+        .tool_call(
+            2,
+            "wire_dial",
+            json!({"name": "ghost-peer"}),
+            Duration::from_secs(5),
+        )
         .expect_err("bare unknown name should error");
     assert!(
         !err.contains("missing 'handle'"),
         "must not regress to missing-handle: {err}"
     );
-    assert!(err.contains("cannot resolve"), "honest resolution error: {err}");
+    assert!(
+        err.contains("cannot resolve"),
+        "honest resolution error: {err}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

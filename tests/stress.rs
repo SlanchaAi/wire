@@ -248,9 +248,12 @@ async fn stress_bind_relay_accumulates_many_slots() {
 
     // Re-binding an existing relay updates in place — count unchanged.
     assert!(
-        wire(&home, &["bind-relay", &relays[2], "--scope", "local", "--json"])
-            .status
-            .success()
+        wire(
+            &home,
+            &["bind-relay", &relays[2], "--scope", "local", "--json"]
+        )
+        .status
+        .success()
     );
     assert_eq!(
         read_eps(&home).len(),
@@ -265,7 +268,11 @@ async fn stress_bind_relay_accumulates_many_slots() {
             .success()
     );
     let after = read_eps(&home);
-    assert_eq!(after.len(), 1, "--replace must leave exactly one slot, got {after:?}");
+    assert_eq!(
+        after.len(),
+        1,
+        "--replace must leave exactly one slot, got {after:?}"
+    );
     assert_eq!(after[0], relays[0].trim_end_matches('/'));
 }
 
@@ -478,13 +485,17 @@ async fn stress_bind_relay_additive_preserves_pinned_peers_issue_7() {
         "ISSUE #7: additive bind dropped the ORIGINAL relay, black-holing the pinned peer. endpoints={urls:?}"
     );
     assert!(
-        urls.iter().any(|u| u == new_relay_url.trim_end_matches('/')),
+        urls.iter()
+            .any(|u| u == new_relay_url.trim_end_matches('/')),
         "new relay added: {urls:?}"
     );
 
     // The DESTRUCTIVE path (--replace) must STILL guard: with a pinned peer
     // it refuses (or warns) rather than silently black-holing.
-    let replace_out = wire(&alice, &["bind-relay", &new_relay_url, "--replace", "--json"]);
+    let replace_out = wire(
+        &alice,
+        &["bind-relay", &new_relay_url, "--replace", "--json"],
+    );
     let combined = format!(
         "{}\n{}",
         String::from_utf8_lossy(&replace_out.stderr),
