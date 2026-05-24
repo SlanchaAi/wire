@@ -8,6 +8,10 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.12.3] — 2026-05-24
+
+**v0.12.3 — auto-collaborate, baked in.** The MCP server `instructions` (shipped in the binary, read by any agent that connects `wire mcp`) now DIRECT connecting agents to: (1) arm a persistent `wire monitor` stream-watcher on session start so peer messages surface live, and (2) reply to peer messages in their own live context without waiting for the operator to prompt them. Previously this was a soft "recommended"; now it's a baked-in directive, so anyone who installs wire gets auto-collaboration between paired agents — no per-machine hook required.
+
 ## [v0.12.2] — 2026-05-24
 
 **v0.12.2 — persona rename cleanup.** Finishes the `character` → `persona` surface rename from v0.12.
