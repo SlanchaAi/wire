@@ -48,6 +48,18 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
     out
 }
 
+/// v0.11: read the canonical handle (DID-derived character) for an
+/// already-initialized session. Replaces the v0.10-and-earlier
+/// assumption that the test fixture's operator-typed handle (e.g.
+/// `paul`) survives into the agent-card. Under v0.11 the handle is
+/// always character-derived, so tests must discover it.
+fn read_handle(home: &PathBuf) -> String {
+    let out = wire(home, &["whoami", "--json"]);
+    assert!(out.status.success(), "whoami failed: {:?}", out);
+    let card: Value = serde_json::from_slice(&out.stdout).unwrap();
+    card["handle"].as_str().unwrap().to_string()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn paul_sends_to_willard_via_relay_and_willard_verifies() {
     // ---------- 1. boot relay-server ----------
@@ -73,6 +85,10 @@ async fn paul_sends_to_willard_via_relay_and_willard_verifies() {
             .status
             .success()
     );
+    // v0.11: capture the DID-derived character handles. The operator-
+    // typed &paul/&willard arguments are ignored at init time.
+    let paul_h = read_handle(&paul_home);
+    let willard_h = read_handle(&willard_home);
 
     // ---------- 3. each binds a slot on the relay ----------
     let paul_bind = wire(&paul_home, &["bind-relay", &relay_url, "--json"]);
@@ -96,7 +112,7 @@ async fn paul_sends_to_willard_via_relay_and_willard_verifies() {
             &paul_home,
             &[
                 "add-peer-slot",
-                "willard",
+                &willard_h,
                 &relay_url,
                 w_slot_id,
                 w_slot_token
@@ -116,7 +132,13 @@ async fn paul_sends_to_willard_via_relay_and_willard_verifies() {
     assert!(
         wire(
             &willard_home,
-            &["add-peer-slot", "paul", &relay_url, p_slot_id, p_slot_token]
+            &[
+                "add-peer-slot",
+                &paul_h,
+                &relay_url,
+                p_slot_id,
+                p_slot_token
+            ]
         )
         .status
         .success()
@@ -135,7 +157,7 @@ async fn paul_sends_to_willard_via_relay_and_willard_verifies() {
         &paul_home,
         &[
             "send",
-            "willard",
+            &willard_h,
             "decision",
             "ship the v0.1 demo",
             "--json",
@@ -172,20 +194,23 @@ async fn paul_sends_to_willard_via_relay_and_willard_verifies() {
     );
 
     // ---------- 9. willard tails — sees the verified event ----------
-    let tail_out = wire(&willard_home, &["tail", "paul", "--json"]);
+    let tail_out = wire(&willard_home, &["tail", &paul_h, "--json"]);
     assert!(tail_out.status.success());
     let stdout = String::from_utf8(tail_out.stdout).unwrap();
     let line = stdout.lines().next().expect("tail produced no output");
     let event: Value = serde_json::from_str(line).unwrap();
     assert_eq!(event["event_id"], event_id);
     {
-        // v0.5.7+: DID is pubkey-suffixed.
+        // v0.11: from = paul's DID. Slug uses paul's DID-derived character.
         let from = event["from"].as_str().unwrap();
-        assert!(from.starts_with("did:wire:paul-"), "from: {from}");
+        assert!(
+            from.starts_with(&format!("did:wire:{paul_h}-")),
+            "from: {from} (expected paul handle = {paul_h})"
+        );
     }
-    // `to` is constructed from typed peer-handle; sender doesn't have peer's
-    // pubkey at send-time, so legacy (handle-only) form is preserved.
-    assert_eq!(event["to"], "did:wire:willard");
+    // `to` is constructed at send time from the peer-handle we pass to
+    // `wire send`. v0.11: that handle is the character (`willard` var).
+    assert_eq!(event["to"], format!("did:wire:{willard_h}"));
     assert_eq!(event["body"], "ship the v0.1 demo");
     assert_eq!(event["verified"], true);
 }
@@ -214,6 +239,7 @@ async fn pull_rejects_event_with_unknown_signer() {
             .status
             .success()
     );
+    let willard_h = read_handle(&willard_home);
 
     // Paul (separate) sends a real signed event into willard's slot via add-peer-slot.
     let paul_home = fresh_dir("paul-unknown");
@@ -222,6 +248,8 @@ async fn pull_rejects_event_with_unknown_signer() {
             .status
             .success()
     );
+    let paul_h = read_handle(&paul_home);
+    let _ = &paul_h; // silence unused-var (paul handle isn't compared but stays for symmetry)
     assert!(
         wire(&paul_home, &["bind-relay", &relay_url])
             .status
@@ -238,7 +266,7 @@ async fn pull_rejects_event_with_unknown_signer() {
             &paul_home,
             &[
                 "add-peer-slot",
-                "willard",
+                &willard_h,
                 &relay_url,
                 w_slot_id,
                 w_slot_token
@@ -250,7 +278,7 @@ async fn pull_rejects_event_with_unknown_signer() {
     assert!(
         wire(
             &paul_home,
-            &["send", "willard", "decision", "from a stranger", "--json"]
+            &["send", &willard_h, "decision", "from a stranger", "--json"]
         )
         .status
         .success()
@@ -340,6 +368,7 @@ async fn status_peer_json_reports_three_health_layers() {
             .status
             .success()
     );
+    let willard_h = read_handle(&willard_home);
     assert!(
         wire(&paul_home, &["bind-relay", &relay_url])
             .status
@@ -359,7 +388,7 @@ async fn status_peer_json_reports_three_health_layers() {
             &paul_home,
             &[
                 "add-peer-slot",
-                "willard",
+                &willard_h,
                 &relay_url,
                 willard_relay["self"]["slot_id"].as_str().unwrap(),
                 willard_relay["self"]["slot_token"].as_str().unwrap(),
@@ -369,7 +398,7 @@ async fn status_peer_json_reports_three_health_layers() {
         .success()
     );
 
-    let out = wire(&paul_home, &["status", "--peer", "willard", "--json"]);
+    let out = wire(&paul_home, &["status", "--peer", &willard_h, "--json"]);
     assert!(out.status.success(), "status --peer failed");
     let status: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(status["transport"]["status"], "ok");

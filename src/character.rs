@@ -55,10 +55,29 @@ pub struct Palette {
 impl Character {
     /// Derive a Character from a wire DID (e.g. `did:wire:paul-a1b2c3d4`).
     ///
-    /// SHA-256 of the DID drives both nickname/emoji selection and HSL hue.
-    /// The function is total and deterministic — every input string yields
-    /// some valid Character.
+    /// v0.11 ONE-NAME: derive the character from the DID's pubkey
+    /// fingerprint suffix only (the trailing 8-hex after the final `-`).
+    /// This makes the character a deterministic function of the
+    /// PUBLIC KEY, NOT of the handle-in-DID. Critical for the v0.11
+    /// invariant: `wire init` sets agent-card.handle = character, which
+    /// rewrites the DID's handle portion; if the character changed
+    /// because of the rewrite, we'd be back to two-name confusion
+    /// (operator-typed handle yields one character, character-as-handle
+    /// yields another). Fingerprint-only seeding closes the loop —
+    /// whatever handle ends up in the DID, the character is the same.
+    ///
+    /// Back-compat: pre-v0.5.7 DIDs (no fingerprint suffix) and any
+    /// malformed DID fall back to hashing the full string, so legacy
+    /// peers still get a stable (if different) character.
     pub fn from_did(did: &str) -> Self {
+        let stripped = did.strip_prefix("did:wire:").unwrap_or(did);
+        if let Some(idx) = stripped.rfind('-') {
+            let suffix = &stripped[idx + 1..];
+            if suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Self::from_seed(suffix.as_bytes());
+            }
+        }
+        // Legacy / malformed: seed from the full string for stability.
         Self::from_seed(did.as_bytes())
     }
 

@@ -31,6 +31,22 @@ fn wire_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_wire"))
 }
 
+/// v0.11: read the DID-derived character handle from a session's
+/// agent-card.json. After `wire init` (CLI or MCP) the card's handle
+/// IS the canonical name the rest of the system addresses the peer by;
+/// the operator-typed argument to init is ignored.
+fn read_handle(home: &std::path::Path) -> String {
+    let path = home.join("config/wire/agent-card.json");
+    let body =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read agent-card {path:?}: {e}"));
+    let v: Value = serde_json::from_str(&body)
+        .unwrap_or_else(|e| panic!("parse agent-card {path:?}: {e}\n{body}"));
+    v["handle"]
+        .as_str()
+        .unwrap_or_else(|| panic!("agent-card missing handle: {body}"))
+        .to_string()
+}
+
 /// Spawn an MCP server backed by `home`, return handles for stdin/stdout-line-stream.
 struct McpProc {
     child: Child,
@@ -284,6 +300,10 @@ async fn full_pair_flow_via_mcp_with_correct_sas_finalizes() {
         .output()
         .unwrap();
     assert!(init_g.status.success());
+    // v0.11: discover canonical handles (the agent-card handles are
+    // DID-derived characters, not the operator-typed "paul"/"willard").
+    let willard_h = read_handle(&guest_home);
+    let _paul_h = read_handle(&host_home);
 
     // Host opens pair, returns immediately (max_wait_secs=0)
     let init_resp = mcp
@@ -371,10 +391,10 @@ async fn full_pair_flow_via_mcp_with_correct_sas_finalizes() {
         .expect("confirm");
     let paired_with = final_resp["paired_with"].as_str().unwrap();
     assert!(
-        paired_with.starts_with("did:wire:willard-"),
+        paired_with.starts_with(&format!("did:wire:{willard_h}-")),
         "got: {paired_with}"
     );
-    assert_eq!(final_resp["peer_handle"], "willard");
+    assert_eq!(final_resp["peer_handle"], willard_h);
 
     let guest_sas = guest_handle.join().unwrap();
     eprintln!("[test] guest sas: {guest_sas}");
@@ -386,8 +406,8 @@ async fn full_pair_flow_via_mcp_with_correct_sas_finalizes() {
         .expect("peers");
     let arr = peers.as_array().unwrap();
     assert!(
-        arr.iter().any(|p| p["handle"] == "willard"),
-        "willard not in peer list: {peers}"
+        arr.iter().any(|p| p["handle"] == willard_h),
+        "willard ({willard_h}) not in peer list: {peers}"
     );
 }
 
@@ -514,6 +534,8 @@ async fn mcp_resources_list_includes_inbox_per_peer_after_pairing() {
         .output()
         .unwrap();
     assert!(init_g.status.success());
+    // v0.11: guest's canonical handle = card.handle (DID-derived).
+    let willard_h = read_handle(&guest_home);
 
     // Pair host ↔ guest
     let init_resp = mcp
@@ -587,14 +609,18 @@ async fn mcp_resources_list_includes_inbox_per_peer_after_pairing() {
         .filter_map(|r| r["uri"].as_str())
         .collect();
     assert!(uris.contains(&"wire://inbox/all"), "got: {uris:?}");
-    assert!(uris.contains(&"wire://inbox/willard"), "got: {uris:?}");
+    let willard_inbox_uri = format!("wire://inbox/{willard_h}");
+    assert!(
+        uris.contains(&willard_inbox_uri.as_str()),
+        "got: {uris:?} (expected {willard_inbox_uri})"
+    );
 
     // resources/read on willard's inbox returns empty (nothing sent yet) but
     // succeeds — it's a JSONL response, not an error.
     let read = mcp.rpc(
         101,
         "resources/read",
-        json!({"uri": "wire://inbox/willard"}),
+        json!({"uri": willard_inbox_uri}),
         Duration::from_secs(5),
     );
     assert!(read["result"]["contents"].is_array(), "got: {read}");

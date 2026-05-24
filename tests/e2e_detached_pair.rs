@@ -43,6 +43,17 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
     out
 }
 
+/// v0.11: read the DID-derived character handle from an
+/// initialized session. Required because v0.11 stops using the
+/// operator-typed init handle (`paul`/`willard`/etc.) — the actual
+/// handle on the agent-card is derived from the keypair.
+fn read_handle(home: &PathBuf) -> String {
+    let out = wire(home, &["whoami", "--json"]);
+    assert!(out.status.success(), "whoami failed: {:?}", out);
+    let card: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    card["handle"].as_str().unwrap().to_string()
+}
+
 /// Spawn a long-running daemon for the given WIRE_HOME. The returned Child
 /// must be killed via DaemonGuard's Drop. Interval is 1s so transitions
 /// surface promptly in the test.
@@ -107,11 +118,13 @@ async fn detached_pair_full_e2e_with_real_daemons() {
             .status
             .success()
     );
+    let paul_h = read_handle(&paul);
     assert!(
         wire(&willard, &["init", "willard", "--relay", &relay_url])
             .status
             .success()
     );
+    let willard_h = read_handle(&willard);
 
     // Long-running daemons on both sides. PID files written by
     // cleanup_on_startup; subsequent CLI calls inherit the same WIRE_HOME so
@@ -212,14 +225,14 @@ async fn detached_pair_full_e2e_with_real_daemons() {
             false
         }
     };
-    assert!(has_peer(&pj, "willard"), "paul missing willard: {pj}");
-    assert!(has_peer(&wj, "paul"), "willard missing paul: {wj}");
+    assert!(has_peer(&pj, &willard_h), "paul missing willard: {pj}");
+    assert!(has_peer(&wj, &paul_h), "willard missing paul: {wj}");
 
     // Send + sync + tail round-trip — confirms the pair actually works.
     assert!(
         wire(
             &paul,
-            &["send", "willard", "claim", "hello from detached e2e"]
+            &["send", &willard_h, "claim", "hello from detached e2e"]
         )
         .status
         .success()
@@ -276,11 +289,15 @@ async fn detached_pair_survives_daemon_restart_mid_handshake() {
             .status
             .success()
     );
+    let paul_h = read_handle(&paul);
+    let _ = &paul_h; // v0.11 unused-var hush
     assert!(
         wire(&willard, &["init", "willard", "--relay", &relay_url])
             .status
             .success()
     );
+    let willard_h = read_handle(&willard);
+    let _ = &willard_h; // v0.11 unused-var hush
 
     let mut paul_d = Some(spawn_daemon(&paul));
     let _will_d = spawn_daemon(&willard);
@@ -395,8 +412,8 @@ async fn detached_pair_survives_daemon_restart_mid_handshake() {
             })
             .unwrap_or(false)
     };
-    assert!(has(&peers_p, "willard"), "paul missing willard: {peers_p}");
-    assert!(has(&peers_w, "paul"), "willard missing paul: {peers_w}");
+    assert!(has(&peers_p, &willard_h), "paul missing willard: {peers_p}");
+    assert!(has(&peers_w, &paul_h), "willard missing paul: {peers_w}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -425,6 +442,12 @@ async fn detached_pair_two_concurrent_hosts_against_two_guests() {
                 .success()
         );
     }
+    // v0.11: capture canonical handles per init. The operator-typed
+    // strings ("paul"/"alice"/"bob") are ignored at init time.
+    let paul_h = read_handle(&paul);
+    let alice_h = read_handle(&alice);
+    let bob_h = read_handle(&bob);
+    let _ = (&paul_h, &alice_h, &bob_h);
 
     let _paul_d = spawn_daemon(&paul);
     let _alice_d = spawn_daemon(&alice);
@@ -568,11 +591,11 @@ async fn detached_pair_two_concurrent_hosts_against_two_guests() {
         })
         .unwrap_or_default();
     assert!(
-        handles.contains(&"alice".to_string()),
-        "paul missing alice: {handles:?}"
+        handles.contains(&alice_h),
+        "paul missing alice ({alice_h}): {handles:?}"
     );
     assert!(
-        handles.contains(&"bob".to_string()),
-        "paul missing bob: {handles:?}"
+        handles.contains(&bob_h),
+        "paul missing bob ({bob_h}): {handles:?}"
     );
 }

@@ -68,7 +68,7 @@ That's it. After step 3, every agent can `wire dial <other-nickname>` or `wire s
 
 On Windows pre-v0.7.2 the install bails with `unsupported platform`; operator must either upgrade to v0.7.2+ or run `wire relay-server --bind 127.0.0.1:8771 --local-only` in a separate window as a workaround.
 
-**v0.7.0 — Characters.** Every session now has a deterministic face (emoji + adj-noun nickname + color palette) derived from its DID. Your statusline / `wire whoami` shows yours. Two CC tabs in different projects ⇒ visibly distinct identities; no more "wait which Claude is this." You can rename: `wire identity rename --name foxtrot-meadow --emoji 🦊` (the palette stays DID-stable; the operator-chosen name + emoji get published on your agent-card so federated peers see what you call yourself).
+**v0.7.0 — Characters.** Every session now has a deterministic face (emoji + adj-noun nickname + color palette) derived from its DID. Your statusline / `wire whoami` shows yours. Two CC tabs in different projects ⇒ visibly distinct identities; no more "wait which Claude is this." As of v0.11 the character IS the addressable handle — what shows in your statusline is the same string your peers reach you by; there is no separate UI name. To change faces, regenerate identity (new DID → new character).
 
 **v0.7.1 — `wire session bind`.** If `wire whoami` from inside a project shows you're sharing a Character with another project, an ancestor cwd (e.g. `~/Source`) is registered and shadowing the leaf. Fix without state loss:
 ```bash

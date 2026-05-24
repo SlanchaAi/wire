@@ -368,18 +368,11 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
         let card_path = path.join("config").join("wire").join("agent-card.json");
         let (did, handle) = read_card_identity(&card_path);
         let daemon_running = check_daemon_live(&path);
-        // v0.7.0-alpha.3: read this session's display.json for any
-        // operator-chosen nickname/emoji overrides.
-        let display_overrides_path = path.join("config").join("wire").join("display.json");
-        let overrides =
-            crate::config::read_display_overrides_at(&display_overrides_path).unwrap_or_default();
-        let character = did.as_deref().map(|d| {
-            crate::character::Character::from_did_with_override(
-                d,
-                overrides.nickname.as_deref(),
-                overrides.emoji.as_deref(),
-            )
-        });
+        // v0.11: character is purely DID-derived across every session.
+        // display.json reads removed — rename verb is gone and the
+        // one-name rule says the character must be findable, which a
+        // local-display override never was.
+        let character = did.as_deref().map(crate::character::Character::from_did);
         out.push(SessionInfo {
             name: name.clone(),
             cwd: name_to_cwd.get(&name).cloned(),

@@ -43,6 +43,17 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
     out
 }
 
+/// v0.11: read the DID-derived character handle from an
+/// initialized session. Required because v0.11 stops using the
+/// operator-typed init handle (`paul`/`willard`/etc.) — the actual
+/// handle on the agent-card is derived from the keypair.
+fn read_handle(home: &PathBuf) -> String {
+    let out = wire(home, &["whoami", "--json"]);
+    assert!(out.status.success(), "whoami failed: {:?}", out);
+    let card: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    card["handle"].as_str().unwrap().to_string()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn daemon_once_drives_full_sync_after_pairing() {
     let relay_dir = fresh_dir("relay-daemon");
@@ -57,11 +68,13 @@ async fn daemon_once_drives_full_sync_after_pairing() {
     let paul = fresh_dir("paul-daemon");
     let willard = fresh_dir("willard-daemon");
     assert!(wire(&paul, &["init", "paul", "--offline"]).status.success());
+    let paul_h = read_handle(&paul);
     assert!(
         wire(&willard, &["init", "willard", "--offline"])
             .status
             .success()
     );
+    let willard_h = read_handle(&willard);
 
     // Pair
     let mut host = std::process::Command::new(wire_bin())
@@ -117,7 +130,7 @@ async fn daemon_once_drives_full_sync_after_pairing() {
 
     // Send + run daemon --once on each side
     assert!(
-        wire(&paul, &["send", "willard", "decision", "via daemon"])
+        wire(&paul, &["send", &willard_h, "decision", "via daemon"])
             .status
             .success()
     );
@@ -133,7 +146,7 @@ async fn daemon_once_drives_full_sync_after_pairing() {
     assert_eq!(wj["pull"]["rejected"].as_array().unwrap().len(), 0);
 
     // Confirm willard's tail sees the verified event
-    let tail = wire(&willard, &["tail", "paul", "--json"]);
+    let tail = wire(&willard, &["tail", &paul_h, "--json"]);
     let event: serde_json::Value = serde_json::from_str(
         String::from_utf8(tail.stdout)
             .unwrap()
@@ -160,11 +173,15 @@ async fn rotate_slot_after_pairing_orphans_old_slot() {
     let paul = fresh_dir("paul-rotate");
     let willard = fresh_dir("willard-rotate");
     assert!(wire(&paul, &["init", "paul", "--offline"]).status.success());
+    let paul_h = read_handle(&paul);
+    let _ = &paul_h; // v0.11 unused-var hush
     assert!(
         wire(&willard, &["init", "willard", "--offline"])
             .status
             .success()
     );
+    let willard_h = read_handle(&willard);
+    let _ = &willard_h; // v0.11 unused-var hush
 
     // Pair via existing helper logic (inlined from other tests).
     let mut host = std::process::Command::new(wire_bin())
@@ -237,7 +254,7 @@ async fn rotate_slot_after_pairing_orphans_old_slot() {
     let new_slot = rj["new_slot_id"].as_str().unwrap().to_string();
     assert_ne!(old_slot, new_slot);
     assert_eq!(rj["announced_to"].as_array().unwrap().len(), 1);
-    assert_eq!(rj["announced_to"][0], "willard");
+    assert_eq!(rj["announced_to"][0].as_str(), Some(willard_h.as_str()));
 
     // Confirm relay.json now has the new slot.
     let post: serde_json::Value = serde_json::from_str(
@@ -250,7 +267,7 @@ async fn rotate_slot_after_pairing_orphans_old_slot() {
     let pull = wire(&willard, &["pull", "--json"]);
     let pj: serde_json::Value = serde_json::from_slice(&pull.stdout).unwrap();
     assert!(!pj["written"].as_array().unwrap().is_empty());
-    let tail = wire(&willard, &["tail", "paul", "--json"]);
+    let tail = wire(&willard, &["tail", &paul_h, "--json"]);
     let tail_str = String::from_utf8(tail.stdout).unwrap();
     let close_event = tail_str
         .lines()
@@ -282,11 +299,15 @@ async fn paul_pair_hosts_willard_joins_then_send_round_trips() {
             .status
             .success()
     );
+    let paul_h = read_handle(&paul_home);
+    let _ = &paul_h; // v0.11 unused-var hush
     assert!(
         wire(&willard_home, &["init", "willard", "--offline"])
             .status
             .success()
     );
+    let willard_h = read_handle(&willard_home);
+    let _ = &willard_h; // v0.11 unused-var hush
 
     // ---- 3. start pair-host in background; capture stderr to learn the code ----
     let mut host_proc = Command::new(wire_bin())
@@ -375,7 +396,7 @@ async fn paul_pair_hosts_willard_joins_then_send_round_trips() {
         serde_json::from_str(host_stdout.trim().lines().last().unwrap()).unwrap();
     let host_paired = host_final["paired_with"].as_str().unwrap();
     assert!(
-        host_paired.starts_with("did:wire:willard-"),
+        host_paired.starts_with(&format!("did:wire:{willard_h}-")),
         "got: {host_paired}"
     );
 
@@ -384,7 +405,7 @@ async fn paul_pair_hosts_willard_joins_then_send_round_trips() {
         serde_json::from_str(join_stdout.trim().lines().last().unwrap()).unwrap();
     let join_paired = join_final["paired_with"].as_str().unwrap();
     assert!(
-        join_paired.starts_with("did:wire:paul-"),
+        join_paired.starts_with(&format!("did:wire:{paul_h}-")),
         "got: {join_paired}"
     );
 
@@ -396,19 +417,19 @@ async fn paul_pair_hosts_willard_joins_then_send_round_trips() {
         &std::fs::read_to_string(paul_home.join("config/wire/trust.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(paul_trust["agents"]["willard"]["tier"], "VERIFIED");
+    assert_eq!(paul_trust["agents"][&willard_h]["tier"], "VERIFIED");
     let willard_trust: Value = serde_json::from_str(
         &std::fs::read_to_string(willard_home.join("config/wire/trust.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(willard_trust["agents"]["paul"]["tier"], "VERIFIED");
+    assert_eq!(willard_trust["agents"][&paul_h]["tier"], "VERIFIED");
 
     // ---- 7. send → push → pull → tail without any manual setup ----
     let send_out = wire(
         &paul_home,
         &[
             "send",
-            "willard",
+            &willard_h,
             "decision",
             "ship the v0.1 demo",
             "--json",
@@ -426,7 +447,7 @@ async fn paul_pair_hosts_willard_joins_then_send_round_trips() {
         "expected exactly 1 verified inbox write, got {pull_json}"
     );
 
-    let tail_out = wire(&willard_home, &["tail", "paul", "--json"]);
+    let tail_out = wire(&willard_home, &["tail", &paul_h, "--json"]);
     let tail_stdout = String::from_utf8(tail_out.stdout).unwrap();
     let event: Value = serde_json::from_str(tail_stdout.lines().next().unwrap()).unwrap();
     assert_eq!(event["body"], "ship the v0.1 demo");

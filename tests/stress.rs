@@ -79,9 +79,32 @@ async fn spawn_federation_relay() -> String {
     format!("http://{addr}")
 }
 
+/// v0.11: read the DID-derived character handle from a session's
+/// agent-card.json. The card handle is the canonical name; the
+/// operator-typed `wire init <name>` arg is ignored at init time.
+fn read_handle(home: &Path) -> String {
+    let path = home.join("config/wire/agent-card.json");
+    let body =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read agent-card {path:?}: {e}"));
+    let v: serde_json::Value = serde_json::from_str(&body)
+        .unwrap_or_else(|e| panic!("parse agent-card {path:?}: {e}\n{body}"));
+    v["handle"]
+        .as_str()
+        .unwrap_or_else(|| panic!("agent-card missing handle: {body}"))
+        .to_string()
+}
+
 /// Pair two fresh homes through the bilateral-gate flow (v0.5.14+).
-/// Returns (alice_home, bob_home) where each has the other pinned.
-async fn pair_two_homes(relay_url: &str, alice_name: &str, bob_name: &str) -> (PathBuf, PathBuf) {
+/// Returns (alice_home, alice_handle, bob_home, bob_handle) where each
+/// has the other pinned. v0.11: callers must use the returned card
+/// handles (DID-derived characters) when sending / inspecting state —
+/// the `alice_name`/`bob_name` args here are only used as fresh_dir
+/// prefixes; the cards' handles are derived from each home's keypair.
+async fn pair_two_homes(
+    relay_url: &str,
+    alice_name: &str,
+    bob_name: &str,
+) -> (PathBuf, String, PathBuf, String) {
     // Handle parser wants a dotted-ASCII host without port (so
     // `alice@127.0.0.1`, not `alice@127.0.0.1:56789`). The actual URL
     // is supplied separately via --relay. Mirror the trick used in
@@ -98,10 +121,11 @@ async fn pair_two_homes(relay_url: &str, alice_name: &str, bob_name: &str) -> (P
             .status
             .success()
     );
+    let alice_h = read_handle(&alice);
     assert!(
         wire(
             &alice,
-            &["claim", alice_name, "--public-url", relay_url, "--json"]
+            &["claim", &alice_h, "--public-url", relay_url, "--json"]
         )
         .status
         .success()
@@ -113,10 +137,11 @@ async fn pair_two_homes(relay_url: &str, alice_name: &str, bob_name: &str) -> (P
             .status
             .success()
     );
+    let bob_h = read_handle(&bob);
 
     // bob → alice: handle-path pair_drop. Lands in alice's pending-inbound.
-    let bob_handle = format!("{alice_name}@{host_only}");
-    let add_out = wire(&bob, &["add", &bob_handle, "--relay", relay_url, "--json"]);
+    let federation = format!("{alice_h}@{host_only}");
+    let add_out = wire(&bob, &["add", &federation, "--relay", relay_url, "--json"]);
     assert!(
         add_out.status.success(),
         "bob `wire add` failed: {}",
@@ -127,14 +152,14 @@ async fn pair_two_homes(relay_url: &str, alice_name: &str, bob_name: &str) -> (P
     let alice_has_pending = wait_until(Instant::now() + Duration::from_secs(15), || {
         let _ = wire(&alice, &["pull", "--json"]);
         let p = wire(&alice, &["pair-list-inbound", "--json"]);
-        String::from_utf8_lossy(&p.stdout).contains(bob_name)
+        String::from_utf8_lossy(&p.stdout).contains(bob_h.as_str())
     });
     assert!(
         alice_has_pending,
-        "alice never saw pending-inbound from {bob_name}"
+        "alice never saw pending-inbound from {bob_h}"
     );
     assert!(
-        wire(&alice, &["pair-accept", bob_name, "--json"])
+        wire(&alice, &["pair-accept", &bob_h, "--json"])
             .status
             .success()
     );
@@ -143,19 +168,22 @@ async fn pair_two_homes(relay_url: &str, alice_name: &str, bob_name: &str) -> (P
     let bob_pinned_alice = wait_until(Instant::now() + Duration::from_secs(15), || {
         let _ = wire(&bob, &["pull", "--json"]);
         let p = wire(&bob, &["peers", "--json"]);
-        String::from_utf8_lossy(&p.stdout).contains(alice_name)
+        String::from_utf8_lossy(&p.stdout).contains(alice_h.as_str())
     });
-    assert!(bob_pinned_alice, "bob never pinned alice via pair_drop_ack");
+    assert!(
+        bob_pinned_alice,
+        "bob never pinned alice ({alice_h}) via pair_drop_ack"
+    );
 
     // alice should also have bob pinned post-accept.
     let p = wire(&alice, &["peers", "--json"]);
     let body = String::from_utf8_lossy(&p.stdout);
     assert!(
-        body.contains(bob_name),
-        "alice should have {bob_name} pinned, got: {body}"
+        body.contains(bob_h.as_str()),
+        "alice should have {bob_h} pinned, got: {body}"
     );
 
-    (alice, bob)
+    (alice, alice_h, bob, bob_h)
 }
 
 fn count_inbox_lines(home: &Path, peer: &str) -> usize {
@@ -173,13 +201,14 @@ fn count_inbox_lines(home: &Path, peer: &str) -> usize {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stress_outbox_flood_500_messages_single_peer() {
     let relay_url = spawn_federation_relay().await;
-    let (alice, bob) = pair_two_homes(&relay_url, "stress-alice-a", "stress-bob-a").await;
+    let (alice, alice_h, bob, bob_h) =
+        pair_two_homes(&relay_url, "stress-alice-a", "stress-bob-a").await;
 
     // Alice sends FLOOD_COUNT messages to bob, sequentially.
     let start = Instant::now();
     for i in 0..FLOOD_COUNT {
         let body = format!("flood msg {i}");
-        let out = wire(&alice, &["send", "stress-bob-a", "claim", &body]);
+        let out = wire(&alice, &["send", &bob_h, "claim", &body]);
         assert!(
             out.status.success(),
             "send {i} failed: {}",
@@ -220,16 +249,16 @@ async fn stress_outbox_flood_500_messages_single_peer() {
     let pull_start = Instant::now();
     let bob_received = wait_until(Instant::now() + Duration::from_secs(60), || {
         let _ = wire(&bob, &["pull", "--json"]);
-        count_inbox_lines(&bob, "stress-alice-a") >= FLOOD_COUNT
+        count_inbox_lines(&bob, &alice_h) >= FLOOD_COUNT
     });
-    let final_count = count_inbox_lines(&bob, "stress-alice-a");
+    let final_count = count_inbox_lines(&bob, &alice_h);
     eprintln!(
         "stress: bob received {final_count}/{FLOOD_COUNT} events in {:?}",
         pull_start.elapsed()
     );
     assert!(
         bob_received,
-        "bob received only {final_count}/{FLOOD_COUNT} events"
+        "bob received only {final_count}/{FLOOD_COUNT} events from alice ({alice_h})"
     );
 
     // Sanity: every line should be valid JSON.
@@ -237,7 +266,7 @@ async fn stress_outbox_flood_500_messages_single_peer() {
         .join("state")
         .join("wire")
         .join("inbox")
-        .join("stress-alice-a.jsonl");
+        .join(format!("{alice_h}.jsonl"));
     let body = std::fs::read_to_string(&inbox).unwrap();
     let mut parsed_ok = 0;
     for line in body.lines() {
@@ -257,7 +286,8 @@ async fn stress_outbox_flood_500_messages_single_peer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stress_concurrent_sends_no_torn_writes() {
     let relay_url = spawn_federation_relay().await;
-    let (alice, bob) = pair_two_homes(&relay_url, "stress-alice-b", "stress-bob-b").await;
+    let (alice, alice_h, bob, bob_h) =
+        pair_two_homes(&relay_url, "stress-alice-b", "stress-bob-b").await;
 
     // Spawn CONCURRENT_THREADS OS threads, each queues CONCURRENT_PER_THREAD
     // events to bob via subprocess `wire send`. The outbox file is shared
@@ -268,10 +298,11 @@ async fn stress_concurrent_sends_no_torn_writes() {
     let handles: Vec<_> = (0..CONCURRENT_THREADS)
         .map(|tid| {
             let alice = alice.clone();
+            let bob_h = bob_h.clone();
             std::thread::spawn(move || {
                 for i in 0..CONCURRENT_PER_THREAD {
                     let body = format!("thread {tid} msg {i}");
-                    let out = wire(&alice, &["send", "stress-bob-b", "claim", &body]);
+                    let out = wire(&alice, &["send", &bob_h, "claim", &body]);
                     assert!(
                         out.status.success(),
                         "thread {tid} send {i} failed: {}",
@@ -294,7 +325,7 @@ async fn stress_concurrent_sends_no_torn_writes() {
         .join("state")
         .join("wire")
         .join("outbox")
-        .join("stress-bob-b.jsonl");
+        .join(format!("{bob_h}.jsonl"));
     let body = std::fs::read_to_string(&outbox).expect("outbox missing");
     let mut parsed_ok = 0;
     for line in body.lines() {
@@ -325,7 +356,7 @@ async fn stress_concurrent_sends_no_torn_writes() {
     assert!(
         wait_until(Instant::now() + Duration::from_secs(60), || {
             let _ = wire(&bob, &["pull", "--json"]);
-            count_inbox_lines(&bob, "stress-alice-b") >= total
+            count_inbox_lines(&bob, &alice_h) >= total
         },),
         "bob never received {total} events"
     );
@@ -347,7 +378,8 @@ async fn stress_concurrent_sends_no_torn_writes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stress_bind_relay_warns_on_pinned_peers_issue_7() {
     let relay_url = spawn_federation_relay().await;
-    let (alice, _bob) = pair_two_homes(&relay_url, "stress-alice-c", "stress-bob-c").await;
+    let (alice, _alice_h, _bob, _bob_h) =
+        pair_two_homes(&relay_url, "stress-alice-c", "stress-bob-c").await;
 
     // Spin a SECOND federation relay for alice to migrate to.
     let new_relay_url = spawn_federation_relay().await;
@@ -390,18 +422,20 @@ async fn stress_bind_relay_warns_on_pinned_peers_issue_7() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stress_send_to_nonexistent_slot_surfaces_error() {
     let relay_url = spawn_federation_relay().await;
-    let (alice, _bob) = pair_two_homes(&relay_url, "stress-alice-d", "stress-bob-d").await;
+    let (alice, _alice_h, _bob, bob_h) =
+        pair_two_homes(&relay_url, "stress-alice-d", "stress-bob-d").await;
 
     // Corrupt alice's pin of bob: replace bob's slot_id with a fake one
     // that does not exist on the relay. This simulates the post-bind-relay
     // state from bob's perspective (alice still thinks bob is at the old
     // slot, but the relay no longer routes to anything alice can reach).
+    // v0.11: peers map keyed by bob's CARD HANDLE.
     let relay_state_path = alice.join("config").join("wire").join("relay.json");
     let bytes = std::fs::read(&relay_state_path).expect("relay.json missing");
     let mut state: Value = serde_json::from_slice(&bytes).expect("relay.json malformed");
     let fake_slot_id = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-    state["peers"]["stress-bob-d"]["slot_id"] = serde_json::json!(fake_slot_id);
-    if let Some(eps) = state["peers"]["stress-bob-d"]["endpoints"].as_array_mut() {
+    state["peers"][bob_h.as_str()]["slot_id"] = serde_json::json!(fake_slot_id);
+    if let Some(eps) = state["peers"][bob_h.as_str()]["endpoints"].as_array_mut() {
         for ep in eps.iter_mut() {
             ep["slot_id"] = serde_json::json!(fake_slot_id);
         }
@@ -414,7 +448,7 @@ async fn stress_send_to_nonexistent_slot_surfaces_error() {
 
     // Queue a message + push. Capture the push --json output.
     assert!(
-        wire(&alice, &["send", "stress-bob-d", "claim", "to the void"])
+        wire(&alice, &["send", &bob_h, "claim", "to the void"])
             .status
             .success()
     );
