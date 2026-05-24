@@ -1271,6 +1271,9 @@ fn mcp_initialize_then_tools_list_round_trip() {
     let mut child = Command::new(wire_bin())
         .arg("mcp")
         .env("WIRE_HOME", &home)
+        // v0.13: skip auto-bootstrap (which would hit the real federation
+        // relay) — these tests drive identity/tools manually.
+        .env("WIRE_MCP_SKIP_AUTO_UP", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1336,6 +1339,9 @@ fn mcp_tools_call_wire_whoami() {
     let mut child = Command::new(wire_bin())
         .arg("mcp")
         .env("WIRE_HOME", &home)
+        // v0.13: skip auto-bootstrap (which would hit the real federation
+        // relay) — these tests drive identity/tools manually.
+        .env("WIRE_MCP_SKIP_AUTO_UP", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1394,6 +1400,9 @@ fn mcp_tools_call_wire_init_idempotent_on_repeat() {
     let mut child = Command::new(wire_bin())
         .arg("mcp")
         .env("WIRE_HOME", &home)
+        // v0.13: skip auto-bootstrap (which would hit the real federation
+        // relay) — these tests drive identity/tools manually.
+        .env("WIRE_MCP_SKIP_AUTO_UP", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
