@@ -41,7 +41,16 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.12.0 (latest)
+## Status — v0.13.0 (latest)
+
+**v0.13 — session-keyed identity. Each session gets its own unique persona, no cwd dependence.**
+
+- **Identity is keyed off the session, not the working directory.** Resolution chain: `WIRE_SESSION_ID` > `CLAUDE_CODE_SESSION_ID` > cwd-fallback → a unique home at `sessions/by-key/<sha256(key)[:16]>`. Same session (incl. resumes) → same identity; distinct sessions → distinct identities, deterministically.
+- **Fixes the Windows "every new session has the same handle" bug at the root.** The old scheme keyed a session home off an un-normalized cwd path string; on Windows, drive-case / separator mismatch made the lookup miss and silently collapse every session onto the shared machine-wide default. The new scheme has no cwd lookup to miss.
+- **MCP auto-bootstraps per session.** On MCP startup an uninitialized session self-inits and claims its persona on the federation relay (so the public phonebook reflects real usage). Gated by `WIRE_MCP_SKIP_AUTO_UP` and skipped if already initialized.
+- **No migration bridge (yet).** Upgrading re-keys existing live sessions to their session-derived home; `wire session gc` for orphaned `by-key` homes is a deferred follow-up. Design: `docs/superpowers/specs/2026-05-24-session-keyed-identity-design.md`.
+
+## Status — v0.12.0
 
 **v0.12 — additive multi-relay, zero-config dual-bind, persona surfacing.**
 
