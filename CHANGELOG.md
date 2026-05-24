@@ -8,6 +8,15 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.13.2] — 2026-05-24
+
+**v0.13.2 — Windows hardening + `wire setup --statusline`.** Three Windows bugs (found by a paired Windows session dogfooding v0.13.1 over wire) plus the long-missing persona statusline and removal of the dead reactor:
+
+- **relay.json torn-write fixed (CRITICAL).** A foreground `wire dial` racing the background daemon corrupted `relay.json`: both did a non-atomic, lockless `fs::write`, interleaving into invalid JSON ("trailing characters at line N") that broke ALL push/pull until hand-repaired. `write_relay_state` now writes via tmp+rename **and** holds the existing `relay.lock` flock (the RMW path calls an unlocked inner to avoid re-entrant deadlock). The race was cross-platform; Windows file-sharing semantics made it easy to hit.
+- **`wire status` / `doctor` false-DOWN fixed.** Daemon-liveness had duplicate Linux/Unix-only copies (`ensure_up::pid_is_alive`, `daemon_liveness`'s `pgrep`, `ensure_up::process_alive`, `pending_pair::process_alive`) running `kill -0` / `pgrep` — absent on Windows → always false → daemon reported DOWN while alive. All now route through the already-Windows-correct `platform::process_alive` / `find_processes_by_cmdline` (tasklist / PowerShell CIM). Same root cause behind the `wire up` / `upgrade` 500 ms self-spawn probe orphaning `wire.exe`.
+- **`wire setup --statusline`.** Installs a Claude Code statusLine showing your persona — liveness dot + emoji + nickname in the persona's accent color + cwd (`● 🪻 bright-camellia · ~/project`). Writes a bundled renderer + merges a `statusLine` block into settings.json (preserves keys, refuses to clobber invalid JSON, idempotent, `--remove` to uninstall, honors `$CLAUDE_CONFIG_DIR`). Closes the gap where personas existed but nothing installed the statusline that displays them.
+- **`wire reactor` removed.** The `claude -p` shell-out reactor was superseded by live-session monitoring + auto-reply baked into the MCP instructions; removed the command, handler, helper, and landing section.
+
 ## [v0.13.1] — 2026-05-24
 
 **v0.13.1 — one name, one command. Identity UX simplified; the last "same handle" leak closed.** A persona review found the one-name promise (v0.11) was still violated in several places, and that the real fix was to stop letting anyone *type* a name they will not get.

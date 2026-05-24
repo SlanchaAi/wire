@@ -291,11 +291,50 @@ pub fn read_relay_state() -> Result<Value> {
     Ok(serde_json::from_slice(&body)?)
 }
 
+/// Atomic, lock-serialized write of the full relay-state. Every direct caller
+/// (foreground `wire dial`, the background daemon, MCP) funnels through here,
+/// so a foreground write can neither TEAR nor lost-update against the daemon.
+/// Holds the same `relay.lock` flock as [`update_relay_state`] and writes via
+/// tmp+rename.
+///
+/// Bug #3 (v0.13.2): the old raw `fs::write` here was non-atomic and lockless.
+/// A foreground `wire dial` and the daemon both rewrote `relay.json`
+/// concurrently, interleaving bytes and leaving trailing garbage ("trailing
+/// characters at line N") that made the file unparseable — breaking all
+/// push/pull until hand-repaired. Surfaced on Windows (file-sharing
+/// semantics make the interleave easy to hit) but the race was cross-platform.
 pub fn write_relay_state(state: &Value) -> Result<()> {
+    use fs2::FileExt;
+    let lock_path = relay_state_lock_path()?;
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
+    }
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening {lock_path:?}"))?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("flock {lock_path:?}"))?;
+    let r = write_relay_state_unlocked(state);
+    let _ = fs2::FileExt::unlock(&lock_file);
+    r
+}
+
+/// Atomic relay-state write WITHOUT taking `relay.lock` — the caller must
+/// already hold it (only [`update_relay_state`], which writes inside its own
+/// locked transaction). tmp+rename so a concurrent reader sees either the old
+/// or new whole file, never a partial one.
+fn write_relay_state_unlocked(state: &Value) -> Result<()> {
     let path = relay_state_path()?;
     let body = serde_json::to_vec_pretty(state)?;
-    fs::write(&path, body).with_context(|| format!("writing {path:?}"))?;
-    set_file_mode_0600(&path)?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, &body).with_context(|| format!("writing tmp {tmp:?}"))?;
+    set_file_mode_0600(&tmp)?;
+    fs::rename(&tmp, &path).with_context(|| format!("atomic rename {tmp:?} → {path:?}"))?;
     Ok(())
 }
 
@@ -348,7 +387,9 @@ where
     let mut state = read_relay_state()?;
     let result = modifier(&mut state);
     let write_result = if result.is_ok() {
-        write_relay_state(&state)
+        // We already hold relay.lock — use the unlocked writer to avoid
+        // re-acquiring the same flock (which would deadlock).
+        write_relay_state_unlocked(&state)
     } else {
         Ok(())
     };
@@ -473,6 +514,40 @@ mod tests {
             let after = read_relay_state().unwrap();
             assert_eq!(after["self"]["relay_url"], "https://test");
             assert_eq!(after["self"]["slot_id"], "abc");
+        });
+    }
+
+    #[test]
+    fn write_relay_state_never_tears_under_concurrency() {
+        // Bug #3 regression: many writers hammering relay.json with
+        // alternating long/short bodies. With the old raw fs::write a
+        // concurrent reader caught torn bytes ("trailing characters") and
+        // failed to parse. The atomic tmp+rename + flock must guarantee every
+        // read sees a complete, parseable file. (Threads share one process +
+        // WIRE_HOME; the flock serializes them just as it would processes.)
+        with_temp_home(|| {
+            ensure_dirs().unwrap();
+            write_relay_state(&json!({"self": null, "peers": {}})).unwrap();
+            let handles: Vec<_> = (0..8)
+                .map(|w| {
+                    std::thread::spawn(move || {
+                        for j in 0..25 {
+                            let body = if j % 2 == 0 {
+                                json!({"self": {"w": w, "j": j, "pad": "x".repeat(2048)}})
+                            } else {
+                                json!({"self": {"w": w}})
+                            };
+                            write_relay_state(&body).unwrap();
+                            // Reader must ALWAYS parse — never a torn file.
+                            read_relay_state().expect("relay.json must always parse");
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
+            assert!(read_relay_state().unwrap().get("self").is_some());
         });
     }
 
