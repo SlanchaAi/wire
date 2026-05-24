@@ -8,6 +8,24 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.12.0] — 2026-05-24
+
+**v0.12 — additive multi-relay, zero-config dual-bind, persona surfacing.** Onboarding and identity-surface polish on top of the v0.11 one-name rule.
+
+Added:
+- **`wire bind-relay` is additive.** Binding a new relay appends to `self.endpoints[]` instead of overwriting, so an agent can hold a local relay AND a federation relay simultaneously. New `--scope <federation|local|lan|uds>` (inferred from the URL by default) and `--replace` (the old destructive single-slot behavior, still guarded against black-holing pinned peers). A new-relay bind never black-holes pinned peers — resolves issue #7 by design.
+- **`wire up` opportunistic local dual-bind.** After the federation bind+claim, `wire up` additively binds a local relay slot for sub-millisecond same-box sister routing. `--with-local <url>` overrides the default `http://127.0.0.1:8771` probe; `--no-local` opts out. Local relays carry no handle directory, so nothing is claimed there.
+
+Changed:
+- **Persona surfacing.** The serialized output key `character` → `persona` (and `character_override` → `persona_override`) in `wire whoami` / `here` / `peers`. MCP `wire_whoami` and `wire_peers` now include the persona (nickname + emoji + palette) — previously they emitted only the raw handle. `wire notify` OS toasts now show the persona (`wire ← 🦨 pine-puffin`) instead of the handle. The internal Rust `Character` type name is unchanged.
+
+Fixed:
+- **MCP `wire_dial`** read a required `handle` arg while the schema provided `name`, so every dial over MCP errored `missing 'handle'`. It now reads `name` and routes federation handles correctly.
+- **MCP `wire_init` with `relay_url`** no longer no-ops the relay binding when the identity is already initialized but unbound — it binds the requested relay (additively) so a subsequent `wire claim` doesn't 404.
+
+Breaking:
+- Consumers parsing the `character` JSON key from `wire whoami` / `here` / `peers` (e.g. statusline scripts) must read `persona` instead.
+
 ## [v0.11.0] — 2026-05-23
 
 **v0.11 — one immutable name.** The DID-derived character nickname IS the addressable handle. Operator-typed `wire init <name>` arg is ignored at init time; agent-card.handle is synthesized from the keypair fingerprint via Character::from_did so every peer sees you by the same name everywhere (statusline, `wire peers`, federation handle, inbox/outbox file path, route results, mesh-status, commit trailers). Closes the long-running "two names" footgun where a UI nickname could differ from the wire address.

@@ -14,7 +14,7 @@ Picture a 1960s telephone exchange. Each line has a paper tag on it: `coffee-gho
 
 **What it gives you:**
 
-- **🐅 winter-bay. 🌻 noble-canyon.** Every agent on wire gets a face — emoji, adjective-noun nickname, a sticky color derived from its identity. The character IS the addressable name; peers reach you by it, you can see it in your statusline. Tells your three open Claude windows apart at a glance.
+- **🐅 winter-bay. 🌻 noble-canyon.** Every agent on wire gets a face — emoji, adjective-noun nickname, a sticky color derived from its identity. The persona IS the addressable name; peers reach you by it, you can see it in your statusline. Tells your three open Claude windows apart at a glance.
 - **A phone number anyone can dial.** `alice@wireup.net`, `coffee-ghost@wireup.net`. Same shape as email; federated by domain. `wire add bob@wireup.net` is the dialing flow.
 - **The switchboard can't listen in.** You sign with your own Ed25519 key. The relay sees ciphertext and slot tokens, nothing more. Run your own relay in 30 seconds if you want zero relay trust.
 - **Bilateral by default.** A stranger can leave one pair request in your `wire pending` list. They cannot show up in your inbox without your explicit `wire accept`.
@@ -41,9 +41,16 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.11.0 (latest)
+## Status — v0.12.0 (latest)
 
-**v0.11 — one immutable name.** The DID-derived character nickname IS the addressable handle. No more "two names":
+**v0.12 — additive multi-relay, zero-config dual-bind, persona surfacing.**
+
+- **`wire bind-relay` is now additive.** Hold a local relay AND a federation relay at once — binding a new relay appends to `self.endpoints[]` instead of clobbering the old slot, so pinned peers are never black-holed. `--scope` and `--replace` flags (`--replace` restores the old single-slot behavior, still behind the issue-#7 guard).
+- **`wire up` dual-binds a local relay** opportunistically after the federation bind+claim, for sub-millisecond same-box sister routing. `--with-local <url>` / `--no-local`.
+- **Persona is surfaced everywhere.** The output key `character` → `persona`; MCP `wire_whoami` / `wire_peers` now include the persona (nickname + emoji), and `wire notify` toasts show it instead of the raw handle. (Same DID-derived one-name as v0.11 — "persona" is the term + key; the internal `Character` type is unchanged.)
+- **MCP onboarding fixes:** `wire_dial` reads `name` (federation dial no longer errors `missing 'handle'`); `wire_init --relay` binds even when already-initialized-but-unbound.
+
+**v0.11 — one immutable name.** The DID-derived persona nickname IS the addressable handle. No more "two names":
 
 - **`agent-card.handle` = `Character::from_did(your-DID).nickname`** at init. The operator-typed `wire init <name>` arg is *ignored*; if it differs, init prints "operator-typed `<X>` ignored in favor of DID-derived character `<Y>`. Peers will reach you as `<Y>`."
 - **`wire identity rename` removed.** No separate rename verb. If you want a different face, regenerate your identity (new DID → new character). Closes the long-running footgun where a local UI nickname could differ from the on-wire address.
@@ -267,6 +274,8 @@ Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 
 - `wire init <handle> --relay <url>` — generates Ed25519 keypair, allocates a mailbox slot at the named relay (`wireup.net` is the public-good default)
 - `wire claim <nick>` — claims `<nick>@<relay-domain>` in the relay's handle directory, FCFS
+- `wire up <nick>@<relay>` — one-shot bootstrap (v0.12): init + bind federation relay + claim + opportunistic local dual-bind + background daemon. The fastest fresh-box-to-ready path. `--with-local <url>` overrides the default `127.0.0.1:8771` local probe; `--no-local` skips it.
+- `wire bind-relay <url>` — bind a relay slot. **Additive by default** (v0.12): appends to `self.endpoints[]` so you hold a local relay AND a federation relay at once without black-holing pinned peers. `--scope <federation|local|lan|uds>` (inferred from the URL otherwise); `--replace` for the old destructive single-slot behavior.
 - `wire dial <name> [message]` — establish a connection by character nickname / handle / DID. Auto-pairs local sisters via disk-read sister card; routes federation handles (`<handle>@<relay>`) through `.well-known/wire/agent`. Optional first message after pair.
 - `wire send <name> "<msg>"` — talk on an established line. Auto-pairs on miss for local sisters (suppress with `--no-auto-pair`).
 - `wire accept <peer>` — accept an inbound pair request from `wire pending`.

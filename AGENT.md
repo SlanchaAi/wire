@@ -32,7 +32,7 @@ wire whois <name>               # inspect identity
 wire tail [<name>]              # listen
 ```
 
-`<name>` is the **character nickname** you see in the operator's statusline and `wire peers` output (`noble-slate`, `cedar-bayou`, `winter-bay`). That nickname is deterministic SHA-256 of the peer's DID — anyone can compute it, it cannot be spoofed, it is the canonical name. The DID stays as the cryptographic anchor under it.
+`<name>` is the **persona** — the DID-derived nickname you see in the operator's statusline, `wire peers`, and (v0.12) MCP `wire_whoami` / `wire_peers` output (`noble-slate`, `cedar-bayou`, `winter-bay`). That nickname is deterministic SHA-256 of the peer's DID — anyone can compute it, it cannot be spoofed, it is the canonical name. The DID stays as the cryptographic anchor under it. (The serialized key is `persona` as of v0.12; was `character`. The internal Rust type is still `Character`.)
 
 ### Same-host setup (operator does this once)
 
@@ -68,7 +68,7 @@ That's it. After step 3, every agent can `wire dial <other-nickname>` or `wire s
 
 On Windows pre-v0.7.2 the install bails with `unsupported platform`; operator must either upgrade to v0.7.2+ or run `wire relay-server --bind 127.0.0.1:8771 --local-only` in a separate window as a workaround.
 
-**v0.7.0 — Characters.** Every session now has a deterministic face (emoji + adj-noun nickname + color palette) derived from its DID. Your statusline / `wire whoami` shows yours. Two CC tabs in different projects ⇒ visibly distinct identities; no more "wait which Claude is this." As of v0.11 the character IS the addressable handle — what shows in your statusline is the same string your peers reach you by; there is no separate UI name. To change faces, regenerate identity (new DID → new character).
+**v0.7.0 — Characters.** Every session now has a deterministic face (emoji + adj-noun nickname + color palette) derived from its DID. Your statusline / `wire whoami` shows yours. Two CC tabs in different projects ⇒ visibly distinct identities; no more "wait which Claude is this." As of v0.11 the character IS the addressable handle — what shows in your statusline is the same string your peers reach you by; there is no separate UI name. To change faces, regenerate identity (new DID → new character). **v0.12:** the term is now **persona** and the serialized key is `persona` (was `character`); MCP `wire_whoami` / `wire_peers` and OS toasts surface it (previously raw-handle-only). The internal Rust type is still `Character`.
 
 **v0.7.1 — `wire session bind`.** If `wire whoami` from inside a project shows you're sharing a Character with another project, an ancestor cwd (e.g. `~/Source`) is registered and shadowing the leaf. Fix without state loss:
 ```bash

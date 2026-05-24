@@ -151,8 +151,9 @@ if [ -x "$target" ]; then
     fi
 
     echo "next steps:"
-    echo "  wire init <handle>                   # first-time identity setup"
-    echo "  wire session new --local-only        # per-project isolated identity"
+    echo "  wire up <nick>@wireup.net            # one-shot: identity + relay + claim + local dual-bind + daemon"
+    echo "  wire dial <peer>@wireup.net          # pair a peer, then: wire send <peer> \"hi\""
+    echo "  wire session new --local-only        # per-project isolated identity (multi-agent box)"
     echo "  wire session pair-all-local          # mesh-pair every sister"
     echo
     echo "see 'wire --help' or https://github.com/SlanchaAi/wire for more."
