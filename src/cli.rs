@@ -1872,7 +1872,7 @@ fn cmd_init(
     if canonical_handle != handle {
         eprintln!(
             "wire init: v0.11 one-name rule — operator-typed `{handle}` ignored in favor of \
-             DID-derived character `{canonical_handle}`. Peers will reach you as `{canonical_handle}`."
+             DID-derived persona `{canonical_handle}`. Peers will reach you as `{canonical_handle}`."
         );
     }
 
@@ -8577,7 +8577,7 @@ fn cmd_session_list(as_json: bool) -> Result<()> {
     }
     println!(
         "{:<22} {:<24} {:<24} {:<10} CWD",
-        "CHARACTER", "NAME", "HANDLE", "DAEMON"
+        "PERSONA", "NAME", "HANDLE", "DAEMON"
     );
     for s in items {
         // ANSI-escape-wrapped character takes more visual width than its
