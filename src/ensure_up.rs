@@ -169,9 +169,23 @@ pub fn daemon_liveness() -> DaemonLiveness {
     // Field stays named `pgrep_pids` for callers; on Windows the old direct
     // `pgrep` shell-out returned empty (no such tool), masking live daemons.
     let pgrep_pids: Vec<u32> = crate::platform::find_processes_by_cmdline("wire daemon");
+    // A2 (v0.13.2): on a multi-session box EVERY session runs its own daemon,
+    // so the old "any `wire daemon` whose pid != my pidfile = orphan" rule
+    // flagged sibling sessions' LEGITIMATE daemons as orphans — `wire doctor`
+    // FAILed on the very multi-agent-per-box setup wire exists for. A true
+    // orphan is a wire daemon owned by NO session: exclude every session's
+    // pidfile pid, not just this session's.
+    let known_session_pids: std::collections::HashSet<u32> = crate::session::list_sessions()
+        .map(|sessions| {
+            sessions
+                .iter()
+                .filter_map(|s| crate::session::session_daemon_pid(&s.home_dir))
+                .collect()
+        })
+        .unwrap_or_default();
     let orphan_pids: Vec<u32> = pgrep_pids
         .iter()
-        .filter(|p| Some(**p) != pidfile_pid)
+        .filter(|p| Some(**p) != pidfile_pid && !known_session_pids.contains(*p))
         .copied()
         .collect();
     DaemonLiveness {

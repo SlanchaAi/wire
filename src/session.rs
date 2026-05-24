@@ -454,28 +454,25 @@ fn read_card_identity(card_path: &Path) -> (Option<String>, Option<String>) {
     (did, handle)
 }
 
-fn check_daemon_live(session_home: &Path) -> bool {
-    // Pidfile lives at <session_home>/state/wire/daemon.pid. Use the
-    // existing ensure_up reader by temporarily pointing at the path; we
-    // can't change env mid-process race-free, so re-implement the pid
-    // extraction directly here from the JSON structure.
+/// Read a session home's daemon pid from `<home>/state/wire/daemon.pid`
+/// (path-based; does NOT consult WIRE_HOME). None if absent/corrupt. Used to
+/// enumerate which daemon pids legitimately belong to a session so orphan
+/// detection doesn't flag a sibling session's daemon (A2).
+pub fn session_daemon_pid(session_home: &Path) -> Option<u32> {
     let pidfile = session_home.join("state").join("wire").join("daemon.pid");
-    let bytes = match std::fs::read(&pidfile) {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-    // Try the structured form first.
-    let pid_opt: Option<u32> = if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+    let bytes = std::fs::read(&pidfile).ok()?;
+    // Structured form first, then legacy integer.
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
         v.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32)
     } else {
-        // Legacy integer form.
         String::from_utf8_lossy(&bytes).trim().parse::<u32>().ok()
-    };
-    let pid = match pid_opt {
-        Some(p) => p,
-        None => return false,
-    };
-    is_process_live(pid)
+    }
+}
+
+fn check_daemon_live(session_home: &Path) -> bool {
+    session_daemon_pid(session_home)
+        .map(is_process_live)
+        .unwrap_or(false)
 }
 
 fn is_process_live(pid: u32) -> bool {
@@ -942,6 +939,12 @@ mod tests {
 
     #[test]
     fn session_home_for_key_is_deterministic_distinct_and_well_formed() {
+        // session_home_for_key reads WIRE_HOME (via sessions_root); hold the
+        // shared env lock so a parallel env-mutating test can't change it
+        // between calls and make a1 != a2 (flaky race).
+        let _guard = crate::config::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let a1 = session_home_for_key("sess-aaa").unwrap();
         let a2 = session_home_for_key("sess-aaa").unwrap();
         let b = session_home_for_key("sess-bbb").unwrap();
