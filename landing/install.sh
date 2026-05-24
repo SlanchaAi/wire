@@ -1,153 +1,161 @@
-#!/bin/sh
-# wire — one-line installer
-# Usage:   curl -fsSL https://wireup.net/install.sh | sh
-# Source:  https://github.com/SlanchaAi/wire/blob/main/landing/install.sh
+#!/usr/bin/env sh
+# install.sh — single-binary installer for `wire`.
 #
-# What this does:
-#   1. Detect your OS + arch.
-#   2. Find the latest wire release on GitHub.
-#   3. Download the matching binary + SHA-256 sidecar.
-#   4. Verify the checksum.
-#   5. Install to ~/.local/bin/wire (or /usr/local/bin/wire if you can write
-#      there). chmod +x.
-#   6. Print where it landed + a "next step" hint.
+# Usage:
+#   curl -fsSL https://wireup.net/install.sh | sh
+#   curl -fsSL https://wireup.net/install.sh | sh -s -- --prefix ~/bin
 #
-# Honesty:
-#   - This script trusts GitHub's HTTPS + the SHA-256s in the release.
-#     If you'd rather build from source: `cargo install slancha-wire`
-#     (crates.io package name; the binary it installs is still `wire`).
-#   - It WILL NOT modify your shell rc files. If ~/.local/bin isn't on
-#     your PATH, the script will tell you the export line to add.
+# What it does:
+#   1. Detects platform (linux x86_64/arm64, darwin arm64, windows x86_64 via Git Bash/MSYS).
+#   2. Downloads the matching pre-built `wire` binary from $WIRE_DIST_URL
+#      (default: GitHub Releases — $REPO_URL/releases/latest/download/wire-<triple>).
+#   3. Verifies SHA-256 if a sibling .sha256 file exists at the dist URL.
+#   4. Installs to $PREFIX/wire (default: $HOME/.local/bin/wire if it exists
+#      and is on $PATH, else /usr/local/bin/wire — with sudo if needed).
+#   5. If pre-built binary unavailable AND `cargo` is on $PATH, falls back
+#      to `cargo install slancha-wire` from crates.io. (Source-build path;
+#      takes ~2 min. The package is named `slancha-wire` on crates.io
+#      because the bare `wire` name is squatted by an unrelated 2014 crate;
+#      the installed binary is still `wire`.)
+#
+# What it does NOT do:
+#   - install systemd / launchd units (use `wire daemonize` opt-in)
+#   - install gh, cloudflared, or any other system service
+#   - require root unless writing to /usr/local/bin
 
 set -eu
 
-REPO="SlanchaAi/wire"
-BIN_NAME="wire"
+REPO_URL="${WIRE_REPO_URL:-https://github.com/SlanchaAi/wire}"
+# Default release-asset URL — points at GitHub Releases produced by .github/workflows/release.yml.
+# Override via WIRE_DIST_URL for testing or alternate hosts.
+DIST_URL="${WIRE_DIST_URL:-${REPO_URL}/releases/latest/download}"
+PREFIX="${PREFIX:-}"
 
-# ───── platform detection ─────
-uname_s=$(uname -s 2>/dev/null || echo unknown)
-uname_m=$(uname -m 2>/dev/null || echo unknown)
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --prefix) PREFIX="$2"; shift 2 ;;
+        --prefix=*) PREFIX="${1#*=}"; shift ;;
+        -h|--help)
+            sed -n '/^# Usage:/,/^[^#]/p' "$0" | sed 's/^# \{0,1\}//' | head -n -1
+            exit 0
+            ;;
+        *) echo "unknown flag: $1" >&2; exit 2 ;;
+    esac
+done
 
+uname_s="$(uname -s)"
+uname_m="$(uname -m)"
+# Resolve target triple for a release asset matching .github/workflows/release.yml.
+# Binary suffix is `.exe` on Windows shells (Git Bash / MSYS / Cygwin), empty elsewhere.
+binsuffix=""
 case "$uname_s" in
     Linux)
-        # Detect libc: musl (Alpine, distroless, immutable) vs glibc (most
-        # mainstream distros). `ldd --version` is the portable check; the
-        # ld-musl-*.so.1 file presence is a robust fallback in case `ldd`
-        # is missing (some distroless images strip it).
-        LIBC="gnu"
-        if ldd --version 2>&1 | grep -qi musl; then
-            LIBC="musl"
-        elif [ -f /lib/ld-musl-x86_64.so.1 ] || [ -f /lib/ld-musl-aarch64.so.1 ]; then
-            LIBC="musl"
-        fi
+        # Prefer musl static for max-portability if available; fall back to gnu otherwise.
         case "$uname_m" in
-            x86_64|amd64)  TARGET="x86_64-unknown-linux-${LIBC}" ;;
-            aarch64|arm64) TARGET="aarch64-unknown-linux-${LIBC}" ;;
+            x86_64|amd64)  triple="x86_64-unknown-linux-musl" ;;
+            aarch64|arm64) triple="aarch64-unknown-linux-musl" ;;
             *) echo "unsupported Linux arch: $uname_m" >&2; exit 1 ;;
         esac
         ;;
     Darwin)
         case "$uname_m" in
-            arm64|aarch64) TARGET="aarch64-apple-darwin" ;;
-            x86_64)
-                echo "Intel Mac binary not published in v0.5 (queue-time issue on" >&2
-                echo "GitHub macos-13 runners). Fall back to:" >&2
-                echo "  cargo install slancha-wire" >&2
-                exit 1
-                ;;
-            *) echo "unsupported macOS arch: $uname_m" >&2; exit 1 ;;
+            x86_64|amd64)  triple="x86_64-apple-darwin" ;;
+            aarch64|arm64) triple="aarch64-apple-darwin" ;;
+            *) echo "unsupported Darwin arch: $uname_m" >&2; exit 1 ;;
         esac
         ;;
-    MINGW*|MSYS*|CYGWIN*)
-        echo "use the .exe from https://github.com/${REPO}/releases/latest" >&2
-        exit 1
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+        # Git Bash / MSYS2 / Cygwin on Windows. uname -m returns "x86_64" or "i686".
+        case "$uname_m" in
+            x86_64|amd64) triple="x86_64-pc-windows-msvc"; binsuffix=".exe" ;;
+            *) echo "unsupported Windows arch: $uname_m (need x86_64)" >&2; exit 1 ;;
+        esac
         ;;
-    *)
-        echo "unsupported OS: $uname_s" >&2
-        echo "fall back: cargo install slancha-wire" >&2
-        exit 1
-        ;;
+    *) echo "unsupported OS: $uname_s" >&2; exit 1 ;;
 esac
 
-# ───── pick install dir ─────
-if [ -n "${WIRE_INSTALL_DIR:-}" ]; then
-    INSTALL_DIR="$WIRE_INSTALL_DIR"
-elif [ -w "/usr/local/bin" ] 2>/dev/null; then
-    INSTALL_DIR="/usr/local/bin"
-else
-    INSTALL_DIR="$HOME/.local/bin"
-fi
-mkdir -p "$INSTALL_DIR"
-
-# ───── direct download URLs ─────
-# Use GitHub's /releases/latest/download/<asset> alias — it 302-redirects to
-# the current tag's asset without consuming the anonymous API rate limit (60
-# req/hr/IP). Anonymous clients on shared NATs were 403ing during install.
-echo "→ resolving latest wire release..."
-DL_BIN="https://github.com/${REPO}/releases/latest/download/wire-${TARGET}"
-DL_SHA="${DL_BIN}.sha256"
-
-# ───── download + verify ─────
-TMPDIR=$(mktemp -d -t wire-install.XXXXXX)
-trap 'rm -rf "$TMPDIR"' EXIT
-
-echo "→ downloading $DL_BIN"
-curl -fsSL "$DL_BIN" -o "$TMPDIR/wire" || {
-    echo "download failed. release artifact may not exist for $TARGET." >&2
-    echo "browse: https://github.com/${REPO}/releases/tag/${TAG}" >&2
-    exit 1
-}
-
-echo "→ downloading $DL_SHA"
-curl -fsSL "$DL_SHA" -o "$TMPDIR/wire.sha256" || {
-    echo "warning: no sha256 sidecar — skipping verification" >&2
-}
-
-if [ -f "$TMPDIR/wire.sha256" ]; then
-    echo "→ verifying sha256"
-    # sha256 file looks like:  "<hex>  wire-<target>"
-    EXPECTED=$(awk '{print $1}' "$TMPDIR/wire.sha256")
-    if command -v shasum >/dev/null 2>&1; then
-        ACTUAL=$(shasum -a 256 "$TMPDIR/wire" | awk '{print $1}')
-    elif command -v sha256sum >/dev/null 2>&1; then
-        ACTUAL=$(sha256sum "$TMPDIR/wire" | awk '{print $1}')
+# Choose install dir.
+if [ -z "$PREFIX" ]; then
+    if [ -d "$HOME/.local/bin" ] && case ":$PATH:" in *":$HOME/.local/bin:"*) true ;; *) false ;; esac; then
+        PREFIX="$HOME/.local/bin"
     else
-        echo "no shasum / sha256sum on PATH — skipping verification" >&2
-        ACTUAL="$EXPECTED"
+        PREFIX="/usr/local/bin"
     fi
-    if [ "$EXPECTED" != "$ACTUAL" ]; then
-        echo "sha256 mismatch!" >&2
-        echo "  expected: $EXPECTED" >&2
-        echo "  actual:   $ACTUAL" >&2
-        exit 1
+fi
+mkdir -p "$PREFIX"
+target="$PREFIX/wire${binsuffix}"
+
+binary_url="$DIST_URL/wire-${triple}${binsuffix}"
+echo "fetching $binary_url ..."
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+
+if curl -fsSL "$binary_url" -o "$tmp"; then
+    # Optional SHA-256 sibling.
+    if curl -fsSL "$binary_url.sha256" -o "$tmp.sha256" 2>/dev/null; then
+        expected="$(awk '{print $1}' "$tmp.sha256")"
+        if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "$tmp" | awk '{print $1}')"
+        elif command -v shasum >/dev/null 2>&1; then
+            actual="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+        else
+            echo "warn: no sha256sum/shasum tool — skipping integrity check" >&2
+            actual="$expected"
+        fi
+        if [ "$expected" != "$actual" ]; then
+            echo "FATAL: SHA-256 mismatch — expected $expected, got $actual" >&2
+            exit 1
+        fi
     fi
-    echo "  ok"
+    chmod +x "$tmp"
+    if ! mv "$tmp" "$target" 2>/dev/null; then
+        echo "elevating to write $target ..." >&2
+        sudo mv "$tmp" "$target"
+    fi
+elif command -v cargo >/dev/null 2>&1; then
+    echo "pre-built binary unavailable — building from source via cargo install slancha-wire (~2 min)" >&2
+    # Prefer crates.io (slancha-wire) over git pin so users get pinned-version semantics.
+    # If that fails (offline / mirror down), fall back to the git path.
+    if ! cargo install slancha-wire --root "$(dirname "$PREFIX")"; then
+        echo "crates.io install failed — falling back to git source build" >&2
+        cargo install --git "$REPO_URL" --root "$(dirname "$PREFIX")" --bin wire
+    fi
+else
+    echo "FATAL: pre-built binary unavailable and cargo not found." >&2
+    echo "Install Rust from https://rustup.rs/ and re-run this script, or" >&2
+    echo "  cargo install slancha-wire    (after rustup)" >&2
+    echo "  git clone $REPO_URL && cd wire && cargo build --release" >&2
+    exit 1
 fi
 
-# ───── install ─────
-echo "→ installing to $INSTALL_DIR/$BIN_NAME"
-chmod +x "$TMPDIR/wire"
-mv "$TMPDIR/wire" "$INSTALL_DIR/$BIN_NAME"
+if [ -x "$target" ]; then
+    echo "wire installed at $target"
+    echo
+    "$target" --version
+    echo
 
-# ───── PATH hint ─────
-case ":$PATH:" in
-    *":$INSTALL_DIR:"*) ;;
-    *)
+    # v0.6.8: stale-cleanup pass. After replacing the binary in place,
+    # old daemons may still be running (with the previous binary text
+    # loaded in memory) and old pidfiles may point at processes that
+    # have just been clobbered. Running `wire upgrade` here:
+    #   - kills any wire daemon still alive from the old binary,
+    #   - wipes stale pidfiles across every session,
+    #   - respawns session daemons under the new binary,
+    #   - warns if multiple wire binaries are on $PATH (the most common
+    #     "I updated but it's still broken" cause).
+    # Best effort: silent skip on older binaries that lack `upgrade`.
+    if "$target" upgrade --check >/dev/null 2>&1; then
+        echo "running stale-cleanup pass (wire upgrade)..."
+        "$target" upgrade || echo "warn: wire upgrade returned non-zero; running daemons may need a manual restart" >&2
         echo
-        echo "$INSTALL_DIR is not on your PATH. Add it:"
-        echo "  echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.bashrc   # or ~/.zshrc"
-        echo
-        ;;
-esac
+    fi
 
-echo
-VERSION_LINE=$("$INSTALL_DIR/$BIN_NAME" --version 2>/dev/null || echo "wire")
-echo "${VERSION_LINE} installed at $INSTALL_DIR/$BIN_NAME"
-echo
-echo "next step:"
-echo "  wire init <handle> --relay https://wireup.net"
-echo "  wire claim <handle>"
-echo "  wire add <friend>@wireup.net"
-echo
-echo "source: https://github.com/${REPO}"
-echo "discord: https://discord.gg/dv2Cd3xzPh"
+    echo "next steps:"
+    echo "  wire up                              # one-shot: identity + relay + claim your persona + daemon"
+    echo "  wire here                            # see your persona (handle == DID-derived name) + who's around"
+    echo "  wire dial <peer>@wireup.net          # pair a peer, then: wire send <peer> \"hi\""
+    echo "  wire session new --local-only        # per-project isolated identity (multi-agent box)"
+    echo "  wire session pair-all-local          # mesh-pair every sister"
+    echo
+    echo "see 'wire --help' or https://github.com/SlanchaAi/wire for more."
+fi

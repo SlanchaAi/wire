@@ -529,12 +529,13 @@ pub fn init_self_idempotent(
             .unwrap_or_else(|| {
                 crate::agent_card::display_handle_from_did(&existing_did).to_string()
             });
-        if existing_handle != handle {
-            bail!(
-                "already initialized as {existing_did}; refusing to re-init with different handle {handle:?}. \
-                 Operator must explicitly delete config to re-init."
-            );
-        }
+        // One-name rule: the on-disk identity is authoritative and the passed
+        // `handle` is a vestigial seed (often the hostname from
+        // default_handle()). Never re-key on re-init — adopt the existing
+        // persona handle for all downstream fields. (Previously this bailed on
+        // a handle mismatch, which broke claim / MCP / pairing on any session
+        // whose persona handle differed from the hostname seed.)
+        let handle: &str = &existing_handle;
         let pk_b64 = card
             .get("verify_keys")
             .and_then(Value::as_object)
@@ -591,6 +592,17 @@ pub fn init_self_idempotent(
     crate::config::ensure_dirs()?;
     let (sk_seed, pk_bytes) = generate_keypair();
     crate::config::write_private_key(&sk_seed)?;
+
+    // One-name rule: derive the persona from the keypair fingerprint, not the
+    // passed `handle` (a vestigial seed — often the hostname from
+    // default_handle()). Deriving here means EVERY init path, including the
+    // auto-init used by claim / MCP / pairing, yields a unique fp-derived
+    // persona instead of a shared hostname. This was the root of "every new
+    // session on a box shows the same handle".
+    let synth_did = crate::agent_card::did_for_with_key(handle, &pk_bytes);
+    let persona = crate::character::Character::from_did(&synth_did).nickname;
+    let handle: &str = &persona;
+
     let card = build_agent_card(handle, &pk_bytes, name, None, None);
     let signed = sign_agent_card(&card, &sk_seed);
     crate::config::write_agent_card(&signed)?;

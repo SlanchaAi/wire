@@ -8,6 +8,16 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.13.1] — 2026-05-24
+
+**v0.13.1 — one name, one command. Identity UX simplified; the last "same handle" leak closed.** A persona review found the one-name promise (v0.11) was still violated in several places, and that the real fix was to stop letting anyone *type* a name they will not get.
+
+- **One-name now holds on EVERY init path.** `init_self_idempotent` — the auto-init used by `wire claim`, MCP `wire_init`, and all pairing — previously used the machine **hostname** (`default_handle()`) as the handle and never applied the persona derivation that `wire init` did. Result: every auto-initialized session on a box became `did:wire:<hostname>-<fp>`, all displaying the same hostname after the fp-strip — a second, more visible root of the Windows "every new session has the same handle" bug (v0.13 fixed the colliding HOME; this fixes the colliding displayed name). Both branches now derive the persona from the keypair fingerprint, so distinct sessions always get distinct fp-derived personas. Re-init with a different typed handle is now an idempotent no-op (the typed handle is vestigial) instead of an error.
+- **Onboarding is one nickless command.** `wire up [relay]` does everything (init + bind + claim your persona + local dual-bind + daemon) and no longer takes a `<nick>` — your handle *is* your DID-derived persona, so there was never a name to type. Accepts `@wireup.net`, a bare host, a full URL, or nothing (defaults to the public relay).
+- **`wire init`, `wire claim`, `wire identity publish` are hidden.** All three accepted a name the one-name rule ignores — terrible UX (you type `alice`, you get `winter-bay`; worse, on a fresh box the ignored name could be the invalid hostname and the command would fail). They are folded into `wire up` and removed from `--help`, kept callable for scripts/offline keygen. `wire init`'s handle arg is now `Option` (`None` = no typed name); `wire claim`/`wire_claim` coerce any typed nick to your persona (MCP `nick` is now optional + advisory).
+- **`landing/install.sh` was stale.** The installer embedded in the relay and served at `wireup.net/install.sh` was an older, separate script showing a 3-step `init` → `claim` → `add` flow with the deprecated `wire add` verb — the first thing every new user saw, contradicting the model. Now byte-identical to the canonical root `install.sh` (one-command `wire up`, canonical `wire dial`, Windows MSYS/Cygwin detection, post-install `wire upgrade` stale-cleanup pass).
+- **README quick-start** rewritten around `wire up` + the one-name model (dropped the pre-v0.11 `wire init alice` → `winter-bay (alice)` two-name example).
+
 ## [v0.13.0] — 2026-05-24
 
 **v0.13 — session-keyed identity.** Replaces the cwd-registry + machine-wide-default session model with a host-agnostic session-key chain (`WIRE_SESSION_ID` > `CLAUDE_CODE_SESSION_ID` > legacy cwd-detect). Each session resolves to a unique, deterministic, cwd-independent WIRE_HOME (`sessions/by-key/<sha256(key)[:16]>`), so two sessions can never collapse onto a shared default. Fixes the Windows "every new session gets the same handle" bug at the root — there is no path string to mis-normalize or miss.

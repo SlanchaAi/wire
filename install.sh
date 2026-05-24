@@ -2,13 +2,13 @@
 # install.sh — single-binary installer for `wire`.
 #
 # Usage:
-#   curl -fsSL https://wire.example.com/install.sh | sh
-#   curl -fsSL https://wire.example.com/install.sh | sh -s -- --prefix ~/bin
+#   curl -fsSL https://wireup.net/install.sh | sh
+#   curl -fsSL https://wireup.net/install.sh | sh -s -- --prefix ~/bin
 #
 # What it does:
-#   1. Detects platform (linux-x86_64, linux-arm64, darwin-x86_64, darwin-arm64).
+#   1. Detects platform (linux x86_64/arm64, darwin arm64, windows x86_64 via Git Bash/MSYS).
 #   2. Downloads the matching pre-built `wire` binary from $WIRE_DIST_URL
-#      (default: https://wire.example.com/dist/<platform>/wire).
+#      (default: GitHub Releases — $REPO_URL/releases/latest/download/wire-<triple>).
 #   3. Verifies SHA-256 if a sibling .sha256 file exists at the dist URL.
 #   4. Installs to $PREFIX/wire (default: $HOME/.local/bin/wire if it exists
 #      and is on $PATH, else /usr/local/bin/wire — with sudo if needed).
@@ -151,7 +151,8 @@ if [ -x "$target" ]; then
     fi
 
     echo "next steps:"
-    echo "  wire up <nick>@wireup.net            # one-shot: identity + relay + claim + local dual-bind + daemon"
+    echo "  wire up                              # one-shot: identity + relay + claim your persona + daemon"
+    echo "  wire here                            # see your persona (handle == DID-derived name) + who's around"
     echo "  wire dial <peer>@wireup.net          # pair a peer, then: wire send <peer> \"hi\""
     echo "  wire session new --local-only        # per-project isolated identity (multi-agent box)"
     echo "  wire session pair-all-local          # mesh-pair every sister"

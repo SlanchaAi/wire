@@ -44,8 +44,14 @@ pub enum Command {
     /// `--relay <url>` (binds a slot inline) or `--offline` (opt into
     /// slotless, acknowledge `wire bind-relay` is required before any
     /// pair or send).
+    ///
+    /// v0.13.1: folded into `wire up` and hidden. Your handle is your
+    /// DID-derived persona (one-name rule), so the typed `handle` arg is a
+    /// vestigial seed with no effect on identity. Kept callable for explicit
+    /// offline keygen (`wire init x --offline`); everyone else uses `wire up`.
+    #[command(hide = true)]
     Init {
-        /// Short handle for this agent (becomes did:wire:<handle>).
+        /// Vestigial seed — ignored; your handle is your DID-derived persona.
         handle: String,
         /// Optional display name (defaults to capitalized handle).
         #[arg(long)]
@@ -650,20 +656,25 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// One-shot full bootstrap — `wire up <nick@relay-host>` does in one
-    /// command what 0.5.10 took five (init + bind-relay + claim + daemon-
-    /// background + remember-to-restart-on-login). Idempotent: re-run on
-    /// an already-set-up box prints state without churn.
+    /// Come online in one command — `wire up` does what used to take five
+    /// (init + bind-relay + claim your persona + background daemon +
+    /// restart-on-login). Idempotent: re-run on an already-set-up box prints
+    /// state without churn.
+    ///
+    /// There is no name to choose: your handle IS your DID-derived persona
+    /// (one-name rule). The optional argument is just which relay to use.
     ///
     /// Examples:
-    ///   wire up paul@wireup.net           # full bootstrap
-    ///   wire up paul-mac@wireup.net       # ditto, nick = paul-mac
-    ///   wire up paul                      # bootstrap, default relay
+    ///   wire up                        # default public relay (wireup.net)
+    ///   wire up @wireup.net            # explicit federation relay
+    ///   wire up http://127.0.0.1:8771  # a local / self-hosted relay
     Up {
-        /// Full handle in `nick@relay-host` form, or just `nick` (defaults
-        /// to the configured public relay wireup.net).
-        handle: String,
-        /// Optional display name (defaults to capitalized nick).
+        /// Relay to bind + claim your persona on: `@wireup.net`, `wireup.net`,
+        /// or a full URL. Omit for the default public relay. No nick — your
+        /// handle is your DID-derived persona.
+        relay: Option<String>,
+        /// Optional display name for your profile card (cosmetic; distinct
+        /// from your addressable handle/persona).
         #[arg(long)]
         name: Option<String>,
         /// Also additively dual-bind a LOCAL relay slot for fast same-box
@@ -720,10 +731,20 @@ pub enum Command {
         #[command(subcommand)]
         action: DiagAction,
     },
-    /// Claim a nick on a relay's handle directory. Anyone can then reach
-    /// this agent by `<nick>@<relay-domain>` via the relay's
+    /// Claim your persona on a relay's handle directory. Anyone can then
+    /// reach this agent by `<persona>@<relay-domain>` via the relay's
     /// `.well-known/wire/agent` endpoint. FCFS; same-DID re-claims allowed.
+    ///
+    /// ONE-NAME RULE (v0.13.1): the claimed handle is always your DID-derived
+    /// persona. The `nick` arg is vestigial — if it differs it is ignored
+    /// (like the typed name `wire init` / `wire up` already ignore), so your
+    /// phonebook entry can never drift from your agent-card handle.
+    ///
+    /// v0.13.1: hidden — `wire up` claims your persona for you. Kept callable
+    /// (idempotent re-claim) but not a user verb; there is no nick to choose.
+    #[command(hide = true)]
     Claim {
+        /// Vestigial: ignored if it differs from your DID-derived persona.
         nick: String,
         /// Relay to claim the nick on. Default = relay our slot is on.
         #[arg(long)]
@@ -917,13 +938,16 @@ pub enum IdentityCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Promote this identity to FEDERATION lifecycle: claim a handle on
-    /// the relay so peers can `wire add <name>@<relay-domain>` you.
-    /// Re-claims with current display fields (after `wire identity rename`)
-    /// so the relay always serves the latest signed card. Equivalent to
-    /// `wire claim` but scoped here for the v0.7+ noun-CLI surface.
+    /// Promote this identity to FEDERATION lifecycle: claim your persona on
+    /// the relay so peers can `wire dial <persona>@<relay-domain>` you.
+    /// Re-claims with current display fields so the relay always serves the
+    /// latest signed card. Equivalent to `wire claim`.
+    ///
+    /// v0.13.1: hidden — `wire up` publishes your persona for you, and the
+    /// nick is vestigial (one-name rule). Kept callable for re-publish.
+    #[command(hide = true)]
     Publish {
-        /// The handle to claim on the relay (e.g. `coffee-ghost`).
+        /// Vestigial: ignored; your handle is your DID-derived persona.
         nick: String,
         /// Override the relay URL. Defaults to the session's bound relay
         /// from `wire init --relay <url>`. Public relay if unset.
@@ -1434,7 +1458,13 @@ pub fn run() -> Result<()> {
             relay,
             offline,
             json,
-        } => cmd_init(&handle, name.as_deref(), relay.as_deref(), offline, json),
+        } => cmd_init(
+            Some(&handle),
+            name.as_deref(),
+            relay.as_deref(),
+            offline,
+            json,
+        ),
         Command::Status { peer, json } => {
             if let Some(peer) = peer {
                 cmd_status_peer(&peer, json)
@@ -1681,13 +1711,13 @@ pub fn run() -> Result<()> {
             json,
         } => cmd_add(&handle, relay.as_deref(), local_sister, json),
         Command::Up {
-            handle,
+            relay,
             name,
             with_local,
             no_local,
             json,
         } => cmd_up(
-            &handle,
+            relay.as_deref(),
             name.as_deref(),
             with_local.as_deref(),
             no_local,
@@ -1742,17 +1772,23 @@ pub fn run() -> Result<()> {
 // ---------- init ----------
 
 fn cmd_init(
-    handle: &str,
+    handle: Option<&str>,
     name: Option<&str>,
     relay: Option<&str>,
     offline: bool,
     as_json: bool,
 ) -> Result<()> {
-    if !handle
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    // One-name rule: a typed handle (if any) is only a vanity seed — the
+    // persona is derived from the keypair fingerprint, so it has no effect
+    // on the resulting identity. `wire up` passes None (there is no name to
+    // type); an explicit `wire init <handle>` passes Some and we surface the
+    // "ignored in favor of persona" notice for transparency.
+    if let Some(h) = handle
+        && !h
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        bail!("handle must be ASCII alphanumeric / '-' / '_' (got {handle:?})");
+        bail!("handle must be ASCII alphanumeric / '-' / '_' (got {h:?})");
     }
     if config::is_initialized()? {
         bail!(
@@ -1837,10 +1873,10 @@ fn cmd_init(
                 bail!(
                     "wire init: no relay specified and no local relay reachable at \
                      http://127.0.0.1:8771.\n\
-                     Pick one:\n\
+                     Pick one (or just run `wire up`):\n\
                      • `wire service install --local-relay` — start the local relay, then re-run\n\
-                     • `wire init {handle} --relay https://wireup.net` — bind to public federation\n\
-                     • `wire init {handle} --offline` — generate keypair only \
+                     • `wire up @wireup.net` — bind to public federation in one command\n\
+                     • `wire init --offline` — generate keypair only \
                      (peers cannot reach you until you `wire bind-relay <url>` later)"
                 );
             }
@@ -1866,12 +1902,18 @@ fn cmd_init(
     // don't let them have it as a name." Operator-typed handles violated
     // that rule because the character was the displayed name but the
     // handle was the addressable one. Now they're the same string.
-    let synth_did = crate::agent_card::did_for_with_key(handle, &pk_bytes);
+    // The seed string only fills the (immediately-discarded) handle portion
+    // of a synthetic DID; the persona derives from the fp suffix regardless,
+    // so any seed yields the same identity.
+    let seed = handle.unwrap_or("agent");
+    let synth_did = crate::agent_card::did_for_with_key(seed, &pk_bytes);
     let character = crate::character::Character::from_did(&synth_did);
     let canonical_handle: &str = &character.nickname;
-    if canonical_handle != handle {
+    if let Some(typed) = handle
+        && typed != canonical_handle
+    {
         eprintln!(
-            "wire init: v0.11 one-name rule — operator-typed `{handle}` ignored in favor of \
+            "wire init: one-name rule — typed `{typed}` ignored in favor of \
              DID-derived persona `{canonical_handle}`. Peers will reach you as `{canonical_handle}`."
         );
     }
@@ -10539,25 +10581,25 @@ mod doctor_tests {
 ///   - `<nick>`              — defaults to wireup.net (the configured
 ///     public relay)
 fn cmd_up(
-    handle_arg: &str,
+    relay_arg: Option<&str>,
     name: Option<&str>,
     with_local: Option<&str>,
     no_local: bool,
     as_json: bool,
 ) -> Result<()> {
-    let (nick, relay_url) = match handle_arg.split_once('@') {
-        Some((n, host)) => {
-            let url = if host.starts_with("http://") || host.starts_with("https://") {
-                host.to_string()
+    // No nick to parse — your handle is your DID-derived persona (one-name
+    // rule). The optional arg is only which relay to bind/claim on. Accepts
+    // `@host`, bare `host`, or a full URL; defaults to the public relay.
+    let relay_url = match relay_arg {
+        Some(r) => {
+            let r = r.trim_start_matches('@');
+            if r.starts_with("http://") || r.starts_with("https://") {
+                r.to_string()
             } else {
-                format!("https://{host}")
-            };
-            (n.to_string(), url)
+                format!("https://{r}")
+            }
         }
-        None => (
-            handle_arg.to_string(),
-            crate::pair_invite::DEFAULT_RELAY.to_string(),
-        ),
+        None => crate::pair_invite::DEFAULT_RELAY.to_string(),
     };
 
     let mut report: Vec<(String, String)> = Vec::new();
@@ -10568,17 +10610,13 @@ fn cmd_up(
         }
     };
 
-    // 1. init (or note existing identity). v0.11 one-name rule: the nick
-    // before `@` is vestigial — identity (and the claimed handle) is the
-    // DID-derived persona, NOT the operator-typed string. We pass the arg
-    // to auto-init only so its "operator-typed X ignored" message fires;
-    // the persona always wins. No bail on nick mismatch (the typed nick
-    // can't select an identity, so a mismatch is not an error).
+    // 1. init (or note existing identity). No typed name — cmd_init(None)
+    // generates the persona from the freshly-minted keypair (one-name rule).
     if config::is_initialized()? {
         step("init", "already initialized".to_string());
     } else {
         cmd_init(
-            &nick,
+            None,
             name,
             Some(&relay_url),
             false,
@@ -10593,12 +10631,7 @@ fn cmd_up(
         let did = card.get("did").and_then(Value::as_str).unwrap_or("");
         crate::agent_card::display_handle_from_did(did).to_string()
     };
-    if canonical != nick {
-        step(
-            "identity",
-            format!("persona is `{canonical}` (typed `{nick}` ignored — one-name rule)"),
-        );
-    }
+    step("identity", format!("persona is `{canonical}`"));
 
     // 2. Ensure relay binding matches. cmd_init with --relay binds it; if
     // already initialized we may need to bind to the requested relay
@@ -10840,16 +10873,37 @@ fn cmd_claim(
     hidden: bool,
     as_json: bool,
 ) -> Result<()> {
-    if !crate::pair_profile::is_valid_nick(nick) {
-        bail!(
-            "phyllis: {nick:?} won't fit in the books — handles need 2-32 chars, lowercase [a-z0-9_-], not on the reserved list"
-        );
-    }
     // `wire claim` is the one-step bootstrap: auto-init + auto-allocate slot
     // + claim handle. Operator should never have to run init/bind-relay first.
     let (_did, relay_url, slot_id, slot_token) =
         crate::pair_invite::ensure_self_with_relay(relay_override)?;
     let card = config::read_agent_card()?;
+
+    // v0.13.1 one-name enforcement: the handle you claim in the phonebook
+    // MUST equal your DID-derived persona, so the directory entry can never
+    // drift from your agent-card handle. A typed nick that differs is ignored
+    // (mirrors how `wire init` coerces the typed name). This closes the
+    // claim-path reopening of the v0.11 "two names" footgun — before this,
+    // `wire claim coffee-ghost` published coffee-ghost@relay -> your DID while
+    // your card said e.g. outback-sandpiper. The typed `nick` arg is now
+    // vestigial, exactly like the one `wire init` / `wire up` already accept.
+    let did = card.get("did").and_then(Value::as_str).unwrap_or_default();
+    let canonical = crate::agent_card::display_handle_from_did(did).to_string();
+    if !canonical.is_empty() && nick != canonical && !as_json {
+        eprintln!(
+            "wire claim: typed `{nick}` ignored — one-name rule. Claiming your persona `{canonical}`."
+        );
+    }
+    let nick = if canonical.is_empty() {
+        nick
+    } else {
+        canonical.as_str()
+    };
+    if !crate::pair_profile::is_valid_nick(nick) {
+        bail!(
+            "phyllis: {nick:?} won't fit in the books — handles need 2-32 chars, lowercase [a-z0-9_-], not on the reserved list"
+        );
+    }
 
     let client = crate::relay_client::RelayClient::new(&relay_url);
     // v0.5.19 (#9.1): forward the `discoverable` flag. None for default

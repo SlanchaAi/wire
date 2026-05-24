@@ -830,15 +830,14 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "wire_claim",
-            "description": "Claim a nick on a relay's handle directory so other agents can reach this agent by `<nick>@<relay-domain>`. Auto-inits + auto-allocates a relay slot if needed. FCFS — same-DID re-claims allowed (used for profile/slot updates).",
+            "description": "Publish this agent in a relay's handle directory so others can reach it by `<persona>@<relay-domain>`. ONE-NAME RULE: the claimed handle is ALWAYS your DID-derived persona — you do not choose it. The `nick` arg is optional + advisory; a value that differs from your persona is ignored (response sets typed_nick_ignored=true). Auto-inits + auto-allocates a relay slot if needed. FCFS — same-DID re-claims allowed (used for profile/slot updates).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "nick": {"type": "string", "description": "2-32 chars, [a-z0-9_-], not in the reserved set."},
+                    "nick": {"type": "string", "description": "Optional + advisory. Ignored if it differs from your DID-derived persona (one-name rule)."},
                     "relay_url": {"type": "string", "description": "Relay to claim on. Default = our relay."},
                     "public_url": {"type": "string", "description": "Public URL the relay should advertise to resolvers."}
-                },
-                "required": ["nick"]
+                }
             }
         }),
         json!({
@@ -1916,10 +1915,7 @@ fn tool_pair_list_inbound() -> Result<Value, String> {
 }
 
 fn tool_claim_handle(args: &Value) -> Result<Value, String> {
-    let nick = args
-        .get("nick")
-        .and_then(Value::as_str)
-        .ok_or("missing 'nick'")?;
+    let typed = args.get("nick").and_then(Value::as_str);
     let relay_override = args.get("relay_url").and_then(Value::as_str);
     let public_url = args.get("public_url").and_then(Value::as_str);
 
@@ -1928,14 +1924,30 @@ fn tool_claim_handle(args: &Value) -> Result<Value, String> {
         crate::pair_invite::ensure_self_with_relay(relay_override).map_err(|e| format!("{e:#}"))?;
     let claim_relay = relay_override.unwrap_or(&our_relay);
     let card = crate::config::read_agent_card().map_err(|e| format!("{e:#}"))?;
+
+    // One-name rule (v0.13.1): the claimed handle is ALWAYS the DID-derived
+    // persona, so the phonebook entry can never drift from the agent-card
+    // handle. `nick` is optional + advisory — a value that differs is ignored.
+    // See cmd_claim for the rationale (closes the claim-path "two names" hole).
+    let did = card.get("did").and_then(Value::as_str).unwrap_or_default();
+    let canonical = crate::agent_card::display_handle_from_did(did).to_string();
+    let nick = if canonical.is_empty() {
+        typed.unwrap_or_default().to_string()
+    } else {
+        canonical
+    };
+    let typed_nick_ignored = typed.map(|t| t != nick).unwrap_or(false);
+
     let client = crate::relay_client::RelayClient::new(claim_relay);
     let resp = client
-        .handle_claim(nick, &our_slot_id, &our_slot_token, public_url, &card)
+        .handle_claim(&nick, &our_slot_id, &our_slot_token, public_url, &card)
         .map_err(|e| format!("{e:#}"))?;
     Ok(json!({
         "nick": nick,
         "relay": claim_relay,
         "response": resp,
+        "one_name": true,
+        "typed_nick_ignored": typed_nick_ignored,
     }))
 }
 
