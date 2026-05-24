@@ -4208,32 +4208,6 @@ fn validate_loopback_bind(bind: &str) -> Result<()> {
 
 // ---------- bind-relay ----------
 
-/// Infer an endpoint scope from a relay URL when `--scope` is not given:
-/// `unix://` -> Uds, loopback host -> Local, otherwise Federation. LAN is
-/// never inferred (it requires an explicit `--scope lan`) because a
-/// private-range IP is indistinguishable from a federation host by URL
-/// alone.
-fn infer_endpoint_scope(url: &str) -> crate::endpoints::EndpointScope {
-    use crate::endpoints::EndpointScope;
-    if url.starts_with("unix://") {
-        return EndpointScope::Uds;
-    }
-    let host = url
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("");
-    if host == "127.0.0.1" || host == "localhost" || host == "::1" {
-        EndpointScope::Local
-    } else {
-        EndpointScope::Federation
-    }
-}
-
 fn parse_scope(s: &str) -> Result<crate::endpoints::EndpointScope> {
     use crate::endpoints::EndpointScope;
     match s.to_lowercase().as_str() {
@@ -4257,7 +4231,7 @@ fn cmd_bind_relay(
     migrate_pinned: bool,
     as_json: bool,
 ) -> Result<()> {
-    use crate::endpoints::{self_endpoints, Endpoint, EndpointScope};
+    use crate::endpoints::{self_endpoints, Endpoint};
 
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
@@ -4269,7 +4243,7 @@ fn cmd_bind_relay(
     let normalized = url.trim_end_matches('/');
     let new_scope = match scope {
         Some(s) => parse_scope(s)?,
-        None => infer_endpoint_scope(normalized),
+        None => crate::endpoints::infer_scope_from_url(normalized),
     };
 
     let existing = config::read_relay_state().unwrap_or_else(|_| json!({}));
@@ -4325,36 +4299,24 @@ fn cmd_bind_relay(
         );
     }
 
-    // Build the new endpoint set. Additive: start from existing, drop any
-    // entry for this same relay (rotation/update), then append the new
-    // one. Replace: start from an empty set.
-    let mut eps: Vec<Endpoint> = if replace { Vec::new() } else { existing_eps };
-    eps.retain(|e| e.relay_url != normalized);
-    eps.push(Endpoint {
-        relay_url: normalized.to_string(),
-        slot_id: alloc.slot_id.clone(),
-        slot_token: alloc.slot_token.clone(),
-        scope: new_scope,
-    });
-
-    // Legacy top-level fields point at the federation endpoint (or, absent
-    // one, the first endpoint) so v0.5.16-and-earlier readers still work —
-    // mirrors endpoints::pin_peer_endpoints.
-    let legacy = eps
-        .iter()
-        .find(|e| e.scope == EndpointScope::Federation)
-        .or_else(|| eps.first());
-    let mut self_obj = serde_json::Map::new();
-    if let Some(l) = legacy {
-        self_obj.insert("relay_url".into(), Value::String(l.relay_url.clone()));
-        self_obj.insert("slot_id".into(), Value::String(l.slot_id.clone()));
-        self_obj.insert("slot_token".into(), Value::String(l.slot_token.clone()));
-    }
-    self_obj.insert("endpoints".into(), serde_json::to_value(&eps)?);
-
+    // Write the new slot via the single source of truth for the self-slot
+    // shape. Additive by default; --replace starts from an empty self so
+    // only this slot remains.
     let mut state = existing;
-    state["self"] = Value::Object(self_obj);
+    if replace {
+        state["self"] = Value::Null;
+    }
+    crate::endpoints::upsert_self_endpoint(
+        &mut state,
+        Endpoint {
+            relay_url: normalized.to_string(),
+            slot_id: alloc.slot_id.clone(),
+            slot_token: alloc.slot_token.clone(),
+            scope: new_scope,
+        },
+    );
     config::write_relay_state(&state)?;
+    let eps = self_endpoints(&state);
 
     let scope_str = format!("{new_scope:?}").to_lowercase();
     if as_json {

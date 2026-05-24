@@ -213,6 +213,82 @@ async fn wire_init_via_mcp_is_idempotent_for_same_handle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wire_init_binds_additional_relay_when_already_initialized() {
+    // Regression: wire_init with relay_url used to NO-OP the relay binding
+    // whenever `self` was already non-null (e.g. bound to another relay, or
+    // a non-null-but-unbound self) — it reported the existing relay and
+    // never allocated the requested slot, so wire_claim then 404'd. Now it
+    // binds the requested relay additively.
+    let relay_a = spawn_relay().await;
+    let relay_b = spawn_relay().await;
+    let home = fresh_dir("init-bind");
+    let mut mcp = McpProc::spawn(&home);
+
+    let r1 = mcp
+        .tool_call(
+            1,
+            "wire_init",
+            json!({"handle": "alice", "relay_url": relay_a}),
+            Duration::from_secs(10),
+        )
+        .expect("init binds relay A");
+    assert_eq!(r1["relay_url"].as_str().unwrap(), relay_a.trim_end_matches('/'));
+    assert!(r1["slot_id"].as_str().is_some(), "slot allocated on A");
+
+    // Already initialized + a DIFFERENT relay: must bind B (the old no-op).
+    let r2 = mcp
+        .tool_call(
+            2,
+            "wire_init",
+            json!({"handle": "alice", "relay_url": relay_b}),
+            Duration::from_secs(10),
+        )
+        .expect("re-init binds relay B");
+    assert_eq!(r2["already_initialized"], true);
+    assert_eq!(
+        r2["relay_url"].as_str().unwrap(),
+        relay_b.trim_end_matches('/'),
+        "second init must BIND the requested relay B, not just report A"
+    );
+    assert!(r2["slot_id"].as_str().is_some(), "slot allocated on B");
+
+    // Additive: self.endpoints carries BOTH relays.
+    let state: Value = serde_json::from_str(
+        &std::fs::read_to_string(home.join("config/wire/relay.json")).unwrap(),
+    )
+    .unwrap();
+    let urls: Vec<String> = state["self"]["endpoints"]
+        .as_array()
+        .expect("self.endpoints[] present after additive bind")
+        .iter()
+        .map(|e| e["relay_url"].as_str().unwrap().to_string())
+        .collect();
+    assert!(urls.iter().any(|u| u == relay_a.trim_end_matches('/')), "A kept: {urls:?}");
+    assert!(urls.iter().any(|u| u == relay_b.trim_end_matches('/')), "B added: {urls:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wire_dial_reads_name_arg_not_handle() {
+    // Regression: wire_dial was wired straight to tool_add, which reads a
+    // required `handle` arg — but the wire_dial schema only provides
+    // `name`, so every dial errored `missing 'handle'`. It must read
+    // `name` now and surface an honest resolution error instead.
+    let home = fresh_dir("dial-name");
+    let mut mcp = McpProc::spawn(&home);
+    mcp.tool_call(1, "wire_init", json!({"handle": "alice"}), Duration::from_secs(5))
+        .expect("init");
+
+    let err = mcp
+        .tool_call(2, "wire_dial", json!({"name": "ghost-peer"}), Duration::from_secs(5))
+        .expect_err("bare unknown name should error");
+    assert!(
+        !err.contains("missing 'handle'"),
+        "must not regress to missing-handle: {err}"
+    );
+    assert!(err.contains("cannot resolve"), "honest resolution error: {err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pair_initiate_returns_distinct_session_ids_for_concurrent_calls() {
     let relay_url = spawn_relay().await;
     let home = fresh_dir("multi-init");
