@@ -199,6 +199,77 @@ fn count_inbox_lines(home: &Path, peer: &str) -> usize {
 // ---------- TEST 1: outbox flood ----------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stress_bind_relay_accumulates_many_slots() {
+    // v0.12 additive-bind stress: bind N distinct relays, assert all N
+    // self.endpoints persist (no clobber / no JSON corruption); re-binding
+    // an existing relay updates in place (count stays N); `--replace`
+    // collapses to exactly one slot.
+    const N: usize = 5;
+    let mut relays = Vec::new();
+    for _ in 0..N {
+        relays.push(spawn_federation_relay().await);
+    }
+    let home = fresh_dir("multibind");
+
+    let read_eps = |home: &PathBuf| -> Vec<String> {
+        let p = home.join("config").join("wire").join("relay.json");
+        let v: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        v["self"]["endpoints"]
+            .as_array()
+            .expect("self.endpoints[]")
+            .iter()
+            .map(|e| e["relay_url"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // init bound to the first relay, then additively bind the rest.
+    assert!(
+        wire(&home, &["init", "alice", "--relay", &relays[0]])
+            .status
+            .success()
+    );
+    for r in &relays[1..] {
+        let out = wire(&home, &["bind-relay", r, "--scope", "local", "--json"]);
+        assert!(
+            out.status.success(),
+            "additive bind failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let eps = read_eps(&home);
+    assert_eq!(eps.len(), N, "all {N} relays must accumulate, got {eps:?}");
+    for r in &relays {
+        assert!(
+            eps.iter().any(|u| u == r.trim_end_matches('/')),
+            "relay {r} present: {eps:?}"
+        );
+    }
+
+    // Re-binding an existing relay updates in place — count unchanged.
+    assert!(
+        wire(&home, &["bind-relay", &relays[2], "--scope", "local", "--json"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        read_eps(&home).len(),
+        N,
+        "re-binding the same relay must not grow the set"
+    );
+
+    // `--replace` collapses to exactly one slot.
+    assert!(
+        wire(&home, &["bind-relay", &relays[0], "--replace", "--json"])
+            .status
+            .success()
+    );
+    let after = read_eps(&home);
+    assert_eq!(after.len(), 1, "--replace must leave exactly one slot, got {after:?}");
+    assert_eq!(after[0], relays[0].trim_end_matches('/'));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stress_outbox_flood_500_messages_single_peer() {
     let relay_url = spawn_federation_relay().await;
     let (alice, alice_h, bob, bob_h) =
