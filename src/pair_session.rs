@@ -551,24 +551,38 @@ pub fn init_self_idempotent(
             "config_dir": crate::config::config_dir()?.to_string_lossy(),
             "already_initialized": true,
         });
-        let relay_state = crate::config::read_relay_state()?;
+        let mut relay_state = crate::config::read_relay_state()?;
         if let Some(url) = relay {
-            if relay_state["self"].is_null() {
+            let url = url.trim_end_matches('/');
+            // Bind iff we don't already hold a slot on THIS relay. Fixes
+            // the v0.11 no-op where an already-initialized identity whose
+            // `self` was non-null-but-unbound (e.g. `self relay: ?`) never
+            // allocated the requested relay slot — `relay_state["self"]`
+            // wasn't strictly null, so the old guard skipped binding and
+            // wire_claim then failed with 404 unknown slot. Additive:
+            // keeps any other slots (matches cmd_bind_relay).
+            let already = crate::endpoints::self_endpoints(&relay_state)
+                .into_iter()
+                .find(|e| e.relay_url == url);
+            if let Some(ep) = already {
+                out["relay_url"] = json!(url);
+                out["slot_id"] = json!(ep.slot_id);
+            } else {
                 let client = crate::relay_client::RelayClient::new(url);
                 client.check_healthz()?;
                 let alloc = client.allocate_slot(Some(handle))?;
-                let mut rs = relay_state;
-                rs["self"] = json!({
-                    "relay_url": url,
-                    "slot_id": alloc.slot_id.clone(),
-                    "slot_token": alloc.slot_token,
-                });
-                crate::config::write_relay_state(&rs)?;
+                crate::endpoints::upsert_self_endpoint(
+                    &mut relay_state,
+                    crate::endpoints::Endpoint {
+                        relay_url: url.to_string(),
+                        slot_id: alloc.slot_id.clone(),
+                        slot_token: alloc.slot_token,
+                        scope: crate::endpoints::infer_scope_from_url(url),
+                    },
+                );
+                crate::config::write_relay_state(&relay_state)?;
                 out["relay_url"] = json!(url);
                 out["slot_id"] = json!(alloc.slot_id);
-            } else if let Some(existing_url) = relay_state["self"]["relay_url"].as_str() {
-                out["relay_url"] = json!(existing_url);
-                out["slot_id"] = relay_state["self"]["slot_id"].clone();
             }
         }
         return Ok(out);

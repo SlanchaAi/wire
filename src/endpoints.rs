@@ -330,10 +330,106 @@ pub fn pin_peer_endpoints(
     Ok(())
 }
 
+/// Infer an endpoint scope from a relay URL: `unix://` -> Uds, a loopback
+/// host -> Local, otherwise Federation. LAN is never inferred (a private-
+/// range IP is indistinguishable from a federation host by URL alone) and
+/// must be requested explicitly.
+pub fn infer_scope_from_url(url: &str) -> EndpointScope {
+    if url.starts_with("unix://") {
+        return EndpointScope::Uds;
+    }
+    let host = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+        EndpointScope::Local
+    } else {
+        EndpointScope::Federation
+    }
+}
+
+/// Build the `self` block for `relay_state.json` from an endpoint set:
+/// the additive `endpoints[]` array plus legacy top-level
+/// relay_url/slot_id/slot_token pointing at the federation endpoint (or,
+/// absent one, the first endpoint) for v0.5.16-and-earlier back-compat.
+fn build_self_value(eps: &[Endpoint]) -> Value {
+    let legacy = eps
+        .iter()
+        .find(|e| e.scope == EndpointScope::Federation)
+        .or_else(|| eps.first());
+    let mut self_obj = serde_json::Map::new();
+    if let Some(l) = legacy {
+        self_obj.insert("relay_url".into(), Value::String(l.relay_url.clone()));
+        self_obj.insert("slot_id".into(), Value::String(l.slot_id.clone()));
+        self_obj.insert("slot_token".into(), Value::String(l.slot_token.clone()));
+    }
+    self_obj.insert(
+        "endpoints".into(),
+        serde_json::to_value(eps).unwrap_or(Value::Null),
+    );
+    Value::Object(self_obj)
+}
+
+/// Insert-or-replace one of OUR OWN endpoints in `relay_state["self"]`,
+/// keyed by `relay_url` (re-binding the same relay updates it in place).
+/// ADDITIVE: every other existing self endpoint is preserved, so an agent
+/// can hold a local relay AND a federation relay at once. Rebuilds the
+/// legacy top-level fields. Single source of truth for the self-slot write
+/// shape — used by `cmd_bind_relay` and `init_self_idempotent`.
+pub fn upsert_self_endpoint(relay_state: &mut Value, ep: Endpoint) {
+    let mut eps = self_endpoints(relay_state);
+    eps.retain(|e| e.relay_url != ep.relay_url);
+    eps.push(ep);
+    relay_state["self"] = build_self_value(&eps);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn infer_scope_classifies_loopback_unix_and_federation() {
+        assert_eq!(infer_scope_from_url("http://127.0.0.1:8771"), EndpointScope::Local);
+        assert_eq!(infer_scope_from_url("http://localhost:8771"), EndpointScope::Local);
+        assert_eq!(infer_scope_from_url("unix:///tmp/wire.sock"), EndpointScope::Uds);
+        assert_eq!(infer_scope_from_url("https://wireup.net"), EndpointScope::Federation);
+    }
+
+    #[test]
+    fn upsert_self_endpoint_is_additive_then_updates_in_place() {
+        let mut state = json!({});
+        upsert_self_endpoint(
+            &mut state,
+            Endpoint::federation("https://wireup.net".into(), "fed1".into(), "ft".into()),
+        );
+        upsert_self_endpoint(
+            &mut state,
+            Endpoint::local("http://127.0.0.1:8771".into(), "loc1".into(), "lt".into()),
+        );
+        // Both kept.
+        assert_eq!(self_endpoints(&state).len(), 2);
+        // Legacy fields point at federation.
+        assert_eq!(state["self"]["relay_url"], "https://wireup.net");
+        // Re-binding the same relay replaces that one entry, not appends.
+        upsert_self_endpoint(
+            &mut state,
+            Endpoint::local("http://127.0.0.1:8771".into(), "loc2".into(), "lt2".into()),
+        );
+        let eps = self_endpoints(&state);
+        assert_eq!(eps.len(), 2, "same-relay rebind replaces, not appends");
+        let loc = eps
+            .iter()
+            .find(|e| e.scope == EndpointScope::Local)
+            .unwrap();
+        assert_eq!(loc.slot_id, "loc2", "local slot updated in place");
+    }
 
     #[test]
     fn peer_endpoints_back_compat_falls_back_to_legacy_fields() {

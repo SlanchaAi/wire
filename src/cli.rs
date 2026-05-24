@@ -265,10 +265,25 @@ pub enum Command {
     BindRelay {
         /// Relay base URL, e.g. `http://127.0.0.1:8770`.
         url: String,
+        /// Endpoint scope: `federation` | `local` | `lan` | `uds`.
+        /// Default inferred from the URL (loopback host -> local,
+        /// `unix://` -> uds, otherwise federation). Pass explicitly when
+        /// the inference is ambiguous (e.g. a federation relay on a
+        /// loopback address in tests).
+        #[arg(long)]
+        scope: Option<String>,
+        /// DESTRUCTIVE: drop all existing self slots and bind only this
+        /// relay (the pre-v0.12 single-slot behavior). Default is
+        /// ADDITIVE — the new slot is appended to `self.endpoints[]`,
+        /// keeping any existing slots so pinned peers are not
+        /// black-holed.
+        #[arg(long)]
+        replace: bool,
         /// Acknowledge that pinned peers will black-hole until they
-        /// re-pin manually. Required when `state.peers` is non-empty;
-        /// ignored on fresh boxes. Use `wire rotate-slot` instead for
-        /// the supported same-relay rotation path.
+        /// re-pin manually. Required for `--replace` (and same-relay
+        /// rotation) when `state.peers` is non-empty; ignored on fresh
+        /// boxes. Use `wire rotate-slot` instead for the supported
+        /// same-relay rotation path.
         #[arg(long)]
         migrate_pinned: bool,
         #[arg(long)]
@@ -651,6 +666,15 @@ pub enum Command {
         /// Optional display name (defaults to capitalized nick).
         #[arg(long)]
         name: Option<String>,
+        /// Also additively dual-bind a LOCAL relay slot for fast same-box
+        /// sister-session routing. Defaults to probing
+        /// `http://127.0.0.1:8771`; pass a URL to override. Local relays
+        /// carry no handle directory, so nothing is claimed there.
+        #[arg(long)]
+        with_local: Option<String>,
+        /// Skip the opportunistic local dual-bind entirely.
+        #[arg(long)]
+        no_local: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1498,9 +1522,11 @@ pub fn run() -> Result<()> {
         } => cmd_relay_server(&bind, local_only, uds.as_deref()),
         Command::BindRelay {
             url,
+            scope,
+            replace,
             migrate_pinned,
             json,
-        } => cmd_bind_relay(&url, migrate_pinned, json),
+        } => cmd_bind_relay(&url, scope.as_deref(), replace, migrate_pinned, json),
         Command::AddPeerSlot {
             handle,
             url,
@@ -1654,7 +1680,19 @@ pub fn run() -> Result<()> {
             local_sister,
             json,
         } => cmd_add(&handle, relay.as_deref(), local_sister, json),
-        Command::Up { handle, name, json } => cmd_up(&handle, name.as_deref(), json),
+        Command::Up {
+            handle,
+            name,
+            with_local,
+            no_local,
+            json,
+        } => cmd_up(
+            &handle,
+            name.as_deref(),
+            with_local.as_deref(),
+            no_local,
+            json,
+        ),
         Command::Doctor {
             json,
             recent_rejections,
@@ -2492,8 +2530,8 @@ fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
                 "public_key_b64": pk_b64,
                 "capabilities": capabilities,
                 "config_dir": config::config_dir()?.to_string_lossy(),
-                "character": character,
-                "character_override": has_override,
+                "persona": character,
+                "persona_override": has_override,
             }))?
         );
     } else {
@@ -2856,7 +2894,7 @@ fn cmd_peers(as_json: bool) -> Result<()> {
             "did": did,
             "tier": tier,
             "capabilities": capabilities,
-            "character": character,
+            "persona": character,
         }));
     }
 
@@ -2871,7 +2909,7 @@ fn cmd_peers(as_json: bool) -> Result<()> {
         // recomputed via Character::from_did (no override) — operators
         // saw different identities depending on --json flag.
         for p in &peers {
-            let char_json = &p["character"];
+            let char_json = &p["persona"];
             let (colored_char, plain_len): (String, usize) = match char_json {
                 serde_json::Value::Null => ("?".to_string(), 1),
                 v => match serde_json::from_value::<crate::character::Character>(v.clone()) {
@@ -3194,7 +3232,7 @@ fn cmd_here(as_json: bool) -> Result<()> {
                 sisters.push(json!({
                     "session": s.name,
                     "handle": s.handle,
-                    "character": ch,
+                    "persona": ch,
                 }));
             }
         }
@@ -3220,7 +3258,7 @@ fn cmd_here(as_json: bool) -> Result<()> {
                 "handle": handle,
                 "did": did,
                 "tier": agent.get("tier").and_then(Value::as_str).unwrap_or("UNKNOWN"),
-                "character": ch,
+                "persona": ch,
             }));
         }
     }
@@ -3232,7 +3270,7 @@ fn cmd_here(as_json: bool) -> Result<()> {
                 "self": {
                     "handle": self_handle,
                     "did": self_did,
-                    "character": self_character,
+                    "persona": self_character,
                     "cwd": cwd,
                     "wire_home": wire_home,
                 },
@@ -3295,8 +3333,8 @@ fn cmd_here(as_json: bool) -> Result<()> {
         println!("sister sessions on this machine:");
         for s in &sisters {
             let session = s["session"].as_str().unwrap_or("?");
-            let ch_nick = s["character"]["nickname"].as_str().unwrap_or("?");
-            let glyph = render_glyph(&s["character"]);
+            let ch_nick = s["persona"]["nickname"].as_str().unwrap_or("?");
+            let glyph = render_glyph(&s["persona"]);
             println!("  {glyph} {ch_nick}  ({session})");
         }
     }
@@ -3306,8 +3344,8 @@ fn cmd_here(as_json: bool) -> Result<()> {
         for p in &peers {
             let handle = p["handle"].as_str().unwrap_or("?");
             let tier = p["tier"].as_str().unwrap_or("");
-            let ch_nick = p["character"]["nickname"].as_str().unwrap_or("?");
-            let glyph = render_glyph(&p["character"]);
+            let ch_nick = p["persona"]["nickname"].as_str().unwrap_or("?");
+            let glyph = render_glyph(&p["persona"]);
             println!("  {glyph} {ch_nick}  ({handle})  [{tier}]");
         }
     }
@@ -3717,9 +3755,35 @@ fn monitor_is_noise_kind(kind: &str) -> bool {
     matches!(kind, "pair_drop" | "pair_drop_ack" | "heartbeat")
 }
 
+/// Resolve a pinned peer's persona (the DID-derived nickname + emoji,
+/// respecting an advertised override on their card). `None` if the peer
+/// isn't in trust or can't be resolved — callers fall back to the handle.
+fn resolve_persona(peer_handle: &str) -> Option<crate::character::Character> {
+    let trust = config::read_trust().ok()?;
+    let agent = trust.get("agents").and_then(|a| a.get(peer_handle))?;
+    if let Some(card) = agent.get("card") {
+        Some(crate::character::Character::from_card(card))
+    } else {
+        let did = agent.get("did").and_then(Value::as_str)?;
+        Some(crate::character::Character::from_did(did))
+    }
+}
+
+/// "emoji nickname" label for a peer, falling back to the raw handle.
+fn persona_label(peer_handle: &str) -> String {
+    match resolve_persona(peer_handle) {
+        Some(ch) => format!("{} {}", ch.emoji, ch.nickname),
+        None => peer_handle.to_string(),
+    }
+}
+
 /// Render a single InboxEvent for `wire monitor` output. JSON form emits the
 /// full structured event for tooling consumption; the plain form is a tight
 /// one-line summary suitable as a harness stream-watcher notification.
+///
+/// Kept PURE (no trust I/O) so it stays deterministic and cheap per event.
+/// Persona enrichment for `--json` belongs at InboxEvent construction in
+/// `inbox_watch` (a follow-up), not here.
 fn monitor_render(e: &crate::inbox_watch::InboxEvent, as_json: bool) -> Result<String> {
     if as_json {
         Ok(serde_json::to_string(e)?)
@@ -4191,7 +4255,31 @@ fn validate_loopback_bind(bind: &str) -> Result<()> {
 
 // ---------- bind-relay ----------
 
-fn cmd_bind_relay(url: &str, migrate_pinned: bool, as_json: bool) -> Result<()> {
+fn parse_scope(s: &str) -> Result<crate::endpoints::EndpointScope> {
+    use crate::endpoints::EndpointScope;
+    match s.to_lowercase().as_str() {
+        "federation" | "fed" => Ok(EndpointScope::Federation),
+        "local" => Ok(EndpointScope::Local),
+        "lan" => Ok(EndpointScope::Lan),
+        "uds" => Ok(EndpointScope::Uds),
+        other => bail!("unknown --scope `{other}` (expected federation|local|lan|uds)"),
+    }
+}
+
+/// v0.12: bind a relay slot. ADDITIVE by default — the new slot is
+/// appended to `self.endpoints[]`, keeping any existing slots so an agent
+/// can hold a local relay AND a federation relay simultaneously without
+/// black-holing pinned peers. `--replace` restores the pre-v0.12
+/// destructive single-slot behavior (guarded by issue #7).
+fn cmd_bind_relay(
+    url: &str,
+    scope: Option<&str>,
+    replace: bool,
+    migrate_pinned: bool,
+    as_json: bool,
+) -> Result<()> {
+    use crate::endpoints::{self_endpoints, Endpoint};
+
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
     }
@@ -4199,76 +4287,107 @@ fn cmd_bind_relay(url: &str, migrate_pinned: bool, as_json: bool) -> Result<()> 
     let did = card.get("did").and_then(Value::as_str).unwrap_or("");
     let handle = crate::agent_card::display_handle_from_did(did).to_string();
 
-    // v0.5.19 (issue #7): refuse silent migration that would black-hole
-    // pinned peers. The peer's relay-state still points at our OLD slot;
-    // they will keep POSTing successfully to a slot we no longer read,
-    // and their messages disappear. Pre-fix this command silently
-    // replaced state.self, the incident report logged 26 events lost
-    // over 2 days.
+    let normalized = url.trim_end_matches('/');
+    let new_scope = match scope {
+        Some(s) => parse_scope(s)?,
+        None => crate::endpoints::infer_scope_from_url(normalized),
+    };
+
     let existing = config::read_relay_state().unwrap_or_else(|_| json!({}));
     let pinned: Vec<String> = existing
         .get("peers")
         .and_then(|p| p.as_object())
         .map(|o| o.keys().cloned().collect())
         .unwrap_or_default();
-    if !pinned.is_empty() && !migrate_pinned {
+
+    let existing_eps = self_endpoints(&existing);
+    let is_rebind_same = existing_eps.iter().any(|e| e.relay_url == normalized);
+
+    // Destructive paths that black-hole pinned peers (issue #7):
+    //   • `--replace` drops every other slot.
+    //   • re-binding the SAME relay rotates that slot in place.
+    // An additive bind of a NEW relay keeps existing slots, so peers stay
+    // reachable — no acknowledgement required. This is the v0.12 default
+    // that unblocks simultaneous local + remote.
+    let destructive = replace || is_rebind_same;
+    if destructive && !pinned.is_empty() && !migrate_pinned {
         let list = pinned.join(", ");
+        let why = if replace {
+            "`--replace` drops your other slot(s)"
+        } else {
+            "re-binding the same relay rotates its slot"
+        };
         bail!(
-            "bind-relay would silently black-hole {n} pinned peer(s): {list}. \
-             They are pinned to your CURRENT slot; without coordination they will keep \
-             pushing to a slot you no longer read.\n\n\
+            "bind-relay would black-hole {n} pinned peer(s): {list}. {why}; they are \
+             pinned to your CURRENT slot and would keep pushing to a slot you no longer \
+             read.\n\n\
              SAFE PATHS:\n\
-             • `wire rotate-slot` — rotates slot on the SAME relay and emits a \
-             wire_close event to every pinned peer so their daemons drop the stale \
-             coords cleanly. This is the supported migration path.\n\
-             • `wire bind-relay {url} --migrate-pinned` — acknowledges that pinned \
-             peers will need to re-pin manually (you must notify them out-of-band, \
-             via a fresh `wire add` from each peer or a re-shared invite). Use this \
-             only when the current slot is unreachable so rotate-slot can't ack.\n\n\
-             Issue #7 (silent black-hole on relay change) caught this — proceed only \
-             if you understand the consequences.",
+             • Default (omit `--replace`) ADDITIVELY binds a NEW relay, keeping existing \
+             slots — no black-hole.\n\
+             • `wire rotate-slot` — same-relay rotation that emits wire_close to peers.\n\
+             • `wire bind-relay {url} --migrate-pinned` — proceed anyway; re-pair each \
+             peer out-of-band.\n\n\
+             Issue #7 (silent black-hole on relay change) caught this.",
             n = pinned.len(),
         );
     }
 
-    let normalized = url.trim_end_matches('/');
     let client = crate::relay_client::RelayClient::new(normalized);
     client.check_healthz()?;
     let alloc = client.allocate_slot(Some(&handle))?;
-    let mut state = existing;
-    if !pinned.is_empty() {
-        // We're committing to the migration. Surface a final stderr
-        // banner naming the peers operators must notify out-of-band so
-        // there's a record in their shell history.
+
+    if destructive && !pinned.is_empty() {
         eprintln!(
-            "wire bind-relay: migrating with {n} pinned peer(s) — they will black-hole \
+            "wire bind-relay: {mode} with {n} pinned peer(s) — they will black-hole \
              until they re-pin: {peers}",
+            mode = if replace { "replacing" } else { "rotating" },
             n = pinned.len(),
             peers = pinned.join(", "),
         );
     }
-    state["self"] = json!({
-        "relay_url": url,
-        "slot_id": alloc.slot_id,
-        "slot_token": alloc.slot_token,
-    });
-    config::write_relay_state(&state)?;
 
+    // Write the new slot via the single source of truth for the self-slot
+    // shape. Additive by default; --replace starts from an empty self so
+    // only this slot remains.
+    let mut state = existing;
+    if replace {
+        state["self"] = Value::Null;
+    }
+    crate::endpoints::upsert_self_endpoint(
+        &mut state,
+        Endpoint {
+            relay_url: normalized.to_string(),
+            slot_id: alloc.slot_id.clone(),
+            slot_token: alloc.slot_token.clone(),
+            scope: new_scope,
+        },
+    );
+    config::write_relay_state(&state)?;
+    let eps = self_endpoints(&state);
+
+    let scope_str = format!("{new_scope:?}").to_lowercase();
     if as_json {
         println!(
             "{}",
             serde_json::to_string(&json!({
-                "relay_url": url,
+                "relay_url": normalized,
                 "slot_id": alloc.slot_id,
+                "scope": scope_str,
+                "endpoints": eps.len(),
+                "additive": !replace,
                 "slot_token_present": true,
             }))?
         );
     } else {
-        println!("bound to relay {url}");
-        println!("slot_id: {}", alloc.slot_id);
+        println!("bound {scope_str} slot on {normalized} (slot {})", alloc.slot_id);
         println!(
-            "(slot_token written to {} mode 0600)",
-            config::relay_state_path()?.display()
+            "self now has {n} endpoint(s): {list}",
+            n = eps.len(),
+            list = eps
+                .iter()
+                .map(|e| format!("{}({:?})", e.relay_url, e.scope))
+                .collect::<Vec<_>>()
+                .join(", "),
         );
     }
     Ok(())
@@ -10416,7 +10535,13 @@ mod doctor_tests {
 ///   - `<nick>@<relay-host>` — explicit relay
 ///   - `<nick>`              — defaults to wireup.net (the configured
 ///     public relay)
-fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
+fn cmd_up(
+    handle_arg: &str,
+    name: Option<&str>,
+    with_local: Option<&str>,
+    no_local: bool,
+    as_json: bool,
+) -> Result<()> {
     let (nick, relay_url) = match handle_arg.split_once('@') {
         Some((n, host)) => {
             let url = if host.starts_with("http://") || host.starts_with("https://") {
@@ -10483,7 +10608,11 @@ fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
         // Fresh box (no pinned peers yet) — migrate_pinned irrelevant.
         // Pass `false` so the safety check kicks in if state was non-empty.
         cmd_bind_relay(
-            &relay_url, /* migrate_pinned */ false, /* as_json */ false,
+            &relay_url,
+            /* scope */ None, // infer from URL (federation for wireup.net)
+            /* replace */ false,
+            /* migrate_pinned */ false,
+            /* as_json */ false,
         )?;
         step("bind-relay", format!("bound to {relay_url}"));
     } else if bound_relay != relay_url {
@@ -10515,6 +10644,51 @@ fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
             "claim",
             format!("WARNING: claim failed: {e}. You can retry `wire claim {nick}`."),
         ),
+    }
+
+    // 3b. Opportunistic local dual-slot (additive). Gives same-box sister
+    // sessions sub-millisecond loopback routing alongside the federation
+    // slot. Local relays carry no handle directory — nothing to claim
+    // there; sister discovery is via `wire session list-local`.
+    if no_local {
+        step("local-slot", "skipped (--no-local)".to_string());
+    } else {
+        let local_url = with_local
+            .unwrap_or("http://127.0.0.1:8771")
+            .trim_end_matches('/');
+        let already_local = crate::endpoints::self_endpoints(
+            &config::read_relay_state().unwrap_or_else(|_| json!({})),
+        )
+        .iter()
+        .any(|e| e.relay_url == local_url);
+        if relay_url.trim_end_matches('/') == local_url || already_local {
+            step("local-slot", "already covered".to_string());
+        } else if crate::relay_client::RelayClient::new(local_url)
+            .check_healthz()
+            .is_ok()
+        {
+            match cmd_bind_relay(
+                local_url,
+                Some("local"),
+                /* replace */ false,
+                /* migrate_pinned */ false,
+                /* as_json */ false,
+            ) {
+                Ok(()) => step(
+                    "local-slot",
+                    format!("dual-bound local relay {local_url} for sister routing"),
+                ),
+                Err(e) => step("local-slot", format!("skipped local relay: {e}")),
+            }
+        } else {
+            step(
+                "local-slot",
+                format!(
+                    "no local relay reachable at {local_url} — federation only \
+                     (sisters resolve via session-list)"
+                ),
+            );
+        }
     }
 
     // 4. Background daemon — must be running for pull/push/ack to flow.
@@ -11171,10 +11345,11 @@ fn cmd_notify(
 }
 
 fn os_notify_inbox_event(ev: &crate::inbox_watch::InboxEvent) {
+    let who = persona_label(&ev.peer);
     let title = if ev.verified {
-        format!("wire ← {}", ev.peer)
+        format!("wire ← {who}")
     } else {
-        format!("wire ← {} (UNVERIFIED)", ev.peer)
+        format!("wire ← {who} (UNVERIFIED)")
     };
     let body = format!("{}: {}", ev.kind, ev.body_preview);
     crate::os_notify::toast(&title, &body);

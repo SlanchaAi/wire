@@ -902,7 +902,7 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
         "wire_pair_accept" | "wire_accept" => tool_pair_accept(&args),
         "wire_pair_reject" | "wire_reject" => tool_pair_reject(&args),
         "wire_pair_list_inbound" | "wire_pending" => tool_pair_list_inbound(),
-        "wire_dial" => tool_add(&args),
+        "wire_dial" => tool_dial(&args),
         "wire_claim" => tool_claim_handle(&args),
         "wire_whois" => tool_whois(&args),
         "wire_profile_set" => tool_profile_set(&args),
@@ -970,9 +970,15 @@ fn tool_whoami() -> Result<Value, String> {
         .get("capabilities")
         .cloned()
         .unwrap_or_else(|| json!(["wire/v3.1"]));
+    // v0.12: surface the DID-derived persona (nickname + emoji + palette)
+    // that the CLI `wire whoami`/`here` already emit, so agents and toasts
+    // see the persona, not just the raw handle.
+    let persona =
+        serde_json::to_value(crate::character::Character::from_card(&card)).unwrap_or(Value::Null);
     Ok(json!({
         "did": did,
         "handle": handle,
+        "persona": persona,
         "fingerprint": fp,
         "key_id": key_id,
         "public_key_b64": pk_b64,
@@ -1004,8 +1010,16 @@ fn tool_peers() -> Result<Value, String> {
         if Some(did.as_str()) == self_did.as_deref() {
             continue;
         }
+        // v0.12: include the persona (respecting the peer's advertised
+        // override when their card carries one, else DID-derived) so MCP
+        // callers render the nickname/emoji instead of the raw handle.
+        let persona = match agent.get("card") {
+            Some(c) => crate::character::Character::from_card(c),
+            None => crate::character::Character::from_did(&did),
+        };
         peers.push(json!({
             "handle": handle,
+            "persona": serde_json::to_value(&persona).unwrap_or(Value::Null),
             "did": did,
             "tier": get_tier(&trust, handle),
             "capabilities": agent.get("card").and_then(|c| c.get("capabilities")).cloned().unwrap_or_else(|| json!([])),
@@ -1629,6 +1643,52 @@ fn tool_invite_accept(args: &Value) -> Result<Value, String> {
 }
 
 // ---------- v0.5 — agentic hotline tools ----------
+
+/// wire_dial (MCP): mirror the CLI `dial` resolution ladder. The prior
+/// wiring routed straight to `tool_add`, which reads a required `handle`
+/// arg — but the wire_dial schema only provides `name`, so every dial
+/// errored `missing 'handle'`. This reads `name` and routes:
+///   • `<nick>@<relay>`  -> federation pair (via tool_add).
+///   • already-pinned     -> no-op success (peer already reachable).
+///   • otherwise          -> honest error. Bare-nickname / local-sister
+///     resolution over MCP is not yet wired (CLI `wire dial` does it);
+///     use `<nick>@<relay>` or `wire_send` (auto-pairs on miss).
+fn tool_dial(args: &Value) -> Result<Value, String> {
+    let name = args
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| args.get("handle").and_then(Value::as_str))
+        .ok_or("missing 'name'")?;
+
+    if name.contains('@') {
+        // Federation path. Present `name` as the `handle` tool_add expects.
+        let mut a = args.clone();
+        if let Some(obj) = a.as_object_mut() {
+            obj.insert("handle".into(), Value::String(name.to_string()));
+        }
+        return tool_add(&a);
+    }
+
+    let relay_state = crate::config::read_relay_state().map_err(|e| e.to_string())?;
+    let pinned = relay_state
+        .get("peers")
+        .and_then(Value::as_object)
+        .map(|m| m.contains_key(name))
+        .unwrap_or(false);
+    if pinned {
+        return Ok(json!({
+            "name_input": name,
+            "status": "already_pinned",
+            "peer_handle": name,
+        }));
+    }
+
+    Err(format!(
+        "cannot resolve `{name}` over MCP: bare-nickname / local-sister dialling is not yet \
+         wired into the MCP surface. Use a federation handle `{name}@<relay>`, or `wire_send` \
+         (it auto-pairs on miss)."
+    ))
+}
 
 fn tool_add(args: &Value) -> Result<Value, String> {
     let handle = args
