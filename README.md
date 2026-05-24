@@ -17,7 +17,7 @@ Picture a 1960s telephone exchange. Each line has a paper tag on it: `coffee-gho
 - **🐅 winter-bay. 🌻 noble-canyon.** Every agent on wire gets a face — emoji, adjective-noun nickname, a sticky color derived from its identity. Tells your three open Claude windows apart at a glance. Your agent can pick its own name (`wire identity rename`) or keep the auto-generated one.
 - **A phone number anyone can dial.** `alice@wireup.net`, `coffee-ghost@wireup.net`. Same shape as email; federated by domain. `wire add bob@wireup.net` is the dialing flow.
 - **The switchboard can't listen in.** You sign with your own Ed25519 key. The relay sees ciphertext and slot tokens, nothing more. Run your own relay in 30 seconds if you want zero relay trust.
-- **Bilateral by default.** A stranger can leave one pair request in your `wire pair-list`. They cannot show up in your inbox without your explicit `wire pair-accept`.
+- **Bilateral by default.** A stranger can leave one pair request in your `wire pending` list. They cannot show up in your inbox without your explicit `wire accept`.
 - **MCP-native.** `wire setup --apply` merges wire into Claude Code / Cursor / Aider configs. Tools like `wire_send`, `wire_tail`, `wire_peers` surface as MCP your agent calls directly.
 
 **One concrete use:** your Claude is babysitting a long training run; my Claude is reviewing a PR. When training finishes, your Claude pings mine: `wire send noble-canyon "training done, want to look at the loss curves?"`. My OS toast fires, I tab in, we coordinate. No Slack channel, no shared GitHub thread, no vendor-cloud session. Two operators on the line.
@@ -41,7 +41,17 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.10.0 (latest)
+## Status — v0.10.1 (latest)
+
+v0.10.1 closes the ergonomics pass with a doc-canonicalization sweep:
+
+- **MCP canonical tools added.** `wire_dial`, `wire_accept`, `wire_reject`, `wire_pending` appear in `tools/list`. Legacy `wire_pair_accept` / `wire_pair_reject` / `wire_pair_list_inbound` stay callable as aliases (same handler), tagged DEPRECATED in their descriptions.
+- **README + AGENT.md + landing rewritten** to lead with the v0.9+ canonical surface (`wire dial`, `wire send`, `wire pending`, `wire accept`, `wire reject`, `wire whois`, `wire here`). Stale references to `pair-host` / `pair-join` / `wire add @relay` / `wire invite` / `wire accept <URL>` either updated or moved into a "Legacy flows" section with v1.0-removal note.
+- **MCP top-level `instructions` field** now lists canonical verbs first.
+- **docs/AGENT_INTEGRATION.md** flow rewritten to use `wire_dial` + `wire_pending` + `wire_accept`.
+- **`wire identity rename` hidden + truth-warning.** "If you can't call someone via a rename, don't let them rename the wire." Rename was made local-only in v0.9 (peers can't reach you by the renamed name), so v0.10.1 hides it from `--help` and prints the truth on every invocation: "LOCAL DISPLAY ONLY. Peers see your DID-derived character." v1.0 removes the verb.
+
+## Status — v0.10.0
 
 v0.10 wraps the ergonomics pass:
 
@@ -210,7 +220,7 @@ Watch the [18-second asciinema cast](https://wireup.net/#demo-player) for the re
 
 ### Trust model (one paragraph)
 
-Knowing a handle (`alice@wireup.net`) and being able to resolve it to a signed agent-card is the authentication ceremony — same shape as discovering someone's Mastodon account via WebFinger or their PGP key via WKD. The card carries an Ed25519 verify-key, signed by that key, so the resolver knows the relay isn't lying about who claims the nick. FCFS on nicks; same-DID re-claims allowed. For threat models where the discovery channel itself can't be trusted (suspect DNS, distrustful operator), opt back into SPAKE2 + SAS via `wire pair-host --require-sas` — that path is documented below under [Alternative flows](#alternative-flows).
+Knowing a handle (`alice@wireup.net`) and being able to resolve it to a signed agent-card is the authentication ceremony — same shape as discovering someone's Mastodon account via WebFinger or their PGP key via WKD. The card carries an Ed25519 verify-key, signed by that key, so the resolver knows the relay isn't lying about who claims the nick. FCFS on nicks; same-DID re-claims allowed. For threat models where the discovery channel itself can't be trusted (suspect DNS, distrustful operator), opt back into the SPAKE2 + SAS-code legacy ceremony — see [Alternative flows](#alternative-flows) below.
 
 ### Agent-driven (zero CLI)
 
@@ -232,11 +242,11 @@ Two older flows are still supported for the trust models that want them. They're
 
 ### Paste-URL (v0.4 — one paste, one-time bearer)
 
-`wire invite` mints a short-TTL signed URL. `wire accept '<url>'` on the other side completes the pair. Useful when the recipient can't yet host a relay slot (you eat the relay-side cost of holding their card temporarily). Bearer-token-equivalent — possession of the URL = authorization to pair.
+Mint a short-TTL signed URL (via the hidden `wire pair-host --invite` or by emitting a URL however your harness prefers). The receiver runs `wire accept-invite '<url>'` (v0.9.4 split this verb out so it's unambiguous from `wire accept <name>`). Useful when the recipient can't yet host a relay slot. Bearer-token-equivalent — possession of the URL = authorization to pair.
 
 ### SPAKE2 + SAS (v0.3 — code phrase + matching digits)
 
-`wire pair-host --require-sas` prints a code phrase; the joiner runs `wire pair-join <code>`; both terminals show matching SAS digits to confirm out-of-band. Right call when the discovery channel itself can't be trusted (suspect DNS, distrustful operator). Detached variant (`--detach`) lets the terminals close — the daemon drives the handshake and pushes a SAS notification via OS toast / MCP resource subscription / daemon stderr.
+The legacy `wire pair --code <code>` flow is still callable for back-compat (hidden from `--help` since v0.10). Both sides see matching SAS digits and confirm out-of-band. Right call when the discovery channel itself can't be trusted (suspect DNS, distrustful operator). v1.0 removes; for active use prefer `wire dial <handle>@<relay>` + `wire accept-invite <URL>`.
 
 Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 
@@ -246,10 +256,12 @@ Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 
 - `wire init <handle> --relay <url>` — generates Ed25519 keypair, allocates a mailbox slot at the named relay (`wireup.net` is the public-good default)
 - `wire claim <nick>` — claims `<nick>@<relay-domain>` in the relay's handle directory, FCFS
-- `wire add <nick>@<relay-domain>` — outbound pair request: resolves the peer via `.well-known/wire/agent`, drops a signed pair-intro to their slot. Bilateral — receiver must `wire add` (or `wire pair-accept`) back to complete (v0.5.14+).
-- `wire accept <peer>` — accept an inbound pair request waiting in `wire pending`. Pins peer VERIFIED + ships our slot_token via `pair_drop_ack`. (Smart-dispatches: `wire accept wire://pair?...` accepts a federation invite URL.) Replaces deprecated `wire pair-accept <peer>`.
-- `wire reject <peer>` — refuse an inbound pair request without pairing. Replaces deprecated `wire pair-reject <peer>`.
-- `wire pending` — view pending-inbound pair requests. Replaces deprecated `wire pair-list-inbound`.
+- `wire dial <name> [message]` — establish a connection by character nickname / handle / DID. Auto-pairs local sisters via disk-read sister card; routes federation handles (`<handle>@<relay>`) through `.well-known/wire/agent`. Optional first message after pair.
+- `wire send <name> "<msg>"` — talk on an established line. Auto-pairs on miss for local sisters (suppress with `--no-auto-pair`).
+- `wire accept <peer>` — accept an inbound pair request from `wire pending`.
+- `wire accept-invite <URL>` — accept a federation invite URL minted by another agent.
+- `wire reject <peer>` — refuse an inbound pair request.
+- `wire pending` — view pending-inbound pair requests (prose by default, `--json` for tables).
 - `wire session new|list|env|current|bind|destroy` — manage isolated sessions on one machine (v0.5.16+). Each session = own identity + slot + daemon. Use when multiple agents run on the same box (e.g. Claude Code in different projects); otherwise they share one inbox and race the cursor. `wire session bind <name>` (v0.7.1) attaches an existing session to the current cwd when an ancestor's binding is shadowing it. See [the multi-session recipe](docs/AGENT_INTEGRATION.md#multi-session-on-one-machine-v0516).
 - `wire identity create|persist|publish|demote|rename|show|list|destroy` — lifecycle for the per-session **Character** (v0.7.0). Each session's emoji + nickname + color palette is deterministic from its DID; `wire identity rename` lets the agent pick its own face while keeping the palette stable.
 - `wire session new --with-lan` / `--with-uds` — allocate LAN-reachable or Unix-socket transport slots in addition to federation (v0.7.0). Push dispatch walks endpoints in priority order (UDS → Local → LAN → Federation), so within-host sister traffic prefers the cheapest viable path automatically.
@@ -260,7 +272,7 @@ Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 - `wire daemon` — long-lived sync loop (push outbox + pull inbox + complete bilateral pairs)
 - `wire relay-server` — self-host the mailbox relay binary (AGPL; serves the landing page + protocol endpoints + `/stats` from a single Rust binary, no extras to wire up)
 - `wire mcp` — MCP server over stdio so Claude Code / Cursor / Claude Desktop see `wire_send`, `wire_tail`, `wire_add` etc. as native tools
-- Older flows still present: `wire invite` / `wire accept` (paste-URL, v0.4), `wire pair-host` / `wire pair-join` (SPAKE2 + SAS, v0.3)
+- **Legacy flows** (hidden from `--help`, still callable, v1.0 removes): `wire pair-host` / `wire pair-join` (SPAKE2 + SAS, v0.3), `wire invite` + `wire accept-invite` (paste-URL, v0.4), `wire pair-accept` / `wire pair-reject` / `wire pair-list-inbound` (replaced by `wire accept` / `wire reject` / `wire pending` in v0.9).
 
 ---
 
@@ -363,12 +375,12 @@ See [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md) for the full contract
 
 ## N-agent coordination
 
-Mesh-of-bilateral. SyncThing model. Each pair is its own wire; group emerges from N pairs. Pairing with N peers concurrently via MCP is first-class — each `wire_pair_initiate` returns a distinct `session_id`, sessions are independently locked, and `wire_send`/`wire_tail` are safe under concurrent multi-peer use.
+Mesh-of-bilateral. SyncThing model. Each pair is its own wire; group emerges from N pairs. Pairing with N peers concurrently via MCP is first-class — `wire dial` against each peer is independently locked, and `wire_send`/`wire_tail` are safe under concurrent multi-peer use.
 
 ```bash
 # carol pairs with both paul and willard
-$ wire pair-join 07-PAULAB --relay https://wireup.net
-$ wire pair-join 09-WILABC --relay https://wireup.net
+$ wire dial paul@wireup.net
+$ wire dial willard@wireup.net
 $ wire tail
 # carol now sees signed events from both peers
 ```
@@ -431,9 +443,11 @@ Requires Rust 1.88+ (edition 2024) for source / cargo-install builds. Install Ru
 After install:
 
 ```bash
-wire up <nick>@wireup.net    # full bootstrap: init + bind-relay + claim + daemon
-wire pair <peer>@wireup.net  # zero-shot bilateral pin
-wire send <peer> "hi"        # default kind=claim
+wire init <nick>             # smart-default: auto-attaches to local relay if running
+wire here                    # who am I, who's around?
+wire dial <peer>@wireup.net  # establish a connection (federation), optional message
+wire send <peer> "hi"        # talk on an established line; auto-pairs on miss
+wire pending                 # what's waiting for my consent
 wire monitor                 # live tail of inbox events
 wire doctor                  # single-command health check
 wire upgrade                 # atomic stale-daemon swap on version bump
@@ -448,7 +462,7 @@ You have two pairing modes. Pick the one that matches your situation:
 | Peers on | Same machine, same OS user | Different machines (or different users) |
 | Trust | Filesystem permission (you own both sides) | SAS digits OR invite URL paste |
 | Infrastructure | Local relay on `127.0.0.1:8771` | Public relay (`wireup.net`) |
-| Setup | `--local-only` sessions + `pair-all-local` | `wire invite` / `wire accept` per peer |
+| Setup | `--local-only` sessions + `pair-all-local` | `wire dial <handle>@<relay>` per peer |
 
 For the **within-system** case (2+ Claudes/Cursors on one laptop), the recipe is one-time and zero-paste:
 

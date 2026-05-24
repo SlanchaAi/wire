@@ -537,7 +537,7 @@ fn handle_initialize(id: &Value) -> Value {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION,
             },
-            "instructions": "wire — magic-wormhole for AI agents. Agents drive pairing via wire_pair_initiate/join/check; the user types the 6-digit SAS back into chat for wire_pair_confirm — this is the only human-in-loop step. v0.5.14 (zero-paste, bilateral-required): for `nick@domain` handles use wire_add; the peer MUST also run wire_add (or wire_pair_accept) on their side before capability flows. INBOUND pair requests from strangers land in pending-inbound: call wire_pair_list_inbound to enumerate, surface to operator, then wire_pair_accept or wire_pair_reject. Never auto-accept inbound pair requests without operator consent. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). RECOMMENDED ON SESSION START: arm a persistent stream-watcher on `wire monitor` (or `wire monitor --json`) so peer messages surface mid-session instead of on next manual poll. In Claude Code that's the Monitor tool with persistent:true; in other harnesses background the process. Default filter strips pair_drop/pair_drop_ack/heartbeat noise — one stdout line per real event. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
+            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). RECOMMENDED ON SESSION START: arm a persistent stream-watcher on `wire monitor --json` so peer messages surface mid-session instead of on next manual poll. In Claude Code that's the Monitor tool with persistent:true. Default filter strips pair_drop/pair_drop_ack/heartbeat noise. Legacy MCP tools (wire_pair_accept / wire_pair_reject / wire_pair_list_inbound, wire_pair_initiate/join/confirm) still callable but DEPRECATED — prefer canonical. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
         }
     })
 }
@@ -775,7 +775,49 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "wire_pair_list_inbound",
-            "description": "List pending-inbound pair requests (v0.5.14). Returns a flat array of `{peer_handle, peer_did, peer_relay_url, peer_slot_id, received_at, event_id}` records, oldest first. Each entry is a stranger who has run `wire add` against this agent's handle but hasn't been accepted yet. Use this on session start (or in response to a `wire — pair request from X` OS toast) to surface pending requests to the operator for accept/reject decisions.",
+            "description": "DEPRECATED in v0.9 — use `wire_pending`. List pending-inbound pair requests (v0.5.14). Returns a flat array of `{peer_handle, peer_did, peer_relay_url, peer_slot_id, received_at, event_id}` records, oldest first.",
+            "inputSchema": {"type": "object", "properties": {}}
+        }),
+        // v0.10.1: canonical MCP names mirroring the operator-facing
+        // verbs (wire dial / accept / reject / pending). Old wire_pair_*
+        // names stay callable as aliases (see dispatch); these new
+        // entries are what appears in tools/list for new clients.
+        json!({
+            "name": "wire_dial",
+            "description": "v0.8 — go talk to this name. Accepts a character nickname (`noble-slate`), session name, card handle, or DID — or a federation handle (`<handle>@<relay>`). Resolves through the local addressing layer (pinned peers, local sister sessions) or routes federation via `.well-known/wire/agent`. Drives the right pair flow (already-pinned: no-op, local sister: disk-read --local-sister, federation: pair_drop). After this completes the peer is in `wire_peers` and `wire_send` to them works.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Peer name — character nickname / session / handle / DID / `<handle>@<relay>`."}
+                },
+                "required": ["name"]
+            }
+        }),
+        json!({
+            "name": "wire_accept",
+            "description": "v0.9 — accept a pending-inbound pair request by character nickname or handle. Replaces deprecated wire_pair_accept. Pins the peer VERIFIED, ships our slot_token via pair_drop_ack, and deletes the pending record. Requires explicit operator consent — surface the request to the user before calling.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "peer": {"type": "string", "description": "Pending peer name (character nickname or card handle, from wire_pending)."}
+                },
+                "required": ["peer"]
+            }
+        }),
+        json!({
+            "name": "wire_reject",
+            "description": "v0.9 — refuse a pending-inbound pair request without pairing. Replaces deprecated wire_pair_reject. Idempotent: succeeds with `rejected: false` if no record existed for that peer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "peer": {"type": "string", "description": "Pending peer name (character nickname or card handle)."}
+                },
+                "required": ["peer"]
+            }
+        }),
+        json!({
+            "name": "wire_pending",
+            "description": "v0.9 — list pending-inbound pair requests waiting for operator consent. Returns the same flat array as legacy wire_pair_list_inbound. Use on session start (or in response to a `wire — pair request from X` OS toast) to surface inbound requests for accept/reject decisions.",
             "inputSchema": {"type": "object", "properties": {}}
         }),
         json!({
@@ -853,9 +895,14 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
         // v0.5 — agentic hotline (handle + profile + zero-paste discovery).
         "wire_add" => tool_add(&args),
         // v0.5.14 — bilateral-required pair: inbound queue management.
-        "wire_pair_accept" => tool_pair_accept(&args),
-        "wire_pair_reject" => tool_pair_reject(&args),
-        "wire_pair_list_inbound" => tool_pair_list_inbound(),
+        // v0.10.1: canonical names introduced (wire_accept, wire_reject,
+        // wire_pending, wire_dial); legacy wire_pair_* names stay as
+        // aliases for back-compat. Both surface in tools/list with
+        // legacy descriptions tagged DEPRECATED.
+        "wire_pair_accept" | "wire_accept" => tool_pair_accept(&args),
+        "wire_pair_reject" | "wire_reject" => tool_pair_reject(&args),
+        "wire_pair_list_inbound" | "wire_pending" => tool_pair_list_inbound(),
+        "wire_dial" => tool_add(&args),
         "wire_claim" => tool_claim_handle(&args),
         "wire_whois" => tool_whois(&args),
         "wire_profile_set" => tool_profile_set(&args),

@@ -879,15 +879,23 @@ pub enum DiagAction {
 
 #[derive(Subcommand, Debug)]
 pub enum IdentityCommand {
-    /// Override the auto-derived nickname and/or emoji. Persists to
-    /// `<WIRE_HOME>/config/wire/display.json`. Local-only; peers still
-    /// see the auto-derived character from your DID (until federation
-    /// publishes overrides in a future release).
+    /// v0.10.1: hidden from --help. The rename only affects YOUR local
+    /// display surface — peers cannot reach you by the renamed nickname
+    /// because v0.9 stopped publishing the override on the agent-card.
+    /// "If you can't call someone via a rename, don't let them rename
+    /// the wire": v1.0 will remove this verb entirely. For now it stays
+    /// callable so existing renames don't disappear out from under
+    /// operators, but the on-call-time warning explains the truth.
+    ///
+    /// Override the local-display nickname and/or emoji. Persists to
+    /// `<WIRE_HOME>/config/wire/display.json`. LOCAL DISPLAY ONLY:
+    /// peers see the auto-derived character from your DID.
     ///
     /// Examples:
     ///   wire identity rename --name foxtrot-meadow --emoji 🦊
     ///   wire identity rename --emoji 🐉      (keep auto nickname)
     ///   wire identity rename --random        (re-roll auto from seed; clears overrides)
+    #[command(hide = true)] // v0.10.1 deprecated — rename doesn't propagate to peers
     Rename {
         /// New nickname (any non-empty string; convention is
         /// `adjective-noun`, e.g. `foxtrot-meadow`). Omit to leave nickname
@@ -2806,6 +2814,21 @@ fn cmd_identity_rename(
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
     }
+    // v0.10.1: rename is a misleading affordance — operators picking a
+    // custom name expect peers to find them by it, but v0.9 made
+    // rename local-display-only. Loudly surface the truth.
+    // Suppress in JSON mode (machine reads `character_override` field).
+    if !as_json {
+        eprintln!(
+            "wire identity rename: LOCAL DISPLAY ONLY.\n  \
+             Peers cannot reach you by the renamed nickname — they see your canonical \
+             character (DID-derived). Run `wire whoami --json | jq .character` to see \
+             what the world calls you.\n  \
+             v1.0 will remove this verb entirely (\"if it can't find you, it shouldn't \
+             rename you\"). Use rename only as a personal-UI preference for your own \
+             statusline."
+        );
+    }
 
     // Read DID once for character derivation in the response.
     let card = config::read_agent_card()?;
@@ -2915,13 +2938,9 @@ fn cmd_identity_rename(
             }))?
         );
     } else {
-        println!("renamed → {}", character.colored());
+        println!("renamed (locally) → {}", character.colored());
         eprintln!("  · palette stays DID-derived (sticky color across renames)");
-        eprintln!(
-            "  · re-published to your federation relay (if bound); future federation lookups serve \
-             the updated card. Existing pinned peers have a cached card from pair-time and won't \
-             see the new name until they re-pair OR fetch your card fresh."
-        );
+        eprintln!("  · NOT published to peers (v0.9+ rename is local-display only)");
     }
     Ok(())
 }
