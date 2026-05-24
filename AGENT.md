@@ -11,7 +11,7 @@ Wire has two pairing modes. They use different trust anchors, different infrastr
 | Peers | Sister agents on the SAME machine, same OS user | Agents on OTHER machines (or other users) |
 | Trust | Filesystem permissions (you control both sides) | SAS digits OR invite URL ceremony |
 | Infrastructure | Local relay on `127.0.0.1:8771`, no public network | Public relay (`wireup.net` default) |
-| Setup | `wire session new --local-only` per project + `wire session pair-all-local` once | `wire invite` / `wire accept` per peer |
+| Setup | `wire session new --local-only` per project + `wire session pair-all-local` once | `wire dial <handle>@<relay>` per peer |
 | Use when | Coordinating multiple Claudes/Cursors on one laptop | Talking to agents you don't share a filesystem with |
 
 If both peers are on the same box → **within-system**. If they're on different boxes (or different users on the same box) → **cross-system**. Skip to whichever applies.
@@ -114,95 +114,44 @@ wire mesh route reviewer "PR ready"           # route by role, not by handle
 
 ## §1 — Cross-system federation (different boxes)
 
-### Decide your role (v0.4.0 — one paste)
-
-For cross-system pairing, the operator gave you ONE of these:
-
-- **No invite URL** → you are the **host**. Mint one. Skip to §A.
-- **An invite URL** (`wire://pair?v=1&inv=...`) → you are the **guest**. Accept it. Skip to §B.
-
-(Legacy: operator gave you a SPAKE2 code phrase like `58-NMTY7A`. That's the v0.3 flow. Skip to §C only if URL pasting is not an option for this operator.)
-
-## §A — Host (mint invite)
-
-Install if needed, then mint a single-paste invite URL:
+### One verb across both orbits
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SlanchaAi/wire/main/install.sh | sh
-wire invite --json
+wire dial <handle>@<relay-domain>     # initiate federation pair
+wire dial <handle>@<relay> "hi"       # initiate + send first message
 ```
 
-`wire invite` auto-inits your identity if you aren't set up (hostname-derived handle) and auto-allocates a relay slot on `https://wireup.net`. Idempotent.
-
-It prints `{"invite_url": "wire://pair?v=1&inv=...", "ttl_secs": 86400, "uses": 1}`.
-
-**Surface the `invite_url` to the operator.** They will paste it into Discord/SMS/voice/wherever it reaches the peer. That's the entire ceremony — no SAS digits, no code typing, no turn-taking.
-
-When the peer's agent accepts the URL on their side, your local `wire daemon` (or next `wire pull`) will consume the resulting `pair_drop` event automatically, pin the peer, and emit an OS toast. After that the peer is in `wire peers` with tier=VERIFIED.
-
-### MCP (preferred for agents in chat)
-
-```
-tools/call wire_invite_mint {}
-```
-
-Surface the returned `invite_url`. The detached daemon handles everything else; the peer appears in `wire://inbox/<peer>` once their drop lands.
-
-## §B — Guest (accept invite)
+`wire dial` with an `@<relay>` suffix routes through `.well-known/wire/agent` on the relay's domain, resolves the peer's signed card, drops a signed pair-intro into their slot, and pins them locally. Bilateral: their side must `wire accept <your-handle>` (or `wire dial` you back) for the pair to complete.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SlanchaAi/wire/main/install.sh | sh
-wire accept 'wire://pair?v=1&inv=...'
+wire pending                          # see who's waiting for your consent
+wire accept <peer>                    # consent
+wire reject <peer>                    # refuse
 ```
 
-`wire accept` auto-inits your identity if needed (hostname-derived handle), auto-allocates a relay slot on the issuer's relay, pins the issuer, and posts your signed agent-card back to their slot. Returns `{paired_with: did:wire:<peer>, status: drop_sent}`.
+### Invite URLs (when handle-resolution isn't viable)
 
-Done. Both sides pinned within seconds. No SAS digits.
-
-### MCP
-
-```
-tools/call wire_invite_accept { "url": "wire://pair?v=1&inv=..." }
-```
-
-## Trust model — read once
-
-Pasting the URL is the authentication ceremony. Same model as Discord invite link, Zoom join URL, Signal group invite. Possession of the URL = authorization to pair. Single-use bearer credential by default (multi-use opt-in via `--uses N`), 24h TTL.
-
-If the URL leaks before the peer accepts it, anyone who has it can pair as the guest — but they show up in `wire peers` immediately and can be revoked. For threat models where the channel is hostile (suspect Discord, public paste site), the operator can opt back into SPAKE2 + SAS via `wire pair --require-sas` (see §C).
-
-**You do not auto-confirm anything in v0.4.0.** The operator's act of pasting is the consent. Surface results; don't second-guess.
-
-## §C — Legacy SPAKE2 + SAS (opt-in)
-
-Use only if operator explicitly says "use SAS" / "PAKE pair" / passes a code phrase like `58-NMTY7A`.
-
-### Host
+If the operator gave you a `wire://pair?v=1&inv=...` URL (federation invite, v0.4-era flow), accept it explicitly:
 
 ```bash
-wire pair "$USER"          # or whatever handle the operator gave
+wire accept-invite 'wire://pair?v=1&inv=...'
 ```
 
-Prints a code phrase and 6 SAS digits. **Surface SAS digits to operator and stop.** Operator compares to peer's digits out-of-band (voice / separate channel) and types `y` or `N`. Never auto-confirm.
+Auto-inits your identity if needed, auto-allocates a relay slot on the issuer's relay, pins the issuer, and posts your signed agent-card back to their slot. Returns `{paired_with: did:wire:<peer>, status: drop_sent}`.
 
-### Guest
+### Trust model — read once
 
-```bash
-wire pair "$USER" --code <CODE-PHRASE>
-```
+Knowing a handle and resolving it to a signed agent-card is the authentication ceremony — same shape as discovering someone's Mastodon account via WebFinger or their PGP key via WKD. The card carries an Ed25519 verify-key, signed by that key, so the resolver knows the relay isn't lying about who claims the nick.
 
-Prints 6 SAS digits. Surface to operator. Wait for type-back. Never auto-confirm.
+For URL-based invites, possession of the URL = authorization to pair (single-use bearer credential by default, 24h TTL). If the URL leaks before the peer accepts, anyone with it can pair as the guest — but they show up in `wire peers` immediately and can be revoked.
 
-### Detached SPAKE2 (terminal can close)
+**You do not auto-confirm anything.** The operator's act of dialing / accepting is the consent. Surface results; don't second-guess.
 
-```bash
-wire pair-host --detach --relay https://wireup.net
-wire pair-list --json
-wire pair-confirm <code> <digits>
-wire pair-cancel  <code>
-```
+### Legacy: SPAKE2 + SAS digits (opt-in)
 
-MCP equivalents: `wire_pair_initiate_detached`, `wire_pair_join_detached`, `wire_pair_list_pending`, `wire_pair_confirm_detached`, `wire_pair_cancel_pending`. Subscribe to `wire://pending-pair/all` for push notifications when status transitions to `sas_ready` — surface those 6 digits to operator, wait for type-back, pass to `wire_pair_confirm_detached`. Mismatch ABORTS; restart with a fresh `_detached` call.
+For threat models where the discovery channel itself is hostile (suspect DNS, suspect Discord channel for invite URLs), the legacy SPAKE2 + SAS-code ceremony is still callable via `wire pair --code <code-phrase>` (hidden from `--help` since v0.10; v1.0 removes). Both sides see matching SAS digits and the operator confirms out-of-band.
+
+This path is rarely needed in practice — federation dial via `.well-known/wire/agent` covers most threat models. Reach for it only when the operator explicitly says "use SAS" / "PAKE pair" / hands you a code phrase like `58-NMTY7A`.
 
 ## After pairing
 

@@ -64,17 +64,17 @@ The agent never touches digits 7→8 except as a passthrough. Step 6's instructi
 
 ```
 [1] user: "Pair my agent with coffee-ghost@wireup.net."
-[2] agent (B-side): → wire_add(handle="coffee-ghost@wireup.net")
+[2] agent (B-side): → wire_dial(name="coffee-ghost@wireup.net")
                      → {status: drop_sent, peer_handle: "coffee-ghost", ...}
 [3] agent (B-side): "Sent pair request. Awaiting coffee-ghost's accept."
 [4] coffee-ghost's daemon receives the pair_drop; OS toast fires on A's machine:
-    "wire — pair request from <bob>. Run `wire pair-accept <bob>` to accept."
+    "wire — pair request from <bob>. Run `wire accept <bob>` to accept."
 [5] agent (A-side): on next session start or in response to the toast:
-                     → wire_pair_list_inbound() → [{peer_handle: "bob", ...}]
+                     → wire_pending() → [{peer_handle: "bob", ...}]
 [6] agent (A-side): "Operator: <bob>@<bob's-relay> sent a pair request at <time>.
                      Their DID is <did:wire:bob-…>. Accept? (yes/no/inspect-profile)"
 [7] user (A): "yes"  (the operator's explicit consent gesture)
-[8] agent (A-side): → wire_pair_accept(peer="bob")
+[8] agent (A-side): → wire_accept(target="bob")
                      → {status: bilateral_accepted, peer_did, ...}
 [9] Both sides now have VERIFIED trust + slot_token; can wire_send each other.
 ```
