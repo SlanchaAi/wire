@@ -17,13 +17,14 @@ Branch: `v0.13.2-windows-hardening`. Authoring lane: bright-camellia (this agent
 | A orphan-false+ | doctor reports phantom "orphan daemon" (pid changes every call = the query's own process) | 🟡 rc2 | CIM query: `Name -like 'wire*'` + exclude `$PID` (kills powershell self-match) |
 | B upgrade-kill | **CRITICAL**: `wire upgrade` doesn't kill daemons on Windows → they ACCUMULATE (2→3→4→5) → real cursor race | 🟡 rc4 | Windows cmdline pattern `*wire daemon*` never matched `wire.exe daemon` (.exe breaks it). Now match `Name like 'wire*'` + role (`daemon`/`relay-server`, pattern minus leading `wire `) |
 | C bash-WSL | `setup --statusline` emitted bare `bash` → Windows resolves to System32\bash.exe (WSL) → statusline breaks | 🟡 rc2 | `resolve_git_bash()` — absolute git-bash path |
-| D monitor-death | `wire monitor` exits 1 with ZERO output on P0.1 cursor-block (untrusted signer's event) — silent death | 🔴 open | print block reason + offending signer before exit; don't die silently |
+| D monitor-death | `wire monitor` exits 1 with ZERO output on P0.1 cursor-block (untrusted signer's event) — silent death | 🟡 rc4 | poll loop surfaces error to stderr + keeps watching; awaiting wisp exact repro |
+| E8 orphan-home | empty/no-card by-key homes surfaced as phantom "?" sisters in list-local (unconditional create_dir_all at process entry) | 🟡 rc5 | lazy home creation + `list_sessions` skips no-card homes |
 | discovery | v0.13 `by-key/` homes invisible to `list-local`/`pair-all-local` → same-box sisters fell to federation | ✅ verified (feral) | `list_sessions` descends into `by-key/`; `sessions_root()` ancestor-walks to `sessions` |
 
 ## Local-pairing UX (epic — beyond "no bugs" core; some are correctness bugs)
 | id | gap | tier | note |
 |----|-----|------|------|
-| E3 | `add-peer-slot` REPLACES endpoints, doesn't merge → clobbers federation route (data loss) | bug | make additive like `bind-relay` (priority Local>Federation) |
+| E3 | `add-peer-slot` REPLACES endpoints, doesn't merge → clobbers federation route (data loss) | 🟡 rc5 | now additive — upsert by relay_url into peer `endpoints[]` |
 | E4 | domain validator rejects loopback/IP → `dial`/`add` can't express `nick@127.0.0.1:8771` | bug | relax validator when scope=local |
 | E5 | `dial <peer>` on already-pinned returns `already_pinned`, won't refresh endpoints → peer that binds local AFTER pairing can't upgrade | bug | `wire repin/refresh <peer>` |
 | E2 | `bind-relay` doesn't nudge the live daemon to pull the new slot (needs manual restart) | bug | signal daemon to re-read endpoints |

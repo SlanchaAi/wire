@@ -4422,18 +4422,54 @@ fn cmd_add_peer_slot(
     slot_token: &str,
     as_json: bool,
 ) -> Result<()> {
+    use crate::endpoints::{Endpoint, infer_scope_from_url, pin_peer_endpoints};
     let mut state = config::read_relay_state()?;
-    let peers = state["peers"]
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("relay state missing 'peers' object"))?;
-    peers.insert(
-        handle.to_string(),
-        json!({
-            "relay_url": url,
-            "slot_id": slot_id,
-            "slot_token": slot_token,
-        }),
-    );
+
+    // E3 (v0.13.2): ADD this slot to the peer's endpoint set — don't REPLACE
+    // the whole entry. The old flat `peers.insert` clobbered an existing
+    // peer's federation endpoint when pinning a local slot, silently dropping
+    // the federation route (glossy-magnolia + wisp-blossom repro: pinning a
+    // loopback slot made the peer flat loopback-only). Mirror bind-relay's
+    // additive semantics: upsert by relay_url into the peer's endpoints[].
+    let new_ep = Endpoint {
+        relay_url: url.to_string(),
+        slot_id: slot_id.to_string(),
+        slot_token: slot_token.to_string(),
+        scope: infer_scope_from_url(url),
+    };
+    let mut endpoints: Vec<Endpoint> = state
+        .get("peers")
+        .and_then(|p| p.get(handle))
+        .and_then(|e| e.get("endpoints"))
+        .and_then(|a| serde_json::from_value::<Vec<Endpoint>>(a.clone()).ok())
+        .unwrap_or_default();
+    // Back-compat: seed from legacy flat fields when the peer predates endpoints[].
+    if endpoints.is_empty()
+        && let Some(peer) = state.get("peers").and_then(|p| p.get(handle))
+        && let (Some(ru), Some(si), Some(st)) = (
+            peer.get("relay_url").and_then(Value::as_str),
+            peer.get("slot_id").and_then(Value::as_str),
+            peer.get("slot_token").and_then(Value::as_str),
+        )
+    {
+        endpoints.push(Endpoint {
+            relay_url: ru.to_string(),
+            slot_id: si.to_string(),
+            slot_token: st.to_string(),
+            scope: infer_scope_from_url(ru),
+        });
+    }
+    // Upsert by relay_url: refresh in place if already pinned, else append.
+    if let Some(existing) = endpoints
+        .iter_mut()
+        .find(|e| e.relay_url == new_ep.relay_url)
+    {
+        *existing = new_ep;
+    } else {
+        endpoints.push(new_ep);
+    }
+    let n = endpoints.len();
+    pin_peer_endpoints(&mut state, handle, &endpoints)?;
     config::write_relay_state(&state)?;
     if as_json {
         println!(
@@ -4443,10 +4479,13 @@ fn cmd_add_peer_slot(
                 "relay_url": url,
                 "slot_id": slot_id,
                 "added": true,
+                "endpoint_count": n,
             }))?
         );
     } else {
-        println!("pinned peer slot for {handle} at {url} ({slot_id})");
+        println!(
+            "pinned peer slot for {handle} at {url} ({slot_id}) — peer now has {n} endpoint(s)"
+        );
     }
     Ok(())
 }

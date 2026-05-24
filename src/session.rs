@@ -408,6 +408,16 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
                     .unwrap_or("?")
                     .to_string();
                 let mut info = mk(sub_path, hash);
+                // E8 (v0.13.2): skip uninitialized by-key homes. maybe_adopt_
+                // session_wire_home creates the home dir on first resolution —
+                // before any identity exists — so transient/probe session keys
+                // that never `wire up` leave empty or agent-card-less homes.
+                // Without this filter they surfaced as phantom "?"-handle
+                // sisters in list-local, degrading the very discovery rc3
+                // fixed. No DID == no identity == not a session.
+                if info.did.is_none() {
+                    continue;
+                }
                 // Prefer the persona handle as the display name when the home
                 // is initialized; fall back to the by-key hash otherwise.
                 if let Some(h) = info.handle.clone() {
@@ -829,14 +839,16 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
     let (home, why) = if let Some((key, source)) = resolve_session_key() {
         match session_home_for_key(&key) {
             Ok(h) => {
-                // by-key homes are created lazily on first resolution.
-                if let Err(e) = std::fs::create_dir_all(&h) {
-                    eprintln!(
-                        "wire {label}: could not create session home {}: {e}",
-                        h.display()
-                    );
-                    return;
-                }
+                // v0.13.2 (E8): do NOT create the home here. Creating it
+                // unconditionally on every resolution — before any identity
+                // exists — left a permanent empty home for every transient /
+                // probe session key that never `wire up`d, accumulating
+                // forever and surfacing as phantom "?" sisters in list-local.
+                // The home is created lazily by `ensure_dirs` on the first
+                // real write (init / claim / send), so an uninitialized
+                // session leaves no trace on disk. (Write paths already
+                // tolerate a non-existent WIRE_HOME — the test harness runs
+                // every test against one.)
                 (h, format!("session key ({source})"))
             }
             Err(_) => return,
