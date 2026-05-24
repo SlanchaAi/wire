@@ -62,15 +62,22 @@ pub fn sessions_root() -> Result<PathBuf> {
         // inside a session see zero sister sessions even though the
         // operator can plainly see them with `wire session list`.
         //
-        // The check is tight on purpose: only short-circuit when the
-        // immediate parent dir is named `sessions`. Anything else (a
-        // plain test WIRE_HOME, a custom location) keeps the v0.6.3
-        // behavior of returning `<WIRE_HOME>/sessions/` so the caller
-        // can populate it.
-        if let Some(parent) = home.parent()
-            && parent.file_name().and_then(|s| s.to_str()) == Some("sessions")
-        {
-            return Ok(parent.to_path_buf());
+        // Walk up to the nearest ancestor named `sessions` and return it.
+        // Handles BOTH the legacy `sessions/<name>` layout (parent named
+        // `sessions`) and the v0.13 `sessions/by-key/<hash>` layout (parent
+        // `by-key`, grandparent `sessions`). The old one-level parent check
+        // matched only the legacy layout, so an inside-session WIRE_HOME on
+        // v0.13 made sessions_root() point at a nonexistent nested dir —
+        // list-local / mesh / pair-all-local then saw zero sisters even
+        // though they were on disk. A WIRE_HOME with no `sessions` ancestor
+        // (plain test dir, custom location) falls through to the v0.6.3
+        // `<WIRE_HOME>/sessions/` behavior.
+        let mut anc = Some(home.as_path());
+        while let Some(p) = anc {
+            if p.file_name().and_then(|s| s.to_str()) == Some("sessions") {
+                return Ok(p.to_path_buf());
+            }
+            anc = p.parent();
         }
         return Ok(direct);
     }
@@ -351,6 +358,24 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
         name_to_cwd.insert(name.clone(), cwd.clone());
     }
 
+    // Build a SessionInfo from a home dir, labeled `name`. v0.11: character
+    // is purely DID-derived (local display.json overrides removed).
+    let mk = |path: PathBuf, name: String| -> SessionInfo {
+        let card_path = path.join("config").join("wire").join("agent-card.json");
+        let (did, handle) = read_card_identity(&card_path);
+        let daemon_running = check_daemon_live(&path);
+        let character = did.as_deref().map(crate::character::Character::from_did);
+        SessionInfo {
+            cwd: name_to_cwd.get(&name).cloned(),
+            name,
+            home_dir: path,
+            did,
+            handle,
+            daemon_running,
+            character,
+        }
+    };
+
     let mut out = Vec::new();
     for entry in std::fs::read_dir(&root)?.flatten() {
         let path = entry.path();
@@ -365,23 +390,34 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
         if name == "registry.json" {
             continue;
         }
-        let card_path = path.join("config").join("wire").join("agent-card.json");
-        let (did, handle) = read_card_identity(&card_path);
-        let daemon_running = check_daemon_live(&path);
-        // v0.11: character is purely DID-derived across every session.
-        // display.json reads removed — rename verb is gone and the
-        // one-name rule says the character must be findable, which a
-        // local-display override never was.
-        let character = did.as_deref().map(crate::character::Character::from_did);
-        out.push(SessionInfo {
-            name: name.clone(),
-            cwd: name_to_cwd.get(&name).cloned(),
-            home_dir: path,
-            did,
-            handle,
-            daemon_running,
-            character,
-        });
+        // v0.13: session homes live under `by-key/<hash>`, not at the top
+        // level. Descend one level so same-box discovery (`list-local` /
+        // `pair-all-local`) sees them — the `by-key` dir itself is a
+        // container, not a session. Without this, EVERY v0.13 session was
+        // invisible to the local mesh, silently forcing same-box sisters
+        // onto federation instead of fast loopback routing.
+        if name == "by-key" {
+            for sub in std::fs::read_dir(&path)?.flatten() {
+                let sub_path = sub.path();
+                if !sub_path.is_dir() {
+                    continue;
+                }
+                let hash = sub_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let mut info = mk(sub_path, hash);
+                // Prefer the persona handle as the display name when the home
+                // is initialized; fall back to the by-key hash otherwise.
+                if let Some(h) = info.handle.clone() {
+                    info.name = h;
+                }
+                out.push(info);
+            }
+            continue;
+        }
+        out.push(mk(path, name));
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
@@ -843,6 +879,54 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_sessions_sees_by_key_homes_and_root_resolves_from_inside() {
+        // Regression (v0.13.2): v0.13 moved session homes under
+        // `sessions/by-key/<hash>`, but (1) list_sessions only scanned the
+        // top level so by-key homes were invisible, and (2) sessions_root()'s
+        // inside-session fallback only walked ONE level up (expecting parent
+        // `sessions`), so an inside-session WIRE_HOME resolved to a bogus
+        // nested dir. Together they made same-box discovery (list-local /
+        // pair-all-local) return zero sisters under v0.13.
+        let _guard = crate::config::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!("wire-bykey-{}", rand::random::<u32>()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("sessions");
+        let home = root.join("by-key").join("abc123def4567890");
+        let cfg = home.join("config").join("wire");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(
+            cfg.join("agent-card.json"),
+            r#"{"did":"did:wire:test-persona-6e301ab1","handle":"test-persona","verify_keys":{}}"#,
+        )
+        .unwrap();
+
+        // (1) sessions_root() must find the real root even when WIRE_HOME
+        //     points INSIDE the by-key home.
+        // SAFETY: ENV_LOCK is held, serializing all env access.
+        unsafe { std::env::set_var("WIRE_HOME", &home) };
+        assert_eq!(
+            sessions_root().unwrap(),
+            root,
+            "sessions_root must resolve the root from inside a by-key home"
+        );
+
+        // (2) list_sessions() must enumerate the by-key home, labeled by handle.
+        let sessions = list_sessions().unwrap();
+        let found = sessions
+            .iter()
+            .any(|s| s.handle.as_deref() == Some("test-persona"));
+        unsafe { std::env::remove_var("WIRE_HOME") };
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            found,
+            "by-key home must be enumerated: {:?}",
+            sessions.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn session_home_for_key_is_deterministic_distinct_and_well_formed() {

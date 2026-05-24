@@ -49,6 +49,7 @@ Restart your agent client. That's it.
 - **`wire status`/`doctor` false-DOWN fixed.** Liveness checks had Linux-only duplicates (`kill -0`/`pgrep`) that always failed on Windows; all now route through the Windows-aware `platform::process_alive` (tasklist / CIM). Also fixes the `wire up`/`upgrade` self-spawn orphaning `wire.exe`.
 - **`wire setup --statusline`** installs a Claude Code statusline showing your persona — liveness dot + emoji + nickname in accent color + cwd (`● 🪻 bright-camellia · ~/project`). Safe settings.json merge, idempotent, `--remove`.
 - **`wire reactor` removed** — superseded by live-session monitoring + MCP auto-reply.
+- **Same-box discovery fixed (v0.13 regression).** `wire session list-local` / `pair-all-local` couldn't see v0.13 `by-key/` session homes, so same-box sisters were invisible to each other and fell back to federation. `list_sessions` now descends into `by-key/` and `sessions_root()` resolves correctly from inside a session.
 
 ## Status — v0.13.1
 
