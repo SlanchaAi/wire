@@ -5217,51 +5217,108 @@ fn run_sync_push() -> Result<Value> {
 /// returned `{}` for any v0.5.17+ session.
 fn run_sync_pull() -> Result<Value> {
     let state = config::read_relay_state()?;
-    let self_state = state.get("self").cloned().unwrap_or(Value::Null);
-    if self_state.is_null() {
+    if state.get("self").map(Value::is_null).unwrap_or(true) {
         return Ok(json!({"written": [], "rejected": [], "total_seen": 0}));
     }
-    let ep = match crate::endpoints::self_primary_endpoint(&state) {
-        Some(e) => e,
-        None => return Ok(json!({"written": [], "rejected": [], "total_seen": 0})),
-    };
-    let url = ep.relay_url.as_str();
-    let slot_id = ep.slot_id.as_str();
-    let slot_token = ep.slot_token.as_str();
-    let last_event_id = self_state
-        .get("last_pulled_event_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    if url.is_empty() {
+    // E2 (v0.13.2): pull EVERY self endpoint, not just the primary. A session
+    // that bound a local slot (additive) alongside its federation slot used to
+    // have the daemon pull ONLY the primary (federation) endpoint — the local
+    // slot was never serviced, so same-box loopback delivery silently never
+    // happened until a manual restart re-seeded the (startup-only) stream
+    // subscriber. Now each endpoint is pulled with its OWN cursor.
+    let endpoints = crate::endpoints::self_endpoints(&state);
+    if endpoints.is_empty() {
         return Ok(json!({"written": [], "rejected": [], "total_seen": 0}));
     }
-    let client = crate::relay_client::RelayClient::new(url);
-    let events = client.list_events(slot_id, slot_token, last_event_id.as_deref(), Some(1000))?;
     let inbox_dir = config::inbox_dir()?;
     config::ensure_dirs()?;
 
-    // P0.1 (0.5.11): shared cursor-blocking logic. Daemon's --once path
-    // must match the CLI's `wire pull` semantics or version-skew bugs
-    // re-emerge by another route.
-    let result = crate::pull::process_events(&events, last_event_id, &inbox_dir)?;
+    // Per-slot cursors live at `self.cursors.<slot_id>`. The legacy global
+    // `self.last_pulled_event_id` is migrated as the cursor for the PRIMARY
+    // slot only (a federation event id won't match a local slot's log); other
+    // slots start from None and `process_events` dedups against the inbox.
+    let self_obj = state.get("self").cloned().unwrap_or(Value::Null);
+    let legacy_cursor = self_obj
+        .get("last_pulled_event_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let primary_slot = crate::endpoints::self_primary_endpoint(&state).map(|e| e.slot_id);
+    let mut cursors: serde_json::Map<String, Value> = self_obj
+        .get("cursors")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
 
-    // P0.3 (0.5.11): same flock-protected RMW as cmd_pull.
-    if let Some(eid) = &result.advance_cursor_to {
-        let eid = eid.clone();
-        config::update_relay_state(|state| {
-            if let Some(self_obj) = state.get_mut("self").and_then(Value::as_object_mut) {
-                self_obj.insert("last_pulled_event_id".into(), Value::String(eid));
-            }
-            Ok(())
-        })?;
+    let mut all_written: Vec<Value> = Vec::new();
+    let mut all_rejected: Vec<Value> = Vec::new();
+    let mut total_seen = 0usize;
+    let mut blocked_any = false;
+
+    for ep in &endpoints {
+        if ep.relay_url.is_empty() {
+            continue;
+        }
+        let cursor = cursors
+            .get(&ep.slot_id)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                if Some(&ep.slot_id) == primary_slot.as_ref() {
+                    legacy_cursor.clone()
+                } else {
+                    None
+                }
+            });
+        let client = crate::relay_client::RelayClient::new(&ep.relay_url);
+        // One endpoint erroring (relay down, slot gone) must NOT stop the
+        // others — a dead local relay shouldn't black-hole federation pulls.
+        let events =
+            match client.list_events(&ep.slot_id, &ep.slot_token, cursor.as_deref(), Some(1000)) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!(
+                        "daemon: pull error on {} slot {} (continuing): {e:#}",
+                        ep.relay_url, ep.slot_id
+                    );
+                    continue;
+                }
+            };
+        total_seen += events.len();
+        // P0.1 shared cursor-blocking logic (matches `wire pull`). A block on
+        // one slot only stalls THAT slot's cursor; other slots keep flowing.
+        let result = crate::pull::process_events(&events, cursor, &inbox_dir)?;
+        if let Some(eid) = &result.advance_cursor_to {
+            cursors.insert(ep.slot_id.clone(), Value::String(eid.clone()));
+        }
+        blocked_any |= result.blocked;
+        all_written.extend(result.written);
+        all_rejected.extend(result.rejected);
     }
 
+    // P0.3 flock-protected RMW: persist per-slot cursors + keep the legacy
+    // global cursor in sync with the primary slot for back-compat with older
+    // binaries that only read `last_pulled_event_id`.
+    let primary_cursor = primary_slot
+        .as_ref()
+        .and_then(|s| cursors.get(s))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    config::update_relay_state(|state| {
+        if let Some(self_obj) = state.get_mut("self").and_then(Value::as_object_mut) {
+            self_obj.insert("cursors".into(), Value::Object(cursors.clone()));
+            if let Some(pc) = &primary_cursor {
+                self_obj.insert("last_pulled_event_id".into(), Value::String(pc.clone()));
+            }
+        }
+        Ok(())
+    })?;
+
     Ok(json!({
-        "written": result.written,
-        "rejected": result.rejected,
-        "total_seen": events.len(),
-        "cursor_blocked": result.blocked,
-        "cursor_advanced_to": result.advance_cursor_to,
+        "written": all_written,
+        "rejected": all_rejected,
+        "total_seen": total_seen,
+        "cursor_blocked": blocked_any,
+        "endpoints_pulled": endpoints.len(),
     }))
 }
 

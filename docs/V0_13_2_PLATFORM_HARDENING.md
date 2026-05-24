@@ -27,7 +27,7 @@ Branch: `v0.13.2-windows-hardening`. Authoring lane: bright-camellia (this agent
 | E3 | `add-peer-slot` REPLACES endpoints, doesn't merge → clobbers federation route (data loss) | 🟡 rc5 | now additive — upsert by relay_url into peer `endpoints[]` |
 | E4 | domain validator rejects loopback/IP → `dial`/`add` can't express `nick@127.0.0.1:8771` | bug | relax validator when scope=local |
 | E5 | `dial <peer>` on already-pinned returns `already_pinned`, won't refresh endpoints → peer that binds local AFTER pairing can't upgrade | bug | `wire repin/refresh <peer>` |
-| E2 | `bind-relay` doesn't nudge the live daemon to pull the new slot (needs manual restart) | bug | signal daemon to re-read endpoints |
+| E2 | daemon never serviced a bind-relay'd local slot (`run_sync_pull` pulled only the primary endpoint) | 🟡 rc6 | pull ALL self endpoints with per-slot cursors; resilient to one slot erroring |
 | E1 | `wire up` doesn't register a local session / auto-start|detect local relay → same-box defaults to federation | feature | |
 | E7 | local slot not auto-advertised into federated card after bind-relay → existing peers can't upgrade | feature | |
 | E6 | no leak-safe in-band same-box pair verb (`wire pair-local`) — manual off-disk coord read + add-peer-slot today | feature | sending a slot_token over federation = credential leak (harness correctly blocks) |
