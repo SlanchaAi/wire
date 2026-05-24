@@ -157,6 +157,51 @@ async fn add_local_endpoint(home: &Path, handle: &str, local_relay_url: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bind_relay_is_additive_keeps_federation_and_local() {
+    // v0.12: `wire bind-relay` must be ADDITIVE — binding a second relay
+    // appends to self.endpoints[] instead of overwriting the first slot.
+    // Before this fix, the second bind clobbered state["self"], leaving a
+    // single legacy-shape binding (the BUG 3 / "simultaneous local+remote"
+    // gap). Both test relays are loopback, so scope is passed explicitly.
+    let fed = spawn_federation_relay().await;
+    let local = spawn_local_only_relay().await;
+    let home = fresh_dir("additive");
+
+    // init binds the federation slot.
+    assert!(
+        wire(&home, &["init", "alice", "--relay", &fed])
+            .status
+            .success()
+    );
+    // additively bind the local slot.
+    let out = wire(&home, &["bind-relay", &local, "--scope", "local", "--json"]);
+    assert!(
+        out.status.success(),
+        "additive bind-relay failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // self.endpoints[] must now carry BOTH slots.
+    let state = read_relay_state(&home);
+    let eps = state["self"]["endpoints"]
+        .as_array()
+        .expect("self.endpoints[] present after additive bind");
+    assert_eq!(eps.len(), 2, "expected federation + local, got {eps:?}");
+    let scopes: Vec<&str> = eps
+        .iter()
+        .map(|e| e["scope"].as_str().unwrap())
+        .collect();
+    assert!(scopes.contains(&"federation"), "federation slot kept: {scopes:?}");
+    assert!(scopes.contains(&"local"), "local slot added: {scopes:?}");
+    // Legacy top-level fields must still point at the federation endpoint.
+    assert_eq!(
+        state["self"]["relay_url"].as_str().unwrap(),
+        fed.trim_end_matches('/'),
+        "legacy relay_url points at federation for back-compat"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dual_slot_send_prefers_local_endpoint() {
     // Both Alice and Bob have dual slots; the federation slot is on the
     // federation relay, the local slot is on the local-only relay. After
