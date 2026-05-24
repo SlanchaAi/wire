@@ -203,9 +203,10 @@ async fn bind_relay_is_additive_keeps_federation_and_local() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn up_opportunistically_dual_binds_local_relay() {
-    // v0.12: `wire up <nick>@<fed> --with-local <url>` additively binds a
-    // local slot alongside the claimed federation slot — zero-config dual
-    // discoverability. Both relays are loopback in-test, so --with-local
+    // v0.13.1: `wire up <fed> --with-local <url>` additively binds a local
+    // slot alongside the claimed federation slot — zero-config dual
+    // discoverability. No nick (one-name rule): the positional arg is just
+    // the federation relay. Both relays are loopback in-test, so --with-local
     // names the local one explicitly. WIRE_MCP_SKIP_AUTO_UP avoids spawning
     // a lingering background daemon.
     let fed = spawn_federation_relay().await;
@@ -213,13 +214,7 @@ async fn up_opportunistically_dual_binds_local_relay() {
     let home = fresh_dir("up-dual");
 
     let out = Command::new(wire_bin())
-        .args([
-            "up",
-            &format!("alice@{fed}"),
-            "--with-local",
-            &local,
-            "--json",
-        ])
+        .args(["up", &fed, "--with-local", &local, "--json"])
         .env("WIRE_HOME", &home)
         .env("WIRE_MCP_SKIP_AUTO_UP", "1")
         .output()

@@ -183,7 +183,13 @@ async fn wire_init_via_mcp_is_idempotent_for_same_handle() {
         )
         .expect("first init succeeds");
     let r1_did = r1["did"].as_str().unwrap();
-    assert!(r1_did.starts_with("did:wire:alice-"), "got: {r1_did}");
+    // One-name rule (v0.13.1): wire_init's `handle` is a vestigial seed; the
+    // DID handle is the keypair-derived persona, not the typed "alice".
+    assert!(r1_did.starts_with("did:wire:"), "got: {r1_did}");
+    assert!(
+        !r1_did.starts_with("did:wire:alice-"),
+        "one-name rule: typed handle `alice` must be ignored, got: {r1_did}"
+    );
     assert_eq!(r1["already_initialized"], false);
 
     // Second init same handle — no-op, returns existing
@@ -199,17 +205,23 @@ async fn wire_init_via_mcp_is_idempotent_for_same_handle() {
     assert_eq!(r2["already_initialized"], true);
     assert_eq!(r2["fingerprint"], r1["fingerprint"]); // same key
 
-    // Third init different handle — error
-    let err = mcp
+    // Third init with a DIFFERENT typed handle — still idempotent, NOT an
+    // error. Under the one-name rule (v0.13.1) the typed handle is a vestigial
+    // seed, so "bob" cannot conflict with anything; the on-disk persona
+    // identity is authoritative and returned unchanged. (Previously this
+    // bailed "refusing to re-init with different handle", which only made
+    // sense when the typed handle selected the identity — it no longer does.)
+    let r3 = mcp
         .tool_call(
             4,
             "wire_init",
             json!({"handle": "bob"}),
             Duration::from_secs(5),
         )
-        .expect_err("different handle must error");
-    assert!(err.contains("already initialized"), "got: {err}");
-    assert!(err.contains("bob"), "should mention attempted handle");
+        .expect("different typed handle is harmless under one-name");
+    assert_eq!(r3["did"], r1["did"], "identity must not change on re-init");
+    assert_eq!(r3["already_initialized"], true);
+    assert_eq!(r3["fingerprint"], r1["fingerprint"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

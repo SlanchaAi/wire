@@ -210,8 +210,14 @@ async fn wire_add_zero_paste_e2e() {
     assert!(b_got, "B never received A's ack");
 }
 
+/// One-name rule: two agents that both *type* the same nick each end up
+/// claiming their OWN distinct DID-derived persona — neither can squat a
+/// name and there is no 409, because the typed nick is ignored. Replaces the
+/// old `claim_409_on_competing_nick`: the supported surface can no longer
+/// produce a competing-nick collision (you cannot choose a name to compete
+/// over).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn claim_409_on_competing_nick() {
+async fn claim_coerces_to_persona_no_squatting() {
     let relay_dir = fresh_dir("relay-conflict");
     let relay = wire::relay_server::Relay::new(relay_dir).await.unwrap();
     let app = relay.router();
@@ -223,29 +229,49 @@ async fn claim_409_on_competing_nick() {
 
     let a = fresh_dir("first-claim");
     let b = fresh_dir("squatter");
-    assert!(
-        wire(&a, &["init", "first-agent", "--relay", &relay_url])
-            .status
-            .success()
+
+    // Both TYPE the same nick `tide-pool`; both succeed because each claim is
+    // coerced to that agent's own persona (auto-init + one-name rule).
+    let out_a = wire(
+        &a,
+        &[
+            "claim",
+            "tide-pool",
+            "--relay",
+            &relay_url,
+            "--public-url",
+            &relay_url,
+        ],
     );
     assert!(
-        wire(&b, &["init", "second-agent", "--relay", &relay_url])
-            .status
-            .success()
+        out_a.status.success(),
+        "A claim failed: {}",
+        String::from_utf8_lossy(&out_a.stderr)
+    );
+    let out_b = wire(
+        &b,
+        &[
+            "claim",
+            "tide-pool",
+            "--relay",
+            &relay_url,
+            "--public-url",
+            &relay_url,
+        ],
     );
     assert!(
-        wire(&a, &["claim", "tide-pool", "--public-url", &relay_url])
-            .status
-            .success()
+        out_b.status.success(),
+        "B claim failed (a competing nick should be impossible under one-name): {}",
+        String::from_utf8_lossy(&out_b.stderr)
     );
 
-    let out = wire(&b, &["claim", "tide-pool"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("409") || stderr.contains("already taken"),
-        "stderr: {stderr}"
-    );
+    // Neither agent's on-wire handle is the typed `tide-pool` — each is its
+    // own fp-derived persona, and the two are distinct.
+    let ha = read_handle(&a);
+    let hb = read_handle(&b);
+    assert_ne!(ha, "tide-pool", "typed nick was not coerced to persona");
+    assert_ne!(hb, "tide-pool", "typed nick was not coerced to persona");
+    assert_ne!(ha, hb, "two distinct keypairs must yield distinct personas");
 }
 
 /// Regression: `wire claim` from a fresh WIRE_HOME (no prior `wire init`,

@@ -1435,8 +1435,17 @@ fn mcp_tools_call_wire_init_idempotent_on_repeat() {
     let p1: serde_json::Value =
         serde_json::from_str(r1["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     {
+        // One-name rule (v0.13.1): the MCP wire_init `handle` arg is a
+        // vestigial seed — the DID handle is the keypair-derived persona, not
+        // the typed "alice". init_self_idempotent now derives the persona on
+        // every init path, closing the leak where the typed handle (or the
+        // hostname, on auto-init) became the on-wire name.
         let d = p1["did"].as_str().unwrap();
-        assert!(d.starts_with("did:wire:alice-"), "got: {d}");
+        assert!(d.starts_with("did:wire:"), "got: {d}");
+        assert!(
+            !d.starts_with("did:wire:alice-"),
+            "one-name rule: typed handle `alice` must be ignored, got: {d}"
+        );
     }
     assert_eq!(p1["already_initialized"], false);
 

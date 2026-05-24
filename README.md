@@ -41,7 +41,16 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.13.0 (latest)
+## Status — v0.13.1 (latest)
+
+**v0.13.1 — one name, one command.** A UX pass that makes the v0.11 one-name promise structurally true and collapses onboarding to a single nickless verb:
+
+- **One name on every init path.** Auto-init (used by claim / MCP / pairing) used to seed the handle from the machine **hostname**, so every auto-initialized session on a box displayed the same name — a second root of the "every new session has the same handle" bug. All init paths now derive a unique persona from the keypair. You can no longer end up with a name that isn't yours.
+- **`wire up` is the one command.** `wire up [relay]` inits + binds + claims your persona + spawns the daemon. No nick to type — your handle *is* your DID-derived persona.
+- **`wire init` / `wire claim` / `wire identity publish` hidden.** They accepted a name the one-name rule ignores (type `alice`, get `winter-bay`) — confusing, so they're folded into `wire up` (still callable for scripts/offline keygen).
+- **Stale installer fixed.** The `install.sh` served at `wireup.net` was an older copy showing a 3-step `init`/`claim`/`add` flow with the deprecated `wire add`. Now the canonical one-command `wire up` flow.
+
+## Status — v0.13.0
 
 **v0.13 — session-keyed identity. Each session gets its own unique persona, no cwd dependence.**
 
@@ -202,24 +211,29 @@ wire setup --apply    # merges wire into Claude Code / Cursor / project-local MC
 
 Restart your agent client after `wire setup --apply` so wire's MCP tools load.
 
-**Both operators — claim an identity:**
+**Both operators — come online (one command):**
 
 ```bash
-$ wire init alice              # auto-attaches to local relay if running, else error with options
-generated did:wire:alice-... (ed25519:alice:...)
-bound to relay http://127.0.0.1:8771 (slot ...)
+$ wire up @wireup.net          # init + bind relay + claim your persona + local dual-bind + daemon
+wire up: init — created identity bound to https://wireup.net
+wire up: claim — winter-bay@wireup.net claimed
 ```
 
-Or attach to a specific relay: `wire init alice --relay https://wireup.net` (federation), `wire init alice --offline` (keypair only).
+**One name, assigned from your key.** Your handle *is* your persona — a DID-derived
+name (`winter-bay`), not a string you type. The name peers reach you by is the exact
+name your signed card reports, and it cannot drift (one-name rule, v0.11+). `wire claim`
+always claims this persona; a typed nick that differs is ignored.
+
+```bash
+$ wire here                    # who am I, who's around?
+you are 🐅 winter-bay@wireup.net
+```
 
 **Pair, by the name you see:**
 
 ```bash
-$ wire here                    # who am I, who's around?
-you are 🐅 winter-bay  (alice)
-
-$ wire dial bob                # auto-pairs if not yet
-$ wire dial bob "hi from alice"  # auto-pair + send
+$ wire dial otter-pass                       # auto-pairs if not yet
+$ wire dial otter-pass "hi from winter-bay"  # auto-pair + send
 ```
 
 Or, if the other side initiates first, accept their request by character nickname:
