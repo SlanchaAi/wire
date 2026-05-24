@@ -10565,20 +10565,14 @@ fn cmd_up(
         }
     };
 
-    // 1. init (or verify existing identity matches the requested nick).
+    // 1. init (or note existing identity). v0.11 one-name rule: the nick
+    // before `@` is vestigial — identity (and the claimed handle) is the
+    // DID-derived persona, NOT the operator-typed string. We pass the arg
+    // to auto-init only so its "operator-typed X ignored" message fires;
+    // the persona always wins. No bail on nick mismatch (the typed nick
+    // can't select an identity, so a mismatch is not an error).
     if config::is_initialized()? {
-        let card = config::read_agent_card()?;
-        let existing_did = card.get("did").and_then(Value::as_str).unwrap_or("");
-        let existing_handle = crate::agent_card::display_handle_from_did(existing_did).to_string();
-        if existing_handle != nick {
-            bail!(
-                "wire up: already initialized as {existing_handle:?} but you asked for {nick:?}. \
-                 Either run with the existing handle (`wire up {existing_handle}@<relay>`) or \
-                 delete `{:?}` to start fresh.",
-                config::config_dir()?
-            );
-        }
-        step("init", format!("already initialized as {existing_handle}"));
+        step("init", "already initialized".to_string());
     } else {
         cmd_init(
             &nick,
@@ -10587,9 +10581,19 @@ fn cmd_up(
             false,
             /* as_json */ false,
         )?;
+        step("init", format!("created identity bound to {relay_url}"));
+    }
+
+    // Canonical persona handle — the one name we claim and are addressed by.
+    let canonical = {
+        let card = config::read_agent_card()?;
+        let did = card.get("did").and_then(Value::as_str).unwrap_or("");
+        crate::agent_card::display_handle_from_did(did).to_string()
+    };
+    if canonical != nick {
         step(
-            "init",
-            format!("created identity {nick} bound to {relay_url}"),
+            "identity",
+            format!("persona is `{canonical}` (typed `{nick}` ignored — one-name rule)"),
         );
     }
 
@@ -10630,7 +10634,7 @@ fn cmd_up(
     // 3. Claim nick on the relay's handle directory. Idempotent — same-DID
     // re-claims are accepted by the relay.
     match cmd_claim(
-        &nick,
+        &canonical,
         Some(&relay_url),
         None,
         /* hidden */ false,
@@ -10638,11 +10642,11 @@ fn cmd_up(
     ) {
         Ok(()) => step(
             "claim",
-            format!("{nick}@{} claimed", strip_proto(&relay_url)),
+            format!("{canonical}@{} claimed", strip_proto(&relay_url)),
         ),
         Err(e) => step(
             "claim",
-            format!("WARNING: claim failed: {e}. You can retry `wire claim {nick}`."),
+            format!("WARNING: claim failed: {e}. You can retry `wire claim {canonical}`."),
         ),
     }
 
@@ -10716,7 +10720,7 @@ fn cmd_up(
         println!(
             "{}",
             serde_json::to_string(&json!({
-                "nick": nick,
+                "nick": canonical,
                 "relay": relay_url,
                 "steps": steps_json,
             }))?

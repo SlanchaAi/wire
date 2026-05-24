@@ -244,6 +244,57 @@ async fn up_opportunistically_dual_binds_local_relay() {
         urls.iter().any(|u| *u == local.trim_end_matches('/')),
         "local slot dual-bound: {urls:?}"
     );
+
+    // v0.12.1: `up` claims the PERSONA, not the typed nick "alice".
+    let persona = read_handle(&home);
+    assert_ne!(persona, "alice", "persona is DID-derived, not the typed nick");
+    let client = reqwest::Client::new();
+    let r_persona = client
+        .get(format!("{fed}/.well-known/wire/agent"))
+        .query(&[("handle", persona.as_str())])
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        r_persona.status().is_success(),
+        "persona {persona} must be claimed on the relay"
+    );
+    let r_typed = client
+        .get(format!("{fed}/.well-known/wire/agent"))
+        .query(&[("handle", "alice")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r_typed.status().as_u16(),
+        404,
+        "the typed nick 'alice' must NOT be claimed (one-name rule)"
+    );
+
+    // v0.12.1: the phonebook (/v1/handles) shows the DID-derived emoji next
+    // to the name, even with no explicit profile emoji set.
+    let dir: Value = client
+        .get(format!("{fed}/v1/handles"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entry = dir["handles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["nick"] == persona)
+        .expect("persona present in phonebook directory");
+    let did = entry["did"].as_str().unwrap();
+    let want_emoji = wire::character::Character::from_did(did).emoji;
+    assert!(!want_emoji.is_empty());
+    assert_eq!(
+        entry["profile"]["emoji"].as_str().unwrap(),
+        want_emoji,
+        "phonebook must show the DID-derived persona emoji"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
