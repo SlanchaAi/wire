@@ -376,39 +376,58 @@ async fn stress_concurrent_sends_no_torn_writes() {
 /// Today (HEAD): none of the above. This test is EXPECTED TO FAIL until
 /// #7 is closed; failure reveals the bug.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stress_bind_relay_warns_on_pinned_peers_issue_7() {
+async fn stress_bind_relay_additive_preserves_pinned_peers_issue_7() {
     let relay_url = spawn_federation_relay().await;
     let (alice, _alice_h, _bob, _bob_h) =
         pair_two_homes(&relay_url, "stress-alice-c", "stress-bob-c").await;
 
-    // Spin a SECOND federation relay for alice to migrate to.
+    // Spin a SECOND federation relay for alice to add.
     let new_relay_url = spawn_federation_relay().await;
 
-    // Run bind-relay against the new relay. Capture stderr/stdout for any
-    // warning text mentioning pinned peers.
+    // v0.12: bind-relay is ADDITIVE by default. Binding a NEW relay while a
+    // peer is pinned must NOT black-hole them (issue #7) — the original slot
+    // is RETAINED in self.endpoints, so the peer's pushes still land. The
+    // danger is now resolved by design, not merely warned about.
     let migrate_out = wire(&alice, &["bind-relay", &new_relay_url, "--json"]);
-
-    // If bind-relay refused / failed loudly, that satisfies (c).
-    let failed_loudly = !migrate_out.status.success();
-    let stderr = String::from_utf8_lossy(&migrate_out.stderr).into_owned();
-    let stdout = String::from_utf8_lossy(&migrate_out.stdout).into_owned();
-    let combined = format!("{stderr}\n{stdout}");
-
-    // Look for any operator-visible mention of pinned peers / migration risk.
-    let warned_about_peers = combined.to_lowercase().contains("pinned")
-        || combined.to_lowercase().contains("black-hole")
-        || combined.to_lowercase().contains("rotate-slot")
-        || combined.to_lowercase().contains("wire_close")
-        || combined.to_lowercase().contains("notify peer");
-
     assert!(
-        failed_loudly || warned_about_peers,
-        "ISSUE #7 STILL OPEN: bind-relay silently migrated alice with a pinned peer (stress-bob-c). \
-         No warning emitted, no failure. Peers will push to a dead slot.\n\
-         migrate_out.status: {:?}\n\
-         stdout: {stdout}\n\
-         stderr: {stderr}",
-        migrate_out.status
+        migrate_out.status.success(),
+        "additive bind-relay should succeed without --migrate-pinned: {}",
+        String::from_utf8_lossy(&migrate_out.stderr)
+    );
+    let state_path = alice.join("config").join("wire").join("relay.json");
+    let state: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    let urls: Vec<String> = state["self"]["endpoints"]
+        .as_array()
+        .expect("self.endpoints[] present")
+        .iter()
+        .map(|e| e["relay_url"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        urls.iter().any(|u| u == relay_url.trim_end_matches('/')),
+        "ISSUE #7: additive bind dropped the ORIGINAL relay, black-holing the pinned peer. endpoints={urls:?}"
+    );
+    assert!(
+        urls.iter().any(|u| u == new_relay_url.trim_end_matches('/')),
+        "new relay added: {urls:?}"
+    );
+
+    // The DESTRUCTIVE path (--replace) must STILL guard: with a pinned peer
+    // it refuses (or warns) rather than silently black-holing.
+    let replace_out = wire(&alice, &["bind-relay", &new_relay_url, "--replace", "--json"]);
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&replace_out.stderr),
+        String::from_utf8_lossy(&replace_out.stdout)
+    )
+    .to_lowercase();
+    let guarded = !replace_out.status.success()
+        || combined.contains("pinned")
+        || combined.contains("black-hole")
+        || combined.contains("rotate-slot");
+    assert!(
+        guarded,
+        "ISSUE #7: --replace silently black-holed a pinned peer. status={:?} out={combined}",
+        replace_out.status
     );
 }
 

@@ -268,6 +268,30 @@ async fn wire_init_binds_additional_relay_when_already_initialized() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wire_whoami_exposes_persona() {
+    // v0.12: MCP wire_whoami must carry the DID-derived persona (nickname +
+    // emoji), not just the raw handle — the surface-strip fix. The CLI
+    // `wire whoami`/`here`/`peers` already include it; the MCP did not.
+    let home = fresh_dir("whoami-persona");
+    let mut mcp = McpProc::spawn(&home);
+    mcp.tool_call(1, "wire_init", json!({"handle": "alice"}), Duration::from_secs(5))
+        .expect("init");
+    let me = mcp
+        .tool_call(2, "wire_whoami", json!({}), Duration::from_secs(5))
+        .expect("whoami");
+    let persona = &me["persona"];
+    assert!(persona.is_object(), "whoami must include persona object: {me}");
+    assert!(
+        persona["nickname"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        "persona.nickname present: {persona}"
+    );
+    assert!(
+        persona["emoji"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        "persona.emoji present: {persona}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wire_dial_reads_name_arg_not_handle() {
     // Regression: wire_dial was wired straight to tool_add, which reads a
     // required `handle` arg — but the wire_dial schema only provides

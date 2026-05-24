@@ -2530,8 +2530,8 @@ fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
                 "public_key_b64": pk_b64,
                 "capabilities": capabilities,
                 "config_dir": config::config_dir()?.to_string_lossy(),
-                "character": character,
-                "character_override": has_override,
+                "persona": character,
+                "persona_override": has_override,
             }))?
         );
     } else {
@@ -2894,7 +2894,7 @@ fn cmd_peers(as_json: bool) -> Result<()> {
             "did": did,
             "tier": tier,
             "capabilities": capabilities,
-            "character": character,
+            "persona": character,
         }));
     }
 
@@ -2909,7 +2909,7 @@ fn cmd_peers(as_json: bool) -> Result<()> {
         // recomputed via Character::from_did (no override) — operators
         // saw different identities depending on --json flag.
         for p in &peers {
-            let char_json = &p["character"];
+            let char_json = &p["persona"];
             let (colored_char, plain_len): (String, usize) = match char_json {
                 serde_json::Value::Null => ("?".to_string(), 1),
                 v => match serde_json::from_value::<crate::character::Character>(v.clone()) {
@@ -3232,7 +3232,7 @@ fn cmd_here(as_json: bool) -> Result<()> {
                 sisters.push(json!({
                     "session": s.name,
                     "handle": s.handle,
-                    "character": ch,
+                    "persona": ch,
                 }));
             }
         }
@@ -3258,7 +3258,7 @@ fn cmd_here(as_json: bool) -> Result<()> {
                 "handle": handle,
                 "did": did,
                 "tier": agent.get("tier").and_then(Value::as_str).unwrap_or("UNKNOWN"),
-                "character": ch,
+                "persona": ch,
             }));
         }
     }
@@ -3270,7 +3270,7 @@ fn cmd_here(as_json: bool) -> Result<()> {
                 "self": {
                     "handle": self_handle,
                     "did": self_did,
-                    "character": self_character,
+                    "persona": self_character,
                     "cwd": cwd,
                     "wire_home": wire_home,
                 },
@@ -3333,8 +3333,8 @@ fn cmd_here(as_json: bool) -> Result<()> {
         println!("sister sessions on this machine:");
         for s in &sisters {
             let session = s["session"].as_str().unwrap_or("?");
-            let ch_nick = s["character"]["nickname"].as_str().unwrap_or("?");
-            let glyph = render_glyph(&s["character"]);
+            let ch_nick = s["persona"]["nickname"].as_str().unwrap_or("?");
+            let glyph = render_glyph(&s["persona"]);
             println!("  {glyph} {ch_nick}  ({session})");
         }
     }
@@ -3344,8 +3344,8 @@ fn cmd_here(as_json: bool) -> Result<()> {
         for p in &peers {
             let handle = p["handle"].as_str().unwrap_or("?");
             let tier = p["tier"].as_str().unwrap_or("");
-            let ch_nick = p["character"]["nickname"].as_str().unwrap_or("?");
-            let glyph = render_glyph(&p["character"]);
+            let ch_nick = p["persona"]["nickname"].as_str().unwrap_or("?");
+            let glyph = render_glyph(&p["persona"]);
             println!("  {glyph} {ch_nick}  ({handle})  [{tier}]");
         }
     }
@@ -3755,9 +3755,35 @@ fn monitor_is_noise_kind(kind: &str) -> bool {
     matches!(kind, "pair_drop" | "pair_drop_ack" | "heartbeat")
 }
 
+/// Resolve a pinned peer's persona (the DID-derived nickname + emoji,
+/// respecting an advertised override on their card). `None` if the peer
+/// isn't in trust or can't be resolved — callers fall back to the handle.
+fn resolve_persona(peer_handle: &str) -> Option<crate::character::Character> {
+    let trust = config::read_trust().ok()?;
+    let agent = trust.get("agents").and_then(|a| a.get(peer_handle))?;
+    if let Some(card) = agent.get("card") {
+        Some(crate::character::Character::from_card(card))
+    } else {
+        let did = agent.get("did").and_then(Value::as_str)?;
+        Some(crate::character::Character::from_did(did))
+    }
+}
+
+/// "emoji nickname" label for a peer, falling back to the raw handle.
+fn persona_label(peer_handle: &str) -> String {
+    match resolve_persona(peer_handle) {
+        Some(ch) => format!("{} {}", ch.emoji, ch.nickname),
+        None => peer_handle.to_string(),
+    }
+}
+
 /// Render a single InboxEvent for `wire monitor` output. JSON form emits the
 /// full structured event for tooling consumption; the plain form is a tight
 /// one-line summary suitable as a harness stream-watcher notification.
+///
+/// Kept PURE (no trust I/O) so it stays deterministic and cheap per event.
+/// Persona enrichment for `--json` belongs at InboxEvent construction in
+/// `inbox_watch` (a follow-up), not here.
 fn monitor_render(e: &crate::inbox_watch::InboxEvent, as_json: bool) -> Result<String> {
     if as_json {
         Ok(serde_json::to_string(e)?)
@@ -11319,10 +11345,11 @@ fn cmd_notify(
 }
 
 fn os_notify_inbox_event(ev: &crate::inbox_watch::InboxEvent) {
+    let who = persona_label(&ev.peer);
     let title = if ev.verified {
-        format!("wire ← {}", ev.peer)
+        format!("wire ← {who}")
     } else {
-        format!("wire ← {} (UNVERIFIED)", ev.peer)
+        format!("wire ← {who} (UNVERIFIED)")
     };
     let body = format!("{}: {}", ev.kind, ev.body_preview);
     crate::os_notify::toast(&title, &body);

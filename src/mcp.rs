@@ -970,9 +970,15 @@ fn tool_whoami() -> Result<Value, String> {
         .get("capabilities")
         .cloned()
         .unwrap_or_else(|| json!(["wire/v3.1"]));
+    // v0.12: surface the DID-derived persona (nickname + emoji + palette)
+    // that the CLI `wire whoami`/`here` already emit, so agents and toasts
+    // see the persona, not just the raw handle.
+    let persona =
+        serde_json::to_value(crate::character::Character::from_card(&card)).unwrap_or(Value::Null);
     Ok(json!({
         "did": did,
         "handle": handle,
+        "persona": persona,
         "fingerprint": fp,
         "key_id": key_id,
         "public_key_b64": pk_b64,
@@ -1004,8 +1010,16 @@ fn tool_peers() -> Result<Value, String> {
         if Some(did.as_str()) == self_did.as_deref() {
             continue;
         }
+        // v0.12: include the persona (respecting the peer's advertised
+        // override when their card carries one, else DID-derived) so MCP
+        // callers render the nickname/emoji instead of the raw handle.
+        let persona = match agent.get("card") {
+            Some(c) => crate::character::Character::from_card(c),
+            None => crate::character::Character::from_did(&did),
+        };
         peers.push(json!({
             "handle": handle,
+            "persona": serde_json::to_value(&persona).unwrap_or(Value::Null),
             "did": did,
             "tier": get_tier(&trust, handle),
             "capabilities": agent.get("card").and_then(|c| c.get("capabilities")).cloned().unwrap_or_else(|| json!([])),
