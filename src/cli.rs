@@ -666,6 +666,15 @@ pub enum Command {
         /// Optional display name (defaults to capitalized nick).
         #[arg(long)]
         name: Option<String>,
+        /// Also additively dual-bind a LOCAL relay slot for fast same-box
+        /// sister-session routing. Defaults to probing
+        /// `http://127.0.0.1:8771`; pass a URL to override. Local relays
+        /// carry no handle directory, so nothing is claimed there.
+        #[arg(long)]
+        with_local: Option<String>,
+        /// Skip the opportunistic local dual-bind entirely.
+        #[arg(long)]
+        no_local: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1671,7 +1680,19 @@ pub fn run() -> Result<()> {
             local_sister,
             json,
         } => cmd_add(&handle, relay.as_deref(), local_sister, json),
-        Command::Up { handle, name, json } => cmd_up(&handle, name.as_deref(), json),
+        Command::Up {
+            handle,
+            name,
+            with_local,
+            no_local,
+            json,
+        } => cmd_up(
+            &handle,
+            name.as_deref(),
+            with_local.as_deref(),
+            no_local,
+            json,
+        ),
         Command::Doctor {
             json,
             recent_rejections,
@@ -10488,7 +10509,13 @@ mod doctor_tests {
 ///   - `<nick>@<relay-host>` — explicit relay
 ///   - `<nick>`              — defaults to wireup.net (the configured
 ///     public relay)
-fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
+fn cmd_up(
+    handle_arg: &str,
+    name: Option<&str>,
+    with_local: Option<&str>,
+    no_local: bool,
+    as_json: bool,
+) -> Result<()> {
     let (nick, relay_url) = match handle_arg.split_once('@') {
         Some((n, host)) => {
             let url = if host.starts_with("http://") || host.starts_with("https://") {
@@ -10591,6 +10618,51 @@ fn cmd_up(handle_arg: &str, name: Option<&str>, as_json: bool) -> Result<()> {
             "claim",
             format!("WARNING: claim failed: {e}. You can retry `wire claim {nick}`."),
         ),
+    }
+
+    // 3b. Opportunistic local dual-slot (additive). Gives same-box sister
+    // sessions sub-millisecond loopback routing alongside the federation
+    // slot. Local relays carry no handle directory — nothing to claim
+    // there; sister discovery is via `wire session list-local`.
+    if no_local {
+        step("local-slot", "skipped (--no-local)".to_string());
+    } else {
+        let local_url = with_local
+            .unwrap_or("http://127.0.0.1:8771")
+            .trim_end_matches('/');
+        let already_local = crate::endpoints::self_endpoints(
+            &config::read_relay_state().unwrap_or_else(|_| json!({})),
+        )
+        .iter()
+        .any(|e| e.relay_url == local_url);
+        if relay_url.trim_end_matches('/') == local_url || already_local {
+            step("local-slot", "already covered".to_string());
+        } else if crate::relay_client::RelayClient::new(local_url)
+            .check_healthz()
+            .is_ok()
+        {
+            match cmd_bind_relay(
+                local_url,
+                Some("local"),
+                /* replace */ false,
+                /* migrate_pinned */ false,
+                /* as_json */ false,
+            ) {
+                Ok(()) => step(
+                    "local-slot",
+                    format!("dual-bound local relay {local_url} for sister routing"),
+                ),
+                Err(e) => step("local-slot", format!("skipped local relay: {e}")),
+            }
+        } else {
+            step(
+                "local-slot",
+                format!(
+                    "no local relay reachable at {local_url} — federation only \
+                     (sisters resolve via session-list)"
+                ),
+            );
+        }
     }
 
     // 4. Background daemon — must be running for pull/push/ack to flow.
