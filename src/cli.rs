@@ -6660,18 +6660,46 @@ fn cmd_add(
     crate::trust::add_agent_card_pin(&mut trust, &peer_card, Some("VERIFIED"));
     config::write_trust(&trust)?;
     let mut relay_state = config::read_relay_state()?;
-    let existing_token = relay_state
+    // Additive re-pin (v0.13.2, E3 token-bleed fix). The old code REPLACED the
+    // whole peer entry with a flat federation-only one, seeding the token from
+    // the entry's TOP-LEVEL `slot_token`. Two bugs (glossy-magnolia repro):
+    //   1. re-dialing a peer that had a local endpoint (from add-peer-slot)
+    //      CLOBBERED that local endpoint.
+    //   2. after a local add-peer-slot the top-level token was the LOCAL token,
+    //      so the federation endpoint inherited a stale LOCAL bearer →
+    //      federation delivery would 401.
+    // Fix: merge the federation endpoint into the peer's endpoints[] (preserve
+    // the local one), and seed its token ONLY from a prior FEDERATION endpoint
+    // on the same relay (re-dialing an already-acked peer), never a local one —
+    // empty until the pair_drop_ack lands otherwise.
+    let mut endpoints: Vec<crate::endpoints::Endpoint> = relay_state
         .get("peers")
         .and_then(|p| p.get(&peer_handle))
-        .and_then(|p| p.get("slot_token"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
+        .and_then(|e| e.get("endpoints"))
+        .and_then(|a| serde_json::from_value::<Vec<crate::endpoints::Endpoint>>(a.clone()).ok())
         .unwrap_or_default();
-    relay_state["peers"][&peer_handle] = json!({
-        "relay_url": peer_relay,
-        "slot_id": peer_slot_id,
-        "slot_token": existing_token, // empty until pair_drop_ack lands
-    });
+    let fed_token = endpoints
+        .iter()
+        .find(|e| {
+            e.relay_url == peer_relay && e.scope == crate::endpoints::EndpointScope::Federation
+        })
+        .map(|e| e.slot_token.clone())
+        .unwrap_or_default();
+    let fed_ep = crate::endpoints::Endpoint {
+        relay_url: peer_relay.clone(),
+        slot_id: peer_slot_id.clone(),
+        slot_token: fed_token, // empty until pair_drop_ack lands
+        scope: crate::endpoints::EndpointScope::Federation,
+    };
+    if let Some(existing) = endpoints
+        .iter_mut()
+        .find(|e| e.relay_url == fed_ep.relay_url)
+    {
+        *existing = fed_ep;
+    } else {
+        endpoints.push(fed_ep);
+    }
+    crate::endpoints::pin_peer_endpoints(&mut relay_state, &peer_handle, &endpoints)?;
     config::write_relay_state(&relay_state)?;
 
     // 4. Build signed pair_drop with our card + coords (no pair_nonce — this
