@@ -8,6 +8,16 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.13.0] — 2026-05-24
+
+**v0.13 — session-keyed identity.** Replaces the cwd-registry + machine-wide-default session model with a host-agnostic session-key chain (`WIRE_SESSION_ID` > `CLAUDE_CODE_SESSION_ID` > legacy cwd-detect). Each session resolves to a unique, deterministic, cwd-independent WIRE_HOME (`sessions/by-key/<sha256(key)[:16]>`), so two sessions can never collapse onto a shared default. Fixes the Windows "every new session gets the same handle" bug at the root — there is no path string to mis-normalize or miss.
+
+- **MCP startup auto-bootstraps** a fresh session home once (one-name init + federation slot + phonebook claim), so each session is its own reachable, claimed identity. Gated on `WIRE_MCP_SKIP_AUTO_UP` + already-initialized; best-effort on network.
+- **Behavior change:** two windows in the same project are now DISTINCT identities (previously shared, via the bug). Existing sessions re-key on first run under v0.13.
+- **Deferred:** migration bridge, GC of orphaned session homes (see the design spec). **The Windows fix is provisional until verified on a real Windows box.**
+
+Design: `docs/superpowers/specs/2026-05-24-session-keyed-identity-design.md`.
+
 ## [v0.12.3] — 2026-05-24
 
 **v0.12.3 — auto-collaborate, baked in.** The MCP server `instructions` (shipped in the binary, read by any agent that connects `wire mcp`) now DIRECT connecting agents to: (1) arm a persistent `wire monitor` stream-watcher on session start so peer messages surface live, and (2) reply to peer messages in their own live context without waiting for the operator to prompt them. Previously this was a soft "recommended"; now it's a baked-in directive, so anyone who installs wire gets auto-collaboration between paired agents — no per-machine hook required.

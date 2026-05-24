@@ -116,6 +116,14 @@ pub fn run() -> Result<()> {
     // `WIRE_AUTO_INIT=0`.
     crate::cli::maybe_auto_init_cwd_session("mcp");
 
+    // v0.13: a session-keyed WIRE_HOME (sessions/by-key/<hash>) starts empty.
+    // Bootstrap its identity on first MCP start — one-name init + federation
+    // slot + phonebook claim — so each Claude session is its own reachable,
+    // claimed identity. One-time per home (gated on is_initialized);
+    // best-effort (offline → init-only, no claim). Skipped under
+    // WIRE_MCP_SKIP_AUTO_UP (tests + manual-identity operators).
+    ensure_session_bootstrapped();
+
     // v0.6.10: surface multi-agent identity collisions explicitly.
     // Two Claudes (or any MCP-host pair) launched in the same cwd
     // auto-detect into the same wire session and silently share an
@@ -1166,6 +1174,31 @@ fn tool_verify(args: &Value) -> Result<Value, String> {
 }
 
 // ---------- pairing tools ----------
+
+/// v0.13: bootstrap a freshly-resolved session-keyed identity. Runs once per
+/// session home (gated on `is_initialized`); no-op under WIRE_MCP_SKIP_AUTO_UP.
+/// init (one-name) + federation slot via `ensure_self_with_relay`, then a
+/// best-effort phonebook claim of the DID-derived persona. Network failures
+/// are swallowed — the identity is still created locally; the claim retries on
+/// a later start.
+fn ensure_session_bootstrapped() {
+    if std::env::var("WIRE_MCP_SKIP_AUTO_UP").is_ok() {
+        return;
+    }
+    if crate::config::is_initialized().unwrap_or(false) {
+        return; // this session home already has an identity
+    }
+    let (did, relay_url, slot_id, slot_token) =
+        match crate::pair_invite::ensure_self_with_relay(None) {
+            Ok(t) => t,
+            Err(_) => return, // offline / relay down — init may have happened locally; skip claim
+        };
+    if let Ok(card) = crate::config::read_agent_card() {
+        let persona = crate::agent_card::display_handle_from_did(&did).to_string();
+        let client = crate::relay_client::RelayClient::new(&relay_url);
+        let _ = client.handle_claim_v2(&persona, &slot_id, &slot_token, None, &card, None);
+    }
+}
 
 fn tool_init(args: &Value) -> Result<Value, String> {
     let handle = args

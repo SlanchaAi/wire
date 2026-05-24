@@ -620,6 +620,43 @@ pub fn detect_session_wire_home(cwd: &std::path::Path) -> Option<PathBuf> {
     None
 }
 
+/// v0.13: resolve a stable per-session key — host-agnostic, with a Claude
+/// Code adapter and the path left open for other hosts. Order:
+///   1. `WIRE_SESSION_ID` — explicit universal override (any harness).
+///   2. `CLAUDE_CODE_SESSION_ID` — Claude Code adapter (stable per
+///      conversation; the same id the auto-memory system keys off).
+///   3. `None` — caller falls back to legacy cwd-detect (bare CLI /
+///      pre-v0.13 hosts). Future host adapters slot in before this.
+///
+/// Returns `(key, source-label)`.
+pub fn resolve_session_key() -> Option<(String, &'static str)> {
+    for (var, source) in [
+        ("WIRE_SESSION_ID", "override"),
+        ("CLAUDE_CODE_SESSION_ID", "claude-code"),
+    ] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some((v.to_string(), source));
+            }
+        }
+    }
+    None
+}
+
+/// v0.13: the WIRE_HOME for a resolved session key —
+/// `<sessions_root>/by-key/<hash>` where `hash` is the first 16 hex of
+/// SHA-256(key). Deterministic and cwd-independent, so two sessions never
+/// collide and there is no path-string to mis-normalize (the Windows bug
+/// cannot occur). 64 bits is collision-safe at this scale.
+pub fn session_home_for_key(key: &str) -> Result<PathBuf> {
+    let mut h = Sha256::new();
+    h.update(key.as_bytes());
+    let digest = h.finalize();
+    let hash = hex::encode(&digest[..8]); // 16 hex chars / 64 bits
+    Ok(sessions_root()?.join("by-key").join(hash))
+}
+
 /// v0.6.10: warn at MCP/CLI startup if another `wire mcp` process is
 /// already running with the same effective `WIRE_HOME`. Closes the
 /// "two Claudes in same cwd silently share an identity" failure mode
@@ -748,13 +785,35 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
     if std::env::var("WIRE_HOME").is_ok() {
         return;
     }
-    let cwd = match std::env::current_dir() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let home = match detect_session_wire_home(&cwd) {
-        Some(h) => h,
-        None => return,
+    // v0.13: prefer the host-agnostic session key (WIRE_SESSION_ID >
+    // CLAUDE_CODE_SESSION_ID). Each session gets its own WIRE_HOME under
+    // `by-key/<hash>` — no cwd lookup, no shared default, no Windows path
+    // collapse. Falls back to legacy cwd-detect only when no session key is
+    // present (bare CLI / pre-v0.13 hosts).
+    let (home, why) = if let Some((key, source)) = resolve_session_key() {
+        match session_home_for_key(&key) {
+            Ok(h) => {
+                // by-key homes are created lazily on first resolution.
+                if let Err(e) = std::fs::create_dir_all(&h) {
+                    eprintln!(
+                        "wire {label}: could not create session home {}: {e}",
+                        h.display()
+                    );
+                    return;
+                }
+                (h, format!("session key ({source})"))
+            }
+            Err(_) => return,
+        }
+    } else {
+        let cwd = match std::env::current_dir() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        match detect_session_wire_home(&cwd) {
+            Some(h) => (h, format!("cwd `{}`", cwd.display())),
+            None => return,
+        }
     };
     // v0.9.1: emit the chatter ONLY when stderr is an interactive TTY.
     // When wire is invoked from a non-interactive parent (Claude Code's
@@ -769,8 +828,7 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
     let interactive = std::io::stderr().is_terminal();
     if !quiet_env && (interactive || verbose_env) {
         eprintln!(
-            "wire {label}: auto-detected session for cwd `{}` → WIRE_HOME=`{}`",
-            cwd.display(),
+            "wire {label}: adopted {why} → WIRE_HOME=`{}`",
             home.display()
         );
     }
@@ -785,6 +843,22 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_home_for_key_is_deterministic_distinct_and_well_formed() {
+        let a1 = session_home_for_key("sess-aaa").unwrap();
+        let a2 = session_home_for_key("sess-aaa").unwrap();
+        let b = session_home_for_key("sess-bbb").unwrap();
+        assert_eq!(a1, a2, "same key -> same home (resume stability)");
+        assert_ne!(a1, b, "distinct keys -> distinct homes (no collision)");
+        let leaf = a1.file_name().unwrap().to_str().unwrap();
+        assert_eq!(leaf.len(), 16, "16 hex chars / 64 bits");
+        assert!(leaf.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(
+            a1.parent().unwrap().file_name().unwrap().to_str().unwrap(),
+            "by-key"
+        );
+    }
 
     #[test]
     fn url_is_loopback_recognises_v4_v6_and_localhost_v0_7_4() {
