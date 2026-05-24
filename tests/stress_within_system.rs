@@ -67,15 +67,15 @@ fn read_handle(home: &PathBuf) -> String {
 /// v0.11: read the DID-derived character handle for a session by its
 /// on-disk session name. Used by tests that did `wire session new
 /// <name>` and then need to look up the actual peer handle.
-fn handle_for_session(root: &PathBuf, session_name: &str) -> String {
+fn handle_for_session(root: &std::path::Path, session_name: &str) -> String {
     let card_path = root
         .join("sessions")
         .join(session_name)
         .join("config")
         .join("wire")
         .join("agent-card.json");
-    let bytes = std::fs::read(&card_path)
-        .unwrap_or_else(|e| panic!("agent-card at {card_path:?}: {e}"));
+    let bytes =
+        std::fs::read(&card_path).unwrap_or_else(|e| panic!("agent-card at {card_path:?}: {e}"));
     let card: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     card["handle"].as_str().unwrap().to_string()
 }
@@ -208,18 +208,18 @@ async fn pair_two_homes_with_local_endpoints(
     );
     let bob_h = read_handle(&bob);
     assert!(
-        wire(
-            &bob,
-            &["claim", &bob_h, "--public-url", fed_url, "--json"]
-        )
-        .status
-        .success()
+        wire(&bob, &["claim", &bob_h, "--public-url", fed_url, "--json"])
+            .status
+            .success()
     );
     attach_local_endpoint(&bob, &bob_h, local_url).await;
 
     // ---- bilateral pair: bob adds alice via federation handle ----
     let alice_federation = format!("{alice_h}@{host_only}");
-    let add_out = wire(&bob, &["add", &alice_federation, "--relay", fed_url, "--json"]);
+    let add_out = wire(
+        &bob,
+        &["add", &alice_federation, "--relay", fed_url, "--json"],
+    );
     assert!(
         add_out.status.success(),
         "bob `wire add` failed: {}",
@@ -233,7 +233,10 @@ async fn pair_two_homes_with_local_endpoints(
         // (bob_h, character), not the operator-typed bob_name.
         String::from_utf8_lossy(&p.stdout).contains(bob_h.as_str())
     });
-    assert!(alice_has_pending, "alice never received pending-inbound from {bob_h}");
+    assert!(
+        alice_has_pending,
+        "alice never received pending-inbound from {bob_h}"
+    );
     assert!(
         wire(&alice, &["pair-accept", &bob_h, "--json"])
             .status
@@ -246,7 +249,10 @@ async fn pair_two_homes_with_local_endpoints(
         // v0.11: peers JSON keys on alice's CARD HANDLE.
         String::from_utf8_lossy(&p.stdout).contains(alice_h.as_str())
     });
-    assert!(bob_pinned, "bob never pinned alice ({alice_h}) via pair_drop_ack");
+    assert!(
+        bob_pinned,
+        "bob never pinned alice ({alice_h}) via pair_drop_ack"
+    );
 
     (alice, bob)
 }
@@ -678,7 +684,10 @@ async fn mesh_route_picks_one_sister_per_strategy_v0_6_5() {
         let v: Value = serde_json::from_slice(&out.stdout).expect("JSON");
         rr_routes.push(v["routed_to"].as_str().unwrap_or("?").to_string());
     }
-    let beth_hits = rr_routes.iter().filter(|h| h.as_str() == beth_h.as_str()).count();
+    let beth_hits = rr_routes
+        .iter()
+        .filter(|h| h.as_str() == beth_h.as_str())
+        .count();
     let charlie_hits = rr_routes
         .iter()
         .filter(|h| h.as_str() == charlie_h.as_str())
@@ -1085,7 +1094,10 @@ async fn mesh_broadcast_fans_to_every_paired_sister_v0_6_3() {
         .as_array()
         .map(|a| a.iter().any(|v| v.as_str() == Some(charlie_h.as_str())))
         .unwrap_or(false);
-    assert!(excluded, "charlie ({charlie_h}) should appear in skipped_excluded: {summary2}");
+    assert!(
+        excluded,
+        "charlie ({charlie_h}) should appear in skipped_excluded: {summary2}"
+    );
 }
 
 // ---------- TEST 5: mesh-status reports paired mesh + per-edge health (v0.6.2 / #18) ----------
@@ -1473,7 +1485,9 @@ async fn stress_within_system_failover_to_federation_on_local_death_v0_5_19() {
     } else {
         panic!(
             "expected peers[{bob_h}].endpoints to exist; peers keys: {:?}",
-            state["peers"].as_object().map(|o| o.keys().collect::<Vec<_>>())
+            state["peers"]
+                .as_object()
+                .map(|o| o.keys().collect::<Vec<_>>())
         );
     }
     std::fs::write(

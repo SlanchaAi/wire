@@ -372,9 +372,7 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
         // display.json reads removed — rename verb is gone and the
         // one-name rule says the character must be findable, which a
         // local-display override never was.
-        let character = did
-            .as_deref()
-            .map(crate::character::Character::from_did);
+        let character = did.as_deref().map(crate::character::Character::from_did);
         out.push(SessionInfo {
             name: name.clone(),
             cwd: name_to_cwd.get(&name).cloned(),

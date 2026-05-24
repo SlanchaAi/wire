@@ -132,7 +132,13 @@ async fn paul_sends_to_willard_via_relay_and_willard_verifies() {
     assert!(
         wire(
             &willard_home,
-            &["add-peer-slot", &paul_h, &relay_url, p_slot_id, p_slot_token]
+            &[
+                "add-peer-slot",
+                &paul_h,
+                &relay_url,
+                p_slot_id,
+                p_slot_token
+            ]
         )
         .status
         .success()

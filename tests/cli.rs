@@ -79,7 +79,10 @@ fn init_creates_keypair_and_card() {
     {
         // v0.5.7+: DID is pubkey-suffixed (`did:wire:paul-<8hex>`).
         let d = parsed["did"].as_str().unwrap();
-        assert!(d.starts_with("did:wire:") && d.len() > 17, "v0.11: handle = DID-derived character, expected `did:wire:<word-word>-<8hex>`, got: {d}");
+        assert!(
+            d.starts_with("did:wire:") && d.len() > 17,
+            "v0.11: handle = DID-derived character, expected `did:wire:<word-word>-<8hex>`, got: {d}"
+        );
     }
     assert!(parsed["fingerprint"].as_str().unwrap().len() == 8);
 
@@ -110,14 +113,20 @@ fn whoami_after_init_returns_did_and_fingerprint() {
     {
         // v0.5.7+: DID is pubkey-suffixed (`did:wire:paul-<8hex>`).
         let d = parsed["did"].as_str().unwrap();
-        assert!(d.starts_with("did:wire:") && d.len() > 17, "v0.11: handle = DID-derived character, expected `did:wire:<word-word>-<8hex>`, got: {d}");
+        assert!(
+            d.starts_with("did:wire:") && d.len() > 17,
+            "v0.11: handle = DID-derived character, expected `did:wire:<word-word>-<8hex>`, got: {d}"
+        );
     }
     {
         // v0.11: handle = DID-derived character, not operator-typed "paul".
         let h = parsed["handle"].as_str().unwrap();
         let d = parsed["did"].as_str().unwrap();
         assert!(!h.is_empty(), "handle should be non-empty: {h}");
-        assert!(d.contains(h), "did slug must contain handle: did={d} handle={h}");
+        assert!(
+            d.contains(h),
+            "did slug must contain handle: did={d} handle={h}"
+        );
     }
     assert!(parsed["capabilities"].is_array());
 }
@@ -638,7 +647,10 @@ fn here_json_includes_self_sisters_peers_v0_9_3() {
     // DID slug rather than pinning operator-typed name.
     let h = parsed["self"]["handle"].as_str().unwrap();
     let d = parsed["self"]["did"].as_str().unwrap();
-    assert!(!h.is_empty() && d.contains(h), "self handle/did mismatch: {parsed}");
+    assert!(
+        !h.is_empty() && d.contains(h),
+        "self handle/did mismatch: {parsed}"
+    );
     assert!(
         parsed.get("sister_sessions").is_some(),
         "sister_sessions field"
@@ -682,7 +694,10 @@ fn whois_typo_returns_did_you_mean_v0_9_2() {
     let whoami = run(&home, &["whoami", "--json"]);
     let card: serde_json::Value = serde_json::from_slice(&whoami.stdout).unwrap();
     let canonical = card["handle"].as_str().unwrap().to_string();
-    assert!(canonical.contains('-'), "expected adj-noun handle: {canonical}");
+    assert!(
+        canonical.contains('-'),
+        "expected adj-noun handle: {canonical}"
+    );
     // Query a 1-char typo: drop the last char.
     let typo = &canonical[..canonical.len() - 1];
 
@@ -1348,14 +1363,20 @@ fn mcp_tools_call_wire_whoami() {
     {
         // v0.5.7+: DID is pubkey-suffixed (`did:wire:paul-<8hex>`).
         let d = parsed["did"].as_str().unwrap();
-        assert!(d.starts_with("did:wire:") && d.len() > 17, "v0.11: handle = DID-derived character, expected `did:wire:<word-word>-<8hex>`, got: {d}");
+        assert!(
+            d.starts_with("did:wire:") && d.len() > 17,
+            "v0.11: handle = DID-derived character, expected `did:wire:<word-word>-<8hex>`, got: {d}"
+        );
     }
     {
         // v0.11: handle = DID-derived character, not operator-typed "paul".
         let h = parsed["handle"].as_str().unwrap();
         let d = parsed["did"].as_str().unwrap();
         assert!(!h.is_empty(), "handle should be non-empty: {h}");
-        assert!(d.contains(h), "did slug must contain handle: did={d} handle={h}");
+        assert!(
+            d.contains(h),
+            "did slug must contain handle: did={d} handle={h}"
+        );
     }
 }
 
@@ -1451,7 +1472,10 @@ fn status_after_init_shows_did_and_zero_peers() {
     {
         // v0.5.7+: DID is pubkey-suffixed (`did:wire:paul-<8hex>`).
         let d = parsed["did"].as_str().unwrap();
-        assert!(d.starts_with("did:wire:") && d.len() > 17, "v0.11: handle = DID-derived character, expected `did:wire:<word-word>-<8hex>`, got: {d}");
+        assert!(
+            d.starts_with("did:wire:") && d.len() > 17,
+            "v0.11: handle = DID-derived character, expected `did:wire:<word-word>-<8hex>`, got: {d}"
+        );
     }
     assert_eq!(parsed["peers"].as_array().unwrap().len(), 0);
     assert_eq!(parsed["self_relay"], serde_json::Value::Null);

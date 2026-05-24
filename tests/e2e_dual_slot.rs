@@ -209,7 +209,13 @@ async fn dual_slot_send_prefers_local_endpoint() {
         .to_string();
     let add_out = wire(
         &alice,
-        &["add", &format!("{bob_h}@{fed_ip}"), "--relay", &fed, "--json"],
+        &[
+            "add",
+            &format!("{bob_h}@{fed_ip}"),
+            "--relay",
+            &fed,
+            "--json",
+        ],
     );
     assert!(add_out.status.success(), "alice wire add failed");
 
@@ -324,7 +330,13 @@ async fn dual_slot_send_falls_back_to_federation_on_local_failure() {
     assert!(
         wire(
             &alice,
-            &["add", &format!("{bob_h}@{fed_ip}"), "--relay", &fed, "--json"]
+            &[
+                "add",
+                &format!("{bob_h}@{fed_ip}"),
+                "--relay",
+                &fed,
+                "--json"
+            ]
         )
         .status
         .success()
@@ -353,9 +365,12 @@ async fn dual_slot_send_falls_back_to_federation_on_local_failure() {
     // Send + push: local should fail (port 1 closed), federation should
     // succeed.
     assert!(
-        wire(&alice, &["send", &bob_h, "claim", "fallback test", "--json"])
-            .status
-            .success()
+        wire(
+            &alice,
+            &["send", &bob_h, "claim", "fallback test", "--json"]
+        )
+        .status
+        .success()
     );
     let push_out = wire(&alice, &["push", "--json"]);
     assert!(push_out.status.success(), "alice push failed");
@@ -420,7 +435,13 @@ async fn dual_slot_back_compat_v0_5_16_peer_routes_via_federation() {
     assert!(
         wire(
             &alice,
-            &["add", &format!("{bob_h}@{fed_ip}"), "--relay", &fed, "--json"]
+            &[
+                "add",
+                &format!("{bob_h}@{fed_ip}"),
+                "--relay",
+                &fed,
+                "--json"
+            ]
         )
         .status
         .success()

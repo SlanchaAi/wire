@@ -9164,8 +9164,9 @@ fn drive_bilateral_pair(
     // 4. B pulls pair_drop → 5. B pair-accept (pins A by CARD HANDLE,
     // not by session name — under v0.11 these differ) → 6. B push ack
     run(b_home, &["pull", "--json"]).with_context(|| format!("step 4/8: {b_name} `wire pull`"))?;
-    run(b_home, &["pair-accept", &a_handle, "--json"])
-        .with_context(|| format!("step 5/8: {b_name} `wire pair-accept {a_handle}` (a session={a_name})"))?;
+    run(b_home, &["pair-accept", &a_handle, "--json"]).with_context(|| {
+        format!("step 5/8: {b_name} `wire pair-accept {a_handle}` (a session={a_name})")
+    })?;
     run(b_home, &["push", "--json"]).with_context(|| format!("step 6/8: {b_name} `wire push`"))?;
 
     // 7. settle so ack reaches A's slot

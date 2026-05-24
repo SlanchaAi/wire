@@ -84,8 +84,8 @@ async fn spawn_federation_relay() -> String {
 /// operator-typed `wire init <name>` arg is ignored at init time.
 fn read_handle(home: &Path) -> String {
     let path = home.join("config/wire/agent-card.json");
-    let body = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read agent-card {path:?}: {e}"));
+    let body =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read agent-card {path:?}: {e}"));
     let v: serde_json::Value = serde_json::from_str(&body)
         .unwrap_or_else(|e| panic!("parse agent-card {path:?}: {e}\n{body}"));
     v["handle"]
@@ -170,7 +170,10 @@ async fn pair_two_homes(
         let p = wire(&bob, &["peers", "--json"]);
         String::from_utf8_lossy(&p.stdout).contains(alice_h.as_str())
     });
-    assert!(bob_pinned_alice, "bob never pinned alice ({alice_h}) via pair_drop_ack");
+    assert!(
+        bob_pinned_alice,
+        "bob never pinned alice ({alice_h}) via pair_drop_ack"
+    );
 
     // alice should also have bob pinned post-accept.
     let p = wire(&alice, &["peers", "--json"]);

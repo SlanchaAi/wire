@@ -216,7 +216,10 @@ async fn invite_url_one_paste_pair_e2e() {
                 .map(|s| s.contains("hello from willard"))
                 .unwrap_or(false)
     });
-    assert!(paul_got, "paul never received willard's ({willard_h}) message");
+    assert!(
+        paul_got,
+        "paul never received willard's ({willard_h}) message"
+    );
 
     // 5. paul → willard (paul has willard pinned via daemon-consumed drop).
     assert!(

@@ -62,26 +62,35 @@ declare -A MOTTO=(
     ["marginalia"]="reads footnotes professionally"
 )
 
-# Boot all five — init + profile + claim.
+# Boot all five — init + profile + claim. v0.11: the wire-card handle
+# is the DID-derived character, not the operator-typed name. We keep the
+# operator-friendly label `$h` (coffee-ghost, tide-pool, ...) for the
+# directory + emoji/motto labelling, but discover each agent's actual
+# wire handle right after init and use that everywhere on-wire.
+declare -A CHAR_OF
 for h in "${HANDLES[@]}"; do
     home="$WORK/$h"
     mkdir -p "$home"
     echo "→ $h: init + claim"
     WIRE_HOME="$home" "$WIRE" init "$h" --relay "$RELAY_URL" >/dev/null
+    char="$(WIRE_HOME="$home" "$WIRE" whoami --json | jq -r .handle)"
+    CHAR_OF[$h]="$char"
     WIRE_HOME="$home" "$WIRE" profile set emoji "${EMOJI[$h]}" >/dev/null
     WIRE_HOME="$home" "$WIRE" profile set motto "${MOTTO[$h]}" >/dev/null
-    WIRE_HOME="$home" "$WIRE" claim "$h" --public-url "$RELAY_URL" >/dev/null
+    WIRE_HOME="$home" "$WIRE" claim "$char" --public-url "$RELAY_URL" >/dev/null
+    echo "    label=$h   wire-handle=$char"
 done
 
-# Each agent wire-adds every other agent.
+# Each agent wire-adds every other agent — by character handle on the wire.
 echo
 echo "→ building 5-mesh via wire add (10 commands, no paste, no SAS)"
 for adder in "${HANDLES[@]}"; do
     for target in "${HANDLES[@]}"; do
         [ "$adder" = "$target" ] && continue
+        target_char="${CHAR_OF[$target]}"
         # Skip if already added (idempotent — adding twice is fine but verbose).
-        if [ ! -f "$WORK/$adder/state/wire/inbox/$target.jsonl" ]; then
-            WIRE_HOME="$WORK/$adder" "$WIRE" add "$target@$HANDLE_DOMAIN" \
+        if [ ! -f "$WORK/$adder/state/wire/inbox/$target_char.jsonl" ]; then
+            WIRE_HOME="$WORK/$adder" "$WIRE" add "$target_char@$HANDLE_DOMAIN" \
                 --relay "$RELAY_URL" --json >/dev/null
         fi
     done
@@ -93,13 +102,13 @@ done
 # mitigation): a stashed pair_drop now requires explicit `wire pair-accept`
 # before the slot_token flows back via pair_drop_ack. Without this step,
 # `wire push` later reports `no reachable endpoint pinned for peer` and the
-# ring-send phase silently drops every message.
+# ring-send phase silently drops every message. v0.11: accept by character.
 for _ in 1 2 3 4 5; do
     for h in "${HANDLES[@]}"; do
         WIRE_HOME="$WORK/$h" "$WIRE" pull --json >/dev/null
         for peer in "${HANDLES[@]}"; do
             [ "$peer" = "$h" ] && continue
-            WIRE_HOME="$WORK/$h" "$WIRE" accept "$peer" --json >/dev/null 2>&1 || true
+            WIRE_HOME="$WORK/$h" "$WIRE" accept "${CHAR_OF[$peer]}" --json >/dev/null 2>&1 || true
         done
     done
 done
@@ -111,10 +120,10 @@ for h in "${HANDLES[@]}"; do
     n=$(WIRE_HOME="$WORK/$h" "$WIRE" peers --json | jq 'length')
     handles=$(WIRE_HOME="$WORK/$h" "$WIRE" peers --json | jq -r '.[] | .handle' | sort | paste -sd ',' -)
     if [ "$n" != "4" ]; then
-        echo "  FAIL: $h has $n peers (expected 4): $handles"
+        echo "  FAIL: $h (${CHAR_OF[$h]}) has $n peers (expected 4): $handles"
         exit 1
     fi
-    echo "  $h (${EMOJI[$h]}): $handles"
+    echo "  $h (${EMOJI[$h]}, ${CHAR_OF[$h]}): $handles"
 done
 
 # Round-trip a message from each agent to its alphabetically-next peer.
@@ -125,7 +134,8 @@ N=${#RING[@]}
 for i in "${!RING[@]}"; do
     src=${RING[$i]}
     dst=${RING[$(( (i + 1) % N ))]}
-    WIRE_HOME="$WORK/$src" "$WIRE" send "$dst" decision \
+    dst_char="${CHAR_OF[$dst]}"
+    WIRE_HOME="$WORK/$src" "$WIRE" send "$dst_char" decision \
         "hi $dst (${EMOJI[$dst]}), $src (${EMOJI[$src]}) here" >/dev/null
 done
 for h in "${HANDLES[@]}"; do
@@ -137,8 +147,9 @@ done
 for i in "${!RING[@]}"; do
     src=${RING[$i]}
     dst=${RING[$(( (i + 1) % N ))]}
-    if ! grep -q "hi $dst" "$WORK/$dst/state/wire/inbox/$src.jsonl" 2>/dev/null; then
-        echo "  FAIL: $dst did not receive $src's ring message"
+    src_char="${CHAR_OF[$src]}"
+    if ! grep -q "hi $dst" "$WORK/$dst/state/wire/inbox/$src_char.jsonl" 2>/dev/null; then
+        echo "  FAIL: $dst (${CHAR_OF[$dst]}) did not receive $src ($src_char)'s ring message"
         exit 1
     fi
     echo "  $src → $dst ✓"

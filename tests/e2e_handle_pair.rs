@@ -100,18 +100,9 @@ async fn wire_add_zero_paste_e2e() {
         .success()
     );
     assert!(
-        wire(
-            &a,
-            &[
-                "claim",
-                &a_h,
-                "--public-url",
-                &relay_url,
-                "--json"
-            ]
-        )
-        .status
-        .success()
+        wire(&a, &["claim", &a_h, "--public-url", &relay_url, "--json"])
+            .status
+            .success()
     );
 
     // B: init only. No prior knowledge of A beyond the handle.
@@ -186,12 +177,9 @@ async fn wire_add_zero_paste_e2e() {
 
     // B → A signed send.
     assert!(
-        wire(
-            &b,
-            &["send", &a_h, "decision", "hello via wire add"]
-        )
-        .status
-        .success()
+        wire(&b, &["send", &a_h, "decision", "hello via wire add"])
+            .status
+            .success()
     );
     let _ = wire(&b, &["push", "--json"]);
     let a_got = wait_until(Instant::now() + Duration::from_secs(15), || {
@@ -206,12 +194,9 @@ async fn wire_add_zero_paste_e2e() {
 
     // A → B signed send.
     assert!(
-        wire(
-            &a,
-            &["send", &b_h, "decision", "ack from coffee-ghost"]
-        )
-        .status
-        .success()
+        wire(&a, &["send", &b_h, "decision", "ack from coffee-ghost"])
+            .status
+            .success()
     );
     let _ = wire(&a, &["push", "--json"]);
     let b_got = wait_until(Instant::now() + Duration::from_secs(15), || {

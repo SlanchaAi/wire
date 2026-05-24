@@ -35,10 +35,10 @@ fn wire_bin() -> PathBuf {
 /// agent-card.json. After `wire init` (CLI or MCP) the card's handle
 /// IS the canonical name the rest of the system addresses the peer by;
 /// the operator-typed argument to init is ignored.
-fn read_handle(home: &PathBuf) -> String {
+fn read_handle(home: &std::path::Path) -> String {
     let path = home.join("config/wire/agent-card.json");
-    let body = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read agent-card {path:?}: {e}"));
+    let body =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read agent-card {path:?}: {e}"));
     let v: Value = serde_json::from_str(&body)
         .unwrap_or_else(|e| panic!("parse agent-card {path:?}: {e}\n{body}"));
     v["handle"]

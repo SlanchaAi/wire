@@ -57,6 +57,13 @@ curl -fsS "$RELAY_URL/healthz" >/dev/null || { echo "relay did not come up"; cat
 echo "→ paul + willard init on $RELAY_URL"
 WIRE_HOME="$PAUL_HOME"    "$WIRE" init paul    --relay "$RELAY_URL" >/dev/null
 WIRE_HOME="$WILLARD_HOME" "$WIRE" init willard --relay "$RELAY_URL" >/dev/null
+# v0.11: discover each side's DID-derived character. The operator-typed
+# "paul" / "willard" are ignored at init; peers reach each other only by
+# the character handle.
+PAUL_H="$(WIRE_HOME="$PAUL_HOME"    "$WIRE" whoami --json | jq -r .handle)"
+WILL_H="$(WIRE_HOME="$WILLARD_HOME" "$WIRE" whoami --json | jq -r .handle)"
+echo "    paul    → $PAUL_H"
+echo "    willard → $WILL_H"
 
 echo "→ paul mints invite URL"
 INVITE_JSON=$(WIRE_HOME="$PAUL_HOME" "$WIRE" invite --relay "$RELAY_URL" --json)
@@ -75,10 +82,10 @@ echo "→ willard accepts URL (one paste)"
 ACCEPT_JSON=$(WIRE_HOME="$WILLARD_HOME" "$WIRE" accept "$INVITE_URL" --json)
 PAIRED_WITH=$(echo "$ACCEPT_JSON" | jq -r '.paired_with')
 case "$PAIRED_WITH" in
-    "did:wire:paul-"*) ;;
-    *) echo "    FAIL: paired_with=$PAIRED_WITH (expected did:wire:paul-<hex>)"; exit 1 ;;
+    "did:wire:$PAUL_H-"*) ;;
+    *) echo "    FAIL: paired_with=$PAIRED_WITH (expected did:wire:$PAUL_H-<hex>)"; exit 1 ;;
 esac
-echo "    willard pinned paul. drop sent to paul's slot."
+echo "    willard pinned paul ($PAUL_H). drop sent to paul's slot."
 
 echo "→ paul pulls (consumes pair_drop → pins willard)"
 PULL=$(WIRE_HOME="$PAUL_HOME" "$WIRE" pull --json)
@@ -87,24 +94,24 @@ WRITTEN=$(echo "$PULL" | jq '.written | length')
 
 PAUL_PEERS=$(WIRE_HOME="$PAUL_HOME" "$WIRE" peers --json | jq -r '.[].handle' | sort | tr '\n' ',' | sed 's/,$//')
 echo "    paul peers: $PAUL_PEERS"
-case ",$PAUL_PEERS," in *,willard,*) ;; *) echo "    FAIL: willard not in paul peers"; exit 1 ;; esac
+case ",$PAUL_PEERS," in *,"$WILL_H",*) ;; *) echo "    FAIL: $WILL_H not in paul peers"; exit 1 ;; esac
 
 echo "→ paul → willard send"
-WIRE_HOME="$PAUL_HOME" "$WIRE" send willard decision "hello via v0.4.0 invite" >/dev/null
+WIRE_HOME="$PAUL_HOME" "$WIRE" send "$WILL_H" decision "hello via v0.4.0 invite" >/dev/null
 WIRE_HOME="$PAUL_HOME" "$WIRE" push --json | jq -r '.pushed | length' | xargs -I{} echo "    pushed {} event(s)"
 WIRE_HOME="$WILLARD_HOME" "$WIRE" pull --json | jq -r '.written | length' | xargs -I{} echo "    willard pulled {} event(s)"
 
-grep -q "hello via v0.4.0 invite" "$WILLARD_HOME/state/wire/inbox/paul.jsonl" \
-    || { echo "    FAIL: message not in willard inbox"; exit 1; }
+grep -q "hello via v0.4.0 invite" "$WILLARD_HOME/state/wire/inbox/$PAUL_H.jsonl" \
+    || { echo "    FAIL: message not in willard inbox $WILLARD_HOME/state/wire/inbox/$PAUL_H.jsonl"; exit 1; }
 echo "    paul → willard verified"
 
 echo "→ willard → paul ack"
-WIRE_HOME="$WILLARD_HOME" "$WIRE" send paul decision "ack from willard" >/dev/null
+WIRE_HOME="$WILLARD_HOME" "$WIRE" send "$PAUL_H" decision "ack from willard" >/dev/null
 WIRE_HOME="$WILLARD_HOME" "$WIRE" push --json | jq -r '.pushed | length' | xargs -I{} echo "    pushed {} event(s)"
 WIRE_HOME="$PAUL_HOME" "$WIRE" pull --json | jq -r '.written | length' | xargs -I{} echo "    paul pulled {} event(s)"
 
-grep -q "ack from willard" "$PAUL_HOME/state/wire/inbox/willard.jsonl" \
-    || { echo "    FAIL: ack not in paul inbox"; exit 1; }
+grep -q "ack from willard" "$PAUL_HOME/state/wire/inbox/$WILL_H.jsonl" \
+    || { echo "    FAIL: ack not in paul inbox $PAUL_HOME/state/wire/inbox/$WILL_H.jsonl"; exit 1; }
 echo "    willard → paul verified"
 
 echo

@@ -66,6 +66,12 @@ curl -fsS "$RELAY/healthz" >/dev/null || { echo "relay did not come up"; exit 1;
 echo "== init paul + willard =="
 WIRE_HOME="$PAUL" "$WIRE" init paul --relay "$RELAY" >/dev/null
 WIRE_HOME="$WILL" "$WIRE" init willard --relay "$RELAY" >/dev/null
+# v0.11: the typed `paul`/`willard` are ignored at init; each side is
+# addressable only by its DID-derived character. Discover them.
+PAUL_H="$(WIRE_HOME="$PAUL" "$WIRE" whoami --json | jq -r .handle)"
+WILL_H="$(WIRE_HOME="$WILL" "$WIRE" whoami --json | jq -r .handle)"
+echo "   paul    → $PAUL_H"
+echo "   willard → $WILL_H"
 
 echo "== spawn long-running daemons (1s tick) =="
 WIRE_HOME="$PAUL" "$WIRE" daemon --interval 1 </dev/null \
@@ -114,12 +120,12 @@ done
 echo "   ✓ both pair-lists empty"
 
 echo "== verify wire peers =="
-WIRE_HOME="$PAUL" "$WIRE" peers | grep -q willard || { echo "paul missing willard"; exit 1; }
-WIRE_HOME="$WILL" "$WIRE" peers | grep -q paul || { echo "willard missing paul"; exit 1; }
+WIRE_HOME="$PAUL" "$WIRE" peers | grep -q "$WILL_H" || { echo "paul missing $WILL_H"; exit 1; }
+WIRE_HOME="$WILL" "$WIRE" peers | grep -q "$PAUL_H" || { echo "willard missing $PAUL_H"; exit 1; }
 echo "   ✓ both peers VERIFIED"
 
 echo "== send + sync + tail =="
-WIRE_HOME="$PAUL" "$WIRE" send willard claim "demo-detached: hello from paul" >/dev/null
+WIRE_HOME="$PAUL" "$WIRE" send "$WILL_H" claim "demo-detached: hello from paul" >/dev/null
 # Daemons sync every 1s; allow up to 5s for the event to land in willard's inbox.
 for _ in $(seq 1 10); do
     if WIRE_HOME="$WILL" "$WIRE" tail 2>&1 | grep -q "demo-detached: hello"; then
