@@ -396,10 +396,22 @@ mod tests {
 
     #[test]
     fn infer_scope_classifies_loopback_unix_and_federation() {
-        assert_eq!(infer_scope_from_url("http://127.0.0.1:8771"), EndpointScope::Local);
-        assert_eq!(infer_scope_from_url("http://localhost:8771"), EndpointScope::Local);
-        assert_eq!(infer_scope_from_url("unix:///tmp/wire.sock"), EndpointScope::Uds);
-        assert_eq!(infer_scope_from_url("https://wireup.net"), EndpointScope::Federation);
+        assert_eq!(
+            infer_scope_from_url("http://127.0.0.1:8771"),
+            EndpointScope::Local
+        );
+        assert_eq!(
+            infer_scope_from_url("http://localhost:8771"),
+            EndpointScope::Local
+        );
+        assert_eq!(
+            infer_scope_from_url("unix:///tmp/wire.sock"),
+            EndpointScope::Uds
+        );
+        assert_eq!(
+            infer_scope_from_url("https://wireup.net"),
+            EndpointScope::Federation
+        );
     }
 
     #[test]
