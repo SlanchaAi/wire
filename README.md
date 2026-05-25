@@ -41,7 +41,16 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.13.3 (latest)
+## Status — v0.13.4 (latest)
+
+**v0.13.4 — Per-session identity (MCP + Windows) + group chat + merged `wire update`.**
+
+- **Per-session identity, fixed on the MCP path.** Claude Code doesn't pass the session id to MCP servers, so wire's MCP fell back to cwd and every Claude session under a shared dir collapsed onto one persona (the Windows "same handle every session" bug). Now `wire setup` forwards `${CLAUDE_CODE_SESSION_ID}` into the MCP env, and cwd resolution is removed everywhere (the MCP mints a distinct per-process identity; the CLI never cwd-resolves). Identity = the session. Re-run `wire setup --apply`; note a project `.mcp.json` overrides the global config.
+- **Statusline** shows the session's own persona — the renderer bridges the `session_id` Claude Code passes on stdin.
+- **`wire group`** create/add/send/tail/list/invite/join + MCP `wire_group_*` — bidirectional group chat over a shared relay-room slot with introduce-on-vouch + self-contained join codes.
+- **`wire update` ≡ `wire upgrade`** merged (always check crates.io + install-if-newer + restart). CI bumped off deprecated Node 20.
+
+## Status — v0.13.3
 
 **v0.13.3 — Group chat + one update command.**
 

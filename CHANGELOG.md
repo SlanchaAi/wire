@@ -8,6 +8,17 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.13.4] — 2026-05-25
+
+**v0.13.4 — Per-session identity (MCP + Windows), statusline fix, group chat, `wire update`.**
+
+- **Per-session identity, fixed on the MCP path — the Windows "same persona every session" bug.** Claude Code sets `CLAUDE_CODE_SESSION_ID` for Bash-tool subprocesses but NOT for the stdio MCP server, and the MCP `initialize` handshake carries no session id — so the MCP server had no per-session signal and fell back to cwd-detection, collapsing every Claude session under a shared dir (`~/Source`, `C:\Users\<user>`) onto ONE identity. Two fixes: (1) `wire setup` now writes the MCP entry with `"env": {"WIRE_SESSION_ID": "${CLAUDE_CODE_SESSION_ID}"}`, which Claude Code expands into the MCP env at launch (validated on Win10 — a fresh session resolves to a distinct by-key persona); (2) **cwd resolution is removed everywhere** — the MCP mints a distinct per-process identity when no session id is present, and the CLI never cwd-resolves. Identity is the session, period. **Re-run `wire setup --apply` on this version** — and note a PROJECT-scoped `.mcp.json` takes precedence over the global config, so make sure the env block landed in the file your host actually uses.
+- **Statusline shows the session's own persona.** The bundled renderer bridges the `session_id` Claude Code passes on STDIN into `WIRE_SESSION_ID` before calling `wire whoami`, so the bottom-of-terminal persona matches the session (was resolving a cwd default / nothing).
+- **Group chat** — `wire group create / add / send / tail / list / invite / join` + MCP `wire_group_*` tools. A group is a shared relay-room slot; the creator-signed roster carries each member's key (introduce-on-vouch), so members verify each other without pairing. `invite` mints a self-contained join code; redeemers land at Introduced tier.
+- **`wire update` ≡ `wire upgrade`** — one verb (alias). Always checks crates.io; installs a newer release if there is one (cargo install, else prebuilt + SHA-256 self-replace), then does the atomic daemon swap. `--check` reports; `--local` skips the fetch.
+- **CI:** GitHub Actions bumped off deprecated Node 20 (checkout@v5, upload-artifact@v7, download-artifact@v8).
+- **Docs:** AGENTS.md + AGENT_INTEGRATION.md now document the v0.13 session-keyed identity model (were the stale pre-v0.13 cwd model).
+
 ## [v0.13.3] — 2026-05-25
 
 **v0.13.3 — Group chat + one update command.**
