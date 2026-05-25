@@ -5144,7 +5144,20 @@ fn cmd_daemon(interval_secs: u64, once: bool, as_json: bool) -> Result<()> {
         // wake signal — whichever comes first. Drain any additional
         // wake-ups that accumulated during the previous cycle since one
         // pull catches up everything.
-        let _ = wake_rx.recv_timeout(interval);
+        //
+        // v0.13.2 (wisp-blossom): if the stream subscriber thread has gone
+        // away, `wake_rx` is Disconnected and `recv_timeout` returns
+        // INSTANTLY — which would busy-spin the sync loop (hammering push/pull
+        // + the relay with zero delay). Fall back to a plain sleep so a dead
+        // stream degrades to normal polling and never kills or pegs the
+        // daemon. (Realizes the "decouple stream from sync" hardening — a
+        // stream failure must never affect the push/pull loop.)
+        match wake_rx.recv_timeout(interval) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::thread::sleep(interval);
+            }
+        }
         while wake_rx.try_recv().is_ok() {}
     }
 }
