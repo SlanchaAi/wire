@@ -18,6 +18,7 @@ pub mod daemon_stream;
 pub mod diag;
 pub mod endpoints;
 pub mod ensure_up;
+pub mod group;
 pub mod inbox_watch;
 pub mod macaroon;
 pub mod mcp;
