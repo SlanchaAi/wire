@@ -1,13 +1,16 @@
-//! Group-chat end-to-end test (v0.13.3, increment I1).
+//! Group-chat end-to-end test (v0.13.3, increment I2 — bidirectional room).
 //!
 //! Three agents: a creator (alice) and two members (bob, carol). Alice pairs
-//! bilaterally with each member (SAS → VERIFIED), creates a group, adds both
-//! verified members, and broadcasts one message. Both members pull and tail
-//! the group by id, seeing the creator's message with a verified signature.
+//! bilaterally with each member ONLY (SAS → VERIFIED; star topology — bob and
+//! carol never pair with each other). Alice creates a group (allocating a
+//! shared relay-room slot), adds both verified members, and the signed roster
+//! (room coords + every member's key) is distributed as group_invite events.
 //!
-//! This is the spec's I1 acceptance path: create → add VERIFIED peer → send →
-//! peer tails it. Member-side rosters + member send-back are I2 (join-code).
-//! Reuses the relay + SAS-pairing harness shape from `e2e_mesh.rs`.
+//! Each member posts to the ONE shared room slot; everyone pulls it. The proof
+//! is the cross-member read: bob reads carol's message (and vice-versa) with a
+//! VERIFIED signature, via the key introduce-pinned from the creator's signed
+//! roster — neither ever paired with the other. Reuses the relay + SAS-pairing
+//! harness shape from `e2e_mesh.rs`.
 
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
@@ -142,7 +145,7 @@ fn drive_pairing(host_home: &PathBuf, guest_home: &PathBuf, relay_url: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn group_creator_broadcast_reaches_both_members() {
+async fn group_bidirectional_room_with_introduce_pin() {
     // ---- 1. boot relay ----
     let relay_dir = fresh_dir("relay");
     let relay = wire::relay_server::Relay::new(relay_dir).await.unwrap();
@@ -221,50 +224,81 @@ async fn group_creator_broadcast_reaches_both_members() {
     let bad = wire(&alice, &["group", "add", &gid, "ghost-peer"]);
     assert!(!bad.status.success(), "adding an unpaired peer should fail");
 
-    // ---- 6. alice broadcasts one message to the group ----
-    let send = wire(&alice, &["group", "send", &gid, "ship it 🚀"]);
-    assert!(send.status.success(), "group send failed: {send:?}");
-    let send_json: Value = serde_json::from_slice(
-        &wire(&alice, &["group", "send", &gid, "and again", "--json"]).stdout,
-    )
-    .unwrap();
-    assert_eq!(
-        send_json["sent"].as_array().unwrap().len(),
-        2,
-        "fan-out to 2 members"
-    );
-    assert_eq!(send_json["failed"].as_array().unwrap().len(), 0);
-
-    // ---- 7. alice pushes; both members pull ----
+    // ---- 6. alice pushes the group invites; both members pull them ----
+    // `group add` queued a signed group_invite (the full roster incl. room
+    // slot coords + every member's key) to each member's outbox.
     assert!(wire(&alice, &["push"]).status.success());
     for m in [&bob, &carol] {
         let pull: Value = serde_json::from_slice(&wire(m, &["pull", "--json"]).stdout).unwrap();
-        assert_eq!(
-            pull["written"].as_array().unwrap().len(),
-            2,
-            "member should receive both group messages, got {pull}"
+        assert!(
+            !pull["written"].as_array().unwrap().is_empty(),
+            "member should receive at least one group_invite, got {pull}"
         );
         assert_eq!(pull["rejected"].as_array().unwrap().len(), 0);
     }
 
-    // ---- 8. each member tails the group by id and sees the creator's text ----
-    for m in [&bob, &carol] {
+    // ---- 7. members post to the shared room (ingest materializes the roster
+    //         + introduce-pins the other members on the creator's vouch) ----
+    assert!(
+        wire(&bob, &["group", "send", &gid, "hi from bob"])
+            .status
+            .success(),
+        "bob should post to the room after ingesting the invite"
+    );
+    assert!(
+        wire(&carol, &["group", "send", &gid, "hi from carol"])
+            .status
+            .success()
+    );
+    // bob's local roster materialized from the invite (3 members).
+    let bob_list: Value =
+        serde_json::from_slice(&wire(&bob, &["group", "list", "--json"]).stdout).unwrap();
+    assert_eq!(
+        bob_list["groups"][0]["members"].as_array().unwrap().len(),
+        3,
+        "bob materialized the full 3-member roster from the invite"
+    );
+
+    // alice also posts (creator into the same room).
+    assert!(
+        wire(&alice, &["group", "send", &gid, "ship it 🚀"])
+            .status
+            .success()
+    );
+
+    // ---- 8. everyone tails the same room and sees ALL messages, verified ----
+    // The cross-member reads are the bidirectional proof: bob reads carol's
+    // message (and vice-versa) verified=true via the introduce-pinned key —
+    // neither ever paired with the other.
+    let tail_texts = |home: &PathBuf| -> (Vec<String>, bool) {
         let tail: Value =
-            serde_json::from_slice(&wire(m, &["group", "tail", &gid, "--json"]).stdout).unwrap();
+            serde_json::from_slice(&wire(home, &["group", "tail", &gid, "--json"]).stdout).unwrap();
         let msgs = tail["messages"].as_array().unwrap();
-        let texts: Vec<&str> = msgs.iter().filter_map(|x| x["text"].as_str()).collect();
+        let texts = msgs
+            .iter()
+            .filter_map(|x| x["text"].as_str().map(str::to_string))
+            .collect();
+        let all_verified = msgs.iter().all(|x| x["verified"].as_bool() == Some(true));
+        (texts, all_verified)
+    };
+
+    for home in [&alice, &bob, &carol] {
+        let (texts, all_verified) = tail_texts(home);
         assert!(
-            texts.contains(&"ship it 🚀"),
-            "member missing first msg: {tail}"
+            texts.iter().any(|t| t == "hi from bob"),
+            "{home:?} missing bob's msg: {texts:?}"
         );
         assert!(
-            texts.contains(&"and again"),
-            "member missing second msg: {tail}"
+            texts.iter().any(|t| t == "hi from carol"),
+            "{home:?} missing carol's msg: {texts:?}"
         );
-        // Both came from a paired (VERIFIED) creator → signature verifies.
         assert!(
-            msgs.iter().all(|x| x["verified"].as_bool() == Some(true)),
-            "every group message should verify against the creator's pinned key: {tail}"
+            texts.iter().any(|t| t == "ship it 🚀"),
+            "{home:?} missing alice's msg: {texts:?}"
+        );
+        assert!(
+            all_verified,
+            "{home:?} saw an UNVERIFIED group message — introduce-pin failed: {texts:?}"
         );
     }
 }

@@ -7059,7 +7059,8 @@ fn cmd_group(cmd: GroupCommand) -> Result<()> {
 }
 
 /// This agent's (did, handle) from its signed card.
-fn group_self_identity() -> Result<(String, String)> {
+/// This agent's signing identity for group ops: (did, handle, key_id, pk_b64).
+fn group_self() -> Result<(String, String, String, String)> {
     let card = config::read_agent_card()?;
     let did = card
         .get("did")
@@ -7067,33 +7068,256 @@ fn group_self_identity() -> Result<(String, String)> {
         .ok_or_else(|| anyhow!("agent-card missing did — run `wire up` first"))?
         .to_string();
     let handle = crate::agent_card::display_handle_from_did(&did).to_string();
-    Ok((did, handle))
+    let pk_b64 = card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent-card missing verify_keys[*].key"))?
+        .to_string();
+    let pk_bytes = crate::signing::b64decode(&pk_b64)?;
+    let key_id = make_key_id(&handle, &pk_bytes);
+    Ok((did, handle, key_id, pk_b64))
+}
+
+/// Relay to host a group room on — prefer the federation endpoint (remote
+/// members can reach it), fall back to LAN, then local, then any.
+fn group_room_relay_url() -> Result<String> {
+    use crate::endpoints::EndpointScope;
+    let state = config::read_relay_state()?;
+    let eps = crate::endpoints::self_endpoints(&state);
+    let pick = eps
+        .iter()
+        .find(|e| e.scope == EndpointScope::Federation)
+        .or_else(|| eps.iter().find(|e| e.scope == EndpointScope::Lan))
+        .or_else(|| eps.iter().find(|e| e.scope == EndpointScope::Local))
+        .or_else(|| eps.first());
+    match pick {
+        Some(e) if !e.relay_url.is_empty() => Ok(e.relay_url.clone()),
+        _ => bail!("no relay endpoint on this identity — run `wire up --relay <url>` first"),
+    }
+}
+
+/// Sign a `group_invite` (carrying the full creator-signed Group) and queue it
+/// to every other member's outbox. The daemon/push delivers; the recipient's
+/// `ingest_group_invites` materializes the room + introduce-pins members.
+fn distribute_group_invite(group: &crate::group::Group, self_did: &str) -> Result<usize> {
+    let (_, self_handle, _, pk_b64) = group_self()?;
+    let sk_seed = config::read_private_key()?;
+    let pk_bytes = crate::signing::b64decode(&pk_b64)?;
+    let now_iso = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+    let group_json = serde_json::to_value(group)?;
+    let mut delivered = 0usize;
+    for handle in group.other_member_handles(self_did) {
+        let event = json!({
+            "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
+            "timestamp": now_iso,
+            "from": self_did,
+            "to": format!("did:wire:{handle}"),
+            "type": "group_invite",
+            "kind": parse_kind("group_invite")?,
+            "body": group_json,
+        });
+        let signed = sign_message_v31(&event, &sk_seed, &pk_bytes, &self_handle)
+            .map_err(|e| anyhow!("signing group_invite for `{handle}`: {e:?}"))?;
+        let line = serde_json::to_vec(&signed)?;
+        if config::append_outbox_record(&handle, &line).is_ok() {
+            delivered += 1;
+        }
+    }
+    Ok(delivered)
+}
+
+/// Introduce-pin a member's key on the creator's vouch: ensure
+/// `trust.agents[handle]` carries this key so the member's group messages
+/// verify, WITHOUT granting bilateral trust. Never lowers an existing tier
+/// (a directly-VERIFIED peer stays VERIFIED); only adds the key if missing.
+fn introduce_pin(
+    trust: &mut Value,
+    handle: &str,
+    did: &str,
+    key_id: &str,
+    key: &str,
+    group_id: &str,
+) {
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let agents = trust
+        .as_object_mut()
+        .expect("trust is an object")
+        .entry("agents")
+        .or_insert_with(|| json!({}));
+    let key_rec = json!({"key_id": key_id, "key": key, "added_at": now, "active": true});
+    match agents.get_mut(handle) {
+        Some(existing) => {
+            // Already pinned (maybe at a higher bilateral tier) — just ensure
+            // the key is present. Do NOT touch the tier.
+            let keys = existing
+                .as_object_mut()
+                .and_then(|o| o.get_mut("public_keys"))
+                .and_then(Value::as_array_mut);
+            if let Some(keys) = keys {
+                let have = keys
+                    .iter()
+                    .any(|k| k.get("key_id").and_then(Value::as_str) == Some(key_id));
+                if !have {
+                    keys.push(key_rec);
+                }
+            }
+        }
+        None => {
+            // First sight — pin at bilateral UNTRUSTED (disjoint from GroupTier).
+            agents[handle] = json!({
+                "tier": "UNTRUSTED",
+                "did": did,
+                "public_keys": [key_rec],
+                "introduced_via": group_id,
+                "pinned_at": now,
+            });
+        }
+    }
+}
+
+/// Scan the inbox for `group_invite` events from pinned creators, verify them
+/// (event signature + roster `creator_sig`), materialize/refresh the local
+/// group at its highest epoch, and introduce-pin every other member. Lazy:
+/// runs at the top of group send/tail/list so a member just-pulled an invite
+/// is immediately usable. Skips groups this agent created.
+fn ingest_group_invites() -> Result<()> {
+    let inbox = config::inbox_dir()?;
+    if !inbox.exists() {
+        return Ok(());
+    }
+    let (self_did, ..) = group_self()?;
+    let trust_now = config::read_trust().unwrap_or_else(|_| json!({"agents": {}}));
+    // group_id -> highest-epoch verified roster seen in the inbox.
+    let mut best: std::collections::HashMap<String, crate::group::Group> =
+        std::collections::HashMap::new();
+
+    for entry in std::fs::read_dir(&inbox)?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        for line in std::fs::read_to_string(&path).unwrap_or_default().lines() {
+            let event: Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if event.get("type").and_then(Value::as_str) != Some("group_invite") {
+                continue;
+            }
+            // Event-level: the invite must be from a pinned peer (the creator)
+            // with a valid signature.
+            if verify_message_v31(&event, &trust_now).is_err() {
+                continue;
+            }
+            let Some(body) = event.get("body") else {
+                continue;
+            };
+            let group: crate::group::Group = match serde_json::from_value(body.clone()) {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            if group.creator_did == self_did {
+                continue; // never overwrite a group I created
+            }
+            // The invite's sender must be the group's creator.
+            let from_did = event.get("from").and_then(Value::as_str).unwrap_or("");
+            if from_did != group.creator_did {
+                continue;
+            }
+            // Roster integrity: creator_sig must verify against the creator's
+            // independently-pinned key (we paired with the creator → have it).
+            let creator_handle = crate::agent_card::display_handle_from_did(&group.creator_did);
+            let creator_key = trust_now
+                .get("agents")
+                .and_then(|a| a.get(creator_handle))
+                .and_then(|a| a.get("public_keys"))
+                .and_then(Value::as_array)
+                .and_then(|ks| ks.first())
+                .and_then(|k| k.get("key"))
+                .and_then(Value::as_str)
+                .and_then(|b| crate::signing::b64decode(b).ok());
+            let Some(creator_key) = creator_key else {
+                continue;
+            };
+            if !group.verify(&creator_key) {
+                continue;
+            }
+            match best.get(&group.id) {
+                Some(prev) if prev.epoch >= group.epoch => {}
+                _ => {
+                    best.insert(group.id.clone(), group);
+                }
+            }
+        }
+    }
+
+    if best.is_empty() {
+        return Ok(());
+    }
+    let mut trust = config::read_trust()?;
+    for group in best.values() {
+        // Don't regress a locally-known group to a stale epoch.
+        if let Ok(local) = crate::group::load_group(&group.id)
+            && local.epoch >= group.epoch
+        {
+            continue;
+        }
+        crate::group::save_group(group)?;
+        for m in &group.members {
+            if m.did == self_did || m.key.is_empty() {
+                continue;
+            }
+            introduce_pin(&mut trust, &m.handle, &m.did, &m.key_id, &m.key, &group.id);
+        }
+    }
+    config::write_trust(&trust)?;
+    Ok(())
 }
 
 fn cmd_group_create(name: &str, as_json: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire up` first");
     }
-    let (did, handle) = group_self_identity()?;
+    let (did, handle, key_id, pk_b64) = group_self()?;
+    let relay_url = group_room_relay_url()?;
+    // Allocate the shared group-room slot on the relay.
+    let client = crate::relay_client::RelayClient::new(&relay_url);
+    let room = client
+        .allocate_slot(Some(&format!("group:{name}")))
+        .with_context(|| format!("allocating group room on {relay_url}"))?;
     let id = format!("g{:016x}", rand::random::<u64>());
-    let mut group = crate::group::Group::new(id.clone(), name.to_string(), handle, did);
+    let mut group = crate::group::Group::new(id.clone(), name.to_string(), handle, did.clone());
+    group.set_room(relay_url, room.slot_id, room.slot_token);
+    group.set_member_keys(&did, key_id, pk_b64)?;
     let sk = config::read_private_key()?;
     group.sign(&sk)?;
     crate::group::save_group(&group)?;
     if as_json {
         println!(
             "{}",
-            serde_json::to_string(&json!({"id": id, "name": name, "members": 1}))?
+            serde_json::to_string(&json!({
+                "id": id, "name": name, "members": 1, "relay_url": group.relay_url
+            }))?
         );
     } else {
-        println!("created group `{name}` (id {id}). You are the creator.");
+        println!(
+            "created group `{name}` (id {id}) — room on {}. You are the creator.",
+            group.relay_url
+        );
         println!("  add peers: `wire group add {id} <peer>`   talk: `wire group send {id} \"hi\"`");
     }
     Ok(())
 }
 
 fn cmd_group_add(group_ref: &str, peer: &str, as_json: bool) -> Result<()> {
-    let (self_did, _) = group_self_identity()?;
+    let (self_did, ..) = group_self()?;
     let mut group = crate::group::resolve_group(group_ref)?;
     if group.creator_did != self_did {
         bail!("only the group creator can add members (the creator signs the roster)");
@@ -7121,20 +7345,50 @@ fn cmd_group_add(group_ref: &str, peer: &str, as_json: bool) -> Result<()> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("trust entry for `{bare}` is missing a did"))?
         .to_string();
-    group.add_member(bare.clone(), peer_did, crate::group::GroupTier::Member)?;
+    // Capture the peer's signing key from trust so the creator can vouch for it
+    // in the signed roster (members introduce-pin it to verify this peer).
+    let key = agent
+        .get("public_keys")
+        .and_then(Value::as_array)
+        .and_then(|ks| {
+            ks.iter()
+                .find(|k| k.get("active").and_then(Value::as_bool).unwrap_or(true))
+        })
+        .ok_or_else(|| anyhow!("no active pinned key for `{bare}` in trust"))?;
+    let peer_key_id = key
+        .get("key_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let peer_pk = key
+        .get("key")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    group.add_member(
+        bare.clone(),
+        peer_did.clone(),
+        crate::group::GroupTier::Member,
+    )?;
+    group.set_member_keys(&peer_did, peer_key_id, peer_pk)?;
     let sk = config::read_private_key()?;
     group.sign(&sk)?;
     crate::group::save_group(&group)?;
+    // Distribute the refreshed signed roster (room coords + everyone's keys) to
+    // ALL members so each can post + verify the others.
+    let delivered = distribute_group_invite(&group, &self_did).unwrap_or(0);
     if as_json {
         println!(
             "{}",
             serde_json::to_string(&json!({
-                "group": group.id, "added": bare, "epoch": group.epoch, "members": group.members.len()
+                "group": group.id, "added": bare, "epoch": group.epoch,
+                "members": group.members.len(), "invites_queued": delivered
             }))?
         );
     } else {
         println!(
-            "added `{bare}` to `{}` — now {} member(s), epoch {}",
+            "added `{bare}` to `{}` — now {} member(s), epoch {} ({delivered} invite(s) queued; run `wire push`)",
             group.name,
             group.members.len(),
             group.epoch
@@ -7147,149 +7401,122 @@ fn cmd_group_send(group_ref: &str, message: &str, as_json: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire up` first");
     }
-    let (self_did, self_handle) = group_self_identity()?;
+    ingest_group_invites()?;
+    let (self_did, self_handle, _, pk_b64) = group_self()?;
     let group = crate::group::resolve_group(group_ref)?;
     if !group.contains_did(&self_did) {
         bail!("you are not a member of group `{}`", group.name);
     }
-    let targets = group.other_member_handles(&self_did);
-    if targets.is_empty() {
+    if group.slot_id.is_empty() || group.relay_url.is_empty() {
         bail!(
-            "group `{}` has no other members yet — add one with `wire group add {} <peer>`",
-            group.name,
-            group.id
+            "group `{}` has no room slot (legacy/partial group)",
+            group.name
         );
     }
-
-    // Sign material once (mirrors cmd_mesh_broadcast); fan a kind=group_msg
-    // event to every other member's outbox. The daemon delivers from there.
     let sk_seed = config::read_private_key()?;
-    let card = config::read_agent_card()?;
-    let pk_b64 = card
-        .get("verify_keys")
-        .and_then(Value::as_object)
-        .and_then(|m| m.values().next())
-        .and_then(|v| v.get("key"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("agent-card missing verify_keys[*].key"))?;
-    let pk_bytes = crate::signing::b64decode(pk_b64)?;
-    let kind_id = parse_kind("group_msg")?;
+    let pk_bytes = crate::signing::b64decode(&pk_b64)?;
     let now_iso = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
-    let body = json!({
-        "group_id": group.id,
-        "group_name": group.name,
-        "epoch": group.epoch,
-        "text": message,
+    let event = json!({
+        "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
+        "timestamp": now_iso,
+        "from": self_did,
+        "to": format!("did:wire:group:{}", group.id),
+        "type": "group_msg",
+        "kind": parse_kind("group_msg")?,
+        "body": {
+            "group_id": group.id,
+            "group_name": group.name,
+            "epoch": group.epoch,
+            "text": message,
+        },
     });
-
-    let mut sent: Vec<String> = Vec::new();
-    let mut failed: Vec<Value> = Vec::new();
-    for handle in &targets {
-        let event = json!({
-            "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
-            "timestamp": now_iso,
-            "from": self_did,
-            "to": format!("did:wire:{handle}"),
-            "type": "group_msg",
-            "kind": kind_id,
-            "body": body,
-        });
-        let signed = match sign_message_v31(&event, &sk_seed, &pk_bytes, &self_handle) {
-            Ok(s) => s,
-            Err(e) => {
-                failed.push(json!({"peer": handle, "error": format!("{e:?}")}));
-                continue;
-            }
-        };
-        let line = serde_json::to_vec(&signed)?;
-        match config::append_outbox_record(handle, &line) {
-            Ok(_) => sent.push(handle.clone()),
-            Err(e) => failed.push(json!({"peer": handle, "error": format!("{e:#}")})),
-        }
-    }
-
+    let signed = sign_message_v31(&event, &sk_seed, &pk_bytes, &self_handle)
+        .map_err(|e| anyhow!("signing group_msg: {e:?}"))?;
+    // Post the one message to the shared group slot.
+    let client = crate::relay_client::RelayClient::new(&group.relay_url);
+    client
+        .post_event(&group.slot_id, &group.slot_token, &signed)
+        .with_context(|| {
+            format!(
+                "posting to group room {} on {}",
+                group.slot_id, group.relay_url
+            )
+        })?;
     if as_json {
         println!(
             "{}",
             serde_json::to_string(&json!({
-                "group": group.id, "epoch": group.epoch, "sent": sent, "failed": failed
+                "group": group.id, "epoch": group.epoch, "status": "posted",
+                "members": group.members.len()
             }))?
         );
     } else {
-        let tail = if failed.is_empty() {
-            String::new()
-        } else {
-            format!(" ({} failed)", failed.len())
-        };
         println!(
-            "group `{}`: queued to {}/{} member(s){tail}",
+            "group `{}`: posted to the room ({} member(s))",
             group.name,
-            sent.len(),
-            targets.len()
+            group.members.len()
         );
     }
     Ok(())
 }
 
 fn cmd_group_tail(group_ref: &str, limit: usize, as_json: bool) -> Result<()> {
-    // In I1 a member added by the creator has no local roster record, so a
-    // member tails by group_id directly: resolve a local group if one exists,
-    // else treat the arg AS the group_id (filter the inbox by it). I2's
-    // join-code path materializes member-side records and removes this gap.
-    let group = crate::group::resolve_group(group_ref).unwrap_or_else(|_| {
-        crate::group::Group::new(
-            group_ref.to_string(),
-            group_ref.to_string(),
-            String::new(),
-            String::new(),
-        )
-    });
-    let inbox = config::inbox_dir()?;
+    ingest_group_invites()?;
+    let group = crate::group::resolve_group(group_ref)?;
+    if group.slot_id.is_empty() || group.relay_url.is_empty() {
+        bail!(
+            "group `{}` has no room slot (legacy/partial group)",
+            group.name
+        );
+    }
     let trust = config::read_trust().unwrap_or_else(|_| json!({"agents": {}}));
+    let client = crate::relay_client::RelayClient::new(&group.relay_url);
+    // Pull the shared room; cap generously then show the last `limit`.
+    let fetch = if limit == 0 {
+        1000
+    } else {
+        (limit * 4).min(1000)
+    };
+    let events = client
+        .list_events(&group.slot_id, &group.slot_token, None, Some(fetch))
+        .with_context(|| {
+            format!(
+                "pulling group room {} on {}",
+                group.slot_id, group.relay_url
+            )
+        })?;
+
     // (timestamp, from_handle, text, verified)
     let mut msgs: Vec<(String, String, String, bool)> = Vec::new();
-    if inbox.exists() {
-        for entry in std::fs::read_dir(&inbox)?.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let from_handle = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?")
-                .to_string();
-            for line in std::fs::read_to_string(&path).unwrap_or_default().lines() {
-                let event: Value = match serde_json::from_str(line) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                // body may be an object or a JSON-encoded string.
-                let body = match event.get("body") {
-                    Some(Value::String(s)) => serde_json::from_str::<Value>(s).ok(),
-                    Some(v) => Some(v.clone()),
-                    None => None,
-                };
-                let Some(body) = body else { continue };
-                if body.get("group_id").and_then(Value::as_str) != Some(group.id.as_str()) {
-                    continue;
-                }
-                let ts = event
-                    .get("timestamp")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let text = body
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let verified = verify_message_v31(&event, &trust).is_ok();
-                msgs.push((ts, from_handle.clone(), text, verified));
-            }
+    for event in &events {
+        if event.get("type").and_then(Value::as_str) != Some("group_msg") {
+            continue;
         }
+        let body = match event.get("body") {
+            Some(Value::String(s)) => serde_json::from_str::<Value>(s).ok(),
+            Some(v) => Some(v.clone()),
+            None => None,
+        };
+        let Some(body) = body else { continue };
+        if body.get("group_id").and_then(Value::as_str) != Some(group.id.as_str()) {
+            continue;
+        }
+        let from_did = event.get("from").and_then(Value::as_str).unwrap_or("");
+        let from_handle = crate::agent_card::display_handle_from_did(from_did).to_string();
+        let ts = event
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let text = body
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let verified = verify_message_v31(event, &trust).is_ok();
+        msgs.push((ts, from_handle, text, verified));
     }
     msgs.sort_by(|a, b| a.0.cmp(&b.0));
     let start = if limit > 0 {

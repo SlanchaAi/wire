@@ -56,6 +56,15 @@ pub struct Member {
     /// a handle, and a roster entry is pinned to one keypair.
     pub did: String,
     pub tier: GroupTier,
+    /// Ed25519 key id (`<handle>:<fp>`). Part of the creator-signed roster so a
+    /// member can introduce-pin this member's key on the creator's vouch.
+    #[serde(default)]
+    pub key_id: String,
+    /// Base64 Ed25519 public key. The creator vouches for this binding via
+    /// `creator_sig`; members pin it (at bilateral UNTRUSTED) to verify this
+    /// member's group messages without a direct SAS handshake.
+    #[serde(default)]
+    pub key: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +75,18 @@ pub struct Group {
     /// Bumped on every roster mutation (add/remove). Orders revocations (T17).
     pub epoch: u64,
     pub members: Vec<Member>,
+    /// The shared group-room slot (I2). The creator allocates one relay slot;
+    /// its token is the room key, distributed only to vouched members. Everyone
+    /// posts + pulls this one slot. Empty until the room is allocated.
+    #[serde(default)]
+    pub relay_url: String,
+    #[serde(default)]
+    pub slot_id: String,
+    /// Shared room key — read+write bearer credential for the group slot.
+    /// SECRET: held only by vouched members; a leak compromises the room
+    /// (revocation = rotate the slot, the I3 kick path).
+    #[serde(default)]
+    pub slot_token: String,
     /// Creator's Ed25519 signature (base64) over the canonical roster sans
     /// this field. Empty until signed.
     #[serde(default)]
@@ -81,13 +102,39 @@ impl Group {
                 handle: creator_handle,
                 did: creator_did.clone(),
                 tier: GroupTier::Creator,
+                key_id: String::new(),
+                key: String::new(),
             }],
             id,
             name,
             creator_did,
             epoch: 0,
+            relay_url: String::new(),
+            slot_id: String::new(),
+            slot_token: String::new(),
             creator_sig: String::new(),
         }
+    }
+
+    /// Attach the relay-room coords (the shared group slot). Does NOT bump
+    /// epoch — set as part of the create transaction, before signing.
+    pub fn set_room(&mut self, relay_url: String, slot_id: String, slot_token: String) {
+        self.relay_url = relay_url;
+        self.slot_id = slot_id;
+        self.slot_token = slot_token;
+    }
+
+    /// Attach a member's signing key by DID. Does NOT bump epoch — set as part
+    /// of the add transaction, before signing. Errors if the DID isn't present.
+    pub fn set_member_keys(&mut self, did: &str, key_id: String, key: String) -> Result<()> {
+        let m = self
+            .members
+            .iter_mut()
+            .find(|m| m.did == did)
+            .with_context(|| format!("did {did} not in group {}", self.id))?;
+        m.key_id = key_id;
+        m.key = key;
+        Ok(())
     }
 
     /// True if `did` is in the roster (any tier).
@@ -110,7 +157,13 @@ impl Group {
         if self.contains_did(&did) {
             bail!("did {did} already in group {}", self.id);
         }
-        self.members.push(Member { handle, did, tier });
+        self.members.push(Member {
+            handle,
+            did,
+            tier,
+            key_id: String::new(),
+            key: String::new(),
+        });
         self.epoch += 1;
         self.creator_sig.clear();
         Ok(())
@@ -142,6 +195,9 @@ impl Group {
             "creator_did": self.creator_did,
             "epoch": self.epoch,
             "members": self.members,
+            "relay_url": self.relay_url,
+            "slot_id": self.slot_id,
+            "slot_token": self.slot_token,
         });
         canonical_event(&payload, true)
     }
@@ -281,6 +337,8 @@ mod tests {
             handle: "intruder".into(),
             did: "did:wire:intruder-bbbbbbbb".into(),
             tier: GroupTier::Member,
+            key_id: String::new(),
+            key: String::new(),
         });
         assert!(!g.verify(&pk), "tampered roster must NOT verify");
     }
@@ -350,6 +408,48 @@ mod tests {
         assert_ne!(
             GroupTier::Member.as_str(),
             crate::trust::Tier::Verified.as_str()
+        );
+    }
+
+    #[test]
+    fn room_coords_and_member_keys_are_covered_by_the_signature() {
+        // The creator vouches for the room coords + each member's key binding,
+        // so tampering with either after signing must invalidate creator_sig.
+        let (mut g, sk, pk) = mk();
+        g.set_room(
+            "https://wireup.net".into(),
+            "slot-abc".into(),
+            "tok-secret".into(),
+        );
+        g.add_member(
+            "bob".into(),
+            "did:wire:bob-12345678".into(),
+            GroupTier::Member,
+        )
+        .unwrap();
+        g.set_member_keys(
+            "did:wire:bob-12345678",
+            "bob:12345678".into(),
+            "BOBKEY".into(),
+        )
+        .unwrap();
+        g.sign(&sk).unwrap();
+        assert!(g.verify(&pk), "signed roster with room + keys must verify");
+
+        // Tamper the room key → verify fails.
+        let mut g2 = g.clone();
+        g2.slot_token = "stolen".into();
+        assert!(
+            !g2.verify(&pk),
+            "swapping the room token must break the vouch"
+        );
+
+        // Tamper a member's pinned key → verify fails (handle-spoof / key-swap).
+        let mut g3 = g.clone();
+        g3.members[1].key = "ATTACKERKEY".into();
+        assert!(
+            !g3.verify(&pk),
+            "swapping a member key must break the vouch"
         );
     }
 
