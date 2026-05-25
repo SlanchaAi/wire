@@ -21,6 +21,10 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY tests ./tests
 COPY landing ./landing
+# assets/ holds files embedded at compile time via include_str! (e.g. the
+# v0.13.2 statusline renderer, assets/wire-statusline.sh). Without this COPY
+# the Docker build fails: "couldn't read ../assets/wire-statusline.sh".
+COPY assets ./assets
 
 RUN cargo build --release --bin wire
 
