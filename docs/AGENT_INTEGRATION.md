@@ -89,6 +89,17 @@ The MCP server's `instructions` field reminds connecting agents of this on every
 
 ### Multi-session on one machine (v0.5.16)
 
+> **v0.13+ — identity is per SESSION, not per cwd. Read this before the cwd-registry model below, which is now the legacy fallback.** As of v0.13 `wire` keys each session's identity off the session id — `WIRE_SESSION_ID` (explicit override) **>** `CLAUDE_CODE_SESSION_ID` (set by Claude Code) — into `sessions/by-key/<sha256(key)[:16]>`, and the MCP server **auto-bootstraps** that identity on startup (no manual `wire session new` / `wire up`). Two Claude tabs in the SAME directory get DISTINCT personas; you do NOT need a per-project `.mcp.json`. The cwd → session-registry path below is used ONLY when no session key is present in the wire process's env.
+>
+> **Symptom: every session shows the SAME persona** (frequently on Windows or older MCP hosts) — the session id isn't reaching `wire`, so it fell back to the cwd path, and everything launched from one directory (e.g. your home dir) collapses onto that directory's single identity. It is **not** "identity is per-directory by design." Diagnose + fix:
+> ```bash
+> wire whoami --json        # config_dir under …/by-key/<hash>/ = session-keyed (good); a cwd/home path = fell back
+> echo "$CLAUDE_CODE_SESSION_ID"            # PowerShell: $env:CLAUDE_CODE_SESSION_ID  — empty in the wire env = the cause
+> # Force a unique, stable key per session before launching the agent:
+> export WIRE_SESSION_ID="$(uuidgen)"                 # bash/zsh
+> $env:WIRE_SESSION_ID = [guid]::NewGuid().ToString() # PowerShell
+> ```
+
 When multiple agent sessions run on the same machine — e.g. one Claude Code in `~/Source/wire`, another in `~/Source/slancha-mesh` — they share one `WIRE_HOME` by default, which means they share one DID, one slot, one inbox JSONL, and one daemon. Peers can't address a specific session, and cursor advances by either session drain events the other never sees.
 
 Fix: give each session its own isolated `WIRE_HOME`. The `wire session` subcommand wraps the bootstrap:
