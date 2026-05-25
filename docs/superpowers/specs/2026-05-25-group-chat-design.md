@@ -26,9 +26,21 @@ Group     = { id, name, creator_did, epoch, members[], creator_sig }
 7. `wire group kick <group> <member>` — remove from roster, epoch++, re-sign; **T11 sender-token revocation** (rotate the group send credential so the kicked member can no longer post). Local-drop allowed without the creator (don't make the creator a single point of failure for kicks).
 
 ## Increments (test each)
-- **I1 (MVP, this pass):** model + create/add/send/tail/list + tests (unit: roster sign/verify, epoch bump, GroupTier disjoint from bilateral Tier; e2e: create→add VERIFIED peer→send→peer tails it). A working group chat among verified peers.
-- **I2:** multi-use join-code → Introduced, visible joins (relay-enforced TTL+uses).
+- **I1 (MVP) — SHIPPED 2026-05-25 (commits fed60da model, 206896e commands+e2e):** model + create/add/send/tail/list + tests. Unit: roster sign/verify, tamper, epoch bump, GroupTier disjoint from bilateral Tier (8 tests, src/group.rs). E2e (tests/e2e_group.rs): relay + 3 agents, creator pairs both members (SAS→VERIFIED), creates group, adds both (epoch→2), refuses an unpaired peer, broadcasts 2 msgs; both members pull (2 written / 0 rejected) and tail by id with verified=true. **Scope: creator-broadcast only** (see Topology below) — a working *announce-style* group chat among verified members.
+- **I2:** bidirectional chat via roster-vouched introductions (see Topology) + multi-use join-code → Introduced, visible joins (relay-enforced TTL+uses).
 - **I3:** kick + T11 sender-token revocation (secure-eject); creator-offline local-drop.
 
+## Topology constraint (the I1→I2 boundary — found while building I1)
+Members are added by pairing each one with the **creator** (star), not pairwise. So in I1 a member can RECEIVE the creator's broadcast (it's paired with + pins the creator) but **cannot send to the group**, for two independent reasons:
+1. **No coords.** A member has relay slot coords only for the creator, not for other members — nothing to push to.
+2. **Trust gate.** Even with coords, the receiver's `verify_message_v31` rejects an event whose sender it hasn't pinned. Member-A is not in member-B's trust.
+
+Bidirectional chat is therefore NOT a quick add on top of I1 — it needs the **introduce-on-vouch** mechanism that `GroupTier::Introduced` + `creator_sig` were designed for:
+- The signed roster must carry **each member's relay endpoint(s)** (the creator knows them from pairing) so members learn where to reach each other.
+- On ingesting a creator-signed roster, a member **pins the other members at `Introduced`** on the creator's vouch (creator_sig authenticates the roster across relays).
+- `verify_message_v31` (or the group-msg accept path) must **accept `Introduced`-pinned senders** for `group_msg` events scoped to that group_id. This is the security-sensitive step: pinning a key you never SAS-verified, trusting the creator's signature instead. Scope it to group_msg + the specific group; never auto-promote bilateral Tier.
+
+Until I2 ships this, members reply out-of-band (direct `wire send` to the creator) or the creator stays the hub. This finding sharpens I2 from "join code" into a concrete trust-model change.
+
 ## Open coordination
-feral owns `src/group.rs` membership on its branch. If it pushes, adopt its model + I add commands 3–7 + tests. If not, I build the minimal model above and reconcile at merge. Transport layer (send/tail/invite/kick) is largely independent of the model internals — interface is "the member-handle set for group G".
+feral owns `src/group.rs` membership on its branch. I built the minimal model + commands per this spec (feral's was exploratory/unpushed); reconcile at merge. Transport layer (send/tail/invite/kick) is independent of model internals — interface is "the member-handle set for group G".
