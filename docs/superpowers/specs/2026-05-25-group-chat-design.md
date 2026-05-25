@@ -42,5 +42,27 @@ Bidirectional chat is therefore NOT a quick add on top of I1 — it needs the **
 
 Until I2 ships this, members reply out-of-band (direct `wire send` to the creator) or the creator stays the hub. This finding sharpens I2 from "join code" into a concrete trust-model change.
 
+## I2 architecture — LOCKED 2026-05-25 (operator: "build I2 bidirectional")
+Three transports were on the table; the relay model decides between them.
+
+**Finding:** a relay `slot_token` is a read+write bearer credential (`relay_server.rs`: "token holder may read + write that slot"; `post_event` sends `Bearer {slot_token}`). So:
+- **(A) Direct member-to-member mesh** would require distributing each member's *personal* mailbox token to every other member — the credential leak the tracker's E6 already flags, and the harness blocks token-over-federation. **Rejected.**
+- **(B) Creator-hub daemon re-fan** avoids new credentials but needs the creator's *daemon* to auto-rebroadcast peer messages — the auto-act surface we're keeping conservative. **Rejected** (don't grow daemon auto-act).
+- **(C) Shared group slot = a real group room.** **CHOSEN.** A slot is already a shared-token mailbox (that's literally how paired peers work, `post_event` doc). The creator allocates ONE slot; its token is the **room key**. Everyone posts + pulls that one slot. No relay change, no daemon change, no per-member credential mesh.
+
+**Mechanism:**
+1. `group create` allocates a group slot on the creator's relay → `{relay_url, slot_id, slot_token}` stored in the Group. Self is added with its `key_id` + pubkey.
+2. `group add <peer>` captures the peer's `did` + `key_id` + pubkey from the creator's trust (the peer is bilaterally VERIFIED), adds them to the signed roster, and pushes a **`group_invite`** event (the full Group incl. slot coords + creator-signed roster) to the peer over the existing paired channel.
+3. **Member ingest** (lazy, at the top of any `group` command — no daemon): scan inbox for `group_invite` from a pinned creator; verify the event signature AND the roster `creator_sig`; materialize the local Group; **introduce-pin** every other member — write `trust.agents[handle] = {tier:"UNTRUSTED", did, public_keys:[{key_id, key, active}], introduced_via:<group_id>}`. Bilateral Tier stays UNTRUSTED (axes disjoint); the key is now present so `verify_message_v31` (key-presence, NOT tier-gated — confirmed) succeeds for that member's group messages.
+4. `group send` signs a `group_msg` and `post_event`s it to the **group slot** (one post, not a fan-out).
+5. `group tail` `list_events` the group slot, verifies each message against pinned keys, displays.
+
+**Security properties (documented, inherent to a group room):**
+- The group `slot_token` is a shared room key: any holder can post + read. Distributed ONLY to vouched (VERIFIED-by-creator) members over secure paired channels. A leaked token = room compromise → revocation = rotate the slot (the I3 kick mechanism).
+- introduce-pin trusts the creator's *signature* over the roster in place of a SAS handshake. Scoped: it pins keys for group-message verification at bilateral UNTRUSTED; it never grants bilateral Tier and never auto-promotes.
+- `creator_sig` authenticates the member→key bindings + slot coords; a member verifies it before pinning anything.
+
+**Sub-increments:** I2a model+create/send/tail against the slot (single-identity test) · I2b invite distribution + member ingest/introduce-pin · I2c e2e bidirectional (member-A posts, member-B + creator read it verified).
+
 ## Open coordination
 feral owns `src/group.rs` membership on its branch. I built the minimal model + commands per this spec (feral's was exploratory/unpushed); reconcile at merge. Transport layer (send/tail/invite/kick) is independent of model internals — interface is "the member-handle set for group G".
