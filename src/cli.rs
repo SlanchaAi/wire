@@ -9656,6 +9656,60 @@ fn cmd_service(action: ServiceAction) -> Result<()> {
 ///
 /// `--check` mode reports drift without acting — lists the processes
 /// that WOULD be killed and the binary version of each.
+///
+/// Session-scoped upgrade kill set (v0.13.2, B fix): THIS session's own daemon
+/// (`my_pid`, from its pidfile — reliable even when the OS process scan can't
+/// see it, as on Windows) plus TRUE orphans (found `wire daemon` pids owned by
+/// no session), EXCLUDING sibling sessions' daemons. Pure + unit-tested so the
+/// session-scoping is locked — the box-wide predecessor accumulated daemons.
+fn upgrade_kill_set(
+    my_pid: Option<u32>,
+    found_daemon_pids: &[u32],
+    owned_session_pids: &std::collections::HashSet<u32>,
+) -> Vec<u32> {
+    let mut k: Vec<u32> = Vec::new();
+    if let Some(p) = my_pid {
+        k.push(p);
+    }
+    for &p in found_daemon_pids {
+        if !owned_session_pids.contains(&p) && Some(p) != my_pid {
+            k.push(p); // true orphan — owned by no session
+        }
+    }
+    k.sort_unstable();
+    k.dedup();
+    k
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn upgrade_kill_set_is_session_scoped() {
+        // owned: my daemon 100, sibling session daemon 200.
+        let owned: HashSet<u32> = [100, 200].into_iter().collect();
+        // found by the process scan: mine (100), sibling (200), a true orphan (999).
+        let k = upgrade_kill_set(Some(100), &[100, 200, 999], &owned);
+        assert!(k.contains(&100), "must kill my own daemon (to replace it)");
+        assert!(k.contains(&999), "must sweep a true orphan");
+        assert!(!k.contains(&200), "must SPARE a sibling session's daemon");
+
+        // CRITICAL: even when the process scan returns EMPTY (Windows CIM can't
+        // match the quoted command line), my own daemon is still killed via its
+        // pidfile pid — this is the B-accumulation fix.
+        assert_eq!(
+            upgrade_kill_set(Some(100), &[], &owned),
+            vec![100],
+            "own daemon killed even when the process scan is empty"
+        );
+
+        // Uninitialized session (no own daemon): only true orphans.
+        assert_eq!(upgrade_kill_set(None, &[999], &HashSet::new()), vec![999]);
+    }
+}
+
 fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
     // 1. Identify all running wire processes. v0.7.3: walks `pgrep -f`
     // on unix / `Get-CimInstance Win32_Process` on Windows via the
@@ -9701,17 +9755,7 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         .iter()
         .filter_map(|s| crate::session::session_daemon_pid(&s.home_dir))
         .collect();
-    let mut kill_set: Vec<u32> = Vec::new();
-    if let Some(p) = my_daemon_pid {
-        kill_set.push(p);
-    }
-    for p in &daemon_pids {
-        if !owned_session_pids.contains(p) && Some(*p) != my_daemon_pid {
-            kill_set.push(*p); // true orphan — owned by no session
-        }
-    }
-    kill_set.sort_unstable();
-    kill_set.dedup();
+    let kill_set = upgrade_kill_set(my_daemon_pid, &daemon_pids, &owned_session_pids);
     // relay_pids are intentionally NOT killed — the local relay is shared.
 
     if check_only {
