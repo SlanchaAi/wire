@@ -5,6 +5,9 @@ Driven with paired Windows testers **glossy-magnolia** + **wisp-blossom** (two i
 
 Branch: `v0.13.2-windows-hardening`. Authoring lane: bright-camellia (this agent, macOS). Build/verify lane: feral-blossom (Windows). Shared loopback relay on `127.0.0.1:8771` — reinstall there restarts it and interrupts all local routing, so **coordinate before restarting**.
 
+## STATUS: v0.13.2 STABLE-READY (2026-05-25)
+Full rc10 Windows matrix GREEN (glossy): B + E2-bidirectional + pair-all-local + E3(additive+token-bleed) + A2 + C + E8 + statusline. **Stable tag HELD for operator review** (operator said hold live deploy). Non-blocking caveats: live sibling-daemon-survival re-test pending wisp recovery; true-orphan-sweep not yet staged. Separate: wisp daemon-stability (rc11).
+
 ## Status legend
 ✅ fixed + verified · 🟡 fixed, awaiting Windows re-verify · 🔴 open · 🔵 epic (separate from "no bugs" core)
 
@@ -17,7 +20,7 @@ Branch: `v0.13.2-windows-hardening`. Authoring lane: bright-camellia (this agent
 | A orphan-false+ | doctor reports phantom "orphan daemon" (pid changes every call = the query's own process) | ✅ verified (glossy, Win) | CIM query: `Name -like 'wire*'` + exclude `$PID` (kills powershell self-match) |
 | A2 cross-session-orphan | doctor flagged daemons as orphans on a multi-session box | ✅ verified (glossy, Win — correctly spared registered daemon, flagged only a true orphan) | orphan = daemon owned by NO session; subtract every session's pidfile pid |
 | E3-bleed | re-dial inherited the entry's top-level (stale LOCAL) token for the federation endpoint + clobbered the local endpoint → fed delivery 401 | ✅ verified (glossy, Win — local survives, fed token empty, no bleed) | cmd_add re-pin additive; fed token only from a prior FEDERATION endpoint |
-| B upgrade-kill | **CRITICAL**: box-wide `wire upgrade` killed nothing on Windows (CIM can't match quoted `wire.exe" daemon`) then respawned all → daemons ACCUMULATE (2→5→8→11) | 🟡 rc9 | session-scoped: kill THIS session's daemon via pidfile pid (CIM-independent) + true orphans; SPARE siblings + shared relay |
+| B upgrade-kill | **CRITICAL**: `wire upgrade` accumulated daemons on Windows | ✅ verified (glossy rc10: pid rotates, count stays 1, relay spared) | session-scoped kill (own daemon via pidfile + true orphans, spare siblings+relay) + force-kill survivors (taskkill /F /T — graceful is a no-op for a windowless daemon) |
 | C bash-WSL | `setup --statusline` emitted bare `bash` → Windows resolves to System32\bash.exe (WSL) → statusline breaks | 🟡 rc2 | `resolve_git_bash()` — absolute git-bash path |
 | D monitor-death | `wire monitor` exits 1 with ZERO output on P0.1 cursor-block (untrusted signer's event) — silent death | 🟡 rc4 | poll loop surfaces error to stderr + keeps watching; awaiting wisp exact repro |
 | E8 orphan-home | empty/no-card by-key homes surfaced as phantom "?" sisters in list-local (unconditional create_dir_all at process entry) | 🟡 rc5 | lazy home creation + `list_sessions` skips no-card homes |
