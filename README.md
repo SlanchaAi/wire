@@ -41,7 +41,13 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.13.4 (latest)
+## Status — v0.13.5 (latest)
+
+**v0.13.5 — Reliable per-session identity (PID-file adapter).**
+
+v0.13.4's env-forward was unreliable: Claude Code passes the literal `${CLAUDE_CODE_SESSION_ID}` unexpanded on clean terminals, which wire hashed → every session collapsed onto one identity. Fixed two ways: a guard that never hashes an unexpanded `${...}` placeholder, and the **Claude Code PID-file adapter** (@WILLARDKLEIN, #56) — wire walks its parent-process chain to the owning `claude` process and reads `~/.claude/sessions/<pid>.json` → `sessionId`, recovering the session id with zero env dependency. The MCP server now resolves the SAME identity as the CLI → true per-session identity, validated on Windows + macOS.
+
+## Status — v0.13.4
 
 **v0.13.4 — Per-session identity (MCP + Windows) + group chat + merged `wire update`.**
 

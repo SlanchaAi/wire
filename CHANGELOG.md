@@ -8,6 +8,17 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.13.5] — 2026-05-25
+
+**v0.13.5 — Reliable per-session identity (the PID-file adapter) + unexpanded-`${}` guard.**
+
+v0.13.4's env-forward (`WIRE_SESSION_ID=${CLAUDE_CODE_SESSION_ID}`) proved unreliable: Claude Code only expands `${}` when the var is in its OWN env, which on a clean top-level terminal (esp. Windows CC 2.1.150) it is NOT — so CC passes the LITERAL string, which wire hashed into ONE fixed identity (every session in every folder collapsed onto one persona). Two fixes:
+
+- **`${...}` literal guard** — `resolve_session_key` treats any unexpanded `${...}` value (and empty) as unset, so it never hashes a placeholder into a shared identity.
+- **Claude Code PID-file adapter** (thanks @WILLARDKLEIN, #56) — when the session id isn't in the env, wire walks its parent-process chain to the owning `claude` process and reads `~/.claude/sessions/<pid>.json` → `sessionId`. Deterministic, race-free, zero env/handshake dependency, cross-platform — validated on Windows (3 concurrent terminals → 3 distinct personas) and macOS. The MCP server now recovers the SAME session id the CLI uses, so CLI and MCP unify on one per-session identity, stable across reconnects.
+
+Net: true per-session identity everywhere, even when Claude Code doesn't put the session id in the MCP env. Ships a reference cross-platform proxy shim (`contrib/wire-mcp-proxy.py`) for builds without the native adapter.
+
 ## [v0.13.4] — 2026-05-25
 
 **v0.13.4 — Per-session identity (MCP + Windows), statusline fix, group chat, `wire update`.**
