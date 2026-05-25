@@ -677,16 +677,10 @@ pub fn resolve_session_key() -> Option<(String, &'static str)> {
         ("WIRE_SESSION_ID", "override"),
         ("CLAUDE_CODE_SESSION_ID", "claude-code"),
     ] {
-        if let Ok(v) = std::env::var(var) {
-            let v = v.trim();
-            // Guard against an unexpanded launcher placeholder, e.g. a host
-            // that writes `"env": {"WIRE_SESSION_ID": "${CLAUDE_CODE_SESSION_ID}"}`
-            // but does NOT expand it (Windows Claude Code passes the literal
-            // when the var is absent). Hashing the literal would collapse every
-            // session onto one identity, so treat a `${...}` value as unset.
-            if !v.is_empty() && !v.contains("${") {
-                return Some((v.to_string(), source));
-            }
+        if let Ok(v) = std::env::var(var)
+            && valid_session_key(&v)
+        {
+            return Some((v.trim().to_string(), source));
         }
     }
     // Claude Code adapter (host-agnostic fallback). On some platforms the MCP
@@ -700,6 +694,18 @@ pub fn resolve_session_key() -> Option<(String, &'static str)> {
         return Some((sid, "claude-code-pidfile"));
     }
     None
+}
+
+/// A session key from the environment is usable only if it is non-empty and is
+/// NOT an unexpanded `${...}` placeholder. A host that writes
+/// `"env": {"WIRE_SESSION_ID": "${CLAUDE_CODE_SESSION_ID}"}` but doesn't expand
+/// it (Windows Claude Code passes the literal when the var is absent) would
+/// otherwise have wire hash the literal — collapsing every session onto one
+/// identity. Treat any `${...}` value as unset so resolution falls through to
+/// the PID-file adapter / per-process mint instead of a shared bogus persona.
+fn valid_session_key(v: &str) -> bool {
+    let v = v.trim();
+    !v.is_empty() && !v.contains("${")
 }
 
 /// Recover the Claude Code session id from the per-session PID-file when it
@@ -1003,6 +1009,18 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn valid_session_key_rejects_empty_and_unexpanded_placeholder() {
+        assert!(valid_session_key("4129275d-cc5c-4d2a"));
+        assert!(valid_session_key("mcp-proc-deadbeef"));
+        assert!(!valid_session_key(""));
+        assert!(!valid_session_key("   "));
+        // The load-bearing guard: an unexpanded MCP-config placeholder must NOT
+        // be hashed — that's the all-sessions-collapse (soft-spruce) bug.
+        assert!(!valid_session_key("${CLAUDE_CODE_SESSION_ID}"));
+        assert!(!valid_session_key("  ${CLAUDE_CODE_SESSION_ID}  "));
+    }
 
     #[test]
     fn list_sessions_sees_by_key_homes_and_root_resolves_from_inside() {
