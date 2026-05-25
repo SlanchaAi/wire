@@ -42,7 +42,34 @@ wire up <nick>@wireup.net        # identity + relay bind + claim + local dual-bi
 
 `wire up` additively binds a local relay (`127.0.0.1:8771`) alongside the federation slot for sub-millisecond same-box sister routing. `--with-local <url>` overrides the probe; `--no-local` skips it. `wire bind-relay <url>` is additive too — you can hold a local relay AND a federation relay at once (`--scope`, `--replace`).
 
-### Same-host setup (operator does this once)
+### Identity is per SESSION (v0.13+) — NOT per directory
+
+**v0.13 changed the identity model. Read this before the cwd-based setup below — that is now a fallback.** Each agent session gets its OWN wire identity, keyed off the session id, not the working directory:
+
+- `wire` resolves identity from `WIRE_SESSION_ID` (explicit override) **>** `CLAUDE_CODE_SESSION_ID` (set by Claude Code), and stores it under `sessions/by-key/<hash>`. Two Claude tabs in the *same* directory get *different* personas; resuming the same session (same id) is stable across restarts.
+- The MCP server **auto-bootstraps** a fresh session's identity on startup (offline-capable local keygen, then a best-effort relay claim) — so a new session gets a name with no manual `wire init` / `wire up`. There may be a ~1s lag before the persona resolves (the statusline shows `(wire: not initialized)` until then).
+- The cwd-detect / `wire session new`-per-project registry (below) is the **legacy fallback**, used only when NO session key is present in the wire process's env (bare CLI, or an MCP host / OS that doesn't propagate the session id).
+
+**Symptom — every session shows the SAME persona** (you keep getting one handle no matter which session): the session key isn't reaching `wire`, so it fell back to the legacy cwd path, and every agent launched from the same directory collapses to that directory's identity (e.g. everything launched from `~` or `C:\Users\You` becomes one persona). This is a propagation gap, **not** "identity is per-directory by design." Diagnose:
+
+```bash
+wire whoami --json | grep -o '"config_dir":"[^"]*"'   # …/by-key/<hash>/… = session-keyed (good);
+                                                       # a cwd/home path = it fell back
+echo "$CLAUDE_CODE_SESSION_ID"      # PowerShell: $env:CLAUDE_CODE_SESSION_ID
+                                    # empty in the wire/MCP env = the cause
+```
+
+If the session id isn't in the wire process's env (some hosts, older Claude Code, or a Windows propagation gap), force a unique, stable key per session before launching the agent:
+
+```bash
+export WIRE_SESSION_ID="$(uuidgen)"                    # bash/zsh
+$env:WIRE_SESSION_ID = [guid]::NewGuid().ToString()    # PowerShell
+# then start the agent in that terminal — its wire identity is now unique to that session
+```
+
+(The statusLine renderer already bridges this: Claude Code passes `session_id` on the statusLine command's STDIN, and the bundled `wire-statusline.sh` exports it as `WIRE_SESSION_ID` before calling `wire whoami` — so the bottom-of-terminal persona matches the session even when the env var isn't inherited.)
+
+### Same-host setup (operator does this once) — legacy cwd-registry path
 
 ```bash
 # 1. Local-relay service (one-time, machine-wide):

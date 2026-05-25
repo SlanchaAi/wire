@@ -28,6 +28,16 @@ dir="$(winpath "$(field "$input" current_dir)")"
 home="${HOME//\\//}"
 case "$dir" in "$home"*) dir="~${dir#"$home"}";; esac
 
+# --- resolve THIS session's identity ---
+# Claude Code passes session_id on STDIN (not in the statusLine subprocess's
+# env), but `wire` keys each session's identity off $WIRE_SESSION_ID /
+# $CLAUDE_CODE_SESSION_ID. Without bridging stdin->env, `wire whoami` here can't
+# see the session key and falls back to a cwd-detected default home — showing
+# the wrong persona (or none) instead of this session's. Export it so whoami
+# resolves the same by-key identity the MCP server bootstrapped for the session.
+sid="$(field "$input" session_id)"
+[ -n "$sid" ] && export WIRE_SESSION_ID="$sid"
+
 # --- wire persona ---
 wj="$("$WIRE" whoami --json 2>/dev/null)"
 emoji="$(field "$wj" emoji)"

@@ -44,7 +44,7 @@ jobs:
             artifact: wire.exe
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -79,7 +79,7 @@ jobs:
           fi
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wire-${{ matrix.target }}
           path: dist/*
@@ -89,7 +89,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -109,7 +109,7 @@ jobs:
     # Skip pre-release tags; crates.io is for stable consumers only.
     if: ${{ !contains(github.ref, '-rc') && !contains(github.ref, '-beta') && !contains(github.ref, '-alpha') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 

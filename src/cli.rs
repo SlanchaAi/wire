@@ -1254,6 +1254,25 @@ pub enum GroupCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Mint a shareable join code for a group (a self-contained token carrying
+    /// the room coords + signed roster). Anyone you give it to can `wire group
+    /// join <code>` to enter the room at Introduced tier. The code IS the room
+    /// key — share it only with people you want in the room.
+    Invite {
+        /// Group id or name.
+        group: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Join a group from a code minted by `wire group invite`. Materializes the
+    /// room locally, pins the existing members on the creator's vouch, and
+    /// announces you to the room so members can verify your messages.
+    Join {
+        /// The `wire-group:` code (or bare base64 payload).
+        code: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `broadcast` fans a signed event to every pinned peer in one call.
@@ -7051,6 +7070,8 @@ fn cmd_group(cmd: GroupCommand) -> Result<()> {
         } => cmd_group_send(&group, &message, json),
         GroupCommand::Tail { group, limit, json } => cmd_group_tail(&group, limit, json),
         GroupCommand::List { json } => cmd_group_list(json),
+        GroupCommand::Invite { group, json } => cmd_group_invite(&group, json),
+        GroupCommand::Join { code, json } => cmd_group_join(&code, json),
     }
 }
 
@@ -7131,6 +7152,8 @@ fn distribute_group_invite(group: &crate::group::Group, self_did: &str) -> Resul
 /// `trust.agents[handle]` carries this key so the member's group messages
 /// verify, WITHOUT granting bilateral trust. Never lowers an existing tier
 /// (a directly-VERIFIED peer stays VERIFIED); only adds the key if missing.
+/// Returns `true` iff it actually changed `trust` (new entry or added key) —
+/// callers use this to decide whether to persist.
 fn introduce_pin(
     trust: &mut Value,
     handle: &str,
@@ -7138,7 +7161,7 @@ fn introduce_pin(
     key_id: &str,
     key: &str,
     group_id: &str,
-) {
+) -> bool {
     let now = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
@@ -7162,8 +7185,10 @@ fn introduce_pin(
                     .any(|k| k.get("key_id").and_then(Value::as_str) == Some(key_id));
                 if !have {
                     keys.push(key_rec);
+                    return true;
                 }
             }
+            false
         }
         None => {
             // First sight — pin at bilateral UNTRUSTED (disjoint from GroupTier).
@@ -7174,6 +7199,7 @@ fn introduce_pin(
                 "introduced_via": group_id,
                 "pinned_at": now,
             });
+            true
         }
     }
 }
@@ -7400,9 +7426,10 @@ fn cmd_group_send(group_ref: &str, message: &str, as_json: bool) -> Result<()> {
     ingest_group_invites()?;
     let (self_did, self_handle, _, pk_b64) = group_self()?;
     let group = crate::group::resolve_group(group_ref)?;
-    if !group.contains_did(&self_did) {
-        bail!("you are not a member of group `{}`", group.name);
-    }
+    // Membership for SEND is room-token possession: having the group locally
+    // (with its slot_token) is the capability. The signed roster gates who you
+    // can VERIFY, not whether you may post — a code-redeemed joiner isn't in the
+    // creator-signed roster but legitimately holds the room key.
     if group.slot_id.is_empty() || group.relay_url.is_empty() {
         bail!(
             "group `{}` has no room slot (legacy/partial group)",
@@ -7467,7 +7494,7 @@ fn cmd_group_tail(group_ref: &str, limit: usize, as_json: bool) -> Result<()> {
             group.name
         );
     }
-    let trust = config::read_trust().unwrap_or_else(|_| json!({"agents": {}}));
+    let mut trust = config::read_trust().unwrap_or_else(|_| json!({"agents": {}}));
     let client = crate::relay_client::RelayClient::new(&group.relay_url);
     // Pull the shared room; cap generously then show the last `limit`.
     let fetch = if limit == 0 {
@@ -7484,12 +7511,41 @@ fn cmd_group_tail(group_ref: &str, limit: usize, as_json: bool) -> Result<()> {
             )
         })?;
 
-    // (timestamp, from_handle, text, verified)
-    let mut msgs: Vec<(String, String, String, bool)> = Vec::new();
+    // Pass 1: introduce-pin anyone who announced a join. A `group_join` carries
+    // the joiner's card and must self-consistently sign under it; posting to the
+    // room requires the room token, so possession is the authorization (pinned
+    // at bilateral UNTRUSTED, group tier Introduced). This lets their later
+    // group messages verify even though they're not in the creator-signed roster.
+    let mut trust_changed = false;
     for event in &events {
-        if event.get("type").and_then(Value::as_str) != Some("group_msg") {
+        if event.get("type").and_then(Value::as_str) != Some("group_join") {
             continue;
         }
+        if let Some((h, did, kid, key)) = group_join_pin_material(event)
+            && introduce_pin(&mut trust, &h, &did, &kid, &key, &group.id)
+        {
+            trust_changed = true;
+        }
+    }
+    if trust_changed {
+        let _ = config::write_trust(&trust);
+    }
+
+    // Pass 2: build the timeline — group messages (verified against the
+    // now-augmented trust) interleaved with join notices.
+    enum Line {
+        Msg {
+            from: String,
+            text: String,
+            verified: bool,
+        },
+        Join {
+            who: String,
+        },
+    }
+    let mut timeline: Vec<(String, Line)> = Vec::new();
+    for event in &events {
+        let ty = event.get("type").and_then(Value::as_str).unwrap_or("");
         let body = match event.get("body") {
             Some(Value::String(s)) => serde_json::from_str::<Value>(s).ok(),
             Some(v) => Some(v.clone()),
@@ -7499,32 +7555,54 @@ fn cmd_group_tail(group_ref: &str, limit: usize, as_json: bool) -> Result<()> {
         if body.get("group_id").and_then(Value::as_str) != Some(group.id.as_str()) {
             continue;
         }
-        let from_did = event.get("from").and_then(Value::as_str).unwrap_or("");
-        let from_handle = crate::agent_card::display_handle_from_did(from_did).to_string();
         let ts = event
             .get("timestamp")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let text = body
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let verified = verify_message_v31(event, &trust).is_ok();
-        msgs.push((ts, from_handle, text, verified));
+        let from_did = event.get("from").and_then(Value::as_str).unwrap_or("");
+        let from_handle = crate::agent_card::display_handle_from_did(from_did).to_string();
+        match ty {
+            "group_msg" => {
+                let text = body
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let verified = verify_message_v31(event, &trust).is_ok();
+                timeline.push((
+                    ts,
+                    Line::Msg {
+                        from: from_handle,
+                        text,
+                        verified,
+                    },
+                ));
+            }
+            "group_join" => timeline.push((ts, Line::Join { who: from_handle })),
+            _ => {}
+        }
     }
-    msgs.sort_by(|a, b| a.0.cmp(&b.0));
+    timeline.sort_by(|a, b| a.0.cmp(&b.0));
     let start = if limit > 0 {
-        msgs.len().saturating_sub(limit)
+        timeline.len().saturating_sub(limit)
     } else {
         0
     };
-    let recent = &msgs[start..];
+    let recent = &timeline[start..];
     if as_json {
         let arr: Vec<Value> = recent
             .iter()
-            .map(|(ts, f, t, v)| json!({"ts": ts, "from": f, "text": t, "verified": v}))
+            .map(|(ts, l)| match l {
+                Line::Msg {
+                    from,
+                    text,
+                    verified,
+                } => {
+                    json!({"ts": ts, "type": "msg", "from": from, "text": text, "verified": verified})
+                }
+                Line::Join { who } => json!({"ts": ts, "type": "join", "from": who}),
+            })
             .collect();
         println!(
             "{}",
@@ -7535,11 +7613,200 @@ fn cmd_group_tail(group_ref: &str, limit: usize, as_json: bool) -> Result<()> {
     } else if recent.is_empty() {
         println!("group `{}`: no messages yet", group.name);
     } else {
-        for (ts, f, t, v) in recent {
+        for (ts, l) in recent {
             let short_ts: String = ts.chars().take(19).collect();
-            let mark = if *v { "✓" } else { "✗" };
-            println!("[{short_ts}] {} {mark}: {t}", persona_label(f));
+            match l {
+                Line::Msg {
+                    from,
+                    text,
+                    verified,
+                } => {
+                    let mark = if *verified { "✓" } else { "✗" };
+                    println!("[{short_ts}] {} {mark}: {text}", persona_label(from));
+                }
+                Line::Join { who } => println!("[{short_ts}] {} joined", persona_label(who)),
+            }
         }
+    }
+    Ok(())
+}
+
+/// Validate a `group_join` room event and extract the joiner's pin material:
+/// (handle, did, key_id, key_b64). The event MUST self-consistently sign under
+/// the key in the card it carries — so a forged join (card A, signed by key B)
+/// is rejected. Authorization to be in the room is proven by the post itself
+/// (it required the room token).
+fn group_join_pin_material(event: &Value) -> Option<(String, String, String, String)> {
+    let body = match event.get("body") {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).ok()?,
+        Some(v) => v.clone(),
+        None => return None,
+    };
+    let card = body.get("joiner_card")?;
+    // Verify the event signs under the card it carries (one-entry trust).
+    let mut tmp = json!({"agents": {}});
+    crate::trust::add_agent_card_pin(&mut tmp, card, Some("UNTRUSTED"));
+    if verify_message_v31(event, &tmp).is_err() {
+        return None;
+    }
+    let did = card.get("did").and_then(Value::as_str)?.to_string();
+    let handle = card
+        .get("handle")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::agent_card::display_handle_from_did(&did).to_string());
+    let (kid_full, krec) = card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.iter().next())?;
+    let key_id = kid_full
+        .strip_prefix("ed25519:")
+        .unwrap_or(kid_full)
+        .to_string();
+    let key = krec.get("key").and_then(Value::as_str)?.to_string();
+    Some((handle, did, key_id, key))
+}
+
+/// `wire group invite <group>` — mint a self-contained join code (the serialized
+/// signed group: room coords + roster + member keys). The code IS the room key.
+fn cmd_group_invite(group_ref: &str, as_json: bool) -> Result<()> {
+    let group = crate::group::resolve_group(group_ref)?;
+    if group.slot_id.is_empty() || group.relay_url.is_empty() {
+        bail!(
+            "group `{}` has no room slot — nothing to invite into",
+            group.name
+        );
+    }
+    if group.creator_sig.is_empty() {
+        bail!(
+            "group `{}` roster is unsigned — add a member or recreate before inviting",
+            group.name
+        );
+    }
+    let payload = serde_json::to_vec(&group)?;
+    let code = format!("wire-group:{}", crate::signing::b64encode(&payload));
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({"group": group.id, "name": group.name, "code": code}))?
+        );
+    } else {
+        println!(
+            "join code for `{}` — share ONLY with people you want in the room (it IS the room key):\n",
+            group.name
+        );
+        println!("{code}\n");
+        println!("they run:  wire group join <code>");
+    }
+    Ok(())
+}
+
+/// `wire group join <code>` — redeem a join code: verify the roster, materialize
+/// the room locally, introduce-pin existing members, and announce ourselves to
+/// the room so members verify our messages. Lands at group tier Introduced.
+fn cmd_group_join(code: &str, as_json: bool) -> Result<()> {
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire up` first");
+    }
+    let raw = code.trim();
+    let b64 = raw.strip_prefix("wire-group:").unwrap_or(raw);
+    let payload =
+        crate::signing::b64decode(b64).map_err(|_| anyhow!("invalid join code (not base64)"))?;
+    let group: crate::group::Group = serde_json::from_slice(&payload)
+        .map_err(|_| anyhow!("invalid join code (not a group payload)"))?;
+    if group.slot_id.is_empty() || group.relay_url.is_empty() {
+        bail!("join code carries no room coords");
+    }
+    // Verify the roster against the creator's key carried IN the roster (TOFU on
+    // the code — you obtained it over a trusted channel). Rejects a tampered code.
+    let creator_key = group
+        .members
+        .iter()
+        .find(|m| m.did == group.creator_did)
+        .map(|m| m.key.clone())
+        .filter(|k| !k.is_empty())
+        .and_then(|k| crate::signing::b64decode(&k).ok())
+        .ok_or_else(|| anyhow!("join code is missing the creator's key"))?;
+    if !group.verify(&creator_key) {
+        bail!("join code failed its signature check (tampered or corrupt)");
+    }
+    let (self_did, self_handle, _, _) = group_self()?;
+    if group.creator_did == self_did {
+        bail!("you created group `{}` — you're already in it", group.name);
+    }
+
+    // Materialize locally + introduce-pin existing members so we can verify them.
+    crate::group::save_group(&group)?;
+    let mut trust = config::read_trust()?;
+    for m in &group.members {
+        if m.did == self_did || m.key.is_empty() {
+            continue;
+        }
+        introduce_pin(&mut trust, &m.handle, &m.did, &m.key_id, &m.key, &group.id);
+    }
+    config::write_trust(&trust)?;
+
+    // Announce ourselves to the room (carry our card) so members introduce-pin us.
+    let card = config::read_agent_card()?;
+    let sk_seed = config::read_private_key()?;
+    let pk_b64 = card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent-card missing verify_keys[*].key"))?;
+    let pk_bytes = crate::signing::b64decode(pk_b64)?;
+    let now_iso = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+    let event = json!({
+        "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
+        "timestamp": now_iso,
+        "from": self_did,
+        "to": format!("did:wire:group:{}", group.id),
+        "type": "group_join",
+        "kind": parse_kind("group_join")?,
+        "body": {
+            "group_id": group.id,
+            "group_name": group.name,
+            "epoch": group.epoch,
+            "joiner_card": card,
+            "text": "joined",
+        },
+    });
+    let signed = sign_message_v31(&event, &sk_seed, &pk_bytes, &self_handle)
+        .map_err(|e| anyhow!("signing group_join: {e:?}"))?;
+    let client = crate::relay_client::RelayClient::new(&group.relay_url);
+    let announced = client
+        .post_event(&group.slot_id, &group.slot_token, &signed)
+        .is_ok();
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "group": group.id, "name": group.name, "joined": true,
+                "members": group.members.len(), "announced": announced
+            }))?
+        );
+    } else {
+        println!(
+            "joined group `{}` ({} member(s)) at Introduced tier.",
+            group.name,
+            group.members.len()
+        );
+        if announced {
+            println!("  announced to the room — members will verify your messages.");
+        } else {
+            println!(
+                "  ⚠ couldn't reach the room relay to announce; retry a `wire group send` so members can verify you."
+            );
+        }
+        println!(
+            "  read: `wire group tail {}`   talk: `wire group send {} \"hi\"`",
+            group.id, group.id
+        );
     }
     Ok(())
 }
@@ -12023,7 +12290,20 @@ fn cmd_profile(action: ProfileAction) -> Result<()> {
 fn cmd_setup(apply: bool) -> Result<()> {
     use std::path::PathBuf;
 
-    let entry = json!({"command": "wire", "args": ["mcp"]});
+    // The `env` mapping forwards Claude Code's per-session id into the MCP
+    // server. CRITICAL for per-session identity: the MCP server process does
+    // NOT inherit CLAUDE_CODE_SESSION_ID (Claude Code sets it for Bash-tool
+    // subprocesses only), and the MCP `initialize` handshake carries no session
+    // id — so without this, the server can't tell sessions apart, falls back to
+    // cwd-detection, and every Claude session under a shared parent dir
+    // collapses onto ONE identity. Claude Code expands `${CLAUDE_CODE_SESSION_ID}`
+    // from its own env at MCP launch; wire's `resolve_session_key` reads
+    // WIRE_SESSION_ID first, so each session becomes its own `by-key/<hash>`.
+    let entry = json!({
+        "command": "wire",
+        "args": ["mcp"],
+        "env": {"WIRE_SESSION_ID": "${CLAUDE_CODE_SESSION_ID}"}
+    });
     let entry_pretty = serde_json::to_string_pretty(&json!({"wire": &entry}))?;
 
     // Detect probable MCP host config locations. Cross-platform — we only

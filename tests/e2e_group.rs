@@ -144,6 +144,105 @@ fn drive_pairing(host_home: &PathBuf, guest_home: &PathBuf, relay_url: &str) {
     );
 }
 
+/// Join code: an agent who NEVER paired with anyone joins a group from a code,
+/// posts, and an existing member verifies the message — and the joiner verifies
+/// the members. Proves `group invite`/`group join` + introduce-pin-on-room-token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn group_join_code_admits_unpaired_member() {
+    let relay_dir = fresh_dir("jc-relay");
+    let relay = wire::relay_server::Relay::new(relay_dir).await.unwrap();
+    let app = relay.router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let relay_url = format!("http://{addr}");
+
+    // alice (creator) + bob (paired member) + dave (joins by code, never paired).
+    let alice = fresh_dir("jc-alice");
+    let bob = fresh_dir("jc-bob");
+    let dave = fresh_dir("jc-dave");
+    for (h, n) in [(&alice, "alice"), (&bob, "bob"), (&dave, "dave")] {
+        assert!(wire(h, &["init", n, "--offline"]).status.success());
+    }
+    let bob_h = read_handle(&bob);
+    let dave_h = read_handle(&dave);
+
+    // alice pairs with bob only; creates a group + adds bob.
+    drive_pairing(&alice, &bob, &relay_url);
+    assert!(
+        wire(&alice, &["group", "create", "open-room"])
+            .status
+            .success()
+    );
+    let list: Value =
+        serde_json::from_slice(&wire(&alice, &["group", "list", "--json"]).stdout).unwrap();
+    let gid = list["groups"][0]["id"].as_str().unwrap().to_string();
+    assert!(
+        wire(&alice, &["group", "add", &gid, &bob_h])
+            .status
+            .success()
+    );
+    assert!(wire(&alice, &["push"]).status.success());
+    assert!(wire(&bob, &["pull"]).status.success());
+
+    // alice mints a join code; dave (unpaired) redeems it.
+    let inv: Value =
+        serde_json::from_slice(&wire(&alice, &["group", "invite", &gid, "--json"]).stdout).unwrap();
+    let code = inv["code"].as_str().expect("invite code").to_string();
+    assert!(code.starts_with("wire-group:"), "code shape: {code}");
+    let join = wire(&dave, &["group", "join", &code]);
+    assert!(join.status.success(), "dave join failed: {join:?}");
+
+    // dave is now in the room locally and posts; alice + bob also post.
+    assert!(
+        wire(
+            &dave,
+            &["group", "send", &gid, "hi from dave (joined by code)"]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        wire(&bob, &["group", "send", &gid, "welcome dave"])
+            .status
+            .success()
+    );
+
+    // bob tails: must SEE dave's message, VERIFIED — bob never paired with dave,
+    // but introduce-pins him from his group_join announcement in the room.
+    let bob_tail: Value =
+        serde_json::from_slice(&wire(&bob, &["group", "tail", &gid, "--json"]).stdout).unwrap();
+    let bob_msgs = bob_tail["messages"].as_array().unwrap();
+    let dave_msg = bob_msgs
+        .iter()
+        .find(|m| m["type"] == "msg" && m["text"] == "hi from dave (joined by code)");
+    assert!(dave_msg.is_some(), "bob missing dave's msg: {bob_tail}");
+    assert_eq!(
+        dave_msg.unwrap()["verified"],
+        Value::Bool(true),
+        "bob must verify the joined member's message via the room-announced key: {bob_tail}"
+    );
+    assert!(
+        bob_msgs
+            .iter()
+            .any(|m| m["type"] == "join" && m["from"] == dave_h),
+        "bob should see dave's join notice: {bob_tail}"
+    );
+
+    // dave tails: sees bob's message verified (dave pinned the roster on join).
+    let dave_tail: Value =
+        serde_json::from_slice(&wire(&dave, &["group", "tail", &gid, "--json"]).stdout).unwrap();
+    let dave_msgs = dave_tail["messages"].as_array().unwrap();
+    let welcome = dave_msgs.iter().find(|m| m["text"] == "welcome dave");
+    assert!(welcome.is_some(), "dave missing bob's welcome: {dave_tail}");
+    assert_eq!(
+        welcome.unwrap()["verified"],
+        Value::Bool(true),
+        "dave must verify a roster member pinned from the join code: {dave_tail}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn group_bidirectional_room_with_introduce_pin() {
     // ---- 1. boot relay ----

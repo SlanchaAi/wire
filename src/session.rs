@@ -850,15 +850,43 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
             }
             Err(_) => return,
         }
-    } else {
-        let cwd = match std::env::current_dir() {
-            Ok(c) => c,
+    } else if label == "mcp" {
+        // v0.13.4 (operator directive: per-session ONLY, never cwd). The MCP
+        // server must NEVER cwd-resolve — that fallback is what collapsed every
+        // Claude session sharing a launch dir (`~/Source`, `C:\Users\<user>`)
+        // onto a single persona. A stdio MCP server is one process per Claude
+        // session, so when no session id reached us (the
+        // `${CLAUDE_CODE_SESSION_ID}` env-forward is missing or didn't expand)
+        // we MINT a per-process key: distinct per session, never a shared cwd
+        // identity. With the env-forward in place this branch isn't reached —
+        // the session id resolves above.
+        let minted = format!(
+            "mcp-proc-{:016x}{:016x}",
+            rand::random::<u64>(),
+            rand::random::<u64>()
+        );
+        match session_home_for_key(&minted) {
+            Ok(h) => {
+                // Pin it for the process so every later resolve is consistent.
+                unsafe {
+                    std::env::set_var("WIRE_SESSION_ID", &minted);
+                }
+                (
+                    h,
+                    "minted per-process key (no session id; cwd disabled for MCP)".to_string(),
+                )
+            }
             Err(_) => return,
-        };
-        match detect_session_wire_home(&cwd) {
-            Some(h) => (h, format!("cwd `{}`", cwd.display())),
-            None => return,
         }
+    } else {
+        // CLI with no session id. Per the per-session-only directive we do NOT
+        // cwd-resolve here either — cwd identity is the collision trap (agents
+        // shell out to the CLI, and any cwd-derived identity risks the wrong /
+        // shared persona). Under Claude Code the CLI always carries
+        // CLAUDE_CODE_SESSION_ID (resolved above), so this only hits a bare
+        // terminal outside an agent host — which gets the stable machine-default
+        // identity (set WIRE_SESSION_ID / WIRE_HOME for an explicit one). No cwd.
+        return;
     };
     // v0.9.1: emit the chatter ONLY when stderr is an interactive TTY.
     // When wire is invoked from a non-interactive parent (Claude Code's
