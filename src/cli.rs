@@ -610,6 +610,11 @@ pub enum Command {
     /// broadcast` fans one signed event to every pinned peer.
     #[command(subcommand)]
     Mesh(MeshCommand),
+    /// Group chat (v0.13.3): create a named group, add VERIFIED peers, and
+    /// send/tail messages across the whole member set. Membership is a signed
+    /// roster (group-scoped tiers, separate from bilateral peer trust).
+    #[command(subcommand)]
+    Group(GroupCommand),
     /// Detect known MCP host config locations (Claude Desktop, Claude Code,
     /// Cursor, project-local) and either print or auto-merge the wire MCP
     /// server entry. Default prints; pass `--apply` to actually modify config
@@ -714,15 +719,26 @@ pub enum Command {
         #[arg(long, default_value_t = 5)]
         recent_rejections: usize,
     },
-    /// Atomic upgrade: kill every `wire daemon` process, spawn a fresh
-    /// one from the current binary, write a new pidfile. Eliminates the
-    /// "stale binary text in memory under a fresh symlink" bug class that
-    /// burned 30 minutes today.
+    /// Update + restart in one step (alias: `wire update`). ALWAYS checks
+    /// crates.io for a newer published wire; if one exists it installs it
+    /// (via `cargo install slancha-wire` when a Rust toolchain is on PATH,
+    /// else by downloading + SHA-256-verifying the prebuilt release binary
+    /// and replacing this one in place), then does the atomic daemon swap —
+    /// kill every `wire daemon`, respawn from the (now-current) binary, write
+    /// a fresh pidfile. No newer version → it skips the install and just
+    /// restarts the daemon. `--check` reports what would happen (available
+    /// update + processes that would be restarted) without doing it;
+    /// `--local` skips the crates.io check and only restarts the daemon
+    /// (offline, or running a local dev build).
+    #[command(visible_alias = "update")]
     Upgrade {
-        /// Report drift without taking action (lists processes that would
-        /// be killed + the version of each).
+        /// Report current vs latest + drift without taking action.
         #[arg(long)]
         check: bool,
+        /// Skip the crates.io update check; just restart the daemon from the
+        /// current binary (offline / local dev build).
+        #[arg(long)]
+        local: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1194,6 +1210,52 @@ pub enum SessionCommand {
 /// v0.6.3: top-level `wire mesh` verbs. Each verb operates on the current
 /// session's view of the pinned peer set. `status` is the read-only
 /// observability primitive (alias for `wire session mesh-status`);
+/// Group-chat verbs (v0.13.3). Membership is a creator-signed roster
+/// (`src/group.rs`); send fans a signed message over the member set.
+#[derive(Subcommand, Debug)]
+pub enum GroupCommand {
+    /// Create a new group — you become the creator + sole member, roster signed.
+    Create {
+        /// Group name (human label).
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a bilaterally-VERIFIED pinned peer to a group you created (Member tier).
+    Add {
+        /// Group id or name.
+        group: String,
+        /// Peer handle (must be a VERIFIED pinned peer).
+        peer: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Send a message to every other member of a group (signed fan-out).
+    Send {
+        /// Group id or name.
+        group: String,
+        /// Message text.
+        message: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show recent messages received for a group.
+    Tail {
+        /// Group id or name.
+        group: String,
+        /// Max messages to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List your groups + their members and tiers.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// `broadcast` fans a signed event to every pinned peer in one call.
 #[derive(Subcommand, Debug)]
 pub enum MeshCommand {
@@ -1637,6 +1699,7 @@ pub fn run() -> Result<()> {
         Command::Session(cmd) => cmd_session(cmd),
         Command::Identity { cmd } => cmd_identity(cmd),
         Command::Mesh(cmd) => cmd_mesh(cmd),
+        Command::Group(cmd) => cmd_group(cmd),
         Command::Invite {
             relay,
             ttl,
@@ -1700,7 +1763,7 @@ pub fn run() -> Result<()> {
             json,
             recent_rejections,
         } => cmd_doctor(json, recent_rejections),
-        Command::Upgrade { check, json } => cmd_upgrade(check, json),
+        Command::Upgrade { check, local, json } => cmd_upgrade(check, local, json),
         Command::Service { action } => cmd_service(action),
         Command::Diag { action } => cmd_diag(action),
         Command::Claim {
@@ -6975,6 +7038,546 @@ fn cmd_pair_reject(peer_nick: &str, as_json: bool) -> Result<()> {
 // each session-local `init` / `claim` / `daemon` runs in its own world
 // without cross-contamination via env vars in this process.
 
+// ---------- group chat (v0.13.3) ----------
+
+fn cmd_group(cmd: GroupCommand) -> Result<()> {
+    match cmd {
+        GroupCommand::Create { name, json } => cmd_group_create(&name, json),
+        GroupCommand::Add { group, peer, json } => cmd_group_add(&group, &peer, json),
+        GroupCommand::Send {
+            group,
+            message,
+            json,
+        } => cmd_group_send(&group, &message, json),
+        GroupCommand::Tail { group, limit, json } => cmd_group_tail(&group, limit, json),
+        GroupCommand::List { json } => cmd_group_list(json),
+    }
+}
+
+/// This agent's (did, handle) from its signed card.
+/// This agent's signing identity for group ops: (did, handle, key_id, pk_b64).
+fn group_self() -> Result<(String, String, String, String)> {
+    let card = config::read_agent_card()?;
+    let did = card
+        .get("did")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent-card missing did — run `wire up` first"))?
+        .to_string();
+    let handle = crate::agent_card::display_handle_from_did(&did).to_string();
+    let pk_b64 = card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent-card missing verify_keys[*].key"))?
+        .to_string();
+    let pk_bytes = crate::signing::b64decode(&pk_b64)?;
+    let key_id = make_key_id(&handle, &pk_bytes);
+    Ok((did, handle, key_id, pk_b64))
+}
+
+/// Relay to host a group room on — prefer the federation endpoint (remote
+/// members can reach it), fall back to LAN, then local, then any.
+fn group_room_relay_url() -> Result<String> {
+    use crate::endpoints::EndpointScope;
+    let state = config::read_relay_state()?;
+    let eps = crate::endpoints::self_endpoints(&state);
+    let pick = eps
+        .iter()
+        .find(|e| e.scope == EndpointScope::Federation)
+        .or_else(|| eps.iter().find(|e| e.scope == EndpointScope::Lan))
+        .or_else(|| eps.iter().find(|e| e.scope == EndpointScope::Local))
+        .or_else(|| eps.first());
+    match pick {
+        Some(e) if !e.relay_url.is_empty() => Ok(e.relay_url.clone()),
+        _ => bail!("no relay endpoint on this identity — run `wire up --relay <url>` first"),
+    }
+}
+
+/// Sign a `group_invite` (carrying the full creator-signed Group) and queue it
+/// to every other member's outbox. The daemon/push delivers; the recipient's
+/// `ingest_group_invites` materializes the room + introduce-pins members.
+fn distribute_group_invite(group: &crate::group::Group, self_did: &str) -> Result<usize> {
+    let (_, self_handle, _, pk_b64) = group_self()?;
+    let sk_seed = config::read_private_key()?;
+    let pk_bytes = crate::signing::b64decode(&pk_b64)?;
+    let now_iso = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+    let group_json = serde_json::to_value(group)?;
+    let mut delivered = 0usize;
+    for handle in group.other_member_handles(self_did) {
+        let event = json!({
+            "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
+            "timestamp": now_iso,
+            "from": self_did,
+            "to": format!("did:wire:{handle}"),
+            "type": "group_invite",
+            "kind": parse_kind("group_invite")?,
+            "body": group_json,
+        });
+        let signed = sign_message_v31(&event, &sk_seed, &pk_bytes, &self_handle)
+            .map_err(|e| anyhow!("signing group_invite for `{handle}`: {e:?}"))?;
+        let line = serde_json::to_vec(&signed)?;
+        if config::append_outbox_record(&handle, &line).is_ok() {
+            delivered += 1;
+        }
+    }
+    Ok(delivered)
+}
+
+/// Introduce-pin a member's key on the creator's vouch: ensure
+/// `trust.agents[handle]` carries this key so the member's group messages
+/// verify, WITHOUT granting bilateral trust. Never lowers an existing tier
+/// (a directly-VERIFIED peer stays VERIFIED); only adds the key if missing.
+fn introduce_pin(
+    trust: &mut Value,
+    handle: &str,
+    did: &str,
+    key_id: &str,
+    key: &str,
+    group_id: &str,
+) {
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let agents = trust
+        .as_object_mut()
+        .expect("trust is an object")
+        .entry("agents")
+        .or_insert_with(|| json!({}));
+    let key_rec = json!({"key_id": key_id, "key": key, "added_at": now, "active": true});
+    match agents.get_mut(handle) {
+        Some(existing) => {
+            // Already pinned (maybe at a higher bilateral tier) — just ensure
+            // the key is present. Do NOT touch the tier.
+            let keys = existing
+                .as_object_mut()
+                .and_then(|o| o.get_mut("public_keys"))
+                .and_then(Value::as_array_mut);
+            if let Some(keys) = keys {
+                let have = keys
+                    .iter()
+                    .any(|k| k.get("key_id").and_then(Value::as_str) == Some(key_id));
+                if !have {
+                    keys.push(key_rec);
+                }
+            }
+        }
+        None => {
+            // First sight — pin at bilateral UNTRUSTED (disjoint from GroupTier).
+            agents[handle] = json!({
+                "tier": "UNTRUSTED",
+                "did": did,
+                "public_keys": [key_rec],
+                "introduced_via": group_id,
+                "pinned_at": now,
+            });
+        }
+    }
+}
+
+/// Scan the inbox for `group_invite` events from pinned creators, verify them
+/// (event signature + roster `creator_sig`), materialize/refresh the local
+/// group at its highest epoch, and introduce-pin every other member. Lazy:
+/// runs at the top of group send/tail/list so a member just-pulled an invite
+/// is immediately usable. Skips groups this agent created.
+fn ingest_group_invites() -> Result<()> {
+    let inbox = config::inbox_dir()?;
+    if !inbox.exists() {
+        return Ok(());
+    }
+    let (self_did, ..) = group_self()?;
+    let trust_now = config::read_trust().unwrap_or_else(|_| json!({"agents": {}}));
+    // group_id -> highest-epoch verified roster seen in the inbox.
+    let mut best: std::collections::HashMap<String, crate::group::Group> =
+        std::collections::HashMap::new();
+
+    for entry in std::fs::read_dir(&inbox)?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        for line in std::fs::read_to_string(&path).unwrap_or_default().lines() {
+            let event: Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if event.get("type").and_then(Value::as_str) != Some("group_invite") {
+                continue;
+            }
+            // Event-level: the invite must be from a pinned peer (the creator)
+            // with a valid signature.
+            if verify_message_v31(&event, &trust_now).is_err() {
+                continue;
+            }
+            let Some(body) = event.get("body") else {
+                continue;
+            };
+            let group: crate::group::Group = match serde_json::from_value(body.clone()) {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            if group.creator_did == self_did {
+                continue; // never overwrite a group I created
+            }
+            // The invite's sender must be the group's creator.
+            let from_did = event.get("from").and_then(Value::as_str).unwrap_or("");
+            if from_did != group.creator_did {
+                continue;
+            }
+            // Roster integrity: creator_sig must verify against the creator's
+            // independently-pinned key (we paired with the creator → have it).
+            let creator_handle = crate::agent_card::display_handle_from_did(&group.creator_did);
+            let creator_key = trust_now
+                .get("agents")
+                .and_then(|a| a.get(creator_handle))
+                .and_then(|a| a.get("public_keys"))
+                .and_then(Value::as_array)
+                .and_then(|ks| ks.first())
+                .and_then(|k| k.get("key"))
+                .and_then(Value::as_str)
+                .and_then(|b| crate::signing::b64decode(b).ok());
+            let Some(creator_key) = creator_key else {
+                continue;
+            };
+            if !group.verify(&creator_key) {
+                continue;
+            }
+            match best.get(&group.id) {
+                Some(prev) if prev.epoch >= group.epoch => {}
+                _ => {
+                    best.insert(group.id.clone(), group);
+                }
+            }
+        }
+    }
+
+    if best.is_empty() {
+        return Ok(());
+    }
+    let mut trust = config::read_trust()?;
+    for group in best.values() {
+        // Don't regress a locally-known group to a stale epoch.
+        if let Ok(local) = crate::group::load_group(&group.id)
+            && local.epoch >= group.epoch
+        {
+            continue;
+        }
+        crate::group::save_group(group)?;
+        for m in &group.members {
+            if m.did == self_did || m.key.is_empty() {
+                continue;
+            }
+            introduce_pin(&mut trust, &m.handle, &m.did, &m.key_id, &m.key, &group.id);
+        }
+    }
+    config::write_trust(&trust)?;
+    Ok(())
+}
+
+fn cmd_group_create(name: &str, as_json: bool) -> Result<()> {
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire up` first");
+    }
+    let (did, handle, key_id, pk_b64) = group_self()?;
+    let relay_url = group_room_relay_url()?;
+    // Allocate the shared group-room slot on the relay.
+    let client = crate::relay_client::RelayClient::new(&relay_url);
+    let room = client
+        .allocate_slot(Some(&format!("group:{name}")))
+        .with_context(|| format!("allocating group room on {relay_url}"))?;
+    let id = format!("g{:016x}", rand::random::<u64>());
+    let mut group = crate::group::Group::new(id.clone(), name.to_string(), handle, did.clone());
+    group.set_room(relay_url, room.slot_id, room.slot_token);
+    group.set_member_keys(&did, key_id, pk_b64)?;
+    let sk = config::read_private_key()?;
+    group.sign(&sk)?;
+    crate::group::save_group(&group)?;
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "id": id, "name": name, "members": 1, "relay_url": group.relay_url
+            }))?
+        );
+    } else {
+        println!(
+            "created group `{name}` (id {id}) — room on {}. You are the creator.",
+            group.relay_url
+        );
+        println!("  add peers: `wire group add {id} <peer>`   talk: `wire group send {id} \"hi\"`");
+    }
+    Ok(())
+}
+
+fn cmd_group_add(group_ref: &str, peer: &str, as_json: bool) -> Result<()> {
+    let (self_did, ..) = group_self()?;
+    let mut group = crate::group::resolve_group(group_ref)?;
+    if group.creator_did != self_did {
+        bail!("only the group creator can add members (the creator signs the roster)");
+    }
+    // T22 consent: a Member must be a peer you bilaterally VERIFIED.
+    let bare = crate::agent_card::bare_handle(peer).to_string();
+    let trust = config::read_trust()?;
+    let agent = trust
+        .get("agents")
+        .and_then(|a| a.get(&bare))
+        .ok_or_else(|| {
+            anyhow!("`{bare}` is not a pinned peer — pair first (`wire dial {bare}@<relay>`)")
+        })?;
+    let tier = agent
+        .get("tier")
+        .and_then(Value::as_str)
+        .unwrap_or("UNTRUSTED");
+    if tier != "VERIFIED" {
+        bail!(
+            "`{bare}` is {tier}, not VERIFIED — only verified peers can be added as Members (T22 consent)"
+        );
+    }
+    let peer_did = agent
+        .get("did")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("trust entry for `{bare}` is missing a did"))?
+        .to_string();
+    // Capture the peer's signing key from trust so the creator can vouch for it
+    // in the signed roster (members introduce-pin it to verify this peer).
+    let key = agent
+        .get("public_keys")
+        .and_then(Value::as_array)
+        .and_then(|ks| {
+            ks.iter()
+                .find(|k| k.get("active").and_then(Value::as_bool).unwrap_or(true))
+        })
+        .ok_or_else(|| anyhow!("no active pinned key for `{bare}` in trust"))?;
+    let peer_key_id = key
+        .get("key_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let peer_pk = key
+        .get("key")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    group.add_member(
+        bare.clone(),
+        peer_did.clone(),
+        crate::group::GroupTier::Member,
+    )?;
+    group.set_member_keys(&peer_did, peer_key_id, peer_pk)?;
+    let sk = config::read_private_key()?;
+    group.sign(&sk)?;
+    crate::group::save_group(&group)?;
+    // Distribute the refreshed signed roster (room coords + everyone's keys) to
+    // ALL members so each can post + verify the others.
+    let delivered = distribute_group_invite(&group, &self_did).unwrap_or(0);
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "group": group.id, "added": bare, "epoch": group.epoch,
+                "members": group.members.len(), "invites_queued": delivered
+            }))?
+        );
+    } else {
+        println!(
+            "added `{bare}` to `{}` — now {} member(s), epoch {} ({delivered} invite(s) queued; run `wire push`)",
+            group.name,
+            group.members.len(),
+            group.epoch
+        );
+    }
+    Ok(())
+}
+
+fn cmd_group_send(group_ref: &str, message: &str, as_json: bool) -> Result<()> {
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire up` first");
+    }
+    ingest_group_invites()?;
+    let (self_did, self_handle, _, pk_b64) = group_self()?;
+    let group = crate::group::resolve_group(group_ref)?;
+    if !group.contains_did(&self_did) {
+        bail!("you are not a member of group `{}`", group.name);
+    }
+    if group.slot_id.is_empty() || group.relay_url.is_empty() {
+        bail!(
+            "group `{}` has no room slot (legacy/partial group)",
+            group.name
+        );
+    }
+    let sk_seed = config::read_private_key()?;
+    let pk_bytes = crate::signing::b64decode(&pk_b64)?;
+    let now_iso = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+    let event = json!({
+        "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
+        "timestamp": now_iso,
+        "from": self_did,
+        "to": format!("did:wire:group:{}", group.id),
+        "type": "group_msg",
+        "kind": parse_kind("group_msg")?,
+        "body": {
+            "group_id": group.id,
+            "group_name": group.name,
+            "epoch": group.epoch,
+            "text": message,
+        },
+    });
+    let signed = sign_message_v31(&event, &sk_seed, &pk_bytes, &self_handle)
+        .map_err(|e| anyhow!("signing group_msg: {e:?}"))?;
+    // Post the one message to the shared group slot.
+    let client = crate::relay_client::RelayClient::new(&group.relay_url);
+    client
+        .post_event(&group.slot_id, &group.slot_token, &signed)
+        .with_context(|| {
+            format!(
+                "posting to group room {} on {}",
+                group.slot_id, group.relay_url
+            )
+        })?;
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "group": group.id, "epoch": group.epoch, "status": "posted",
+                "members": group.members.len()
+            }))?
+        );
+    } else {
+        println!(
+            "group `{}`: posted to the room ({} member(s))",
+            group.name,
+            group.members.len()
+        );
+    }
+    Ok(())
+}
+
+fn cmd_group_tail(group_ref: &str, limit: usize, as_json: bool) -> Result<()> {
+    ingest_group_invites()?;
+    let group = crate::group::resolve_group(group_ref)?;
+    if group.slot_id.is_empty() || group.relay_url.is_empty() {
+        bail!(
+            "group `{}` has no room slot (legacy/partial group)",
+            group.name
+        );
+    }
+    let trust = config::read_trust().unwrap_or_else(|_| json!({"agents": {}}));
+    let client = crate::relay_client::RelayClient::new(&group.relay_url);
+    // Pull the shared room; cap generously then show the last `limit`.
+    let fetch = if limit == 0 {
+        1000
+    } else {
+        (limit * 4).min(1000)
+    };
+    let events = client
+        .list_events(&group.slot_id, &group.slot_token, None, Some(fetch))
+        .with_context(|| {
+            format!(
+                "pulling group room {} on {}",
+                group.slot_id, group.relay_url
+            )
+        })?;
+
+    // (timestamp, from_handle, text, verified)
+    let mut msgs: Vec<(String, String, String, bool)> = Vec::new();
+    for event in &events {
+        if event.get("type").and_then(Value::as_str) != Some("group_msg") {
+            continue;
+        }
+        let body = match event.get("body") {
+            Some(Value::String(s)) => serde_json::from_str::<Value>(s).ok(),
+            Some(v) => Some(v.clone()),
+            None => None,
+        };
+        let Some(body) = body else { continue };
+        if body.get("group_id").and_then(Value::as_str) != Some(group.id.as_str()) {
+            continue;
+        }
+        let from_did = event.get("from").and_then(Value::as_str).unwrap_or("");
+        let from_handle = crate::agent_card::display_handle_from_did(from_did).to_string();
+        let ts = event
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let text = body
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let verified = verify_message_v31(event, &trust).is_ok();
+        msgs.push((ts, from_handle, text, verified));
+    }
+    msgs.sort_by(|a, b| a.0.cmp(&b.0));
+    let start = if limit > 0 {
+        msgs.len().saturating_sub(limit)
+    } else {
+        0
+    };
+    let recent = &msgs[start..];
+    if as_json {
+        let arr: Vec<Value> = recent
+            .iter()
+            .map(|(ts, f, t, v)| json!({"ts": ts, "from": f, "text": t, "verified": v}))
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(
+                &json!({"group": group.id, "name": group.name, "messages": arr})
+            )?
+        );
+    } else if recent.is_empty() {
+        println!("group `{}`: no messages yet", group.name);
+    } else {
+        for (ts, f, t, v) in recent {
+            let short_ts: String = ts.chars().take(19).collect();
+            let mark = if *v { "✓" } else { "✗" };
+            println!("[{short_ts}] {} {mark}: {t}", persona_label(f));
+        }
+    }
+    Ok(())
+}
+
+fn cmd_group_list(as_json: bool) -> Result<()> {
+    let groups = crate::group::list_groups()?;
+    if as_json {
+        let arr: Vec<Value> = groups
+            .iter()
+            .map(|g| {
+                json!({
+                    "id": g.id,
+                    "name": g.name,
+                    "epoch": g.epoch,
+                    "members": g.members.iter().map(|m| json!({"handle": m.handle, "tier": m.tier.as_str()})).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&json!({"groups": arr}))?);
+    } else if groups.is_empty() {
+        println!("no groups yet — create one with `wire group create <name>`");
+    } else {
+        for g in &groups {
+            println!(
+                "{} ({}) — {} member(s), epoch {}",
+                g.name,
+                g.id,
+                g.members.len(),
+                g.epoch
+            );
+            for m in &g.members {
+                println!("    {} [{}]", m.handle, m.tier.as_str());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// v0.6.3: top-level `wire mesh` verb dispatcher. Status aliases the
 /// v0.6.2 session-namespaced handler; broadcast is the new primitive.
 fn cmd_mesh(cmd: MeshCommand) -> Result<()> {
@@ -9655,6 +10258,230 @@ fn cmd_service(action: ServiceAction) -> Result<()> {
     Ok(())
 }
 
+// ---------- update (self-update from crates.io / prebuilt release) ----------
+
+const CRATE_NAME: &str = "slancha-wire";
+
+/// (target-triple, binary-extension) of the GitHub release asset for THIS
+/// platform — names mirror `.github/workflows/release.yml`. `None` if no
+/// prebuilt is published for this target.
+fn release_asset_triple() -> Option<(&'static str, &'static str)> {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        return Some(("x86_64-pc-windows-msvc", ".exe"));
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        return Some(("aarch64-apple-darwin", ""));
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        return Some(("x86_64-apple-darwin", ""));
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        return Some(("x86_64-unknown-linux-musl", ""));
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        return Some(("aarch64-unknown-linux-musl", ""));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Latest stable version published on crates.io.
+fn fetch_latest_published_version() -> Result<String> {
+    let url = format!("https://crates.io/api/v1/crates/{CRATE_NAME}");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let resp = client
+        .get(&url)
+        // crates.io rejects requests without a descriptive User-Agent (403).
+        .header(
+            "User-Agent",
+            format!("wire/{} (self-update)", env!("CARGO_PKG_VERSION")),
+        )
+        .send()?;
+    if !resp.status().is_success() {
+        bail!("crates.io returned {} for {CRATE_NAME}", resp.status());
+    }
+    let v: Value = resp.json()?;
+    v.get("crate")
+        .and_then(|c| {
+            c.get("max_stable_version")
+                .or_else(|| c.get("newest_version"))
+        })
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("crates.io response missing crate.max_stable_version"))
+}
+
+/// True iff `latest` is strictly newer than `current` (numeric major.minor.patch;
+/// pre-release suffixes ignored).
+fn version_is_newer(latest: &str, current: &str) -> bool {
+    let parse = |s: &str| -> (u64, u64, u64) {
+        let core = s.split('-').next().unwrap_or(s);
+        let mut it = core.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+        (
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+        )
+    };
+    parse(latest) > parse(current)
+}
+
+fn cargo_on_path() -> bool {
+    std::process::Command::new("cargo")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Download the prebuilt release binary for `latest` and replace THIS binary
+/// in place — the toolchain-free update path (for boxes with no `cargo`).
+fn self_update_from_release(latest: &str) -> Result<()> {
+    let (triple, ext) = release_asset_triple().ok_or_else(|| {
+        anyhow!(
+            "no prebuilt release binary for this platform — install a Rust toolchain and re-run, \
+             or `cargo install {CRATE_NAME}`"
+        )
+    })?;
+    let base =
+        format!("https://github.com/SlanchaAi/wire/releases/download/v{latest}/wire-{triple}{ext}");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
+    let resp = client
+        .get(&base)
+        .header("User-Agent", "wire-self-update")
+        .send()?;
+    if !resp.status().is_success() {
+        bail!("downloading {base} returned {}", resp.status());
+    }
+    let bytes = resp.bytes()?;
+
+    // Verify the SHA-256 sidecar if present (best-effort; absence is non-fatal).
+    if let Ok(sha) = client
+        .get(format!("{base}.sha256"))
+        .header("User-Agent", "wire-self-update")
+        .send()
+        && sha.status().is_success()
+    {
+        let expected = sha
+            .text()?
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if !expected.is_empty() {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(&bytes);
+            let actual = hex::encode(h.finalize());
+            if expected != actual {
+                bail!(
+                    "SHA-256 mismatch — expected {expected}, got {actual} (aborting, binary NOT replaced)"
+                );
+            }
+        }
+    }
+
+    let exe = std::env::current_exe().context("locating current exe")?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow!("current exe has no parent dir"))?;
+    let tmp = dir.join(format!(".wire-update-{}", std::process::id()));
+    std::fs::write(&tmp, &bytes).with_context(|| format!("writing {tmp:?}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+        // Unix: rename over the running binary — the running process keeps the
+        // old inode; the new file takes the path for the next invocation.
+        std::fs::rename(&tmp, &exe).with_context(|| format!("replacing {exe:?}"))?;
+    }
+    #[cfg(windows)]
+    {
+        // Windows can't overwrite a running .exe — rename it aside first
+        // (allowed even while running), then move the new one into place.
+        let old = exe.with_extension("old");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(&exe, &old)
+            .with_context(|| format!("renaming running exe {exe:?} aside"))?;
+        std::fs::rename(&tmp, &exe).with_context(|| format!("installing new exe at {exe:?}"))?;
+    }
+    Ok(())
+}
+
+/// Outcome of the crates.io self-update step (the front half of `wire upgrade`).
+struct UpdateOutcome {
+    current: String,
+    latest: String,
+    /// A newer stable version is published.
+    available: bool,
+    /// We actually installed it this run.
+    installed: bool,
+    /// How it was installed ("cargo install" / "prebuilt release binary").
+    via: Option<&'static str>,
+}
+
+/// Check crates.io for a newer published wire and, when `install` is true,
+/// self-install it (cargo if a toolchain is on PATH, else the prebuilt release
+/// binary). The front half of `wire upgrade`; `install=false` is check-only.
+fn self_update_step(install: bool) -> Result<UpdateOutcome> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let latest = fetch_latest_published_version().context("checking crates.io for latest wire")?;
+    let available = version_is_newer(&latest, &current);
+    if !install || !available {
+        return Ok(UpdateOutcome {
+            current,
+            latest,
+            available,
+            installed: false,
+            via: None,
+        });
+    }
+    let via = if cargo_on_path() {
+        eprintln!(
+            "wire upgrade: {current} → {latest} — installing via `cargo install {CRATE_NAME}` …"
+        );
+        let status = std::process::Command::new("cargo")
+            .args([
+                "install",
+                CRATE_NAME,
+                "--version",
+                &latest,
+                "--force",
+                "--locked",
+            ])
+            .status()
+            .context("running cargo install")?;
+        if !status.success() {
+            bail!("`cargo install {CRATE_NAME}` failed");
+        }
+        "cargo install"
+    } else {
+        eprintln!(
+            "wire upgrade: {current} → {latest} — no `cargo` on PATH, downloading the prebuilt release binary …"
+        );
+        self_update_from_release(&latest)?;
+        "prebuilt release binary"
+    };
+    Ok(UpdateOutcome {
+        current,
+        latest,
+        available,
+        installed: true,
+        via: Some(via),
+    })
+}
+
 // ---------- upgrade (atomic daemon swap) ----------
 
 /// `wire upgrade` — kill all running `wire daemon` processes, spawn a
@@ -9723,7 +10550,36 @@ mod upgrade_tests {
     }
 }
 
-fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
+fn cmd_upgrade(check_only: bool, local: bool, as_json: bool) -> Result<()> {
+    // 0. (v0.13.3 — merged `update`) ALWAYS check crates.io first and, unless
+    // this is a --check or --local run, self-install a newer release BEFORE the
+    // daemon swap below — the respawn then picks up the new on-disk binary. A
+    // crates.io/network failure must NOT block the restart, so it degrades to a
+    // warning. `--local` skips it entirely (offline / local dev build).
+    let update: Option<UpdateOutcome> = if local {
+        None
+    } else {
+        match self_update_step(!check_only) {
+            Ok(o) => Some(o),
+            Err(e) => {
+                if !check_only {
+                    eprintln!("wire upgrade: update check skipped — {e:#}");
+                }
+                None
+            }
+        }
+    };
+    if let Some(o) = &update
+        && o.installed
+    {
+        eprintln!(
+            "wire upgrade: installed {} (was {}, via {}); restarting the daemon on the new binary.",
+            o.latest,
+            o.current,
+            o.via.unwrap_or("self-update")
+        );
+    }
+
     // 1. Identify all running wire processes. v0.7.3: walks `pgrep -f`
     // on unix / `Get-CimInstance Win32_Process` on Windows via the
     // shared `platform::find_processes_by_cmdline`. Covers both the
@@ -9807,12 +10663,18 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
                 .map(|_| label)
         })
         .collect();
+        let (update_latest, update_available) = match &update {
+            Some(o) => (Some(o.latest.clone()), o.available),
+            None => (None, false),
+        };
         let report = json!({
             "running_pids": running_pids,
             "running_daemons": daemon_pids,
             "running_relay_servers": relay_pids,
             "pidfile_version": recorded_version,
             "cli_version": cli_version,
+            "latest_published": update_latest,
+            "update_available": update_available,
             "would_kill": kill_set,
             "would_refresh_services": installed_service_kinds,
             "session_daemons_running": sessions_with_daemons,
@@ -9824,6 +10686,11 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         } else {
             println!("wire upgrade --check");
             println!("  cli version:      {cli_version}");
+            match (&update_latest, update_available) {
+                (Some(l), true) => println!("  latest published: {l}  (UPDATE AVAILABLE)"),
+                (Some(l), false) => println!("  latest published: {l}  (up to date)"),
+                (None, _) => println!("  latest published: (crates.io check skipped)"),
+            }
             println!(
                 "  pidfile version:  {}",
                 recorded_version.as_deref().unwrap_or("(missing)")

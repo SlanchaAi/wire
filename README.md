@@ -41,7 +41,14 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.13.2 (latest)
+## Status — v0.13.3 (latest)
+
+**v0.13.3 — Group chat + one update command.**
+
+- **`wire group` — bidirectional group chat.** `create / add / send / tail / list`. A group is a **shared relay-room slot** (the creator allocates one slot; its token is the room key, distributed only to vouched members; everyone posts + pulls that one slot — no relay change, no per-member credential mesh). Membership is a **creator-signed roster**; its `GroupTier` (creator/member/introduced) is a separate axis from bilateral peer trust. `add <peer>` takes a bilaterally-VERIFIED peer and ships a signed invite; on ingest a member **introduce-pins** the others' keys at bilateral UNTRUSTED so their group messages verify without a direct SAS handshake (axes stay disjoint, never auto-promotes). Members who never paired with each other can post to the room and read each other verified, vouched by the creator's signature.
+- **`wire update` ≡ `wire upgrade`** — one verb (`update` is an alias). Always checks crates.io; installs a newer release if there is one (`cargo install` when a toolchain is present, else download + SHA-256-verify the prebuilt binary), then restarts the daemon on the new binary. No newer version → skip install, still restart. `--check` reports without acting; `--local` skips the crates.io check.
+
+## Status — v0.13.2
 
 **v0.13.2 — Windows hardening + persona statusline.** Three Windows bugs (caught by a paired Windows session dogfooding over wire) plus the missing statusline:
 
