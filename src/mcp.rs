@@ -868,6 +868,78 @@ fn tool_defs() -> Vec<Value> {
             "description": "Return the local agent's full profile (DID + handle + emoji + motto + vibe + pronouns + now). Cheap; no network. Use this to surface 'who am I' to the operator or to compose self-introductions to new peers.",
             "inputSchema": {"type": "object", "properties": {}}
         }),
+        // ---- group chat (v0.13.4): a group is a shared relay-room slot; the
+        // creator-signed roster carries member keys so members verify each
+        // other without pairing. GroupTier (creator/member/introduced) is a
+        // SEPARATE axis from bilateral peer trust. ----
+        json!({
+            "name": "wire_group_create",
+            "description": "Create a group chat room (you become the creator). Allocates a shared relay slot whose token is the room key, signs the initial roster, and persists it locally. Returns {id, name, members, relay_url}. Use the returned id with the other wire_group_* tools.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "Human label for the group."}},
+                "required": ["name"]
+            }
+        }),
+        json!({
+            "name": "wire_group_add",
+            "description": "Add a bilaterally-VERIFIED pinned peer to a group you created, as a Member. The peer must already be paired + VERIFIED (check wire_peers). Re-signs the roster and queues a signed group_invite to every member (run a normal push/let the daemon deliver). Creator-only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "group": {"type": "string", "description": "Group id or name."},
+                    "peer": {"type": "string", "description": "Handle of a VERIFIED pinned peer."}
+                },
+                "required": ["group", "peer"]
+            }
+        }),
+        json!({
+            "name": "wire_group_send",
+            "description": "Post a message to a group room (one signed event to the shared slot; every member reads it). You must have the group locally (created it, were added, or joined by code).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "group": {"type": "string", "description": "Group id or name."},
+                    "message": {"type": "string", "description": "Message text."}
+                },
+                "required": ["group", "message"]
+            }
+        }),
+        json!({
+            "name": "wire_group_tail",
+            "description": "Read recent messages from a group room. Each message has a 'verified' bool (signature checked against the roster + room-announced joiner keys). Also surfaces join notices. Pulls the shared room slot.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "group": {"type": "string", "description": "Group id or name."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 20, "description": "Max timeline entries to return."}
+                },
+                "required": ["group"]
+            }
+        }),
+        json!({
+            "name": "wire_group_list",
+            "description": "List the groups this agent is in, with each group's members and their GroupTiers (creator/member/introduced). Read-only, local.",
+            "inputSchema": {"type": "object", "properties": {}, "required": []}
+        }),
+        json!({
+            "name": "wire_group_invite",
+            "description": "Mint a shareable join code for a group — a self-contained token (room coords + signed roster). Anyone you give it to can wire_group_join to enter at Introduced tier. The code IS the room key; share only with people you want in the room.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"group": {"type": "string", "description": "Group id or name."}},
+                "required": ["group"]
+            }
+        }),
+        json!({
+            "name": "wire_group_join",
+            "description": "Join a group from a code minted by wire_group_invite. Materializes the room locally, pins existing members on the creator's vouch, and announces you to the room so members verify your messages. No prior pairing needed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"code": {"type": "string", "description": "The `wire-group:` join code."}},
+                "required": ["code"]
+            }
+        }),
     ]
 }
 
@@ -914,6 +986,14 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
         "wire_whois" => tool_whois(&args),
         "wire_profile_set" => tool_profile_set(&args),
         "wire_profile_get" => tool_profile_get(),
+        // v0.13.4 — group chat (shared-room slot + introduce-on-vouch).
+        "wire_group_create" => tool_group_create(&args),
+        "wire_group_add" => tool_group_add(&args),
+        "wire_group_send" => tool_group_send(&args),
+        "wire_group_tail" => tool_group_tail(&args),
+        "wire_group_list" => tool_group_list(),
+        "wire_group_invite" => tool_group_invite(&args),
+        "wire_group_join" => tool_group_join(&args),
         // Legacy alias kept for older agent prompts that reference `wire_join`.
         // Surfaces the operator-friendly error pointing to wire_pair_join.
         "wire_join" => Err(
@@ -1033,6 +1113,97 @@ fn tool_peers() -> Result<Value, String> {
         }));
     }
     Ok(json!(peers))
+}
+
+/// Run `wire group <args> --json` by spawning this same binary, inheriting the
+/// MCP session's WIRE_* env so it resolves the same identity/home. Group ops are
+/// infrequent, so this reuses the exact, tested CLI logic — including the
+/// verification-sensitive invite/join paths — rather than duplicating it here.
+fn group_cli_json(args: &[&str]) -> Result<Value, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("locating wire binary: {e}"))?;
+    let out = std::process::Command::new(exe)
+        .arg("group")
+        .args(args)
+        .arg("--json")
+        .env("WIRE_QUIET_AUTOSESSION", "1") // suppress the adopt-session stderr line
+        .output()
+        .map_err(|e| format!("spawning `wire group`: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(err.trim().to_string());
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    // Last JSON object line is the result (any adopt chatter went to stderr).
+    let line = s
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with('{'))
+        .unwrap_or("{}");
+    serde_json::from_str(line).map_err(|e| format!("parsing `wire group` output: {e}"))
+}
+
+fn tool_group_create(args: &Value) -> Result<Value, String> {
+    let name = args
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or("missing 'name'")?;
+    group_cli_json(&["create", name])
+}
+
+fn tool_group_add(args: &Value) -> Result<Value, String> {
+    let group = args
+        .get("group")
+        .and_then(Value::as_str)
+        .ok_or("missing 'group'")?;
+    let peer = args
+        .get("peer")
+        .and_then(Value::as_str)
+        .ok_or("missing 'peer'")?;
+    group_cli_json(&["add", group, peer])
+}
+
+fn tool_group_send(args: &Value) -> Result<Value, String> {
+    let group = args
+        .get("group")
+        .and_then(Value::as_str)
+        .ok_or("missing 'group'")?;
+    let message = args
+        .get("message")
+        .and_then(Value::as_str)
+        .ok_or("missing 'message'")?;
+    group_cli_json(&["send", group, message])
+}
+
+fn tool_group_tail(args: &Value) -> Result<Value, String> {
+    let group = args
+        .get("group")
+        .and_then(Value::as_str)
+        .ok_or("missing 'group'")?;
+    if let Some(n) = args.get("limit").and_then(Value::as_u64) {
+        group_cli_json(&["tail", group, "--limit", &n.to_string()])
+    } else {
+        group_cli_json(&["tail", group])
+    }
+}
+
+fn tool_group_list() -> Result<Value, String> {
+    group_cli_json(&["list"])
+}
+
+fn tool_group_invite(args: &Value) -> Result<Value, String> {
+    let group = args
+        .get("group")
+        .and_then(Value::as_str)
+        .ok_or("missing 'group'")?;
+    group_cli_json(&["invite", group])
+}
+
+fn tool_group_join(args: &Value) -> Result<Value, String> {
+    let code = args
+        .get("code")
+        .and_then(Value::as_str)
+        .ok_or("missing 'code'")?;
+    group_cli_json(&["join", code])
 }
 
 fn tool_send(args: &Value) -> Result<Value, String> {
