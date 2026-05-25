@@ -12290,7 +12290,20 @@ fn cmd_profile(action: ProfileAction) -> Result<()> {
 fn cmd_setup(apply: bool) -> Result<()> {
     use std::path::PathBuf;
 
-    let entry = json!({"command": "wire", "args": ["mcp"]});
+    // The `env` mapping forwards Claude Code's per-session id into the MCP
+    // server. CRITICAL for per-session identity: the MCP server process does
+    // NOT inherit CLAUDE_CODE_SESSION_ID (Claude Code sets it for Bash-tool
+    // subprocesses only), and the MCP `initialize` handshake carries no session
+    // id — so without this, the server can't tell sessions apart, falls back to
+    // cwd-detection, and every Claude session under a shared parent dir
+    // collapses onto ONE identity. Claude Code expands `${CLAUDE_CODE_SESSION_ID}`
+    // from its own env at MCP launch; wire's `resolve_session_key` reads
+    // WIRE_SESSION_ID first, so each session becomes its own `by-key/<hash>`.
+    let entry = json!({
+        "command": "wire",
+        "args": ["mcp"],
+        "env": {"WIRE_SESSION_ID": "${CLAUDE_CODE_SESSION_ID}"}
+    });
     let entry_pretty = serde_json::to_string_pretty(&json!({"wire": &entry}))?;
 
     // Detect probable MCP host config locations. Cross-platform — we only
