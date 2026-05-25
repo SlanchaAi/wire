@@ -9859,40 +9859,42 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         return Ok(());
     }
 
-    // 3. Kill every running wire process (daemons + relay-servers).
-    // Graceful first (SIGTERM / taskkill), then forceful (SIGKILL /
-    // taskkill /F) after a brief grace period. v0.7.3: uses
-    // `platform::kill_process` so the Windows path goes through
-    // `taskkill /T /PID` (kills the process tree, important for
-    // relay-server's hyper worker threads).
-    let mut killed: Vec<u32> = Vec::new();
+    // 3. Terminate the kill set. Graceful first, then FORCE-kill any survivor.
+    //
+    // v0.13.2 (B fix #2): the force-kill must NOT be gated on graceful having
+    // "succeeded". On Windows, `taskkill /PID /T` WITHOUT `/F` is a no-op for a
+    // windowless daemon (it returns failure), so the rc9 logic — which only
+    // force-killed pids that graceful had reported killing — force-killed
+    // NOTHING, and the daemon survived every `wire upgrade` (glossy: pidfile
+    // pids 3676/25236/24660 all survived → accumulation). Now we attempt
+    // graceful best-effort, grace-wait, then force-kill EVERY pid still alive
+    // regardless of the graceful result. Force-kill (`taskkill /F /T` /
+    // SIGKILL) is the load-bearing step.
     for pid in &kill_set {
-        if crate::platform::kill_process(*pid, false) {
-            killed.push(*pid);
-        }
+        let _ = crate::platform::kill_process(*pid, false); // best-effort graceful
     }
-    // Wait up to ~2s for graceful exit.
-    if !killed.is_empty() {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            let still_alive: Vec<u32> = killed
-                .iter()
-                .copied()
-                .filter(|p| process_alive_pid(*p))
-                .collect();
-            if still_alive.is_empty() {
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                // Force-kill hold-outs.
-                for pid in still_alive {
-                    let _ = crate::platform::kill_process(pid, true);
-                }
-                break;
-            }
+    if !kill_set.is_empty() {
+        // Brief grace for platforms where graceful works (Unix SIGTERM).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+        while std::time::Instant::now() < deadline && kill_set.iter().any(|p| process_alive_pid(*p))
+        {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        // Force-kill every survivor — this is what actually kills the
+        // windowless daemon on Windows.
+        for pid in &kill_set {
+            if process_alive_pid(*pid) {
+                let _ = crate::platform::kill_process(*pid, true);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200)); // settle
     }
+    // Report what's actually gone (drives the "no stale" message + JSON).
+    let killed: Vec<u32> = kill_set
+        .iter()
+        .copied()
+        .filter(|p| !process_alive_pid(*p))
+        .collect();
 
     // 4. Remove stale pidfile so ensure_daemon_running doesn't think the
     //    old daemon is still owning it.
