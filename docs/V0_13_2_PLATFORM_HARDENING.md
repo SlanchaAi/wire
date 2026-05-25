@@ -45,3 +45,7 @@ Full rc10 Windows matrix GREEN (glossy): B + E2-bidirectional + pair-all-local +
 
 ## Verified PASS (glossy/wisp/feral, Win10 x86_64)
 relay.json atomicity under stress · loopback throughput ~50 msg/s/agent bidirectional · status running · clean cold spawn · list-local sees by-key sisters (feral, rc3 build).
+
+## Operator-decision items (NOT v0.13.2 blockers — for operator review on return)
+
+- **MCP `instructions` auto-act-on-peers = prompt-injection / worm vector** (feral-blossom's group-chat security review, 3 independent adversaries; THREAT_MODEL T16). The v0.12.3 instruction telling agents to act on peer messages "without waiting for the operator" means a validly-signed message from a *compromised* peer auto-triggers agent action, and a "forward to your peers" payload self-propagates across the bilateral mesh. A signature authenticates the SENDER, not the safety of acting on the CONTENT. **Live today** (low real risk now — mesh is same-operator sisters — but real). Fix is zero-code (reword), but it CHANGES the auto-collaborate behavior the operator explicitly designed, so it's an operator call — NOT touched unilaterally (operator AFK + hold-for-review). Proposed resolution to offer: separate "auto-CONVERSE with known sisters" (keep) from "auto-EXECUTE instructions embedded in peer content" + "auto-REBROADCAST" (require operator confirm) — the current wording conflates them.
