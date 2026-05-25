@@ -174,19 +174,7 @@ fn daemon_pid_file() -> Result<PathBuf> {
 }
 
 fn process_alive(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        use std::process::Command;
-        Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
+    crate::platform::process_alive(pid)
 }
 
 /// Run on daemon startup. Only marks pending files aborted_restart if the

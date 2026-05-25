@@ -58,6 +58,22 @@ pub fn process_alive(pid: u32) -> bool {
     }
 }
 
+/// The role/subcommand of a `wire <role> ...` process pattern —
+/// `cmdline_role("wire daemon") == "daemon"`, `cmdline_role("wire
+/// relay-server") == "relay-server"`. A pattern without the `wire ` prefix
+/// passes through unchanged.
+///
+/// The Windows process scan matches this role (not the full `wire daemon`
+/// string) against the command line, because the image is `wire.exe` and the
+/// contiguous `wire daemon` never matches the real `wire.exe daemon` cmdline.
+/// Hoisted out of the `cfg(windows)` block + unit-tested so the `.exe`-match
+/// regression (which caused `wire upgrade` to accumulate daemons) is locked on
+/// EVERY platform's CI, not only on a Windows runner.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn cmdline_role(pattern: &str) -> &str {
+    pattern.strip_prefix("wire ").unwrap_or(pattern)
+}
+
 /// `pgrep -f <pattern>` equivalent: every pid whose command line
 /// contains `pattern`. Empty Vec on tool error or zero matches.
 ///
@@ -90,10 +106,27 @@ pub fn find_processes_by_cmdline(pattern: &str) -> Vec<u32> {
         // Single-quote the pattern in the PowerShell string. Inside
         // single-quoted PS strings, the only escape is `''` for a
         // literal single quote; we replace pre-emptively.
-        let escaped = pattern.replace('\'', "''");
+        // The Windows process image is `wire.exe`, so a Unix-style full
+        // pattern like "wire daemon" does NOT match the actual command line
+        // "wire.exe daemon" (the ".exe " breaks the contiguous match). Match
+        // the wire image by Name and the ROLE/subcommand (the pattern minus a
+        // leading "wire ") in the command line. Without this, find returned
+        // nothing for the real daemon on Windows, so `wire upgrade` killed no
+        // daemons and they ACCUMULATED (glossy-magnolia: 2->3->4->5 over three
+        // upgrade cycles — the exact multi-daemon cursor race doctor warns of).
+        //
+        // Two further guards (glossy-magnolia repro):
+        //   - `$_.Name -like 'wire*'` — only wire processes count. Without it
+        //     the query SELF-MATCHED: this PowerShell process's own command
+        //     line contains the pattern literal, so it showed up as a phantom
+        //     "orphan daemon" with a new pid every call (doctor FAILed on
+        //     every healthy box).
+        //   - `$_.ProcessId -ne $PID` — belt-and-suspenders self-exclusion.
+        let role = cmdline_role(pattern);
+        let escaped = role.replace('\'', "''");
         let ps = format!(
             "Get-CimInstance Win32_Process | \
-             Where-Object {{ $_.CommandLine -like '*{escaped}*' }} | \
+             Where-Object {{ $_.Name -like 'wire*' -and $_.ProcessId -ne $PID -and $_.CommandLine -like '*{escaped}*' }} | \
              Select-Object -ExpandProperty ProcessId"
         );
         Command::new("powershell.exe")
@@ -164,6 +197,17 @@ pub fn kill_process(pid: u32, force: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cmdline_role_strips_wire_prefix() {
+        // Locks the Windows .exe-match logic on every platform's CI: the role
+        // is what we match against `wire.exe daemon`, not the full pattern.
+        assert_eq!(cmdline_role("wire daemon"), "daemon");
+        assert_eq!(cmdline_role("wire relay-server"), "relay-server");
+        // No `wire ` prefix → unchanged (custom patterns pass through).
+        assert_eq!(cmdline_role("daemon"), "daemon");
+        assert_eq!(cmdline_role("relay-server"), "relay-server");
+    }
 
     #[test]
     fn process_alive_returns_true_for_self() {

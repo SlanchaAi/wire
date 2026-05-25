@@ -146,21 +146,13 @@ pub struct DaemonLiveness {
     pub record: PidRecord,
 }
 
-/// True iff `pid` is currently a live OS process. Linux: `/proc/<pid>`.
-/// Other Unix: `kill -0`. Returns false on any error.
+/// True iff `pid` is currently a live OS process. Delegates to the
+/// platform-aware check (`/proc` on Linux, `kill -0` on other Unix,
+/// `tasklist` on Windows) so callers never disagree across OSes. The old
+/// local `kill -0` path false-negatived on Windows (no `kill`), making
+/// `wire status`/`doctor` report the daemon DOWN while it was alive.
 pub fn pid_is_alive(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
+    crate::platform::process_alive(pid)
 }
 
 /// Read the daemon pid file + pgrep in one shot, producing a snapshot
@@ -173,21 +165,27 @@ pub fn daemon_liveness() -> DaemonLiveness {
     let record = read_pid_record("daemon");
     let pidfile_pid = record.pid();
     let pidfile_alive = pidfile_pid.map(pid_is_alive).unwrap_or(false);
-    let pgrep_pids: Vec<u32> = std::process::Command::new("pgrep")
-        .args(["-f", "wire daemon"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .split_whitespace()
-                .filter_map(|s| s.parse::<u32>().ok())
+    // Platform-aware cmdline scan (Unix `pgrep`, Windows PowerShell CIM).
+    // Field stays named `pgrep_pids` for callers; on Windows the old direct
+    // `pgrep` shell-out returned empty (no such tool), masking live daemons.
+    let pgrep_pids: Vec<u32> = crate::platform::find_processes_by_cmdline("wire daemon");
+    // A2 (v0.13.2): on a multi-session box EVERY session runs its own daemon,
+    // so the old "any `wire daemon` whose pid != my pidfile = orphan" rule
+    // flagged sibling sessions' LEGITIMATE daemons as orphans — `wire doctor`
+    // FAILed on the very multi-agent-per-box setup wire exists for. A true
+    // orphan is a wire daemon owned by NO session: exclude every session's
+    // pidfile pid, not just this session's.
+    let known_session_pids: std::collections::HashSet<u32> = crate::session::list_sessions()
+        .map(|sessions| {
+            sessions
+                .iter()
+                .filter_map(|s| crate::session::session_daemon_pid(&s.home_dir))
                 .collect()
         })
         .unwrap_or_default();
     let orphan_pids: Vec<u32> = pgrep_pids
         .iter()
-        .filter(|p| Some(**p) != pidfile_pid)
+        .filter(|p| Some(**p) != pidfile_pid && !known_session_pids.contains(*p))
         .copied()
         .collect();
     DaemonLiveness {
@@ -363,22 +361,8 @@ pub fn daemon_version_mismatch() -> Option<String> {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn process_alive(pid: u32) -> bool {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn process_alive(pid: u32) -> bool {
-    // macOS / others: signal-0 check via `kill -0 <pid>` exit status.
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::platform::process_alive(pid)
 }
 
 #[cfg(test)]

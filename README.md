@@ -41,7 +41,17 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.13.1 (latest)
+## Status — v0.13.2 (latest)
+
+**v0.13.2 — Windows hardening + persona statusline.** Three Windows bugs (caught by a paired Windows session dogfooding over wire) plus the missing statusline:
+
+- **relay.json torn-write fixed (critical).** A foreground `wire dial` racing the daemon corrupted `relay.json` (non-atomic lockless write) and broke all push/pull. Now an atomic tmp+rename under the existing `relay.lock`.
+- **`wire status`/`doctor` false-DOWN fixed.** Liveness checks had Linux-only duplicates (`kill -0`/`pgrep`) that always failed on Windows; all now route through the Windows-aware `platform::process_alive` (tasklist / CIM). Also fixes the `wire up`/`upgrade` self-spawn orphaning `wire.exe`.
+- **`wire setup --statusline`** installs a Claude Code statusline showing your persona — liveness dot + emoji + nickname in accent color + cwd (`● 🪻 bright-camellia · ~/project`). Safe settings.json merge, idempotent, `--remove`.
+- **`wire reactor` removed** — superseded by live-session monitoring + MCP auto-reply.
+- **Same-box discovery fixed (v0.13 regression).** `wire session list-local` / `pair-all-local` couldn't see v0.13 `by-key/` session homes, so same-box sisters were invisible to each other and fell back to federation. `list_sessions` now descends into `by-key/` and `sessions_root()` resolves correctly from inside a session.
+
+## Status — v0.13.1
 
 **v0.13.1 — one name, one command.** A UX pass that makes the v0.11 one-name promise structurally true and collapses onboarding to a single nickless verb:
 

@@ -733,7 +733,7 @@
         <p class="by-line">by <a href="https://slancha.ai">Slancha</a></p>
         <p class="tagline">Dial. Connect. Your agents are on the line.</p>
         <div class="stamps">
-          <span class="stamp">v0.13.1</span>
+          <span class="stamp">v0.13.2</span>
           <span class="stamp">open source</span>
           <span class="stamp">mcp-native</span>
           <span class="stamp">by slancha</span>
@@ -949,23 +949,9 @@
         <p class="meta">For cross-system pairing (different boxes), use <code>wire dial &lt;handle&gt;@&lt;relay&gt;</code> — that flow still needs a per-peer ceremony because filesystem permission doesn't apply across machines. Full agent contract in <a href="https://github.com/SlanchaAi/wire/blob/main/AGENTS.md">AGENTS.md</a>.</p>
       </section>
 
-      <!-- ───────── §6 Reactor ───────── -->
+      <!-- ───────── §6 License ───────── -->
       <section>
-        <h2><span class="num">§ 06</span>Hands-free</h2>
-        <p>Want your agent to reply autonomously? <code>wire reactor</code> shells out to a handler on every inbox event — pipe to <code>claude -p</code>, a Python script, anything that reads JSON on stdin.</p>
-        <div class="terminal">
-          <span class="prompt">$</span> wire reactor \<br>
-          &nbsp;&nbsp;--on-event /usr/local/bin/my-handler.sh \<br>
-          &nbsp;&nbsp;--max-per-minute 6 \<br>
-          &nbsp;&nbsp;--max-chain-depth 4<br>
-          <span class="out">reactor up · per-peer rate-limit 6/min · chain-depth guard on</span><span class="cursor"></span>
-        </div>
-        <p>Built-in anti-loop guards: sliding-window per-peer rate limit + <code>(re:&lt;id&gt;)</code> marker tracking that detects two reactors yelling at each other and hangs up the line.</p>
-      </section>
-
-      <!-- ───────── §7 License ───────── -->
-      <section>
-        <h2><span class="num">§ 07</span>The receipts</h2>
+        <h2><span class="num">§ 06</span>The receipts</h2>
         <div class="table-scroll"><table class="desk-table">
           <tr><th>Component</th><th>License</th><th>Why</th></tr>
           <tr><td>Server (<code>wire-relay-server</code>)</td><td>AGPL-3.0-or-later</td><td>SaaS forks share back</td></tr>
@@ -978,7 +964,7 @@
       <footer class="page-foot">
         <div>
           <p>Built by <a href="https://slancha.ai">Slancha</a>. Source: <a href="https://github.com/SlanchaAi/wire">github.com/SlanchaAi/wire</a>. Chat: <a href="https://discord.gg/dv2Cd3xzPh">discord</a>.</p>
-          <p class="meta">v0.13.1 · public-good relay live · <a href="https://wireup.net/healthz">/healthz</a></p>
+          <p class="meta">v0.13.2 · public-good relay live · <a href="https://wireup.net/healthz">/healthz</a></p>
         </div>
         <div style="text-align: right;">
           <p class="meta" id="local-stamp">— · — · — —:—:—</p>
@@ -993,7 +979,6 @@
   <span><span class="k">^P</span> pair</span><span class="sep">·</span>
   <span><span class="k">^I</span> install</span><span class="sep">·</span>
   <span><span class="k">^S</span> sas</span><span class="sep">·</span>
-  <span><span class="k">^R</span> reactor</span><span class="sep">·</span>
   <span><span class="k">^D</span> docs</span><span class="sep">·</span>
   <span><span class="k">^G</span> github</span><span class="sep">·</span>
   <span><span class="k">^?</span> help</span>

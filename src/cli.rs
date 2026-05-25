@@ -618,6 +618,17 @@ pub enum Command {
         /// Actually write the changes (default = print only).
         #[arg(long)]
         apply: bool,
+        /// Install a Claude Code statusLine showing your wire persona
+        /// (liveness dot + emoji + nickname in the persona's accent color +
+        /// cwd) instead of merging the MCP server. Writes a renderer script
+        /// and merges a `statusLine` block into Claude Code's settings.json
+        /// (honors $CLAUDE_CONFIG_DIR). Combine with --apply to write.
+        #[arg(long)]
+        statusline: bool,
+        /// With --statusline: uninstall it (drop the statusLine key + remove
+        /// the renderer script) instead of installing.
+        #[arg(long)]
+        remove: bool,
     },
     /// Show an agent's profile. With no arg, prints local self. With a
     /// `nick@domain` arg, resolves via that domain's `.well-known/wire/agent`
@@ -840,44 +851,6 @@ pub enum Command {
         /// Emit JSON.
         #[arg(long)]
         json: bool,
-    },
-    /// Long-running event dispatcher. Watches inbox for new verified events
-    /// and spawns the given shell command per event, passing the event JSON
-    /// on stdin. Use to wire up autonomous reply loops:
-    ///   wire reactor --on-event 'claude -p "respond via wire send"'
-    /// Cursor persisted to `$WIRE_HOME/state/wire/reactor.cursor`.
-    Reactor {
-        /// Shell command to spawn per event. Event JSON written to its stdin.
-        #[arg(long)]
-        on_event: String,
-        /// Only fire for events from this peer.
-        #[arg(long)]
-        peer: Option<String>,
-        /// Only fire for events of this kind (numeric or name, e.g. 1 / decision).
-        #[arg(long)]
-        kind: Option<String>,
-        /// Skip events whose verified flag is false (default true).
-        #[arg(long, default_value_t = true)]
-        verified_only: bool,
-        /// Poll interval in seconds.
-        #[arg(long, default_value_t = 2)]
-        interval: u64,
-        /// Process one sweep and exit.
-        #[arg(long)]
-        once: bool,
-        /// Don't actually spawn — print one JSONL line per event for smoke-testing.
-        #[arg(long)]
-        dry_run: bool,
-        /// Hard rate-limit: max events handler is fired for per peer per minute.
-        /// 0 = unlimited. Default 6 — covers normal conversational tempo, kills
-        /// LLM-vs-LLM feedback loops (which fire 10+/sec).
-        #[arg(long, default_value_t = 6)]
-        max_per_minute: u32,
-        /// Anti-loop chain depth. Track event_ids this reactor emitted; if an
-        /// incoming event body contains `(re:X)` where X is in our emitted log,
-        /// skip — that's a reply-to-our-reply, depth ≥ 2. Disable with 0.
-        #[arg(long, default_value_t = 1)]
-        max_chain_depth: u32,
     },
     /// Watch the inbox for new verified events and fire an OS notification per
     /// event. Long-running; background under systemd / `&` / tmux. Cursor is
@@ -1738,28 +1711,17 @@ pub fn run() -> Result<()> {
             json,
         } => cmd_claim(&nick, relay.as_deref(), public_url.as_deref(), hidden, json),
         Command::Profile { action } => cmd_profile(action),
-        Command::Setup { apply } => cmd_setup(apply),
-        Command::Reactor {
-            on_event,
-            peer,
-            kind,
-            verified_only,
-            interval,
-            once,
-            dry_run,
-            max_per_minute,
-            max_chain_depth,
-        } => cmd_reactor(
-            &on_event,
-            peer.as_deref(),
-            kind.as_deref(),
-            verified_only,
-            interval,
-            once,
-            dry_run,
-            max_per_minute,
-            max_chain_depth,
-        ),
+        Command::Setup {
+            apply,
+            statusline,
+            remove,
+        } => {
+            if statusline {
+                cmd_setup_statusline(apply, remove)
+            } else {
+                cmd_setup(apply)
+            }
+        }
         Command::Notify {
             interval,
             peer,
@@ -3920,7 +3882,20 @@ fn cmd_monitor(
     let sleep_dur = std::time::Duration::from_millis(interval_ms.max(50));
 
     loop {
-        let events = w.poll()?;
+        // Never die silently. wisp-blossom (Win10) saw `wire monitor` exit 1
+        // with ZERO bytes on stdout+stderr when a cursor-block (untrusted
+        // signer's pair event) tripped the watcher — a silent death looks
+        // identical to "still watching" and breaks the sister-collab model.
+        // Surface the reason and KEEP watching instead of propagating a fatal
+        // `?` that some callers swallow.
+        let events = match w.poll() {
+            Ok(evs) => evs,
+            Err(e) => {
+                eprintln!("wire monitor: poll error (continuing to watch): {e:#}");
+                std::thread::sleep(sleep_dur);
+                continue;
+            }
+        };
         let mut wrote = false;
         for ev in events {
             if let Some(filter) = peer_filter
@@ -4447,18 +4422,54 @@ fn cmd_add_peer_slot(
     slot_token: &str,
     as_json: bool,
 ) -> Result<()> {
+    use crate::endpoints::{Endpoint, infer_scope_from_url, pin_peer_endpoints};
     let mut state = config::read_relay_state()?;
-    let peers = state["peers"]
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("relay state missing 'peers' object"))?;
-    peers.insert(
-        handle.to_string(),
-        json!({
-            "relay_url": url,
-            "slot_id": slot_id,
-            "slot_token": slot_token,
-        }),
-    );
+
+    // E3 (v0.13.2): ADD this slot to the peer's endpoint set — don't REPLACE
+    // the whole entry. The old flat `peers.insert` clobbered an existing
+    // peer's federation endpoint when pinning a local slot, silently dropping
+    // the federation route (glossy-magnolia + wisp-blossom repro: pinning a
+    // loopback slot made the peer flat loopback-only). Mirror bind-relay's
+    // additive semantics: upsert by relay_url into the peer's endpoints[].
+    let new_ep = Endpoint {
+        relay_url: url.to_string(),
+        slot_id: slot_id.to_string(),
+        slot_token: slot_token.to_string(),
+        scope: infer_scope_from_url(url),
+    };
+    let mut endpoints: Vec<Endpoint> = state
+        .get("peers")
+        .and_then(|p| p.get(handle))
+        .and_then(|e| e.get("endpoints"))
+        .and_then(|a| serde_json::from_value::<Vec<Endpoint>>(a.clone()).ok())
+        .unwrap_or_default();
+    // Back-compat: seed from legacy flat fields when the peer predates endpoints[].
+    if endpoints.is_empty()
+        && let Some(peer) = state.get("peers").and_then(|p| p.get(handle))
+        && let (Some(ru), Some(si), Some(st)) = (
+            peer.get("relay_url").and_then(Value::as_str),
+            peer.get("slot_id").and_then(Value::as_str),
+            peer.get("slot_token").and_then(Value::as_str),
+        )
+    {
+        endpoints.push(Endpoint {
+            relay_url: ru.to_string(),
+            slot_id: si.to_string(),
+            slot_token: st.to_string(),
+            scope: infer_scope_from_url(ru),
+        });
+    }
+    // Upsert by relay_url: refresh in place if already pinned, else append.
+    if let Some(existing) = endpoints
+        .iter_mut()
+        .find(|e| e.relay_url == new_ep.relay_url)
+    {
+        *existing = new_ep;
+    } else {
+        endpoints.push(new_ep);
+    }
+    let n = endpoints.len();
+    pin_peer_endpoints(&mut state, handle, &endpoints)?;
     config::write_relay_state(&state)?;
     if as_json {
         println!(
@@ -4468,10 +4479,13 @@ fn cmd_add_peer_slot(
                 "relay_url": url,
                 "slot_id": slot_id,
                 "added": true,
+                "endpoint_count": n,
             }))?
         );
     } else {
-        println!("pinned peer slot for {handle} at {url} ({slot_id})");
+        println!(
+            "pinned peer slot for {handle} at {url} ({slot_id}) — peer now has {n} endpoint(s)"
+        );
     }
     Ok(())
 }
@@ -5130,7 +5144,20 @@ fn cmd_daemon(interval_secs: u64, once: bool, as_json: bool) -> Result<()> {
         // wake signal — whichever comes first. Drain any additional
         // wake-ups that accumulated during the previous cycle since one
         // pull catches up everything.
-        let _ = wake_rx.recv_timeout(interval);
+        //
+        // v0.13.2 (wisp-blossom): if the stream subscriber thread has gone
+        // away, `wake_rx` is Disconnected and `recv_timeout` returns
+        // INSTANTLY — which would busy-spin the sync loop (hammering push/pull
+        // + the relay with zero delay). Fall back to a plain sleep so a dead
+        // stream degrades to normal polling and never kills or pegs the
+        // daemon. (Realizes the "decouple stream from sync" hardening — a
+        // stream failure must never affect the push/pull loop.)
+        match wake_rx.recv_timeout(interval) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::thread::sleep(interval);
+            }
+        }
         while wake_rx.try_recv().is_ok() {}
     }
 }
@@ -5203,51 +5230,108 @@ fn run_sync_push() -> Result<Value> {
 /// returned `{}` for any v0.5.17+ session.
 fn run_sync_pull() -> Result<Value> {
     let state = config::read_relay_state()?;
-    let self_state = state.get("self").cloned().unwrap_or(Value::Null);
-    if self_state.is_null() {
+    if state.get("self").map(Value::is_null).unwrap_or(true) {
         return Ok(json!({"written": [], "rejected": [], "total_seen": 0}));
     }
-    let ep = match crate::endpoints::self_primary_endpoint(&state) {
-        Some(e) => e,
-        None => return Ok(json!({"written": [], "rejected": [], "total_seen": 0})),
-    };
-    let url = ep.relay_url.as_str();
-    let slot_id = ep.slot_id.as_str();
-    let slot_token = ep.slot_token.as_str();
-    let last_event_id = self_state
-        .get("last_pulled_event_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    if url.is_empty() {
+    // E2 (v0.13.2): pull EVERY self endpoint, not just the primary. A session
+    // that bound a local slot (additive) alongside its federation slot used to
+    // have the daemon pull ONLY the primary (federation) endpoint — the local
+    // slot was never serviced, so same-box loopback delivery silently never
+    // happened until a manual restart re-seeded the (startup-only) stream
+    // subscriber. Now each endpoint is pulled with its OWN cursor.
+    let endpoints = crate::endpoints::self_endpoints(&state);
+    if endpoints.is_empty() {
         return Ok(json!({"written": [], "rejected": [], "total_seen": 0}));
     }
-    let client = crate::relay_client::RelayClient::new(url);
-    let events = client.list_events(slot_id, slot_token, last_event_id.as_deref(), Some(1000))?;
     let inbox_dir = config::inbox_dir()?;
     config::ensure_dirs()?;
 
-    // P0.1 (0.5.11): shared cursor-blocking logic. Daemon's --once path
-    // must match the CLI's `wire pull` semantics or version-skew bugs
-    // re-emerge by another route.
-    let result = crate::pull::process_events(&events, last_event_id, &inbox_dir)?;
+    // Per-slot cursors live at `self.cursors.<slot_id>`. The legacy global
+    // `self.last_pulled_event_id` is migrated as the cursor for the PRIMARY
+    // slot only (a federation event id won't match a local slot's log); other
+    // slots start from None and `process_events` dedups against the inbox.
+    let self_obj = state.get("self").cloned().unwrap_or(Value::Null);
+    let legacy_cursor = self_obj
+        .get("last_pulled_event_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let primary_slot = crate::endpoints::self_primary_endpoint(&state).map(|e| e.slot_id);
+    let mut cursors: serde_json::Map<String, Value> = self_obj
+        .get("cursors")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
 
-    // P0.3 (0.5.11): same flock-protected RMW as cmd_pull.
-    if let Some(eid) = &result.advance_cursor_to {
-        let eid = eid.clone();
-        config::update_relay_state(|state| {
-            if let Some(self_obj) = state.get_mut("self").and_then(Value::as_object_mut) {
-                self_obj.insert("last_pulled_event_id".into(), Value::String(eid));
-            }
-            Ok(())
-        })?;
+    let mut all_written: Vec<Value> = Vec::new();
+    let mut all_rejected: Vec<Value> = Vec::new();
+    let mut total_seen = 0usize;
+    let mut blocked_any = false;
+
+    for ep in &endpoints {
+        if ep.relay_url.is_empty() {
+            continue;
+        }
+        let cursor = cursors
+            .get(&ep.slot_id)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                if Some(&ep.slot_id) == primary_slot.as_ref() {
+                    legacy_cursor.clone()
+                } else {
+                    None
+                }
+            });
+        let client = crate::relay_client::RelayClient::new(&ep.relay_url);
+        // One endpoint erroring (relay down, slot gone) must NOT stop the
+        // others — a dead local relay shouldn't black-hole federation pulls.
+        let events =
+            match client.list_events(&ep.slot_id, &ep.slot_token, cursor.as_deref(), Some(1000)) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!(
+                        "daemon: pull error on {} slot {} (continuing): {e:#}",
+                        ep.relay_url, ep.slot_id
+                    );
+                    continue;
+                }
+            };
+        total_seen += events.len();
+        // P0.1 shared cursor-blocking logic (matches `wire pull`). A block on
+        // one slot only stalls THAT slot's cursor; other slots keep flowing.
+        let result = crate::pull::process_events(&events, cursor, &inbox_dir)?;
+        if let Some(eid) = &result.advance_cursor_to {
+            cursors.insert(ep.slot_id.clone(), Value::String(eid.clone()));
+        }
+        blocked_any |= result.blocked;
+        all_written.extend(result.written);
+        all_rejected.extend(result.rejected);
     }
 
+    // P0.3 flock-protected RMW: persist per-slot cursors + keep the legacy
+    // global cursor in sync with the primary slot for back-compat with older
+    // binaries that only read `last_pulled_event_id`.
+    let primary_cursor = primary_slot
+        .as_ref()
+        .and_then(|s| cursors.get(s))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    config::update_relay_state(|state| {
+        if let Some(self_obj) = state.get_mut("self").and_then(Value::as_object_mut) {
+            self_obj.insert("cursors".into(), Value::Object(cursors.clone()));
+            if let Some(pc) = &primary_cursor {
+                self_obj.insert("last_pulled_event_id".into(), Value::String(pc.clone()));
+            }
+        }
+        Ok(())
+    })?;
+
     Ok(json!({
-        "written": result.written,
-        "rejected": result.rejected,
-        "total_seen": events.len(),
-        "cursor_blocked": result.blocked,
-        "cursor_advanced_to": result.advance_cursor_to,
+        "written": all_written,
+        "rejected": all_rejected,
+        "total_seen": total_seen,
+        "cursor_blocked": blocked_any,
+        "endpoints_pulled": endpoints.len(),
     }))
 }
 
@@ -6589,18 +6673,46 @@ fn cmd_add(
     crate::trust::add_agent_card_pin(&mut trust, &peer_card, Some("VERIFIED"));
     config::write_trust(&trust)?;
     let mut relay_state = config::read_relay_state()?;
-    let existing_token = relay_state
+    // Additive re-pin (v0.13.2, E3 token-bleed fix). The old code REPLACED the
+    // whole peer entry with a flat federation-only one, seeding the token from
+    // the entry's TOP-LEVEL `slot_token`. Two bugs (glossy-magnolia repro):
+    //   1. re-dialing a peer that had a local endpoint (from add-peer-slot)
+    //      CLOBBERED that local endpoint.
+    //   2. after a local add-peer-slot the top-level token was the LOCAL token,
+    //      so the federation endpoint inherited a stale LOCAL bearer →
+    //      federation delivery would 401.
+    // Fix: merge the federation endpoint into the peer's endpoints[] (preserve
+    // the local one), and seed its token ONLY from a prior FEDERATION endpoint
+    // on the same relay (re-dialing an already-acked peer), never a local one —
+    // empty until the pair_drop_ack lands otherwise.
+    let mut endpoints: Vec<crate::endpoints::Endpoint> = relay_state
         .get("peers")
         .and_then(|p| p.get(&peer_handle))
-        .and_then(|p| p.get("slot_token"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
+        .and_then(|e| e.get("endpoints"))
+        .and_then(|a| serde_json::from_value::<Vec<crate::endpoints::Endpoint>>(a.clone()).ok())
         .unwrap_or_default();
-    relay_state["peers"][&peer_handle] = json!({
-        "relay_url": peer_relay,
-        "slot_id": peer_slot_id,
-        "slot_token": existing_token, // empty until pair_drop_ack lands
-    });
+    let fed_token = endpoints
+        .iter()
+        .find(|e| {
+            e.relay_url == peer_relay && e.scope == crate::endpoints::EndpointScope::Federation
+        })
+        .map(|e| e.slot_token.clone())
+        .unwrap_or_default();
+    let fed_ep = crate::endpoints::Endpoint {
+        relay_url: peer_relay.clone(),
+        slot_id: peer_slot_id.clone(),
+        slot_token: fed_token, // empty until pair_drop_ack lands
+        scope: crate::endpoints::EndpointScope::Federation,
+    };
+    if let Some(existing) = endpoints
+        .iter_mut()
+        .find(|e| e.relay_url == fed_ep.relay_url)
+    {
+        *existing = fed_ep;
+    } else {
+        endpoints.push(fed_ep);
+    }
+    crate::endpoints::pin_peer_endpoints(&mut relay_state, &peer_handle, &endpoints)?;
     config::write_relay_state(&relay_state)?;
 
     // 4. Build signed pair_drop with our card + coords (no pair_nonce — this
@@ -9557,6 +9669,60 @@ fn cmd_service(action: ServiceAction) -> Result<()> {
 ///
 /// `--check` mode reports drift without acting — lists the processes
 /// that WOULD be killed and the binary version of each.
+///
+/// Session-scoped upgrade kill set (v0.13.2, B fix): THIS session's own daemon
+/// (`my_pid`, from its pidfile — reliable even when the OS process scan can't
+/// see it, as on Windows) plus TRUE orphans (found `wire daemon` pids owned by
+/// no session), EXCLUDING sibling sessions' daemons. Pure + unit-tested so the
+/// session-scoping is locked — the box-wide predecessor accumulated daemons.
+fn upgrade_kill_set(
+    my_pid: Option<u32>,
+    found_daemon_pids: &[u32],
+    owned_session_pids: &std::collections::HashSet<u32>,
+) -> Vec<u32> {
+    let mut k: Vec<u32> = Vec::new();
+    if let Some(p) = my_pid {
+        k.push(p);
+    }
+    for &p in found_daemon_pids {
+        if !owned_session_pids.contains(&p) && Some(p) != my_pid {
+            k.push(p); // true orphan — owned by no session
+        }
+    }
+    k.sort_unstable();
+    k.dedup();
+    k
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn upgrade_kill_set_is_session_scoped() {
+        // owned: my daemon 100, sibling session daemon 200.
+        let owned: HashSet<u32> = [100, 200].into_iter().collect();
+        // found by the process scan: mine (100), sibling (200), a true orphan (999).
+        let k = upgrade_kill_set(Some(100), &[100, 200, 999], &owned);
+        assert!(k.contains(&100), "must kill my own daemon (to replace it)");
+        assert!(k.contains(&999), "must sweep a true orphan");
+        assert!(!k.contains(&200), "must SPARE a sibling session's daemon");
+
+        // CRITICAL: even when the process scan returns EMPTY (Windows CIM can't
+        // match the quoted command line), my own daemon is still killed via its
+        // pidfile pid — this is the B-accumulation fix.
+        assert_eq!(
+            upgrade_kill_set(Some(100), &[], &owned),
+            vec![100],
+            "own daemon killed even when the process scan is empty"
+        );
+
+        // Uninitialized session (no own daemon): only true orphans.
+        assert_eq!(upgrade_kill_set(None, &[999], &HashSet::new()), vec![999]);
+    }
+}
+
 fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
     // 1. Identify all running wire processes. v0.7.3: walks `pgrep -f`
     // on unix / `Get-CimInstance Win32_Process` on Windows via the
@@ -9583,18 +9749,27 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
     };
     let cli_version = env!("CARGO_PKG_VERSION").to_string();
 
-    // 2b. v0.6.9: snapshot which sessions HAD a running daemon BEFORE
-    // we kill anything. Step 3's pgrep+SIGTERM also kills session-owned
-    // daemons (they share the `wire daemon` command line), so by the
-    // time the respawn loop runs, `daemon_running` would always be
-    // false and zero sessions would respawn. Capture state up front
-    // and respawn whatever was alive at the start.
-    let sessions_to_respawn_after_kill: Vec<std::path::PathBuf> = crate::session::list_sessions()
+    // 2b. v0.13.2 (B fix — session-scoped upgrade). `wire upgrade` now
+    // refreshes THIS session's daemon, not the whole box. The old box-wide
+    // design (kill every `wire daemon` process, wipe every session's pidfile,
+    // respawn every session) was wrong for a multi-session / shared-relay box
+    // AND broke on Windows: the CIM scan can't match the quoted
+    // `"...\wire.exe" daemon` command line (no contiguous `wire daemon`), so it
+    // found nothing to kill, then the respawn loop ACCUMULATED daemons
+    // (glossy-magnolia: 2->5->8->11). The kill set is now:
+    //   (a) THIS session's own daemon, via its pidfile pid — reliable and
+    //       CIM-independent; plus
+    //   (b) TRUE orphans: `wire daemon` pids owned by NO session.
+    // It SPARES sibling sessions' daemons AND the shared loopback relay-server
+    // (killing it would break every same-box session's routing).
+    let my_daemon_pid = record.pid();
+    let owned_session_pids: std::collections::HashSet<u32> = crate::session::list_sessions()
         .unwrap_or_default()
-        .into_iter()
-        .filter(|s| s.daemon_running)
-        .map(|s| s.home_dir)
+        .iter()
+        .filter_map(|s| crate::session::session_daemon_pid(&s.home_dir))
         .collect();
+    let kill_set = upgrade_kill_set(my_daemon_pid, &daemon_pids, &owned_session_pids);
+    // relay_pids are intentionally NOT killed — the local relay is shared.
 
     if check_only {
         // v0.6.8: also surface session-level state + PATH dupes in --check.
@@ -9638,7 +9813,7 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
             "running_relay_servers": relay_pids,
             "pidfile_version": recorded_version,
             "cli_version": cli_version,
-            "would_kill": running_pids,
+            "would_kill": kill_set,
             "would_refresh_services": installed_service_kinds,
             "session_daemons_running": sessions_with_daemons,
             "path_binaries": path_dupes,
@@ -9697,40 +9872,42 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         return Ok(());
     }
 
-    // 3. Kill every running wire process (daemons + relay-servers).
-    // Graceful first (SIGTERM / taskkill), then forceful (SIGKILL /
-    // taskkill /F) after a brief grace period. v0.7.3: uses
-    // `platform::kill_process` so the Windows path goes through
-    // `taskkill /T /PID` (kills the process tree, important for
-    // relay-server's hyper worker threads).
-    let mut killed: Vec<u32> = Vec::new();
-    for pid in &running_pids {
-        if crate::platform::kill_process(*pid, false) {
-            killed.push(*pid);
-        }
+    // 3. Terminate the kill set. Graceful first, then FORCE-kill any survivor.
+    //
+    // v0.13.2 (B fix #2): the force-kill must NOT be gated on graceful having
+    // "succeeded". On Windows, `taskkill /PID /T` WITHOUT `/F` is a no-op for a
+    // windowless daemon (it returns failure), so the rc9 logic — which only
+    // force-killed pids that graceful had reported killing — force-killed
+    // NOTHING, and the daemon survived every `wire upgrade` (glossy: pidfile
+    // pids 3676/25236/24660 all survived → accumulation). Now we attempt
+    // graceful best-effort, grace-wait, then force-kill EVERY pid still alive
+    // regardless of the graceful result. Force-kill (`taskkill /F /T` /
+    // SIGKILL) is the load-bearing step.
+    for pid in &kill_set {
+        let _ = crate::platform::kill_process(*pid, false); // best-effort graceful
     }
-    // Wait up to ~2s for graceful exit.
-    if !killed.is_empty() {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            let still_alive: Vec<u32> = killed
-                .iter()
-                .copied()
-                .filter(|p| process_alive_pid(*p))
-                .collect();
-            if still_alive.is_empty() {
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                // Force-kill hold-outs.
-                for pid in still_alive {
-                    let _ = crate::platform::kill_process(pid, true);
-                }
-                break;
-            }
+    if !kill_set.is_empty() {
+        // Brief grace for platforms where graceful works (Unix SIGTERM).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+        while std::time::Instant::now() < deadline && kill_set.iter().any(|p| process_alive_pid(*p))
+        {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        // Force-kill every survivor — this is what actually kills the
+        // windowless daemon on Windows.
+        for pid in &kill_set {
+            if process_alive_pid(*pid) {
+                let _ = crate::platform::kill_process(*pid, true);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200)); // settle
     }
+    // Report what's actually gone (drives the "no stale" message + JSON).
+    let killed: Vec<u32> = kill_set
+        .iter()
+        .copied()
+        .filter(|p| !process_alive_pid(*p))
+        .collect();
 
     // 4. Remove stale pidfile so ensure_daemon_running doesn't think the
     //    old daemon is still owning it.
@@ -9739,21 +9916,12 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         let _ = std::fs::remove_file(&pidfile);
     }
 
-    // 4b. v0.6.8/9 stale-cleanup: wipe every session's pidfile (step 3's
-    // pgrep+SIGTERM has already killed the processes; pidfile tombstones
-    // would otherwise block ensure_session_daemon's "already running"
-    // short-circuit). The respawn list comes from the v0.6.9 pre-kill
-    // snapshot above — checking `daemon_running` here would always
-    // return false because we just killed them.
-    if let Ok(sessions) = crate::session::list_sessions() {
-        for s in &sessions {
-            let session_pidfile = s.home_dir.join("state").join("wire").join("daemon.pid");
-            if session_pidfile.exists() {
-                let _ = std::fs::remove_file(&session_pidfile);
-            }
-        }
-    }
-    let session_daemons_to_respawn = sessions_to_respawn_after_kill;
+    // 4b. v0.13.2: session-scoped — only THIS session's pidfile is wiped
+    // (already removed at step 4 above). We deliberately DO NOT touch sibling
+    // sessions' pidfiles: their daemons were spared, so wiping their pidfiles
+    // would make them look down and the old box-wide respawn would spawn
+    // duplicates (the accumulation bug). Each sibling refreshes itself on its
+    // own `wire upgrade`.
 
     // 4c. v0.6.8 PATH duplicate-binary detection. If `wire` resolves to
     // multiple distinct files on $PATH, surface the conflict — operators
@@ -9830,25 +9998,11 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
     //    and short-circuits to "already running".)
     let spawned = crate::ensure_up::ensure_daemon_running()?;
 
-    // 5b. v0.6.8: respawn each session daemon under the new binary.
-    // Reuses `ensure_session_daemon` — same code path `wire session new`
-    // takes for the initial spawn (writes versioned pidfile, opens log,
-    // detaches). Best effort: failure of one session's respawn doesn't
-    // abort the upgrade for the others.
-    let mut session_respawns: Vec<Value> = Vec::new();
-    for home in &session_daemons_to_respawn {
-        match ensure_session_daemon(home) {
-            Ok(()) => session_respawns.push(json!({
-                "session_home": home.to_string_lossy(),
-                "status": "respawned",
-            })),
-            Err(e) => session_respawns.push(json!({
-                "session_home": home.to_string_lossy(),
-                "status": "failed",
-                "error": format!("{e:#}"),
-            })),
-        }
-    }
+    // 5b. v0.13.2: session-scoped — no sibling respawn. `ensure_daemon_running`
+    // above already respawned THIS session's daemon; sibling sessions were
+    // spared (never killed), so there is nothing to respawn for them. Each
+    // refreshes itself on its own `wire upgrade`.
+    let session_respawns: Vec<Value> = Vec::new();
 
     let new_record = crate::ensure_up::read_pid_record("daemon");
     let new_pid = new_record.pid();
@@ -9863,8 +10017,8 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
             "{}",
             serde_json::to_string(&json!({
                 "killed": killed,
-                "killed_daemons": daemon_pids,
-                "killed_relay_servers": relay_pids,
+                "found_daemons": daemon_pids,
+                "spared_relay_servers": relay_pids,
                 "service_refreshes": service_refreshes,
                 "spawned_fresh_daemon": spawned,
                 "new_pid": new_pid,
@@ -9879,17 +10033,32 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         if killed.is_empty() {
             println!("wire upgrade: no stale wire processes running");
         } else {
-            println!(
-                "wire upgrade: killed {} process(es) — {} daemon(s) + {} relay-server(s) (pids {})",
-                killed.len(),
-                daemon_pids.len(),
-                relay_pids.len(),
-                killed
+            let killed_list = killed
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            // Session-scoped: report what was actually killed, and that the
+            // shared relay-server was SPARED (not killed) — the old wording
+            // lumped the spared relay into the killed count and read like it
+            // had been terminated (glossy-magnolia nit).
+            if relay_pids.is_empty() {
+                println!(
+                    "wire upgrade: killed {} daemon(s) [{killed_list}]",
+                    killed.len()
+                );
+            } else {
+                let relay_list = relay_pids
                     .iter()
                     .map(|p| p.to_string())
                     .collect::<Vec<_>>()
-                    .join(", ")
-            );
+                    .join(", ");
+                println!(
+                    "wire upgrade: killed {} daemon(s) [{killed_list}]; spared {} shared relay-server(s) [{relay_list}]",
+                    killed.len(),
+                    relay_pids.len()
+                );
+            }
         }
         if !service_refreshes.is_empty() {
             println!(
@@ -11104,259 +11273,270 @@ fn upsert_mcp_entry(path: &std::path::Path, server_name: &str, entry: &Value) ->
     Ok(true)
 }
 
-// ---------- reactor — event-handler dispatch loop ----------
+// ---------- setup --statusline ----------
 
-#[allow(clippy::too_many_arguments)]
-fn cmd_reactor(
-    on_event: &str,
-    peer_filter: Option<&str>,
-    kind_filter: Option<&str>,
-    verified_only: bool,
-    interval_secs: u64,
-    once: bool,
-    dry_run: bool,
-    max_per_minute: u32,
-    max_chain_depth: u32,
-) -> Result<()> {
-    use crate::inbox_watch::{InboxEvent, InboxWatcher};
-    use std::collections::{HashMap, HashSet, VecDeque};
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
+/// Bundled Claude Code statusLine renderer (persona emoji + nickname + cwd,
+/// pidfile+tasklist liveness). Embedded at compile time; written to the
+/// Claude config dir on `wire setup --statusline --apply`.
+const STATUSLINE_RENDERER: &str = include_str!("../assets/wire-statusline.sh");
 
-    let cursor_path = config::state_dir()?.join("reactor.cursor");
-    // event_ids THIS reactor's handler has caused to be sent (via wire send).
-    // Used by chain-depth check — an incoming `(re:X)` where X is in this set
-    // means peer is replying to something we just said → don't reply back.
-    //
-    // Persisted across restarts so a reactor that crashes mid-conversation
-    // doesn't re-enter the loop. Reads on startup, writes after each
-    // outbox-grow detection. Capped at 500 entries (LRU-ish — old entries
-    // dropped from front of file).
-    let emitted_path = config::state_dir()?.join("reactor-emitted.log");
-    let mut emitted_ids: HashSet<String> = HashSet::new();
-    if emitted_path.exists()
-        && let Ok(body) = std::fs::read_to_string(&emitted_path)
-    {
-        for line in body.lines() {
-            let t = line.trim();
-            if !t.is_empty() {
-                emitted_ids.insert(t.to_string());
-            }
-        }
+/// `wire setup --statusline [--apply] [--remove]` — install/remove a Claude
+/// Code statusLine that renders this session's wire persona. Honors
+/// `$CLAUDE_CONFIG_DIR` (default `~/.claude`). Writes the renderer script and
+/// merges a `statusLine` block into settings.json, preserving existing keys
+/// and refusing to clobber a settings.json that exists but isn't valid JSON.
+fn cmd_setup_statusline(apply: bool, remove: bool) -> Result<()> {
+    use std::path::PathBuf;
+    let cfg_dir: PathBuf = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
+        .ok_or_else(|| anyhow!("cannot locate Claude config dir (set $CLAUDE_CONFIG_DIR)"))?;
+    let settings_path = cfg_dir.join("settings.json");
+    let script_path = cfg_dir.join("wire-statusline.sh");
+    // Resolve the shell invocation. On Windows a bare `bash` resolves to
+    // System32\bash.exe (WSL) — wrong environment, Windows paths invalid,
+    // statusline breaks — so we emit the absolute git-bash path. On Unix a
+    // bare `bash <script>` is correct. Script path is quoted for spaces.
+    let (command, command_warn) = statusline_command(&script_path);
+
+    println!("wire setup --statusline\n");
+    println!("Claude config dir: {}", cfg_dir.display());
+    println!("  renderer:  {}", script_path.display());
+    println!("  settings:  {}", settings_path.display());
+    if let Some(w) = &command_warn {
+        println!("  ⚠ {w}");
     }
-    // Outbox file paths the reactor watches for new sent-event_ids.
-    let outbox_dir = config::outbox_dir()?;
-    // (peer → file size we've already scanned). Lets us notice new outbox
-    // appends without re-reading the whole file each sweep.
-    let mut outbox_cursors: HashMap<String, u64> = HashMap::new();
+    println!();
 
-    let mut watcher = InboxWatcher::from_cursor_file(&cursor_path)?;
-
-    let kind_num: Option<u32> = match kind_filter {
-        Some(k) => Some(parse_kind(k)?),
-        None => None,
-    };
-
-    // Per-peer sliding window of dispatch instants for rate-limit check.
-    let mut peer_dispatch_log: HashMap<String, VecDeque<Instant>> = HashMap::new();
-
-    let dispatch = |ev: &InboxEvent,
-                    peer_dispatch_log: &mut HashMap<String, VecDeque<Instant>>,
-                    emitted_ids: &HashSet<String>|
-     -> Result<bool> {
-        if let Some(p) = peer_filter
-            && ev.peer != p
-        {
-            return Ok(false);
+    if remove {
+        if !apply {
+            println!("Would REMOVE the statusLine key from settings.json and delete the renderer.");
+            println!("Run `wire setup --statusline --remove --apply` to do it.");
+            return Ok(());
         }
-        if verified_only && !ev.verified {
-            return Ok(false);
-        }
-        if let Some(want) = kind_num {
-            let ev_kind = ev.raw.get("kind").and_then(Value::as_u64).map(|n| n as u32);
-            if ev_kind != Some(want) {
-                return Ok(false);
-            }
-        }
-
-        // Chain-depth check: if the body contains `(re:<event_id>)` and that
-        // event_id is in our emitted set, this is a reply to one of our
-        // replies → loop suspected, skip.
-        if max_chain_depth > 0 {
-            let body_str = match &ev.raw["body"] {
-                Value::String(s) => s.clone(),
-                other => serde_json::to_string(other).unwrap_or_default(),
-            };
-            if let Some(referenced) = parse_re_marker(&body_str) {
-                // Handler scripts usually truncate event_id (e.g. ${ID:0:12}).
-                // Match emitted set by prefix to catch both full + truncated.
-                let matched = emitted_ids.contains(&referenced)
-                    || emitted_ids.iter().any(|full| full.starts_with(&referenced));
-                if matched {
-                    eprintln!(
-                        "wire reactor: skip {} from {} — chain-depth (reply to our re:{})",
-                        ev.event_id, ev.peer, referenced
-                    );
-                    return Ok(false);
-                }
-            }
-        }
-
-        // Per-peer rate-limit check (sliding 60s window).
-        if max_per_minute > 0 {
-            let now = Instant::now();
-            let win = peer_dispatch_log.entry(ev.peer.clone()).or_default();
-            while let Some(&front) = win.front() {
-                if now.duration_since(front) > Duration::from_secs(60) {
-                    win.pop_front();
-                } else {
-                    break;
-                }
-            }
-            if win.len() as u32 >= max_per_minute {
-                eprintln!(
-                    "wire reactor: skip {} from {} — rate-limit ({}/min reached)",
-                    ev.event_id, ev.peer, max_per_minute
-                );
-                return Ok(false);
-            }
-            win.push_back(now);
-        }
-
-        if dry_run {
-            println!("{}", serde_json::to_string(&ev.raw)?);
-            return Ok(true);
-        }
-
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(on_event)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .env("WIRE_EVENT_PEER", &ev.peer)
-            .env("WIRE_EVENT_ID", &ev.event_id)
-            .env("WIRE_EVENT_KIND", &ev.kind)
-            .spawn()
-            .with_context(|| format!("spawning reactor handler: {on_event}"))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let body = serde_json::to_vec(&ev.raw)?;
-            let _ = stdin.write_all(&body);
-            let _ = stdin.write_all(b"\n");
-        }
-        std::mem::drop(child);
-        Ok(true)
-    };
-
-    // Scan outbox files for newly-appended event_ids and add to emitted set.
-    let scan_outbox = |emitted_ids: &mut HashSet<String>,
-                       outbox_cursors: &mut HashMap<String, u64>|
-     -> Result<usize> {
-        if !outbox_dir.exists() {
-            return Ok(0);
-        }
-        let mut added = 0;
-        let mut new_ids: Vec<String> = Vec::new();
-        for entry in std::fs::read_dir(&outbox_dir)?.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|x| x.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let peer = match path.file_stem().and_then(|s| s.to_str()) {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            let cur_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            let start = *outbox_cursors.get(&peer).unwrap_or(&0);
-            if cur_len <= start {
-                outbox_cursors.insert(peer, start);
-                continue;
-            }
-            let body = std::fs::read_to_string(&path).unwrap_or_default();
-            let tail = &body[start as usize..];
-            for line in tail.lines() {
-                if let Ok(v) = serde_json::from_str::<Value>(line)
-                    && let Some(eid) = v.get("event_id").and_then(Value::as_str)
-                    && emitted_ids.insert(eid.to_string())
-                {
-                    new_ids.push(eid.to_string());
-                    added += 1;
-                }
-            }
-            outbox_cursors.insert(peer, cur_len);
-        }
-        if !new_ids.is_empty() {
-            // Append new ids to disk, cap on-disk file at 500 entries.
-            let mut all: Vec<String> = emitted_ids.iter().cloned().collect();
-            if all.len() > 500 {
-                all.sort();
-                let drop_n = all.len() - 500;
-                let dropped: HashSet<String> = all.iter().take(drop_n).cloned().collect();
-                emitted_ids.retain(|x| !dropped.contains(x));
-                all = emitted_ids.iter().cloned().collect();
-            }
-            let _ = std::fs::write(&emitted_path, all.join("\n") + "\n");
-        }
-        Ok(added)
-    };
-
-    let sweep = |watcher: &mut InboxWatcher,
-                 emitted_ids: &mut HashSet<String>,
-                 outbox_cursors: &mut HashMap<String, u64>,
-                 peer_dispatch_log: &mut HashMap<String, VecDeque<Instant>>|
-     -> Result<usize> {
-        // Pick up any event_ids we sent since last sweep.
-        let _ = scan_outbox(emitted_ids, outbox_cursors);
-
-        let events = watcher.poll()?;
-        let mut fired = 0usize;
-        for ev in &events {
-            match dispatch(ev, peer_dispatch_log, emitted_ids) {
-                Ok(true) => fired += 1,
-                Ok(false) => {}
-                Err(e) => eprintln!("wire reactor: handler error for {}: {e}", ev.event_id),
-            }
-        }
-        watcher.save_cursors(&cursor_path)?;
-        Ok(fired)
-    };
-
-    if once {
-        sweep(
-            &mut watcher,
-            &mut emitted_ids,
-            &mut outbox_cursors,
-            &mut peer_dispatch_log,
-        )?;
+        let dropped = remove_statusline_entry(&settings_path)?;
+        let script_gone = if script_path.exists() {
+            std::fs::remove_file(&script_path).is_ok()
+        } else {
+            false
+        };
+        println!(
+            "Removed: statusLine key {} · renderer {}",
+            if dropped { "dropped" } else { "absent" },
+            if script_gone { "deleted" } else { "absent" }
+        );
         return Ok(());
     }
-    let interval = std::time::Duration::from_secs(interval_secs.max(1));
-    loop {
-        if let Err(e) = sweep(
-            &mut watcher,
-            &mut emitted_ids,
-            &mut outbox_cursors,
-            &mut peer_dispatch_log,
-        ) {
-            eprintln!("wire reactor: sweep error: {e}");
+
+    if !apply {
+        println!("Would write the renderer above and merge into settings.json:");
+        println!();
+        println!("  \"statusLine\": {{ \"type\": \"command\", \"command\": \"{command}\" }}");
+        println!();
+        println!("Resulting statusline:  ● <emoji> <nickname> · <cwd>");
+        println!("Run `wire setup --statusline --apply` to install.");
+        println!("(Existing settings.json keys are preserved; an invalid settings.json aborts.)");
+        return Ok(());
+    }
+
+    if let Some(parent) = script_path.parent() {
+        std::fs::create_dir_all(parent).context("creating Claude config dir")?;
+    }
+    std::fs::write(&script_path, STATUSLINE_RENDERER).context("writing renderer script")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&script_path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o755);
+            let _ = std::fs::set_permissions(&script_path, perms);
         }
-        std::thread::sleep(interval);
+    }
+    let changed = upsert_statusline_entry(&settings_path, &command)?;
+    println!("✓ renderer written: {}", script_path.display());
+    if changed {
+        println!("✓ merged statusLine into: {}", settings_path.display());
+    } else {
+        println!(
+            "  settings.json already configured: {}",
+            settings_path.display()
+        );
+    }
+    println!();
+    println!("Restart Claude Code (or reopen the session) to see your persona in the statusline.");
+    Ok(())
+}
+
+/// Merge a `statusLine` command block into a Claude settings.json, preserving
+/// all other keys. Returns Ok(true) if changed. Refuses to clobber a file that
+/// exists but is not valid JSON.
+fn upsert_statusline_entry(path: &std::path::Path, command: &str) -> Result<bool> {
+    let mut cfg: Value = if path.exists() {
+        let body = std::fs::read_to_string(path).context("reading settings.json")?;
+        if body.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&body).context(
+                "settings.json exists but is not valid JSON — refusing to clobber; fix or remove it first",
+            )?
+        }
+    } else {
+        json!({})
+    };
+    if !cfg.is_object() {
+        bail!("settings.json root is not a JSON object — refusing to clobber");
+    }
+    let desired = json!({"type": "command", "command": command});
+    let root = cfg.as_object_mut().unwrap();
+    if root.get("statusLine") == Some(&desired) {
+        return Ok(false);
+    }
+    root.insert("statusLine".to_string(), desired);
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).context("creating parent dir")?;
+    }
+    let out = serde_json::to_string_pretty(&cfg)? + "\n";
+    std::fs::write(path, out).context("writing settings.json")?;
+    Ok(true)
+}
+
+/// Drop the `statusLine` key from settings.json. Ok(true) if a key was removed,
+/// Ok(false) if file/key absent. Refuses to edit invalid JSON.
+fn remove_statusline_entry(path: &std::path::Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let body = std::fs::read_to_string(path).context("reading settings.json")?;
+    if body.trim().is_empty() {
+        return Ok(false);
+    }
+    let mut cfg: Value = serde_json::from_str(&body)
+        .context("settings.json is not valid JSON — refusing to edit")?;
+    let Some(root) = cfg.as_object_mut() else {
+        return Ok(false);
+    };
+    if root.remove("statusLine").is_none() {
+        return Ok(false);
+    }
+    let out = serde_json::to_string_pretty(&cfg)? + "\n";
+    std::fs::write(path, out).context("writing settings.json")?;
+    Ok(true)
+}
+
+/// Build the `statusLine.command` string for this platform. Returns the
+/// command plus an optional warning to surface to the operator.
+fn statusline_command(script_path: &std::path::Path) -> (String, Option<String>) {
+    #[cfg(windows)]
+    {
+        match resolve_git_bash() {
+            Some(bash) => (format!("\"{}\" \"{}\"", bash, script_path.display()), None),
+            None => (
+                format!("bash \"{}\"", script_path.display()),
+                Some(
+                    "could not locate git-bash; using bare `bash`. On Windows that may resolve to \
+                     WSL (System32\\bash.exe) and the statusline will be blank — install Git for \
+                     Windows or set statusLine.command to your git-bash bash.exe path."
+                        .to_string(),
+                ),
+            ),
+        }
+    }
+    #[cfg(unix)]
+    {
+        (format!("bash \"{}\"", script_path.display()), None)
     }
 }
 
-/// Parse `(re:<event_id>)` marker out of an event body. Returns the
-/// referenced event_id (full or prefix) if present. Tolerates spaces.
-fn parse_re_marker(body: &str) -> Option<String> {
-    let needle = "(re:";
-    let i = body.find(needle)?;
-    let rest = &body[i + needle.len()..];
-    let end = rest.find(')')?;
-    let id = rest[..end].trim().to_string();
-    if id.is_empty() {
-        return None;
+/// Locate the git-bash `bash.exe` on Windows, avoiding the WSL launcher at
+/// `System32\bash.exe`. Claude Code's statusLine command needs the real
+/// git-bash so the renderer runs in a POSIX-ish env with valid paths.
+#[cfg(windows)]
+fn resolve_git_bash() -> Option<String> {
+    use std::path::PathBuf;
+    // 1. `where.exe bash` — take the first hit that is NOT under System32
+    //    (that one is the WSL `bash.exe` launcher).
+    if let Ok(out) = std::process::Command::new("where.exe").arg("bash").output()
+        && out.status.success()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let p = line.trim();
+            if !p.is_empty() && !p.to_lowercase().contains("\\system32\\") {
+                return Some(p.to_string());
+            }
+        }
     }
-    Some(id)
+    // 2. Common Git-for-Windows install locations.
+    let candidates = [
+        std::env::var("ProgramFiles")
+            .ok()
+            .map(|p| format!("{p}\\Git\\bin\\bash.exe")),
+        std::env::var("ProgramFiles(x86)")
+            .ok()
+            .map(|p| format!("{p}\\Git\\bin\\bash.exe")),
+        std::env::var("LocalAppData")
+            .ok()
+            .map(|p| format!("{p}\\Programs\\Git\\bin\\bash.exe")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|c| PathBuf::from(c).exists())
+}
+
+#[cfg(test)]
+mod statusline_tests {
+    use super::*;
+
+    #[test]
+    fn statusline_merge_preserves_keys_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"theme":"dark","model":"opus"}"#).unwrap();
+        // First merge changes the file but keeps existing keys.
+        assert!(upsert_statusline_entry(&path, "bash /x.sh").unwrap());
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["model"], "opus");
+        assert_eq!(v["statusLine"]["type"], "command");
+        assert_eq!(v["statusLine"]["command"], "bash /x.sh");
+        // Identical re-merge = no change.
+        assert!(!upsert_statusline_entry(&path, "bash /x.sh").unwrap());
+        // Remove drops ONLY statusLine.
+        assert!(remove_statusline_entry(&path).unwrap());
+        let v2: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v2["theme"], "dark");
+        assert!(v2.get("statusLine").is_none());
+        // Remove again = no-op.
+        assert!(!remove_statusline_entry(&path).unwrap());
+    }
+
+    #[test]
+    fn statusline_merge_refuses_to_clobber_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "this is not json {").unwrap();
+        let err = upsert_statusline_entry(&path, "bash /x.sh").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not valid JSON"),
+            "err: {err:#}"
+        );
+        // File left untouched.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "this is not json {"
+        );
+    }
+
+    #[test]
+    fn statusline_creates_settings_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        assert!(upsert_statusline_entry(&path, "bash /x.sh").unwrap());
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["statusLine"]["command"], "bash /x.sh");
+    }
 }
 
 // ---------- notify (Goal 2) ----------
