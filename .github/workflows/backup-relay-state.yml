@@ -59,7 +59,7 @@ jobs:
           cat METADATA.txt
 
       - name: upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wireup-relay-data-${{ github.run_id }}
           path: artifact/
