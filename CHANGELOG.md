@@ -8,6 +8,13 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.13.3] — 2026-05-25
+
+**v0.13.3 — Group chat + one update command.**
+
+- **`wire group` — bidirectional group chat.** `create / add / send / tail / list`. A group is a **shared relay-room slot**: the creator allocates one slot and its token is the room key, distributed only to vouched members; everyone posts + pulls that one slot (no relay change, no daemon auto-rebroadcast, no per-member credential mesh — chosen because a `slot_token` is a read+write credential, so direct member-to-member delivery would leak each member's personal mailbox token). Membership is a **creator-signed roster** with a `GroupTier` (creator/member/introduced) that is a SEPARATE axis from bilateral peer trust. `add` takes a bilaterally-VERIFIED peer (T22 consent) and distributes a `group_invite` carrying the signed roster + room coords. On ingesting an invite a member **introduce-pins** every other member — adds their key to trust at bilateral UNTRUSTED so their group messages verify, WITHOUT granting bilateral trust and never lowering an existing tier (the axes stay disjoint). Net: members who never paired with each other can post to the room and read each other's messages with a verified signature, vouched by the creator's signature in place of a direct SAS handshake. Verified live on wireup.net + by an e2e star-topology test (one member reads another's message verified though they never paired).
+- **`wire update` ≡ `wire upgrade` — merged.** One verb (`update` is an alias). It ALWAYS checks crates.io; if a newer stable release is published it installs it (`cargo install slancha-wire` when a Rust toolchain is on PATH, else downloads + SHA-256-verifies the prebuilt release binary and self-replaces — toolchain-free), then runs the atomic daemon swap so the restart picks up the new binary. No newer version → it skips the install and just restarts. A crates.io/network failure degrades to a warning and never blocks the restart. `--check` reports the available update + the processes that would restart without acting; `--local` skips the crates.io check (offline / local dev build).
+
 ## [v0.13.2] — 2026-05-24
 
 **v0.13.2 — Windows hardening + `wire setup --statusline`.** Three Windows bugs (found by a paired Windows session dogfooding v0.13.1 over wire) plus the long-missing persona statusline and removal of the dead reactor:
