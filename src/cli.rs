@@ -726,6 +726,20 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Self-update to the latest PUBLISHED wire. Checks crates.io for the
+    /// newest version and installs it — via `cargo install slancha-wire` if a
+    /// Rust toolchain is on PATH, otherwise by downloading the prebuilt
+    /// release binary for this platform (no toolchain needed) and replacing
+    /// this binary in place. Distinct from `wire upgrade`, which restarts the
+    /// running daemon; after updating, run `wire upgrade` to pick up the new
+    /// binary. (`wire update --check` just reports current vs latest.)
+    Update {
+        /// Report current vs latest without installing.
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Install / inspect / remove a launchd plist (macOS) or systemd
     /// user unit (linux) that runs `wire daemon` on login + restarts
     /// on crash. Replaces today's "background it with tmux/&/systemd
@@ -1701,6 +1715,7 @@ pub fn run() -> Result<()> {
             recent_rejections,
         } => cmd_doctor(json, recent_rejections),
         Command::Upgrade { check, json } => cmd_upgrade(check, json),
+        Command::Update { check, json } => cmd_update(check, json),
         Command::Service { action } => cmd_service(action),
         Command::Diag { action } => cmd_diag(action),
         Command::Claim {
@@ -9651,6 +9666,239 @@ fn cmd_service(action: ServiceAction) -> Result<()> {
         println!("  unit:      {}", report.unit_path);
         println!("  status:    {}", report.status);
         println!("  detail:    {}", report.detail);
+    }
+    Ok(())
+}
+
+// ---------- update (self-update from crates.io / prebuilt release) ----------
+
+const CRATE_NAME: &str = "slancha-wire";
+
+/// (target-triple, binary-extension) of the GitHub release asset for THIS
+/// platform — names mirror `.github/workflows/release.yml`. `None` if no
+/// prebuilt is published for this target.
+fn release_asset_triple() -> Option<(&'static str, &'static str)> {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        return Some(("x86_64-pc-windows-msvc", ".exe"));
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        return Some(("aarch64-apple-darwin", ""));
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        return Some(("x86_64-apple-darwin", ""));
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        return Some(("x86_64-unknown-linux-musl", ""));
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        return Some(("aarch64-unknown-linux-musl", ""));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Latest stable version published on crates.io.
+fn fetch_latest_published_version() -> Result<String> {
+    let url = format!("https://crates.io/api/v1/crates/{CRATE_NAME}");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let resp = client
+        .get(&url)
+        // crates.io rejects requests without a descriptive User-Agent (403).
+        .header(
+            "User-Agent",
+            format!("wire/{} (self-update)", env!("CARGO_PKG_VERSION")),
+        )
+        .send()?;
+    if !resp.status().is_success() {
+        bail!("crates.io returned {} for {CRATE_NAME}", resp.status());
+    }
+    let v: Value = resp.json()?;
+    v.get("crate")
+        .and_then(|c| {
+            c.get("max_stable_version")
+                .or_else(|| c.get("newest_version"))
+        })
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("crates.io response missing crate.max_stable_version"))
+}
+
+/// True iff `latest` is strictly newer than `current` (numeric major.minor.patch;
+/// pre-release suffixes ignored).
+fn version_is_newer(latest: &str, current: &str) -> bool {
+    let parse = |s: &str| -> (u64, u64, u64) {
+        let core = s.split('-').next().unwrap_or(s);
+        let mut it = core.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+        (
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+        )
+    };
+    parse(latest) > parse(current)
+}
+
+fn cargo_on_path() -> bool {
+    std::process::Command::new("cargo")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Download the prebuilt release binary for `latest` and replace THIS binary
+/// in place — the toolchain-free update path (for boxes with no `cargo`).
+fn self_update_from_release(latest: &str) -> Result<()> {
+    let (triple, ext) = release_asset_triple().ok_or_else(|| {
+        anyhow!(
+            "no prebuilt release binary for this platform — install a Rust toolchain and re-run, \
+             or `cargo install {CRATE_NAME}`"
+        )
+    })?;
+    let base =
+        format!("https://github.com/SlanchaAi/wire/releases/download/v{latest}/wire-{triple}{ext}");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
+    let resp = client
+        .get(&base)
+        .header("User-Agent", "wire-self-update")
+        .send()?;
+    if !resp.status().is_success() {
+        bail!("downloading {base} returned {}", resp.status());
+    }
+    let bytes = resp.bytes()?;
+
+    // Verify the SHA-256 sidecar if present (best-effort; absence is non-fatal).
+    if let Ok(sha) = client
+        .get(format!("{base}.sha256"))
+        .header("User-Agent", "wire-self-update")
+        .send()
+        && sha.status().is_success()
+    {
+        let expected = sha
+            .text()?
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if !expected.is_empty() {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(&bytes);
+            let actual = hex::encode(h.finalize());
+            if expected != actual {
+                bail!(
+                    "SHA-256 mismatch — expected {expected}, got {actual} (aborting, binary NOT replaced)"
+                );
+            }
+        }
+    }
+
+    let exe = std::env::current_exe().context("locating current exe")?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow!("current exe has no parent dir"))?;
+    let tmp = dir.join(format!(".wire-update-{}", std::process::id()));
+    std::fs::write(&tmp, &bytes).with_context(|| format!("writing {tmp:?}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+        // Unix: rename over the running binary — the running process keeps the
+        // old inode; the new file takes the path for the next invocation.
+        std::fs::rename(&tmp, &exe).with_context(|| format!("replacing {exe:?}"))?;
+    }
+    #[cfg(windows)]
+    {
+        // Windows can't overwrite a running .exe — rename it aside first
+        // (allowed even while running), then move the new one into place.
+        let old = exe.with_extension("old");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(&exe, &old)
+            .with_context(|| format!("renaming running exe {exe:?} aside"))?;
+        std::fs::rename(&tmp, &exe).with_context(|| format!("installing new exe at {exe:?}"))?;
+    }
+    Ok(())
+}
+
+fn cmd_update(check_only: bool, as_json: bool) -> Result<()> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let latest = fetch_latest_published_version().context("checking crates.io for latest wire")?;
+    let available = version_is_newer(&latest, &current);
+
+    if check_only {
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "current": current,
+                    "latest": latest,
+                    "update_available": available,
+                }))?
+            );
+        } else if available {
+            println!("wire update: {current} → {latest} available. Run `wire update` to install.");
+        } else {
+            println!("wire update: up to date ({current} is the latest published).");
+        }
+        return Ok(());
+    }
+
+    if !available {
+        println!("wire update: already on the latest published version ({current}).");
+        return Ok(());
+    }
+
+    let via = if cargo_on_path() {
+        eprintln!(
+            "wire update: {current} → {latest} — installing via `cargo install {CRATE_NAME}` …"
+        );
+        let status = std::process::Command::new("cargo")
+            .args([
+                "install",
+                CRATE_NAME,
+                "--version",
+                &latest,
+                "--force",
+                "--locked",
+            ])
+            .status()
+            .context("running cargo install")?;
+        if !status.success() {
+            bail!("`cargo install {CRATE_NAME}` failed");
+        }
+        "cargo install"
+    } else {
+        eprintln!(
+            "wire update: {current} → {latest} — no `cargo` on PATH, downloading the prebuilt release binary …"
+        );
+        self_update_from_release(&latest)?;
+        "prebuilt release binary"
+    };
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "updated_from": current,
+                "updated_to": latest,
+                "via": via,
+            }))?
+        );
+    } else {
+        println!(
+            "wire update: installed {latest} (via {via}). Run `wire upgrade` to restart the daemon on the new binary."
+        );
     }
     Ok(())
 }
