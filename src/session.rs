@@ -679,11 +679,98 @@ pub fn resolve_session_key() -> Option<(String, &'static str)> {
     ] {
         if let Ok(v) = std::env::var(var) {
             let v = v.trim();
-            if !v.is_empty() {
+            // Guard against an unexpanded launcher placeholder, e.g. a host
+            // that writes `"env": {"WIRE_SESSION_ID": "${CLAUDE_CODE_SESSION_ID}"}`
+            // but does NOT expand it (Windows Claude Code passes the literal
+            // when the var is absent). Hashing the literal would collapse every
+            // session onto one identity, so treat a `${...}` value as unset.
+            if !v.is_empty() && !v.contains("${") {
                 return Some((v.to_string(), source));
             }
         }
     }
+    // Claude Code adapter (host-agnostic fallback). On some platforms the MCP
+    // server process does not inherit CLAUDE_CODE_SESSION_ID and the MCP
+    // `initialize` handshake carries no session id, so the env checks above
+    // miss. Claude Code, however, writes `~/.claude/sessions/<pid>.json`
+    // ({"sessionId":..., "cwd":...}) for each live session, named by the
+    // owning `claude` process PID. Walk our parent-process chain to that
+    // process and read its sessionId — deterministic, race-free, env-free.
+    if let Some(sid) = claude_code_session_from_pidfile() {
+        return Some((sid, "claude-code-pidfile"));
+    }
+    None
+}
+
+/// Recover the Claude Code session id from the per-session PID-file when it
+/// isn't available via the environment. Claude Code writes
+/// `~/.claude/sessions/<pid>.json` = `{"sessionId": "...", "cwd": "...", ...}`
+/// for each live session, keyed by the owning `claude` process PID. The MCP
+/// server we run inside is a descendant of that process, so we walk our
+/// parent chain and return the `sessionId` of the first ancestor that has a
+/// PID-file. Cross-platform: the file exists on macOS/Linux/Windows alike.
+fn claude_code_session_from_pidfile() -> Option<String> {
+    let dir = dirs::home_dir()?.join(".claude").join("sessions");
+    let mut pid = std::process::id();
+    // Chains are shallow (MCP server -> launcher -> claude); 16 is generous.
+    for _ in 0..16 {
+        let f = dir.join(format!("{pid}.json"));
+        if let Ok(txt) = std::fs::read_to_string(&f)
+            && let Ok(v) = serde_json::from_str::<Value>(&txt)
+            && let Some(s) = v.get("sessionId").and_then(Value::as_str)
+        {
+            let s = s.trim();
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+        pid = parent_pid(pid)?;
+    }
+    None
+}
+
+/// Best-effort parent-PID lookup. Linux: `/proc/<pid>/status`. macOS: `ps`.
+/// Windows: PowerShell CIM (no extra crate). Returns `None` on any failure,
+/// which simply ends the walk.
+#[cfg(target_os = "linux")]
+fn parent_pid(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("PPid:") {
+            return rest.trim().parse().ok();
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn parent_pid(pid: u32) -> Option<u32> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+#[cfg(target_os = "windows")]
+fn parent_pid(pid: u32) -> Option<u32> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').ParentProcessId"),
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn parent_pid(_pid: u32) -> Option<u32> {
     None
 }
 
