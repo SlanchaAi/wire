@@ -719,29 +719,26 @@ pub enum Command {
         #[arg(long, default_value_t = 5)]
         recent_rejections: usize,
     },
-    /// Atomic upgrade: kill every `wire daemon` process, spawn a fresh
-    /// one from the current binary, write a new pidfile. Eliminates the
-    /// "stale binary text in memory under a fresh symlink" bug class that
-    /// burned 30 minutes today.
+    /// Update + restart in one step (alias: `wire update`). ALWAYS checks
+    /// crates.io for a newer published wire; if one exists it installs it
+    /// (via `cargo install slancha-wire` when a Rust toolchain is on PATH,
+    /// else by downloading + SHA-256-verifying the prebuilt release binary
+    /// and replacing this one in place), then does the atomic daemon swap —
+    /// kill every `wire daemon`, respawn from the (now-current) binary, write
+    /// a fresh pidfile. No newer version → it skips the install and just
+    /// restarts the daemon. `--check` reports what would happen (available
+    /// update + processes that would be restarted) without doing it;
+    /// `--local` skips the crates.io check and only restarts the daemon
+    /// (offline, or running a local dev build).
+    #[command(visible_alias = "update")]
     Upgrade {
-        /// Report drift without taking action (lists processes that would
-        /// be killed + the version of each).
+        /// Report current vs latest + drift without taking action.
         #[arg(long)]
         check: bool,
+        /// Skip the crates.io update check; just restart the daemon from the
+        /// current binary (offline / local dev build).
         #[arg(long)]
-        json: bool,
-    },
-    /// Self-update to the latest PUBLISHED wire. Checks crates.io for the
-    /// newest version and installs it — via `cargo install slancha-wire` if a
-    /// Rust toolchain is on PATH, otherwise by downloading the prebuilt
-    /// release binary for this platform (no toolchain needed) and replacing
-    /// this binary in place. Distinct from `wire upgrade`, which restarts the
-    /// running daemon; after updating, run `wire upgrade` to pick up the new
-    /// binary. (`wire update --check` just reports current vs latest.)
-    Update {
-        /// Report current vs latest without installing.
-        #[arg(long)]
-        check: bool,
+        local: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1766,8 +1763,7 @@ pub fn run() -> Result<()> {
             json,
             recent_rejections,
         } => cmd_doctor(json, recent_rejections),
-        Command::Upgrade { check, json } => cmd_upgrade(check, json),
-        Command::Update { check, json } => cmd_update(check, json),
+        Command::Upgrade { check, local, json } => cmd_upgrade(check, local, json),
         Command::Service { action } => cmd_service(action),
         Command::Diag { action } => cmd_diag(action),
         Command::Claim {
@@ -10423,37 +10419,37 @@ fn self_update_from_release(latest: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_update(check_only: bool, as_json: bool) -> Result<()> {
+/// Outcome of the crates.io self-update step (the front half of `wire upgrade`).
+struct UpdateOutcome {
+    current: String,
+    latest: String,
+    /// A newer stable version is published.
+    available: bool,
+    /// We actually installed it this run.
+    installed: bool,
+    /// How it was installed ("cargo install" / "prebuilt release binary").
+    via: Option<&'static str>,
+}
+
+/// Check crates.io for a newer published wire and, when `install` is true,
+/// self-install it (cargo if a toolchain is on PATH, else the prebuilt release
+/// binary). The front half of `wire upgrade`; `install=false` is check-only.
+fn self_update_step(install: bool) -> Result<UpdateOutcome> {
     let current = env!("CARGO_PKG_VERSION").to_string();
     let latest = fetch_latest_published_version().context("checking crates.io for latest wire")?;
     let available = version_is_newer(&latest, &current);
-
-    if check_only {
-        if as_json {
-            println!(
-                "{}",
-                serde_json::to_string(&json!({
-                    "current": current,
-                    "latest": latest,
-                    "update_available": available,
-                }))?
-            );
-        } else if available {
-            println!("wire update: {current} → {latest} available. Run `wire update` to install.");
-        } else {
-            println!("wire update: up to date ({current} is the latest published).");
-        }
-        return Ok(());
+    if !install || !available {
+        return Ok(UpdateOutcome {
+            current,
+            latest,
+            available,
+            installed: false,
+            via: None,
+        });
     }
-
-    if !available {
-        println!("wire update: already on the latest published version ({current}).");
-        return Ok(());
-    }
-
     let via = if cargo_on_path() {
         eprintln!(
-            "wire update: {current} → {latest} — installing via `cargo install {CRATE_NAME}` …"
+            "wire upgrade: {current} → {latest} — installing via `cargo install {CRATE_NAME}` …"
         );
         let status = std::process::Command::new("cargo")
             .args([
@@ -10472,27 +10468,18 @@ fn cmd_update(check_only: bool, as_json: bool) -> Result<()> {
         "cargo install"
     } else {
         eprintln!(
-            "wire update: {current} → {latest} — no `cargo` on PATH, downloading the prebuilt release binary …"
+            "wire upgrade: {current} → {latest} — no `cargo` on PATH, downloading the prebuilt release binary …"
         );
         self_update_from_release(&latest)?;
         "prebuilt release binary"
     };
-
-    if as_json {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "updated_from": current,
-                "updated_to": latest,
-                "via": via,
-            }))?
-        );
-    } else {
-        println!(
-            "wire update: installed {latest} (via {via}). Run `wire upgrade` to restart the daemon on the new binary."
-        );
-    }
-    Ok(())
+    Ok(UpdateOutcome {
+        current,
+        latest,
+        available,
+        installed: true,
+        via: Some(via),
+    })
 }
 
 // ---------- upgrade (atomic daemon swap) ----------
@@ -10563,7 +10550,36 @@ mod upgrade_tests {
     }
 }
 
-fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
+fn cmd_upgrade(check_only: bool, local: bool, as_json: bool) -> Result<()> {
+    // 0. (v0.13.3 — merged `update`) ALWAYS check crates.io first and, unless
+    // this is a --check or --local run, self-install a newer release BEFORE the
+    // daemon swap below — the respawn then picks up the new on-disk binary. A
+    // crates.io/network failure must NOT block the restart, so it degrades to a
+    // warning. `--local` skips it entirely (offline / local dev build).
+    let update: Option<UpdateOutcome> = if local {
+        None
+    } else {
+        match self_update_step(!check_only) {
+            Ok(o) => Some(o),
+            Err(e) => {
+                if !check_only {
+                    eprintln!("wire upgrade: update check skipped — {e:#}");
+                }
+                None
+            }
+        }
+    };
+    if let Some(o) = &update
+        && o.installed
+    {
+        eprintln!(
+            "wire upgrade: installed {} (was {}, via {}); restarting the daemon on the new binary.",
+            o.latest,
+            o.current,
+            o.via.unwrap_or("self-update")
+        );
+    }
+
     // 1. Identify all running wire processes. v0.7.3: walks `pgrep -f`
     // on unix / `Get-CimInstance Win32_Process` on Windows via the
     // shared `platform::find_processes_by_cmdline`. Covers both the
@@ -10647,12 +10663,18 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
                 .map(|_| label)
         })
         .collect();
+        let (update_latest, update_available) = match &update {
+            Some(o) => (Some(o.latest.clone()), o.available),
+            None => (None, false),
+        };
         let report = json!({
             "running_pids": running_pids,
             "running_daemons": daemon_pids,
             "running_relay_servers": relay_pids,
             "pidfile_version": recorded_version,
             "cli_version": cli_version,
+            "latest_published": update_latest,
+            "update_available": update_available,
             "would_kill": kill_set,
             "would_refresh_services": installed_service_kinds,
             "session_daemons_running": sessions_with_daemons,
@@ -10664,6 +10686,11 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         } else {
             println!("wire upgrade --check");
             println!("  cli version:      {cli_version}");
+            match (&update_latest, update_available) {
+                (Some(l), true) => println!("  latest published: {l}  (UPDATE AVAILABLE)"),
+                (Some(l), false) => println!("  latest published: {l}  (up to date)"),
+                (None, _) => println!("  latest published: (crates.io check skipped)"),
+            }
             println!(
                 "  pidfile version:  {}",
                 recorded_version.as_deref().unwrap_or("(missing)")
