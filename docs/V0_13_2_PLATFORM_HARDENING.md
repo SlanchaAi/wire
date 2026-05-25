@@ -5,8 +5,8 @@ Driven with paired Windows testers **glossy-magnolia** + **wisp-blossom** (two i
 
 Branch: `v0.13.2-windows-hardening`. Authoring lane: bright-camellia (this agent, macOS). Build/verify lane: feral-blossom (Windows). Shared loopback relay on `127.0.0.1:8771` — reinstall there restarts it and interrupts all local routing, so **coordinate before restarting**.
 
-## STATUS: v0.13.2 STABLE-READY (2026-05-25)
-Full rc10 Windows matrix GREEN (glossy): B + E2-bidirectional + pair-all-local + E3(additive+token-bleed) + A2 + C + E8 + statusline. **Stable tag HELD for operator review** (operator said hold live deploy). Non-blocking caveats: live sibling-daemon-survival re-test pending wisp recovery; true-orphan-sweep not yet staged. Separate: wisp daemon-stability (rc11).
+## STATUS: v0.13.2 SHIPPED + LIVE (2026-05-25)
+Full rc10 Windows matrix GREEN (glossy): B + E2-bidirectional + pair-all-local + E3(additive+token-bleed) + A2 + C + E8 + statusline. **SHIPPED 2026-05-25**: crates.io 0.13.2, wireup.net relay redeployed (healthz 200; a Dockerfile assets/ COPY miss caught + fixed post-tag), binaries + ci green. Operator GO confirmed. Released-build Windows validation in progress with glossy/wisp. Non-blocking caveats: live sibling-daemon-survival re-test pending wisp recovery; true-orphan-sweep not yet staged. Separate: wisp daemon-stability (rc11).
 
 ## Status legend
 ✅ fixed + verified · 🟡 fixed, awaiting Windows re-verify · 🔴 open · 🔵 epic (separate from "no bugs" core)
