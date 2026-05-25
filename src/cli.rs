@@ -10017,8 +10017,8 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
             "{}",
             serde_json::to_string(&json!({
                 "killed": killed,
-                "killed_daemons": daemon_pids,
-                "killed_relay_servers": relay_pids,
+                "found_daemons": daemon_pids,
+                "spared_relay_servers": relay_pids,
                 "service_refreshes": service_refreshes,
                 "spawned_fresh_daemon": spawned,
                 "new_pid": new_pid,
@@ -10033,17 +10033,32 @@ fn cmd_upgrade(check_only: bool, as_json: bool) -> Result<()> {
         if killed.is_empty() {
             println!("wire upgrade: no stale wire processes running");
         } else {
-            println!(
-                "wire upgrade: killed {} process(es) — {} daemon(s) + {} relay-server(s) (pids {})",
-                killed.len(),
-                daemon_pids.len(),
-                relay_pids.len(),
-                killed
+            let killed_list = killed
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            // Session-scoped: report what was actually killed, and that the
+            // shared relay-server was SPARED (not killed) — the old wording
+            // lumped the spared relay into the killed count and read like it
+            // had been terminated (glossy-magnolia nit).
+            if relay_pids.is_empty() {
+                println!(
+                    "wire upgrade: killed {} daemon(s) [{killed_list}]",
+                    killed.len()
+                );
+            } else {
+                let relay_list = relay_pids
                     .iter()
                     .map(|p| p.to_string())
                     .collect::<Vec<_>>()
-                    .join(", ")
-            );
+                    .join(", ");
+                println!(
+                    "wire upgrade: killed {} daemon(s) [{killed_list}]; spared {} shared relay-server(s) [{relay_list}]",
+                    killed.len(),
+                    relay_pids.len()
+                );
+            }
         }
         if !service_refreshes.is_empty() {
             println!(
