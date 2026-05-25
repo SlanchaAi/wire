@@ -610,6 +610,11 @@ pub enum Command {
     /// broadcast` fans one signed event to every pinned peer.
     #[command(subcommand)]
     Mesh(MeshCommand),
+    /// Group chat (v0.13.3): create a named group, add VERIFIED peers, and
+    /// send/tail messages across the whole member set. Membership is a signed
+    /// roster (group-scoped tiers, separate from bilateral peer trust).
+    #[command(subcommand)]
+    Group(GroupCommand),
     /// Detect known MCP host config locations (Claude Desktop, Claude Code,
     /// Cursor, project-local) and either print or auto-merge the wire MCP
     /// server entry. Default prints; pass `--apply` to actually modify config
@@ -1208,6 +1213,52 @@ pub enum SessionCommand {
 /// v0.6.3: top-level `wire mesh` verbs. Each verb operates on the current
 /// session's view of the pinned peer set. `status` is the read-only
 /// observability primitive (alias for `wire session mesh-status`);
+/// Group-chat verbs (v0.13.3). Membership is a creator-signed roster
+/// (`src/group.rs`); send fans a signed message over the member set.
+#[derive(Subcommand, Debug)]
+pub enum GroupCommand {
+    /// Create a new group — you become the creator + sole member, roster signed.
+    Create {
+        /// Group name (human label).
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a bilaterally-VERIFIED pinned peer to a group you created (Member tier).
+    Add {
+        /// Group id or name.
+        group: String,
+        /// Peer handle (must be a VERIFIED pinned peer).
+        peer: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Send a message to every other member of a group (signed fan-out).
+    Send {
+        /// Group id or name.
+        group: String,
+        /// Message text.
+        message: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show recent messages received for a group.
+    Tail {
+        /// Group id or name.
+        group: String,
+        /// Max messages to show.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List your groups + their members and tiers.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// `broadcast` fans a signed event to every pinned peer in one call.
 #[derive(Subcommand, Debug)]
 pub enum MeshCommand {
@@ -1651,6 +1702,7 @@ pub fn run() -> Result<()> {
         Command::Session(cmd) => cmd_session(cmd),
         Command::Identity { cmd } => cmd_identity(cmd),
         Command::Mesh(cmd) => cmd_mesh(cmd),
+        Command::Group(cmd) => cmd_group(cmd),
         Command::Invite {
             relay,
             ttl,
@@ -6989,6 +7041,319 @@ fn cmd_pair_reject(peer_nick: &str, as_json: bool) -> Result<()> {
 // `wire` invocations with `WIRE_HOME` overridden to the session's dir;
 // each session-local `init` / `claim` / `daemon` runs in its own world
 // without cross-contamination via env vars in this process.
+
+// ---------- group chat (v0.13.3) ----------
+
+fn cmd_group(cmd: GroupCommand) -> Result<()> {
+    match cmd {
+        GroupCommand::Create { name, json } => cmd_group_create(&name, json),
+        GroupCommand::Add { group, peer, json } => cmd_group_add(&group, &peer, json),
+        GroupCommand::Send {
+            group,
+            message,
+            json,
+        } => cmd_group_send(&group, &message, json),
+        GroupCommand::Tail { group, limit, json } => cmd_group_tail(&group, limit, json),
+        GroupCommand::List { json } => cmd_group_list(json),
+    }
+}
+
+/// This agent's (did, handle) from its signed card.
+fn group_self_identity() -> Result<(String, String)> {
+    let card = config::read_agent_card()?;
+    let did = card
+        .get("did")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent-card missing did — run `wire up` first"))?
+        .to_string();
+    let handle = crate::agent_card::display_handle_from_did(&did).to_string();
+    Ok((did, handle))
+}
+
+fn cmd_group_create(name: &str, as_json: bool) -> Result<()> {
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire up` first");
+    }
+    let (did, handle) = group_self_identity()?;
+    let id = format!("g{:016x}", rand::random::<u64>());
+    let mut group = crate::group::Group::new(id.clone(), name.to_string(), handle, did);
+    let sk = config::read_private_key()?;
+    group.sign(&sk)?;
+    crate::group::save_group(&group)?;
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({"id": id, "name": name, "members": 1}))?
+        );
+    } else {
+        println!("created group `{name}` (id {id}). You are the creator.");
+        println!("  add peers: `wire group add {id} <peer>`   talk: `wire group send {id} \"hi\"`");
+    }
+    Ok(())
+}
+
+fn cmd_group_add(group_ref: &str, peer: &str, as_json: bool) -> Result<()> {
+    let (self_did, _) = group_self_identity()?;
+    let mut group = crate::group::resolve_group(group_ref)?;
+    if group.creator_did != self_did {
+        bail!("only the group creator can add members (the creator signs the roster)");
+    }
+    // T22 consent: a Member must be a peer you bilaterally VERIFIED.
+    let bare = crate::agent_card::bare_handle(peer).to_string();
+    let trust = config::read_trust()?;
+    let agent = trust
+        .get("agents")
+        .and_then(|a| a.get(&bare))
+        .ok_or_else(|| {
+            anyhow!("`{bare}` is not a pinned peer — pair first (`wire dial {bare}@<relay>`)")
+        })?;
+    let tier = agent
+        .get("tier")
+        .and_then(Value::as_str)
+        .unwrap_or("UNTRUSTED");
+    if tier != "VERIFIED" {
+        bail!(
+            "`{bare}` is {tier}, not VERIFIED — only verified peers can be added as Members (T22 consent)"
+        );
+    }
+    let peer_did = agent
+        .get("did")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("trust entry for `{bare}` is missing a did"))?
+        .to_string();
+    group.add_member(bare.clone(), peer_did, crate::group::GroupTier::Member)?;
+    let sk = config::read_private_key()?;
+    group.sign(&sk)?;
+    crate::group::save_group(&group)?;
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "group": group.id, "added": bare, "epoch": group.epoch, "members": group.members.len()
+            }))?
+        );
+    } else {
+        println!(
+            "added `{bare}` to `{}` — now {} member(s), epoch {}",
+            group.name,
+            group.members.len(),
+            group.epoch
+        );
+    }
+    Ok(())
+}
+
+fn cmd_group_send(group_ref: &str, message: &str, as_json: bool) -> Result<()> {
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire up` first");
+    }
+    let (self_did, self_handle) = group_self_identity()?;
+    let group = crate::group::resolve_group(group_ref)?;
+    if !group.contains_did(&self_did) {
+        bail!("you are not a member of group `{}`", group.name);
+    }
+    let targets = group.other_member_handles(&self_did);
+    if targets.is_empty() {
+        bail!(
+            "group `{}` has no other members yet — add one with `wire group add {} <peer>`",
+            group.name,
+            group.id
+        );
+    }
+
+    // Sign material once (mirrors cmd_mesh_broadcast); fan a kind=group_msg
+    // event to every other member's outbox. The daemon delivers from there.
+    let sk_seed = config::read_private_key()?;
+    let card = config::read_agent_card()?;
+    let pk_b64 = card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent-card missing verify_keys[*].key"))?;
+    let pk_bytes = crate::signing::b64decode(pk_b64)?;
+    let kind_id = parse_kind("group_msg")?;
+    let now_iso = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+    let body = json!({
+        "group_id": group.id,
+        "group_name": group.name,
+        "epoch": group.epoch,
+        "text": message,
+    });
+
+    let mut sent: Vec<String> = Vec::new();
+    let mut failed: Vec<Value> = Vec::new();
+    for handle in &targets {
+        let event = json!({
+            "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
+            "timestamp": now_iso,
+            "from": self_did,
+            "to": format!("did:wire:{handle}"),
+            "type": "group_msg",
+            "kind": kind_id,
+            "body": body,
+        });
+        let signed = match sign_message_v31(&event, &sk_seed, &pk_bytes, &self_handle) {
+            Ok(s) => s,
+            Err(e) => {
+                failed.push(json!({"peer": handle, "error": format!("{e:?}")}));
+                continue;
+            }
+        };
+        let line = serde_json::to_vec(&signed)?;
+        match config::append_outbox_record(handle, &line) {
+            Ok(_) => sent.push(handle.clone()),
+            Err(e) => failed.push(json!({"peer": handle, "error": format!("{e:#}")})),
+        }
+    }
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "group": group.id, "epoch": group.epoch, "sent": sent, "failed": failed
+            }))?
+        );
+    } else {
+        let tail = if failed.is_empty() {
+            String::new()
+        } else {
+            format!(" ({} failed)", failed.len())
+        };
+        println!(
+            "group `{}`: queued to {}/{} member(s){tail}",
+            group.name,
+            sent.len(),
+            targets.len()
+        );
+    }
+    Ok(())
+}
+
+fn cmd_group_tail(group_ref: &str, limit: usize, as_json: bool) -> Result<()> {
+    // In I1 a member added by the creator has no local roster record, so a
+    // member tails by group_id directly: resolve a local group if one exists,
+    // else treat the arg AS the group_id (filter the inbox by it). I2's
+    // join-code path materializes member-side records and removes this gap.
+    let group = crate::group::resolve_group(group_ref).unwrap_or_else(|_| {
+        crate::group::Group::new(
+            group_ref.to_string(),
+            group_ref.to_string(),
+            String::new(),
+            String::new(),
+        )
+    });
+    let inbox = config::inbox_dir()?;
+    let trust = config::read_trust().unwrap_or_else(|_| json!({"agents": {}}));
+    // (timestamp, from_handle, text, verified)
+    let mut msgs: Vec<(String, String, String, bool)> = Vec::new();
+    if inbox.exists() {
+        for entry in std::fs::read_dir(&inbox)?.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let from_handle = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .to_string();
+            for line in std::fs::read_to_string(&path).unwrap_or_default().lines() {
+                let event: Value = match serde_json::from_str(line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                // body may be an object or a JSON-encoded string.
+                let body = match event.get("body") {
+                    Some(Value::String(s)) => serde_json::from_str::<Value>(s).ok(),
+                    Some(v) => Some(v.clone()),
+                    None => None,
+                };
+                let Some(body) = body else { continue };
+                if body.get("group_id").and_then(Value::as_str) != Some(group.id.as_str()) {
+                    continue;
+                }
+                let ts = event
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let text = body
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let verified = verify_message_v31(&event, &trust).is_ok();
+                msgs.push((ts, from_handle.clone(), text, verified));
+            }
+        }
+    }
+    msgs.sort_by(|a, b| a.0.cmp(&b.0));
+    let start = if limit > 0 {
+        msgs.len().saturating_sub(limit)
+    } else {
+        0
+    };
+    let recent = &msgs[start..];
+    if as_json {
+        let arr: Vec<Value> = recent
+            .iter()
+            .map(|(ts, f, t, v)| json!({"ts": ts, "from": f, "text": t, "verified": v}))
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(
+                &json!({"group": group.id, "name": group.name, "messages": arr})
+            )?
+        );
+    } else if recent.is_empty() {
+        println!("group `{}`: no messages yet", group.name);
+    } else {
+        for (ts, f, t, v) in recent {
+            let short_ts: String = ts.chars().take(19).collect();
+            let mark = if *v { "✓" } else { "✗" };
+            println!("[{short_ts}] {} {mark}: {t}", persona_label(f));
+        }
+    }
+    Ok(())
+}
+
+fn cmd_group_list(as_json: bool) -> Result<()> {
+    let groups = crate::group::list_groups()?;
+    if as_json {
+        let arr: Vec<Value> = groups
+            .iter()
+            .map(|g| {
+                json!({
+                    "id": g.id,
+                    "name": g.name,
+                    "epoch": g.epoch,
+                    "members": g.members.iter().map(|m| json!({"handle": m.handle, "tier": m.tier.as_str()})).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&json!({"groups": arr}))?);
+    } else if groups.is_empty() {
+        println!("no groups yet — create one with `wire group create <name>`");
+    } else {
+        for g in &groups {
+            println!(
+                "{} ({}) — {} member(s), epoch {}",
+                g.name,
+                g.id,
+                g.members.len(),
+                g.epoch
+            );
+            for m in &g.members {
+                println!("    {} [{}]", m.handle, m.tier.as_str());
+            }
+        }
+    }
+    Ok(())
+}
 
 /// v0.6.3: top-level `wire mesh` verb dispatcher. Status aliases the
 /// v0.6.2 session-namespaced handler; broadcast is the new primitive.
