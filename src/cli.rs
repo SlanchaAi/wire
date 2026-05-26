@@ -4690,46 +4690,64 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
                 .unwrap_or("")
                 .to_string();
 
-            let mut delivered = false;
-            let mut last_err_reason: Option<String> = None;
-            for endpoint in &ordered_endpoints {
-                let client = crate::relay_client::RelayClient::new(&endpoint.relay_url);
-                match client.post_event(&endpoint.slot_id, &endpoint.slot_token, &event) {
-                    Ok(resp) => {
-                        if resp.status == "duplicate" {
-                            skipped.push(json!({
-                                "peer": peer_handle,
-                                "event_id": event_id,
-                                "reason": "duplicate",
-                                "endpoint": endpoint.relay_url,
-                                "scope": serde_json::to_value(endpoint.scope).unwrap_or(json!("?")),
-                            }));
-                        } else {
-                            pushed.push(json!({
-                                "peer": peer_handle,
-                                "event_id": event_id,
-                                "endpoint": endpoint.relay_url,
-                                "scope": serde_json::to_value(endpoint.scope).unwrap_or(json!("?")),
-                            }));
+            // Capture the most recent per-endpoint error reason via a RefCell
+            // so we can preserve cmd_push's pre-existing "last-error wins"
+            // semantics for the skipped-with-reason path. The shared
+            // try_post_event_with_failover helper (from #62) handles iteration,
+            // priority order, and early-return on first success; the closure
+            // applies the existing `format_transport_error` formatting on
+            // each individual error so the operator sees the same diagnostic
+            // text as before the dedup.
+            let last_err: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+            match crate::relay_client::try_post_event_with_failover(
+                &ordered_endpoints,
+                &event,
+                |endpoint, ev| {
+                    let client = crate::relay_client::RelayClient::new(&endpoint.relay_url);
+                    match client.post_event(&endpoint.slot_id, &endpoint.slot_token, ev) {
+                        Ok(resp) => Ok(resp),
+                        Err(e) => {
+                            *last_err.borrow_mut() =
+                                Some(crate::relay_client::format_transport_error(&e));
+                            Err(e)
                         }
-                        delivered = true;
-                        break;
                     }
-                    Err(e) => {
-                        // Local-first endpoint failed; record reason and
-                        // try the next endpoint silently (operator sees
-                        // the federation success). If every endpoint
-                        // fails, the last reason is what gets reported.
-                        last_err_reason = Some(crate::relay_client::format_transport_error(&e));
+                },
+            ) {
+                Ok((endpoint, resp)) => {
+                    if resp.status == "duplicate" {
+                        skipped.push(json!({
+                            "peer": peer_handle,
+                            "event_id": event_id,
+                            "reason": "duplicate",
+                            "endpoint": endpoint.relay_url,
+                            "scope": serde_json::to_value(endpoint.scope).unwrap_or(json!("?")),
+                        }));
+                    } else {
+                        pushed.push(json!({
+                            "peer": peer_handle,
+                            "event_id": event_id,
+                            "endpoint": endpoint.relay_url,
+                            "scope": serde_json::to_value(endpoint.scope).unwrap_or(json!("?")),
+                        }));
                     }
                 }
-            }
-            if !delivered {
-                skipped.push(json!({
-                    "peer": peer_handle,
-                    "event_id": event_id,
-                    "reason": last_err_reason.unwrap_or_else(|| "all endpoints failed".to_string()),
-                }));
+                Err(_) => {
+                    // Every endpoint failed. Preserve the prior "last reason
+                    // is what gets reported" UX (the closure captured the
+                    // last per-endpoint error via `last_err`) so this dedup
+                    // is a true zero-behavior-change refactor. The helper's
+                    // combined-error string is intentionally discarded here
+                    // — operators get the same single-line `reason` they got
+                    // before #62 introduced the helper.
+                    skipped.push(json!({
+                        "peer": peer_handle,
+                        "event_id": event_id,
+                        "reason": last_err
+                            .into_inner()
+                            .unwrap_or_else(|| "all endpoints failed".to_string()),
+                    }));
+                }
             }
         }
     }
