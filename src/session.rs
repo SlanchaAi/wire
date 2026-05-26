@@ -696,13 +696,7 @@ pub fn resolve_session_key() -> Option<(String, &'static str)> {
     if let Some(sid) = claude_code_session_from_pidfile() {
         return Some((sid, "claude-code-pidfile"));
     }
-    
-    // VS Code/GitHub Copilot workspace adapter — similar to Claude pidfile approach.
-    // If we're running in a VS Code extension context, derive session from workspace.
-    if let Some(sid) = vscode_workspace_session() {
-        return Some((sid, "vscode-workspace-fallback"));
-    }
-    
+
     None
 }
 
@@ -788,47 +782,6 @@ fn parent_pid(pid: u32) -> Option<u32> {
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn parent_pid(_pid: u32) -> Option<u32> {
     None
-}
-
-/// VS Code/GitHub Copilot workspace-based session identity fallback.
-/// When environment variables aren't available, derive a stable session ID
-/// from the current working directory (workspace root). This provides a
-/// consistent identity per VS Code workspace, similar to how Claude Code
-/// uses the pidfile approach.
-///
-/// Returns a workspace-based session identifier if cwd is available,
-/// otherwise None.
-fn vscode_workspace_session() -> Option<String> {
-    // Try to get the current working directory
-    let cwd = std::env::current_dir().ok()?;
-    
-    // Check if we're in a git repository by looking for .git
-    let git_root = find_git_root(&cwd);
-    
-    // Use git root if found, otherwise use current directory
-    let workspace_root = git_root.unwrap_or(cwd);
-    
-    // Create a stable hash of the workspace path
-    let path_str = workspace_root.to_string_lossy();
-    let mut h = Sha256::new();
-    h.update(path_str.as_bytes());
-    h.update(b"-vscode-workspace");  // Add a namespace separator
-    let digest = h.finalize();
-    
-    // Return first 32 hex chars (128 bits) for good collision resistance
-    Some(hex::encode(&digest[..16]))
-}
-
-/// Find the git repository root by walking up the directory tree.
-fn find_git_root(start: &Path) -> Option<PathBuf> {
-    let mut current = start;
-    loop {
-        let git_dir = current.join(".git");
-        if git_dir.exists() {
-            return Some(current.to_path_buf());
-        }
-        current = current.parent()?;
-    }
 }
 
 /// v0.13: the WIRE_HOME for a resolved session key —

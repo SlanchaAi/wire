@@ -12385,7 +12385,7 @@ fn cmd_setup(apply: bool) -> Result<()> {
         }
         // Cursor
         targets.push(("Cursor", home.join(".cursor/mcp.json")));
-        
+
         // GitHub Copilot (VS Code) — User settings
         #[cfg(target_os = "macos")]
         targets.push((
@@ -12404,7 +12404,7 @@ fn cmd_setup(apply: bool) -> Result<()> {
                 PathBuf::from(appdata).join("Code/User/settings.json"),
             ));
         }
-        
+
         // VS Code Insiders variant
         #[cfg(target_os = "macos")]
         targets.push((
@@ -12485,33 +12485,46 @@ fn cmd_setup(apply: bool) -> Result<()> {
 
 /// Idempotent merge of an `mcpServers.<name>` entry into a JSON config file.
 /// Returns Ok(true) if file was changed, Ok(false) if entry already matched.
-/// 
+///
 /// Supports two config formats:
 /// - Standard MCP: `{"mcpServers": {"wire": {...}}}`
 /// - VS Code: `{"mcp": {"servers": {"wire": {...}}}}`
 fn upsert_mcp_entry(path: &std::path::Path, server_name: &str, entry: &Value) -> Result<bool> {
     let mut cfg: Value = if path.exists() {
         let body = std::fs::read_to_string(path).context("reading config")?;
-        serde_json::from_str(&body).unwrap_or_else(|_| json!({}))
+        if body.trim().is_empty() {
+            json!({})
+        } else {
+            // Refuse to default a non-empty-but-unparseable file to `{}` —
+            // doing so would overwrite the whole file with just our entry.
+            // VS Code's settings.json is JSONC (// comments, trailing commas)
+            // which serde_json can't parse; surface it so the caller lists
+            // this target under "Skipped" and the user adds wire manually.
+            serde_json::from_str(&body).with_context(|| {
+                format!(
+                    "{} is not strict JSON (comments / trailing commas?); \
+                     add the wire MCP entry manually to avoid overwriting it",
+                    path.display()
+                )
+            })?
+        }
     } else {
         json!({})
     };
     if !cfg.is_object() {
         cfg = json!({});
     }
-    
+
     // Detect VS Code settings.json (contains "mcp.servers" instead of "mcpServers")
-    let is_vscode = path.to_string_lossy().contains("Code/User/settings.json") 
+    let is_vscode = path.to_string_lossy().contains("Code/User/settings.json")
         || path.to_string_lossy().contains(".vscode/settings.json")
         || path.to_string_lossy().contains("Code - Insiders");
-    
+
     let root = cfg.as_object_mut().unwrap();
-    
+
     if is_vscode {
         // VS Code format: {"mcp": {"servers": {"wire": {...}}}}
-        let mcp = root
-            .entry("mcp".to_string())
-            .or_insert_with(|| json!({}));
+        let mcp = root.entry("mcp".to_string()).or_insert_with(|| json!({}));
         if !mcp.is_object() {
             *mcp = json!({});
         }
@@ -12541,7 +12554,7 @@ fn upsert_mcp_entry(path: &std::path::Path, server_name: &str, entry: &Value) ->
         }
         map.insert(server_name.to_string(), entry.clone());
     }
-    
+
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
