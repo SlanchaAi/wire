@@ -6765,6 +6765,13 @@ fn cmd_add(
         .ok_or_else(|| anyhow!("resolved missing did"))?
         .to_string();
     let peer_handle = crate::agent_card::display_handle_from_did(&peer_did).to_string();
+
+    // Self-pair guard (issue #30, explicit "Optional" ask). Refuses loudly
+    // when the resolved peer DID matches our own. See
+    // `reject_self_pair_after_resolution` for the full failure-mode and
+    // remediation rationale.
+    reject_self_pair_after_resolution(&our_did, &peer_did)?;
+
     let peer_slot_id = resolved
         .get("slot_id")
         .and_then(Value::as_str)
@@ -12130,6 +12137,49 @@ fn strip_proto(url: &str) -> String {
 /// always ignored the userinfo prefix when keeping an existing clean
 /// slot. The hard invariant either way: a userinfo-bearing URL must
 /// never reach `self.endpoints[]` or the published agent-card.
+/// Self-pair guard (issue #30, explicit "Optional" ask).
+///
+/// Refuses to proceed when the resolved peer DID matches our own DID. Two
+/// ways this fires:
+///
+///   1. The operator literally dialed their own handle by mistake.
+///   2. Two terminals / agents that should be DISTINCT collapsed onto one
+///      wire identity — either because v0.13's session-key resolution
+///      didn't reach the wire process (env var not propagated; see #29 and
+///      the Windows symptoms in #30) or because both terminals share a
+///      WIRE_HOME without setting WIRE_SESSION_ID.
+///
+/// Pre-guard, case (2) silently produced a pair_drop targeting our own
+/// slot — bilateral handshake could never complete and the operator could
+/// only see "pending forever" with no diagnostic. The guard makes the
+/// failure mode debuggable instead of silent by surfacing the exact DID
+/// collision and pointing at the `wire whoami` / `WIRE_SESSION_ID`
+/// diagnostic that the v0.13.5 session-key adapter introduced.
+///
+/// Companion to the lightweight nickname-match guard at the top of
+/// `cmd_add` (which catches the literal `wire add <our-nick>@<relay>`
+/// case before WebFinger). This DID-level guard is the load-bearing one
+/// because case (2) — two collapsed terminals with DIFFERENT typed
+/// nicknames that BOTH resolve to the shared DID — can't be caught
+/// without the post-resolution comparison.
+fn reject_self_pair_after_resolution(our_did: &str, peer_did: &str) -> Result<()> {
+    if our_did == peer_did {
+        bail!(
+            "refusing to self-pair: resolved peer DID `{peer_did}` matches your own \
+             DID. Two terminals can collapse onto one wire identity when the per-\
+             session key isn't reaching the wire process (issue #30 / #29).\n\n\
+             Diagnose:\n  \
+             • `wire whoami` in each terminal — DIDs MUST differ.\n  \
+             • `echo $WIRE_SESSION_ID` (bash) / `echo $env:WIRE_SESSION_ID` \
+             (PowerShell) — must be set + distinct per session.\n\n\
+             Force distinct identities before relaunching the agent:\n  \
+             • bash/zsh:   `export WIRE_SESSION_ID=\"$(uuidgen)\"`\n  \
+             • PowerShell: `$env:WIRE_SESSION_ID = [guid]::NewGuid().ToString()`"
+        );
+    }
+    Ok(())
+}
+
 fn strip_relay_url_userinfo(url: &str) -> String {
     // Locate the authority segment: everything after `://` (or the whole
     // string if there is no scheme yet), up to the first `/`, `?`, or `#`.
@@ -13129,5 +13179,71 @@ mod relay_url_tests {
             strip_proto("https://nick@wireup.net").contains('@'),
             "strip_proto preserves userinfo by design; the userinfo guard upstream is what prevents the doubled echo"
         );
+    }
+}
+
+#[cfg(test)]
+mod self_pair_guard_tests {
+    use super::*;
+
+    #[test]
+    fn reject_self_pair_after_resolution_blocks_matching_dids() {
+        // Issue #30 (explicit "Optional" ask): when both terminals collapse
+        // onto one wire identity (a v0.13-era WIRE_SESSION_ID propagation
+        // gap or a shared WIRE_HOME), the resolved peer DID matches the
+        // local DID and pair_drop silently goes nowhere. Guard surfaces
+        // it as a refusable error with the diagnostic remediation path.
+
+        let err = reject_self_pair_after_resolution(
+            "did:wire:winter-bay-4092b577",
+            "did:wire:winter-bay-4092b577",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("refusing to self-pair"),
+            "must explicitly refuse, not silently bail: {err}"
+        );
+        assert!(
+            err.contains("did:wire:winter-bay-4092b577"),
+            "must include the colliding DID so the operator can grep their `wire whoami` output: {err}"
+        );
+        assert!(
+            err.contains("issue #30") || err.contains("issue #29"),
+            "must point at the tracking issue so historical context is one search away: {err}"
+        );
+        // Remediation must be copy-paste ready — both POSIX and PowerShell
+        // (the failure mode is Windows-prevalent per #30).
+        assert!(
+            err.contains("WIRE_SESSION_ID"),
+            "remediation must name the env var operators set: {err}"
+        );
+        assert!(
+            err.contains("uuidgen") || err.contains("NewGuid"),
+            "remediation must include a concrete command to mint a unique id: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_self_pair_after_resolution_allows_distinct_dids() {
+        // Sanity: the guard must not fire for any normal pair attempt
+        // between two distinct identities. Cover the common shapes:
+        // adjective-noun personas (post-v0.11), bare keypair hashes, and
+        // mixed-case DIDs that happen to share a prefix.
+        reject_self_pair_after_resolution(
+            "did:wire:winter-bay-4092b577",
+            "did:wire:cedar-bayou-0616dc6c",
+        )
+        .unwrap();
+        reject_self_pair_after_resolution("did:wire:ed25519:abc123", "did:wire:ed25519:def456")
+            .unwrap();
+        // Same persona prefix, different suffix-hash → distinct DIDs (the
+        // suffix is the load-bearing identifier). Must NOT trigger the
+        // guard.
+        reject_self_pair_after_resolution(
+            "did:wire:noble-canyon-deadbeef",
+            "did:wire:noble-canyon-cafef00d",
+        )
+        .unwrap();
     }
 }
