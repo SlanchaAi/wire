@@ -4386,7 +4386,16 @@ fn cmd_bind_relay(
     let did = card.get("did").and_then(Value::as_str).unwrap_or("");
     let handle = crate::agent_card::display_handle_from_did(did).to_string();
 
-    let normalized = url.trim_end_matches('/');
+    let normalized_raw = url.trim_end_matches('/');
+    // Refuse to record/publish a relay endpoint that embeds userinfo —
+    // `https://<handle>@<host>` 4xxes every inbound event POST. Strip and
+    // warn so operators learn the right shape without losing the call.
+    let normalized_owned = strip_relay_url_userinfo(normalized_raw);
+    let normalized = normalized_owned.as_str();
+    // Belt-and-suspenders: confirm the post-strip URL is clean before any
+    // persist / publish. A future code path that bypasses the strip filter
+    // MUST NOT be able to leak userinfo into the signed agent-card.
+    assert_relay_url_clean_for_publish(normalized)?;
     let new_scope = match scope {
         Some(s) => parse_scope(s)?,
         None => crate::endpoints::infer_scope_from_url(normalized),
@@ -11905,6 +11914,14 @@ fn cmd_up(
         None => crate::pair_invite::DEFAULT_RELAY.to_string(),
     };
 
+    // Strip any URL userinfo (`<handle>@<host>`) before doing any state-
+    // mutating work — otherwise the malformed endpoint gets persisted in
+    // `relay_state` AND published in the signed agent-card, where every
+    // inbound POST to it 4xxes. Mirrors `cmd_up`'s already-bound branch,
+    // which has always ignored the userinfo on the "keeping existing
+    // binding" warning path.
+    let relay_url = strip_relay_url_userinfo(&relay_url);
+
     let mut report: Vec<(String, String)> = Vec::new();
     let mut step = |stage: &str, detail: String| {
         report.push((stage.to_string(), detail.clone()));
@@ -12070,6 +12087,78 @@ fn strip_proto(url: &str) -> String {
     url.trim_start_matches("https://")
         .trim_start_matches("http://")
         .to_string()
+}
+
+/// Strip URL userinfo (`https://<userinfo>@<host>...`) from a relay URL,
+/// warning to stderr if any was stripped. Returns the cleaned URL.
+///
+/// Bug 1 this fixes: `wire up <handle>@<relay>` and `wire bind-relay
+/// <handle>@<relay>` previously prepended `https://` to the literal arg,
+/// recording and publishing the endpoint as `https://<handle>@<relay>` —
+/// handle parsed as URL userinfo. Every inbound event POST to that
+/// endpoint (pair_drop_ack, messages) gets a 4xx (Cloudflare 400 on
+/// wireup.net) because the upstream rejects the userinfo on plain
+/// GETs/POSTs. Bilateral pairing can't complete; messages sit
+/// undelivered. Also surfaced cosmetically (Bug 3) as a doubled-handle
+/// echo at the claim step (`<nick>@<nick>@<host>`) because `strip_proto`
+/// left the userinfo in.
+///
+/// Behavior: strip-and-warn rather than hard-reject. In v0.11+ the handle
+/// is DID-derived (one-name rule), so the userinfo isn't *needed* — but
+/// `<handle>@<relay>` is literally the wire dial-address format
+/// (`wire dial coral-weasel@wireup.net`), so an operator who types
+/// `wire up <handle>@<relay>` is making a natural-by-analogy mistake, not
+/// a hostile request. Mirrors `cmd_up`'s already-bound branch, which has
+/// always ignored the userinfo prefix when keeping an existing clean
+/// slot. The hard invariant either way: a userinfo-bearing URL must
+/// never reach `self.endpoints[]` or the published agent-card.
+fn strip_relay_url_userinfo(url: &str) -> String {
+    // Locate the authority segment: everything after `://` (or the whole
+    // string if there is no scheme yet), up to the first `/`, `?`, or `#`.
+    let authority_start = url.find("://").map(|i| i + 3).unwrap_or(0);
+    let rest = &url[authority_start..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+
+    let Some(at_pos) = authority.find('@') else {
+        return url.to_string();
+    };
+
+    let userinfo = &authority[..at_pos];
+    let host = &authority[at_pos + 1..];
+    let scheme = &url[..authority_start];
+    let tail = &rest[authority_end..];
+    let cleaned = format!("{scheme}{host}{tail}");
+
+    eprintln!(
+        "wire: ignoring `{userinfo}@` prefix on relay URL `{url}` — \
+         in v0.11+ your handle is DID-derived (one-name rule), so the relay URL \
+         is just the bare relay. Binding to `{cleaned}` instead."
+    );
+
+    cleaned
+}
+
+/// Hard assertion that a URL about to be persisted to `relay_state` /
+/// published in the signed agent-card carries no userinfo. The
+/// `strip_relay_url_userinfo` filter at every public entry point already
+/// removes it; this is the belt-and-suspenders check at the actual mutation
+/// site — a future code path that bypasses the entry filter must NOT be
+/// able to leak a malformed endpoint into a signed card or the persisted
+/// relay state.
+fn assert_relay_url_clean_for_publish(url: &str) -> Result<()> {
+    let authority_start = url.find("://").map(|i| i + 3).unwrap_or(0);
+    let rest = &url[authority_start..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.contains('@') {
+        bail!(
+            "internal invariant violated: relay URL `{url}` still carries userinfo at \
+             the persist/publish boundary — `strip_relay_url_userinfo` must be called \
+             before this point. Refusing to publish a malformed endpoint."
+        );
+    }
+    Ok(())
 }
 
 // ---------- pair megacommand (zero-paste handle-based) ----------
@@ -12891,3 +12980,124 @@ fn os_toast(title: &str, body: &str) {
 }
 
 // Integration tests for the CLI live in `tests/cli.rs` (cargo's tests/ dir).
+
+#[cfg(test)]
+mod relay_url_tests {
+    use super::*;
+
+    #[test]
+    fn strip_relay_url_userinfo_strips_handle_and_returns_cleaned() {
+        // Bug 1: `wire up <handle>@<relay>` and `wire bind-relay
+        // <handle>@<relay>` previously persisted/published the endpoint as
+        // `https://<handle>@<relay>` — handle stuck in URL userinfo. Every
+        // inbound event POST to that endpoint 4xxed (Cloudflare 400 on
+        // wireup.net); bilateral pairing couldn't complete.
+        //
+        // Strip+warn (not hard-reject): mirrors cmd_up's already-bound
+        // branch, which has always ignored the userinfo on the "keeping
+        // existing binding" warning path. `<handle>@<relay>` is also
+        // literally the wire dial-address format — natural by analogy.
+
+        assert_eq!(
+            strip_relay_url_userinfo("https://copilot-agent@wireup.net"),
+            "https://wireup.net",
+            "https URL with handle userinfo is stripped to the bare host"
+        );
+        assert_eq!(
+            strip_relay_url_userinfo("http://copilot-agent@127.0.0.1:8771"),
+            "http://127.0.0.1:8771",
+            "http + port + userinfo is stripped, port preserved"
+        );
+        // user:password@host — both halves of userinfo are dropped.
+        assert_eq!(strip_relay_url_userinfo("https://u:p@host"), "https://host");
+        // Authority with port + userinfo.
+        assert_eq!(
+            strip_relay_url_userinfo("https://nick@host:8443"),
+            "https://host:8443"
+        );
+        // Schemeless `<handle>@<host>` — strips correctly. (cmd_up's
+        // bare-host normalize prepends https:// before calling, but the
+        // function is robust to either input.)
+        assert_eq!(strip_relay_url_userinfo("nick@wireup.net"), "wireup.net");
+        // Path / query / fragment AFTER the authority are preserved.
+        assert_eq!(
+            strip_relay_url_userinfo("https://nick@wireup.net/v1/events?x=1#frag"),
+            "https://wireup.net/v1/events?x=1#frag"
+        );
+    }
+
+    #[test]
+    fn strip_relay_url_userinfo_passes_clean_urls_through_unchanged() {
+        // Bare host (https / http, with and without port, with path / query).
+        for ok in [
+            "https://wireup.net",
+            "http://wireup.net",
+            "http://127.0.0.1:8771",
+            "https://relay.example.com:9443/v1/wire",
+            "https://wireup.net/?env=prod",
+            // Path / query containing `@` is fine — it's not in the authority.
+            "https://wireup.net/users/me@example.com",
+            "https://wireup.net/?to=me@example.com",
+            // Fragment with @ — fine.
+            "https://wireup.net/#contact@me",
+            // IPv6 literal (no @ in authority).
+            "http://[::1]:8771",
+            // Schemeless bare host — also fine.
+            "wireup.net",
+            "wireup.net:8443",
+        ] {
+            assert_eq!(
+                strip_relay_url_userinfo(ok),
+                ok,
+                "clean URL `{ok}` must pass through unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn assert_relay_url_clean_for_publish_blocks_userinfo_at_persist_site() {
+        // Belt-and-suspenders: even if a future code path bypasses
+        // strip_relay_url_userinfo at the entry, the persist/publish
+        // boundary must refuse a userinfo URL. This is the second line
+        // of defense that keeps a malformed endpoint out of the SIGNED
+        // agent-card and the persisted relay_state.
+        assert!(assert_relay_url_clean_for_publish("https://wireup.net").is_ok());
+        assert!(assert_relay_url_clean_for_publish("http://127.0.0.1:8771").is_ok());
+        assert!(
+            assert_relay_url_clean_for_publish("https://wireup.net/?to=me@example.com").is_ok()
+        );
+
+        let err = assert_relay_url_clean_for_publish("https://nick@wireup.net")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("invariant violated"),
+            "persist-site failure must be flagged as an internal invariant violation, not user error: {err}"
+        );
+        assert!(
+            err.contains("strip_relay_url_userinfo"),
+            "error must name the upstream filter so the caller can audit the bypass: {err}"
+        );
+        // user:password@host is just as bad — userinfo is userinfo.
+        assert!(assert_relay_url_clean_for_publish("https://u:p@host").is_err());
+        // Authority with port + userinfo.
+        assert!(assert_relay_url_clean_for_publish("https://nick@host:8443").is_err());
+    }
+
+    #[test]
+    fn strip_proto_no_longer_doubles_handle_after_userinfo_fix() {
+        // Bug 3 (cosmetic): `wire up <handle>@<relay>` echoed `claimed
+        // <nick>@<nick>@<relay>` because strip_proto left the userinfo in.
+        // With Bug 1's strip+warn in cmd_up, the claim step receives a
+        // bare host — strip_proto returns `<host>` and the echo is
+        // `<nick>@<host>` exactly once. Verified end-to-end here:
+        let after_strip = strip_relay_url_userinfo("https://nick@wireup.net");
+        assert_eq!(after_strip, "https://wireup.net");
+        assert_eq!(strip_proto(&after_strip), "wireup.net");
+        // And the doubled-echo failure mode that motivated the fix:
+        assert!(
+            strip_proto("https://nick@wireup.net").contains('@'),
+            "strip_proto preserves userinfo by design; the userinfo guard upstream is what prevents the doubled echo"
+        );
+    }
+}
