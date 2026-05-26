@@ -57,7 +57,7 @@ If automatic setup doesn't work, manually add this to your VS Code settings.json
         "command": "wire",
         "args": ["mcp"],
         "env": {
-          "VSCODE_GIT_REPOSITORY_ROOT": "${workspaceFolder}"
+          "WIRE_SESSION_ID": "${workspaceFolder}"
         }
       }
     }
@@ -65,7 +65,15 @@ If automatic setup doesn't work, manually add this to your VS Code settings.json
 }
 ```
 
-> **Note**: Wire resolves workspace identity from `VSCODE_GIT_REPOSITORY_ROOT`. If VS Code doesn't automatically set this variable, explicitly configure it in the MCP server env as shown above using `${workspaceFolder}`.
+> **Note**: `WIRE_SESSION_ID` is wire's dedicated universal session-identity override (resolution priority 1). The `${workspaceFolder}` value is substituted by VS Code's MCP host, giving each workspace a deterministic, stable identity across restarts.
+>
+> **Version caveat**: `${workspaceFolder}` substitution in `mcp.json` / settings.json has version-dependent history (see [microsoft/vscode#251263](https://github.com/microsoft/vscode/issues/251263)). If the variable doesn't expand on your VS Code version, wire's `${}` guard safely rejects the literal placeholder and falls through to a per-process key — degrading to "no stable identity" rather than collapsing distinct workspaces onto one persona. To force a stable string, replace `"${workspaceFolder}"` with a literal per-workspace value (e.g. `"my-frontend-project"`).
+
+### Verifying it works
+
+After restart, have Copilot call `wire_whoami` in two different workspaces:
+- ✅ **Stable across restarts** AND **distinct across workspaces** → working
+- ⚠️ Same persona in both workspaces → `${workspaceFolder}` didn't expand; use a literal string
 
 ### Step 3: Restart VS Code
 
@@ -87,9 +95,12 @@ Wire creates a **per-workspace identity** for GitHub Copilot in VS Code:
 
 ### Identity Resolution Order
 
-1. **WIRE_SESSION_ID** (explicit override in settings)
-2. **VSCODE_GIT_REPOSITORY_ROOT** (workspace git root)
-3. **Workspace fallback** (hash of workspace path)
+1. **`WIRE_SESSION_ID`** — dedicated universal override (set this in your MCP env to `${workspaceFolder}` for per-workspace identity; recommended)
+2. **`CLAUDE_CODE_SESSION_ID`** — Claude Code adapter
+3. **`VSCODE_GIT_REPOSITORY_ROOT`** — opportunistic VS Code adapter (only fires if the host actually forwards it; treat as a bonus, not the mechanism that "just works")
+4. **None** — falls through to a per-process minted key (MCP) or the legacy cwd-detect (bare CLI)
+
+Any `${...}` literal that wasn't expanded by the host is rejected by the `${}` guard and falls through to (4) — so a failed-to-expand `${workspaceFolder}` degrades to "no stable identity," never to a cross-workspace collision.
 
 ### Why Per-Workspace?
 
@@ -244,14 +255,14 @@ wire whoami --json | grep config_dir
 # If it shows a shared path (not /by-key/<hash>/), identity isn't per-workspace
 ```
 
-**Fix:** Set explicit `VSCODE_GIT_REPOSITORY_ROOT` in settings.json:
+**Fix:** Set explicit `WIRE_SESSION_ID` in settings.json:
 ```json
 {
   "mcp": {
     "servers": {
       "wire": {
         "env": {
-          "VSCODE_GIT_REPOSITORY_ROOT": "${workspaceFolder}"
+          "WIRE_SESSION_ID": "${workspaceFolder}"
         }
       }
     }
@@ -259,7 +270,7 @@ wire whoami --json | grep config_dir
 }
 ```
 
-> **Tip**: Wire looks for `VSCODE_GIT_REPOSITORY_ROOT` to determine workspace identity. If VS Code doesn't set this automatically, use `${workspaceFolder}` as shown above to ensure each workspace gets a unique identity.
+> **Tip**: `WIRE_SESSION_ID` is wire's dedicated session-identity override. Using `${workspaceFolder}` ensures each workspace gets a unique, stable identity. If `${workspaceFolder}` doesn't expand on your VS Code version, wire's `${}` guard rejects the literal and falls back safely — replace with a literal per-workspace string (e.g. `"my-frontend"`) to force a stable identity.
 
 ### Issue: "wire_send not found"
 

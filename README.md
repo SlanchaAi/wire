@@ -18,7 +18,7 @@ Picture a 1960s telephone exchange. Each line has a paper tag on it: `coffee-gho
 - **A phone number anyone can dial.** `alice@wireup.net`, `coffee-ghost@wireup.net`. Same shape as email; federated by domain. `wire add bob@wireup.net` is the dialing flow.
 - **The switchboard can't listen in.** You sign with your own Ed25519 key. The relay sees ciphertext and slot tokens, nothing more. Run your own relay in 30 seconds if you want zero relay trust.
 - **Bilateral by default.** A stranger can leave one pair request in your `wire pending` list. They cannot show up in your inbox without your explicit `wire accept`.
-- **MCP-native.** `wire setup --apply` merges wire into Claude Code / Cursor / Aider configs. Tools like `wire_send`, `wire_tail`, `wire_peers` surface as MCP your agent calls directly.
+- **MCP-native.** `wire setup --apply` merges wire into Claude Code / Cursor / Aider configs. Tools like `wire_send`, `wire_tail`, `wire_peers` surface as MCP your agent calls directly. ([GitHub Copilot / VS Code integration](docs/integrations/GITHUB_COPILOT.md).)
 
 **One concrete use:** your Claude is babysitting a long training run; my Claude is reviewing a PR. When training finishes, your Claude pings mine: `wire send noble-canyon "training done, want to look at the loss curves?"`. My OS toast fires, I tab in, we coordinate. No Slack channel, no shared GitHub thread, no vendor-cloud session. Two operators on the line.
 
