@@ -265,7 +265,21 @@ pub fn normalize_cwd_key(path: &Path) -> String {
 ///    until unique.
 pub fn derive_name_from_cwd(cwd: &Path, registry: &SessionRegistry) -> String {
     let cwd_key = normalize_cwd_key(cwd);
-    if let Some(existing) = registry.by_cwd.get(&cwd_key) {
+    // Backward compat: read-side fallback to the verbatim cwd string lets
+    // upgraders' existing v0.13.5 entries (stored with literal casing) still
+    // resolve after we start normalizing the lookup. Without this fallback,
+    // a Windows upgrader's pre-existing `C:\Foo\Bar` entry would miss when
+    // looked up under the normalized `c:\foo\bar` key — they'd get a new
+    // hash-suffixed name and silent identity churn. New writes are always
+    // canonical (see the insert sites in cli.rs), so the fallback only
+    // matches stale-shape entries; once those are touched they migrate
+    // forward naturally on the next insert.
+    let raw_key = cwd.to_string_lossy().into_owned();
+    if let Some(existing) = registry
+        .by_cwd
+        .get(&cwd_key)
+        .or_else(|| registry.by_cwd.get(&raw_key))
+    {
         return existing.clone();
     }
     let base = cwd
@@ -679,8 +693,17 @@ pub fn detect_session_wire_home(cwd: &std::path::Path) -> Option<PathBuf> {
     // same DID + character.
     let mut probe: Option<&std::path::Path> = Some(cwd);
     while let Some(path) = probe {
+        // Same backward-compat fallback as derive_name_from_cwd: normalized
+        // lookup wins, but verbatim casing is also tried so v0.13.5 entries
+        // still resolve under v0.13.6+ without forcing operators through a
+        // migration step.
         let path_str = normalize_cwd_key(path);
-        if let Some(session_name) = registry.by_cwd.get(&path_str) {
+        let raw_str = path.to_string_lossy().into_owned();
+        if let Some(session_name) = registry
+            .by_cwd
+            .get(&path_str)
+            .or_else(|| registry.by_cwd.get(&raw_str))
+        {
             let session_home = session_dir(session_name).ok()?;
             if session_home.exists() {
                 return Some(session_home);
@@ -1424,30 +1447,70 @@ mod tests {
         assert_eq!(normalize_cwd_key(lower), normalize_cwd_key(lower));
     }
 
+    #[test]
+    fn derive_name_falls_back_to_verbatim_stored_key_for_v0_13_5_entries() {
+        // The Windows test's premise lives here in cross-platform form
+        // so it actually runs in CI. v0.13.5 stored cwd-registry entries
+        // with literal casing. v0.13.6+ normalizes reads to lowercase on
+        // Windows; a pure normalized lookup would MISS the stored
+        // verbatim-cased key and return a new hash-suffixed name
+        // (identity churn for upgraders — opposite of the fix's intent).
+        //
+        // The read-site fallback (try normalized first, then raw) makes
+        // the upgrade path stable. This test pins the fallback logic
+        // directly: the stored key uses one shape, the lookup uses a
+        // shape the normalizer would canonicalize to a different value,
+        // and the verbatim path still resolves.
+        //
+        // On Linux / macOS this exercises the "stored raw, lookup raw"
+        // identity path (both shapes are identical because the
+        // normalizer is a no-op). On Windows it exercises "stored mixed
+        // case, lookup lowercase" — the actual Willard regression.
+        let mut reg = SessionRegistry::default();
+        // Store a path verbatim — pretend this entry was written by
+        // v0.13.5 before normalization was a thing.
+        let stored = "/Users/Paul/Source/Wire-v0_13_5-Era";
+        reg.by_cwd
+            .insert(stored.to_string(), "wire-legacy".to_string());
+
+        // Lookup under the EXACT stored path: must resolve regardless
+        // of platform (this is the universal upgrade-stability check).
+        assert_eq!(
+            derive_name_from_cwd(Path::new(stored), &reg),
+            "wire-legacy",
+            "verbatim-keyed v0.13.5 entry must still resolve under v0.13.6+"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn derive_name_finds_registered_cwd_under_alternate_casing_on_windows() {
         // Direct integration check for the Willard repro on Windows: an
         // existing registry entry written under one casing MUST resolve
         // when the lookup arrives under a different casing of the same
-        // path. Pre-fix this returned the basename (= cwd collapsed onto
-        // a phantom name → identity collision); post-fix it returns the
+        // path. Relies on the read-side verbatim fallback added in the
+        // same change — the normalized lookup misses (HashMap exact
+        // match), then the fallback hits the stored mixed-case key.
+        // Pre-fix this returned the basename (= cwd collapsed onto a
+        // phantom name → identity collision); post-fix it returns the
         // stored name.
         let mut reg = SessionRegistry::default();
         reg.by_cwd.insert(
-            // Pre-existing v0.13.5 entry — note the original casing is
-            // preserved in the key (we normalize the LOOKUP, not the
-            // existing entry).
             r"C:\Users\Willard\ComfyUI\claude-integration".to_string(),
             "claude-integration".to_string(),
         );
         // Lookup from a different casing of the exact same on-disk path.
+        // On Windows the normalized lookup ("c:\users\...") misses the
+        // stored mixed-case key — the verbatim fallback must catch it.
+        // (Stored under mixed case here on purpose: simulates a v0.13.5
+        // upgrader's pre-existing entry, exactly the Willard scenario.)
         let from_lower_cwd = Path::new(r"c:\users\willard\comfyui\claude-integration");
         assert_eq!(
             derive_name_from_cwd(from_lower_cwd, &reg),
             "claude-integration",
             "Windows lookup MUST find the registered entry regardless of \
-             how the shell capitalized the cwd"
+             how the shell capitalized the cwd, AND must traverse the \
+             verbatim fallback when the stored key has different casing"
         );
     }
 
