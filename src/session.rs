@@ -668,7 +668,9 @@ pub fn detect_session_wire_home(cwd: &std::path::Path) -> Option<PathBuf> {
 ///   1. `WIRE_SESSION_ID` — explicit universal override (any harness).
 ///   2. `CLAUDE_CODE_SESSION_ID` — Claude Code adapter (stable per
 ///      conversation; the same id the auto-memory system keys off).
-///   3. `None` — caller falls back to legacy cwd-detect (bare CLI /
+///   3. `VSCODE_GIT_REPOSITORY_ROOT` — VS Code/GitHub Copilot workspace-based
+///      identity (stable per workspace).
+///   4. `None` — caller falls back to legacy cwd-detect (bare CLI /
 ///      pre-v0.13 hosts). Future host adapters slot in before this.
 ///
 /// Returns `(key, source-label)`.
@@ -676,6 +678,7 @@ pub fn resolve_session_key() -> Option<(String, &'static str)> {
     for (var, source) in [
         ("WIRE_SESSION_ID", "override"),
         ("CLAUDE_CODE_SESSION_ID", "claude-code"),
+        ("VSCODE_GIT_REPOSITORY_ROOT", "vscode-workspace"),
     ] {
         if let Ok(v) = std::env::var(var)
             && valid_session_key(&v)
@@ -693,6 +696,7 @@ pub fn resolve_session_key() -> Option<(String, &'static str)> {
     if let Some(sid) = claude_code_session_from_pidfile() {
         return Some((sid, "claude-code-pidfile"));
     }
+
     None
 }
 
@@ -1020,6 +1024,104 @@ mod tests {
         // be hashed — that's the all-sessions-collapse (soft-spruce) bug.
         assert!(!valid_session_key("${CLAUDE_CODE_SESSION_ID}"));
         assert!(!valid_session_key("  ${CLAUDE_CODE_SESSION_ID}  "));
+    }
+
+    #[test]
+    fn resolve_session_key_vscode_adapter_and_placeholder_guard() {
+        // Per-adapter test for the VS Code / GitHub Copilot path added in #59.
+        // Holds two invariants the integration depends on:
+        //
+        //   (a) When VSCODE_GIT_REPOSITORY_ROOT is set to a real workspace
+        //       path, that key wins resolution and two distinct workspace
+        //       paths produce two distinct session homes — proves the
+        //       per-workspace-identity contract documented in
+        //       docs/integrations/GITHUB_COPILOT.md.
+        //
+        //   (b) When the env entry is the unexpanded literal "${workspaceFolder}"
+        //       (host failed to substitute), the ${} guard rejects it and the
+        //       fn falls through — proves the safe-degradation property
+        //       (no-identity, NOT cross-workspace collision).
+        //
+        // Mirrors the WIRE_SESSION_ID / CLAUDE_CODE_SESSION_ID semantics so any
+        // future adapter added to the env-check loop inherits the same gates.
+        let _guard = crate::config::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        // Snapshot + clear every env var resolve_session_key consults so this
+        // test is hermetic regardless of the harness environment.
+        let prev_override = std::env::var_os("WIRE_SESSION_ID");
+        let prev_claude = std::env::var_os("CLAUDE_CODE_SESSION_ID");
+        let prev_vscode = std::env::var_os("VSCODE_GIT_REPOSITORY_ROOT");
+        // SAFETY: ENV_LOCK is held, serializing all env access.
+        unsafe {
+            std::env::remove_var("WIRE_SESSION_ID");
+            std::env::remove_var("CLAUDE_CODE_SESSION_ID");
+            std::env::remove_var("VSCODE_GIT_REPOSITORY_ROOT");
+        }
+
+        // (a) Two distinct workspace paths -> two distinct, stable session homes.
+        unsafe { std::env::set_var("VSCODE_GIT_REPOSITORY_ROOT", "/home/dev/frontend") };
+        let r1 = resolve_session_key();
+        assert!(
+            matches!(&r1, Some((k, src)) if k == "/home/dev/frontend" && *src == "vscode-workspace"),
+            "VSCODE_GIT_REPOSITORY_ROOT must win resolution and be labeled vscode-workspace; got {r1:?}"
+        );
+        let home_a = session_home_for_key(&r1.as_ref().unwrap().0).unwrap();
+
+        unsafe { std::env::set_var("VSCODE_GIT_REPOSITORY_ROOT", "/home/dev/backend") };
+        let r2 = resolve_session_key();
+        let home_b = session_home_for_key(&r2.as_ref().unwrap().0).unwrap();
+        assert_ne!(
+            home_a, home_b,
+            "distinct workspace roots must map to distinct session homes (no cross-workspace persona collision)"
+        );
+
+        // Same path again -> same home (resume stability).
+        unsafe { std::env::set_var("VSCODE_GIT_REPOSITORY_ROOT", "/home/dev/frontend") };
+        let home_a2 = session_home_for_key(&resolve_session_key().unwrap().0).unwrap();
+        assert_eq!(
+            home_a, home_a2,
+            "same workspace root must yield the same home across calls"
+        );
+
+        // (b) Unexpanded ${workspaceFolder} literal MUST NOT be accepted.
+        //     With every other adapter still cleared, resolution must fall
+        //     through to None (or the claude pidfile path, which is absent in
+        //     this test env) — never hash the literal.
+        unsafe { std::env::set_var("VSCODE_GIT_REPOSITORY_ROOT", "${workspaceFolder}") };
+        let r_guard = resolve_session_key();
+        assert!(
+            !matches!(&r_guard, Some((k, _)) if k.contains("${")),
+            "unexpanded ${{workspaceFolder}} literal must be rejected by the ${{}} guard; got {r_guard:?}"
+        );
+        // Same guard for the other adapter slots.
+        unsafe {
+            std::env::remove_var("VSCODE_GIT_REPOSITORY_ROOT");
+            std::env::set_var("WIRE_SESSION_ID", "${workspaceFolder}");
+        }
+        let r_guard2 = resolve_session_key();
+        assert!(
+            !matches!(&r_guard2, Some((k, _)) if k.contains("${")),
+            "unexpanded ${{workspaceFolder}} in WIRE_SESSION_ID must also be rejected; got {r_guard2:?}"
+        );
+
+        // Restore any env we displaced.
+        // SAFETY: ENV_LOCK still held.
+        unsafe {
+            std::env::remove_var("WIRE_SESSION_ID");
+            std::env::remove_var("CLAUDE_CODE_SESSION_ID");
+            std::env::remove_var("VSCODE_GIT_REPOSITORY_ROOT");
+            if let Some(v) = prev_override {
+                std::env::set_var("WIRE_SESSION_ID", v);
+            }
+            if let Some(v) = prev_claude {
+                std::env::set_var("CLAUDE_CODE_SESSION_ID", v);
+            }
+            if let Some(v) = prev_vscode {
+                std::env::set_var("VSCODE_GIT_REPOSITORY_ROOT", v);
+            }
+        }
     }
 
     #[test]
