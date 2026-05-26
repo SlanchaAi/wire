@@ -227,6 +227,34 @@ fn path_hash_suffix(cwd: &Path) -> String {
     hex::encode(&digest[..2]) // 4 hex chars
 }
 
+/// v0.13.6: case-insensitive cwd-registry key on Windows.
+///
+/// Issue #30 (Willard repro): on Windows, two terminals in the "same"
+/// project under different drive/path casing (`C:\Foo\Bar` vs
+/// `C:\foo\bar`) hashed to DIFFERENT registry keys — the second
+/// terminal's `wire whoami` missed the registry lookup, derived a
+/// phantom name, and silently fell back to the legacy default identity
+/// (e.g. `did:wire:willard`). Both terminals collapsed onto one shared
+/// DID, every pairing attempt between them was a self-pair, and
+/// bilateral handshake could never complete.
+///
+/// Fix: on Windows, lowercase the cwd before reading from OR writing to
+/// the cwd→session map. Two paths that resolve to the same on-disk
+/// directory now produce the same registry key regardless of how the
+/// shell / launcher capitalized them.
+///
+/// On case-sensitive filesystems (Linux / macOS HFS+ / case-sensitive
+/// APFS / NTFS in case-sensitive mode) the path is returned as-is —
+/// distinct casings legitimately point at distinct directories.
+///
+/// Used at every read and write of `SessionRegistry.by_cwd` so old
+/// non-canonical entries written by v0.13.5 still resolve under v0.13.6+
+/// later, and new entries written under v0.13.6+ are immediately canonical.
+pub fn normalize_cwd_key(path: &Path) -> String {
+    let s = path.to_string_lossy().into_owned();
+    if cfg!(windows) { s.to_lowercase() } else { s }
+}
+
 /// Derive a stable session name for the given cwd. Resolution order:
 ///
 /// 1. If the registry already maps this cwd → name, return that name.
@@ -236,7 +264,7 @@ fn path_hash_suffix(cwd: &Path) -> String {
 /// 3. If still a collision: append a numeric suffix `-2`, `-3`, ...
 ///    until unique.
 pub fn derive_name_from_cwd(cwd: &Path, registry: &SessionRegistry) -> String {
-    let cwd_key = cwd.to_string_lossy().into_owned();
+    let cwd_key = normalize_cwd_key(cwd);
     if let Some(existing) = registry.by_cwd.get(&cwd_key) {
         return existing.clone();
     }
@@ -651,7 +679,7 @@ pub fn detect_session_wire_home(cwd: &std::path::Path) -> Option<PathBuf> {
     // same DID + character.
     let mut probe: Option<&std::path::Path> = Some(cwd);
     while let Some(path) = probe {
-        let path_str = path.to_string_lossy().into_owned();
+        let path_str = normalize_cwd_key(path);
         if let Some(session_name) = registry.by_cwd.get(&path_str) {
             let session_home = session_dir(session_name).ok()?;
             if session_home.exists() {
@@ -1362,6 +1390,64 @@ mod tests {
         assert_eq!(
             derive_name_from_cwd(Path::new("/Users/paul/Source/wire"), &reg),
             "wire-special"
+        );
+    }
+
+    #[test]
+    fn normalize_cwd_key_case_handling_matches_platform_filesystem() {
+        // Issue #30 Willard repro: on Windows, two terminals in the "same"
+        // project under different casings of the same path
+        // (`C:\Foo\Bar` vs `C:\foo\bar`) hashed to DIFFERENT registry keys
+        // pre-fix → the second terminal missed the registry lookup, fell
+        // back to the legacy default identity, and both terminals collapsed
+        // onto a shared DID. Fix: normalize the cwd key case-insensitively
+        // on Windows, case-sensitively elsewhere (so distinct-on-disk paths
+        // on case-sensitive filesystems remain distinct).
+        let upper = Path::new("/Users/paul/Source/WIRE");
+        let lower = Path::new("/Users/paul/Source/wire");
+        if cfg!(windows) {
+            assert_eq!(
+                normalize_cwd_key(upper),
+                normalize_cwd_key(lower),
+                "on Windows, distinct casings of the same path MUST normalize \
+                 to the same key (NTFS is case-insensitive by default)"
+            );
+        } else {
+            assert_ne!(
+                normalize_cwd_key(upper),
+                normalize_cwd_key(lower),
+                "on case-sensitive filesystems, distinct casings ARE distinct \
+                 directories and MUST stay distinct keys"
+            );
+        }
+        // Trivial sanity: same input always produces same output.
+        assert_eq!(normalize_cwd_key(lower), normalize_cwd_key(lower));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn derive_name_finds_registered_cwd_under_alternate_casing_on_windows() {
+        // Direct integration check for the Willard repro on Windows: an
+        // existing registry entry written under one casing MUST resolve
+        // when the lookup arrives under a different casing of the same
+        // path. Pre-fix this returned the basename (= cwd collapsed onto
+        // a phantom name → identity collision); post-fix it returns the
+        // stored name.
+        let mut reg = SessionRegistry::default();
+        reg.by_cwd.insert(
+            // Pre-existing v0.13.5 entry — note the original casing is
+            // preserved in the key (we normalize the LOOKUP, not the
+            // existing entry).
+            r"C:\Users\Willard\ComfyUI\claude-integration".to_string(),
+            "claude-integration".to_string(),
+        );
+        // Lookup from a different casing of the exact same on-disk path.
+        let from_lower_cwd = Path::new(r"c:\users\willard\comfyui\claude-integration");
+        assert_eq!(
+            derive_name_from_cwd(from_lower_cwd, &reg),
+            "claude-integration",
+            "Windows lookup MUST find the registered entry regardless of \
+             how the shell capitalized the cwd"
         );
     }
 
