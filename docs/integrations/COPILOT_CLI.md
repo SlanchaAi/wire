@@ -41,6 +41,8 @@ In a Copilot CLI session, ask:
 
 Copilot will invoke the wire MCP tool and print something like `🌻 noble-canyon`.
 
+If wire's tools don't appear, run `/mcp list` inside Copilot CLI to confirm the wire MCP server was loaded. If it's not listed, the MCP config path on your Copilot CLI install differs from the documented `~/.copilot/mcp-config.json` — please [open an issue](https://github.com/SlanchaAi/wire/issues) with your platform + Copilot CLI version so we can add the variant to `wire setup --apply`'s target list. (Manual install below is the workaround in the meantime.)
+
 ## Manual install
 
 If `wire setup --apply` can't find your config (uncommon Copilot CLI install layout), add this block to `~/.copilot/mcp-config.json` (or `$XDG_CONFIG_HOME/copilot/mcp-config.json` if you use XDG):
