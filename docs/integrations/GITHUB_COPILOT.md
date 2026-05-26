@@ -57,13 +57,15 @@ If automatic setup doesn't work, manually add this to your VS Code settings.json
         "command": "wire",
         "args": ["mcp"],
         "env": {
-          "WIRE_SESSION_ID": "${workspaceFolder}"
+          "VSCODE_GIT_REPOSITORY_ROOT": "${workspaceFolder}"
         }
       }
     }
   }
 }
 ```
+
+> **Note**: Wire resolves workspace identity from `VSCODE_GIT_REPOSITORY_ROOT`. If VS Code doesn't automatically set this variable, explicitly configure it in the MCP server env as shown above using `${workspaceFolder}`.
 
 ### Step 3: Restart VS Code
 
@@ -242,20 +244,22 @@ wire whoami --json | grep config_dir
 # If it shows a shared path (not /by-key/<hash>/), identity isn't per-workspace
 ```
 
-**Fix:** Set explicit WIRE_SESSION_ID in settings.json:
+**Fix:** Set explicit `VSCODE_GIT_REPOSITORY_ROOT` in settings.json:
 ```json
 {
   "mcp": {
     "servers": {
       "wire": {
         "env": {
-          "WIRE_SESSION_ID": "${workspaceFolder}"
+          "VSCODE_GIT_REPOSITORY_ROOT": "${workspaceFolder}"
         }
       }
     }
   }
 }
 ```
+
+> **Tip**: Wire looks for `VSCODE_GIT_REPOSITORY_ROOT` to determine workspace identity. If VS Code doesn't set this automatically, use `${workspaceFolder}` as shown above to ensure each workspace gets a unique identity.
 
 ### Issue: "wire_send not found"
 
