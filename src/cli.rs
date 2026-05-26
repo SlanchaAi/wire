@@ -6920,19 +6920,19 @@ fn cmd_add_accept_pending(
     )?;
     config::write_relay_state(&relay_state)?;
 
-    // 3. Ship our slot_token to peer via pair_drop_ack so they can write back.
-    crate::pair_invite::send_pair_drop_ack(
-        &pending.peer_handle,
-        &pending.peer_relay_url,
-        &pending.peer_slot_id,
-        &pending.peer_slot_token,
-    )
-    .with_context(|| {
-        format!(
-            "pair_drop_ack send to {} @ {} slot {} failed",
-            pending.peer_handle, pending.peer_relay_url, pending.peer_slot_id
-        )
-    })?;
+    // 3. Ship our slot_token to peer via pair_drop_ack — try every advertised
+    //    peer endpoint in priority order (Bug 2). `endpoints_to_pin` was
+    //    already built from `pending.peer_endpoints` (with legacy-triple
+    //    fallback) just above, so we reuse it rather than rebuilding.
+    crate::pair_invite::send_pair_drop_ack(&pending.peer_handle, &endpoints_to_pin).with_context(
+        || {
+            format!(
+                "pair_drop_ack send to {} (across {} endpoint(s)) failed",
+                pending.peer_handle,
+                endpoints_to_pin.len()
+            )
+        },
+    )?;
 
     // 4. Delete the pending-inbound record now that bilateral is complete.
     crate::pending_inbound_pair::consume_pending_inbound(peer_nick)?;

@@ -4,7 +4,7 @@
 //! the only async surface in the crate is `relay_server::serve`. Async clients
 //! land in v0.2 if a long-running daemon needs them.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -233,6 +233,58 @@ pub fn post_event_to_endpoint(
     }
     let client = RelayClient::new(&endpoint.relay_url);
     client.post_event(&endpoint.slot_id, &endpoint.slot_token, event)
+}
+
+/// Try posting `event` to each endpoint in priority order; return the first
+/// success. Generic over the poster so tests can inject a deterministic mock
+/// without spinning up an HTTP server. In production callers pass
+/// `post_event_to_endpoint`.
+///
+/// Bug 2 (P1, federation reachability) this implements: before this helper,
+/// the bilateral-pair ack path (`send_pair_drop_ack`) only ever POSTed to the
+/// FIRST endpoint in the peer's card. A peer whose first endpoint 4xx'd (e.g.
+/// the userinfo-malformed URL surfaced in Bug 1) was unreachable even when
+/// they advertised a perfectly good second endpoint. Surfaced when
+/// `coral-weasel`'s `wire accept swift-harbor` 400'd on the malformed first
+/// endpoint while a clean `https://wireup.net` endpoint sat behind it
+/// untouched.
+///
+/// Failover ordering is the priority order supplied by the caller (typically
+/// `peer_endpoints_in_priority_order` / `self_endpoints` — UDS / Local / LAN
+/// / Federation, lowest-friction first), so this respects the existing
+/// transport-preference contract.
+///
+/// Returns `Ok((endpoint, response))` on the first success — the caller can
+/// log which endpoint actually accepted the event. Returns `Err` if and only
+/// if every endpoint failed; the error string includes the per-endpoint
+/// reasons so the operator can diagnose without re-tracing.
+pub fn try_post_event_with_failover<F>(
+    endpoints: &[crate::endpoints::Endpoint],
+    event: &Value,
+    mut poster: F,
+) -> Result<(crate::endpoints::Endpoint, PostEventResponse)>
+where
+    F: FnMut(&crate::endpoints::Endpoint, &Value) -> Result<PostEventResponse>,
+{
+    if endpoints.is_empty() {
+        bail!(
+            "no endpoints to deliver to — peer has no pinned endpoints in relay_state. \
+             Re-run the pair flow (or `wire dial <peer>@<relay>`) to re-pin the peer's \
+             advertised endpoints."
+        );
+    }
+    let mut errs: Vec<String> = Vec::with_capacity(endpoints.len());
+    for ep in endpoints {
+        match poster(ep, event) {
+            Ok(resp) => return Ok((ep.clone(), resp)),
+            Err(e) => errs.push(format!("{} ({:?}): {e}", ep.relay_url, ep.scope)),
+        }
+    }
+    bail!(
+        "all {n} endpoint(s) failed:\n  • {reasons}",
+        n = endpoints.len(),
+        reasons = errs.join("\n  • ")
+    )
 }
 
 impl RelayClient {
@@ -807,5 +859,172 @@ mod tests {
         unsafe {
             std::env::remove_var(INSECURE_SKIP_TLS_ENV);
         }
+    }
+}
+
+#[cfg(test)]
+mod failover_tests {
+    use super::*;
+    use crate::endpoints::{Endpoint, EndpointScope};
+    use std::sync::Mutex;
+
+    fn fed_ep(url: &str, slot: &str, token: &str) -> Endpoint {
+        Endpoint::federation(url.to_string(), slot.to_string(), token.to_string())
+    }
+
+    fn local_ep(url: &str, slot: &str, token: &str) -> Endpoint {
+        Endpoint {
+            relay_url: url.to_string(),
+            slot_id: slot.to_string(),
+            slot_token: token.to_string(),
+            scope: EndpointScope::Local,
+        }
+    }
+
+    fn ok_resp() -> PostEventResponse {
+        PostEventResponse {
+            event_id: Some("evt-1".to_string()),
+            status: "queued".to_string(),
+        }
+    }
+
+    #[test]
+    fn first_endpoint_succeeds_no_further_attempts() {
+        // Happy path: first endpoint accepts; subsequent endpoints are
+        // never tried. Pins that failover doesn't churn unnecessary RTTs
+        // when the primary works.
+        let endpoints = vec![
+            fed_ep("https://good.example", "slot1", "tok1"),
+            fed_ep("https://other.example", "slot2", "tok2"),
+        ];
+        let attempts: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let result = try_post_event_with_failover(&endpoints, &serde_json::json!({}), |ep, _| {
+            attempts.lock().unwrap().push(ep.relay_url.clone());
+            Ok(ok_resp())
+        })
+        .unwrap();
+        assert_eq!(result.0.relay_url, "https://good.example");
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            vec!["https://good.example".to_string()],
+            "must NOT try the second endpoint after the first succeeds"
+        );
+    }
+
+    #[test]
+    fn skips_dead_endpoint_and_succeeds_on_next() {
+        // The Bug 2 regression case: a peer advertises [bad, good]. Pre-fix,
+        // send_pair_drop_ack would 4xx on `bad` and give up — bilateral pair
+        // unreachable. Now the failover helper tries `bad`, records the
+        // error, tries `good`, succeeds. Mirrors the swift-harbor ↔
+        // coral-weasel incident exactly.
+        let endpoints = vec![
+            // Bad first endpoint (modeling the userinfo-malformed URL from
+            // Bug 1 / the federation 400 coral-weasel hit on accept).
+            fed_ep("https://copilot-agent@wireup.net", "slot-bad", "tok-bad"),
+            // Clean second endpoint that actually works.
+            fed_ep("https://wireup.net", "slot-good", "tok-good"),
+        ];
+        let attempts: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let (delivered_ep, _resp) =
+            try_post_event_with_failover(&endpoints, &serde_json::json!({}), |ep, _| {
+                attempts.lock().unwrap().push(ep.relay_url.clone());
+                if ep.relay_url.contains('@') {
+                    Err(anyhow!("400 Bad Request (userinfo embedded)"))
+                } else {
+                    Ok(ok_resp())
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            delivered_ep.relay_url, "https://wireup.net",
+            "the successful endpoint must be the one returned to the caller"
+        );
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            vec![
+                "https://copilot-agent@wireup.net".to_string(),
+                "https://wireup.net".to_string()
+            ],
+            "must try `bad` first, then fall over to `good`"
+        );
+    }
+
+    #[test]
+    fn respects_priority_order_caller_supplies() {
+        // We don't re-sort; we honor the caller's order. Typical input is
+        // `peer_endpoints_in_priority_order` (UDS / Local / LAN / Federation),
+        // so the "first tried" semantics encode the existing transport-
+        // preference contract. Test: Local before Federation in input →
+        // Local tried first.
+        let endpoints = vec![
+            local_ep("http://127.0.0.1:8771", "loc1", "loctok"),
+            fed_ep("https://wireup.net", "fed1", "fedtok"),
+        ];
+        let attempts: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let _ = try_post_event_with_failover(&endpoints, &serde_json::json!({}), |ep, _| {
+            attempts.lock().unwrap().push(ep.relay_url.clone());
+            Ok(ok_resp())
+        })
+        .unwrap();
+        assert_eq!(
+            attempts.lock().unwrap()[0],
+            "http://127.0.0.1:8771",
+            "Local-scope endpoint must be tried first (per the caller's priority order)"
+        );
+    }
+
+    #[test]
+    fn all_failures_returns_combined_error() {
+        // All endpoints fail: the helper must combine the per-endpoint
+        // reasons into a single error so the operator can diagnose without
+        // re-tracing — same shape as cmd_push's failure logging.
+        let endpoints = vec![
+            fed_ep("https://a.example", "s", "t"),
+            fed_ep("https://b.example", "s", "t"),
+            fed_ep("https://c.example", "s", "t"),
+        ];
+        let err = try_post_event_with_failover(&endpoints, &serde_json::json!({}), |ep, _| {
+            Err(anyhow!("simulated 500 from {}", ep.relay_url))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("all 3 endpoint(s) failed"),
+            "error must surface the total count: {err}"
+        );
+        // Every endpoint URL appears in the combined error so each
+        // failure is attributable.
+        for u in [
+            "https://a.example",
+            "https://b.example",
+            "https://c.example",
+        ] {
+            assert!(
+                err.contains(u),
+                "combined error must include each failing endpoint URL ({u}): {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_endpoints_returns_actionable_error() {
+        // A peer with no pinned endpoints is unreachable by definition. The
+        // helper must say so explicitly (not silently return Ok) and point
+        // at the re-pair remediation.
+        let endpoints: Vec<Endpoint> = Vec::new();
+        let err = try_post_event_with_failover(&endpoints, &serde_json::json!({}), |_, _| {
+            unreachable!("poster must not be called when endpoint list is empty")
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("no endpoints to deliver to"),
+            "empty-list error must be explicit: {err}"
+        );
+        assert!(
+            err.contains("re-pin") || err.contains("dial") || err.contains("pair"),
+            "empty-list error must point at the remediation path: {err}"
+        );
     }
 }

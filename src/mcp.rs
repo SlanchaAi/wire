@@ -2034,17 +2034,26 @@ fn tool_pair_accept(args: &Value) -> Result<Value, String> {
     });
     crate::config::write_relay_state(&relay_state).map_err(|e| format!("{e:#}"))?;
 
-    // Ship our slot_token via pair_drop_ack.
-    crate::pair_invite::send_pair_drop_ack(
-        &pending.peer_handle,
-        &pending.peer_relay_url,
-        &pending.peer_slot_id,
-        &pending.peer_slot_token,
-    )
-    .map_err(|e| {
+    // Ship our slot_token via pair_drop_ack — Bug 2 fix: iterate the peer's
+    // advertised endpoints in priority order, only fail if all are dead. The
+    // pending record's `peer_endpoints` carries the full advertised list when
+    // the pair_drop was written by a v0.5.17+ peer; fall back to a one-element
+    // slice from the legacy triple for older records so we still hit the
+    // failover helper with a valid input.
+    let ack_endpoints: Vec<crate::endpoints::Endpoint> = if pending.peer_endpoints.is_empty() {
+        vec![crate::endpoints::Endpoint::federation(
+            pending.peer_relay_url.clone(),
+            pending.peer_slot_id.clone(),
+            pending.peer_slot_token.clone(),
+        )]
+    } else {
+        pending.peer_endpoints.clone()
+    };
+    crate::pair_invite::send_pair_drop_ack(&pending.peer_handle, &ack_endpoints).map_err(|e| {
         format!(
-            "pair_drop_ack send to {} @ {} slot {} failed: {e:#}",
-            pending.peer_handle, pending.peer_relay_url, pending.peer_slot_id
+            "pair_drop_ack send to {} (across {} endpoint(s)) failed: {e:#}",
+            pending.peer_handle,
+            ack_endpoints.len()
         )
     })?;
 
