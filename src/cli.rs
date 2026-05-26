@@ -12253,21 +12253,25 @@ fn cmd_profile(action: ProfileAction) -> Result<()> {
             let parsed: Value =
                 serde_json::from_str(&value).unwrap_or(Value::String(value.clone()));
             let new_profile = crate::pair_profile::write_profile_field(&field, parsed)?;
+            let published = republish_card_to_phonebook();
             if json {
                 println!(
                     "{}",
                     serde_json::to_string(&json!({
                         "field": field,
                         "profile": new_profile,
+                        "published_to": published,
                     }))?
                 );
             } else {
                 println!("profile.{field} set");
+                print_profile_publish_result(&published);
             }
         }
         ProfileAction::Get { json } => return cmd_whois(None, json, None),
         ProfileAction::Clear { field, json } => {
             let new_profile = crate::pair_profile::write_profile_field(&field, Value::Null)?;
+            let published = republish_card_to_phonebook();
             if json {
                 println!(
                     "{}",
@@ -12275,14 +12279,64 @@ fn cmd_profile(action: ProfileAction) -> Result<()> {
                         "field": field,
                         "cleared": true,
                         "profile": new_profile,
+                        "published_to": published,
                     }))?
                 );
             } else {
                 println!("profile.{field} cleared");
+                print_profile_publish_result(&published);
             }
         }
     }
     Ok(())
+}
+
+/// Best-effort: re-publish the (freshly re-signed) agent-card to every relay
+/// this identity already holds a federation slot on, so a `wire profile`
+/// edit reaches the public phonebook immediately instead of waiting for the
+/// next `wire up`. Silent no-op when the identity holds no federation slot
+/// (offline / local-only). `discoverable: None` makes the relay PRESERVE the
+/// prior setting, so a `--hidden` agent stays hidden across the re-claim.
+/// Returns the relay URLs the card was published to.
+fn republish_card_to_phonebook() -> Vec<String> {
+    let Ok(card) = config::read_agent_card() else {
+        return Vec::new();
+    };
+    let did = card.get("did").and_then(Value::as_str).unwrap_or_default();
+    let persona = crate::agent_card::display_handle_from_did(did).to_string();
+    if persona.is_empty() {
+        return Vec::new();
+    }
+    let Ok(state) = config::read_relay_state() else {
+        return Vec::new();
+    };
+    let mut published = Vec::new();
+    for ep in crate::endpoints::self_endpoints(&state) {
+        if ep.scope != crate::endpoints::EndpointScope::Federation
+            || ep.slot_id.is_empty()
+            || ep.slot_token.is_empty()
+        {
+            continue;
+        }
+        let client = crate::relay_client::RelayClient::new(&ep.relay_url);
+        if client
+            .handle_claim_v2(&persona, &ep.slot_id, &ep.slot_token, None, &card, None)
+            .is_ok()
+        {
+            published.push(ep.relay_url.clone());
+        }
+    }
+    published
+}
+
+fn print_profile_publish_result(published: &[String]) {
+    if published.is_empty() {
+        println!(
+            "  (local only — not bound to a federation relay; run `wire up` to publish to the phonebook)"
+        );
+    } else {
+        println!("  published to phonebook: {}", published.join(", "));
+    }
 }
 
 // ---------- setup — one-shot MCP host registration ----------
