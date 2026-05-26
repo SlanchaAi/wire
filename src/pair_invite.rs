@@ -647,11 +647,21 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
 /// Used by the SPAKE2 invite-URL path (auto-called) and by the bilateral
 /// completion path in `cmd_add` (operator-driven). Failures propagate so
 /// the caller can surface the failure loudly.
+/// Send a pair_drop_ack to a peer. Iterates the peer's pinned endpoints
+/// in priority order (UDS / Local / LAN / Federation), trying each on
+/// failure — only errors if every endpoint fails. Fixes Bug 2: previously
+/// took a single `peer_relay`/`peer_slot_id`/`peer_slot_token` triple and
+/// gave up after the first POST, so a peer whose first endpoint 4xx'd
+/// (e.g. the userinfo-malformed URL from Bug 1) was unreachable even when
+/// they advertised a second, clean endpoint.
+///
+/// Back-compat: callers that only know a single endpoint (legacy v0.5.16-
+/// era pending records without `endpoints[]`) can pass a one-element slice
+/// built from the legacy fields — the helper handles list-of-one identically
+/// to the pre-fix single-endpoint shape.
 pub fn send_pair_drop_ack(
     peer_handle: &str,
-    peer_relay: &str,
-    peer_slot_id: &str,
-    peer_slot_token: &str,
+    peer_endpoints: &[crate::endpoints::Endpoint],
 ) -> Result<()> {
     // Load our own card + relay coords.
     let our_card = config::read_agent_card()?;
@@ -746,10 +756,23 @@ pub fn send_pair_drop_ack(
         "body": body,
     });
     let signed = crate::signing::sign_message_v31(&event, &sk_seed, &pk_bytes, &our_handle)?;
-    let client = crate::relay_client::RelayClient::new(peer_relay);
-    client
-        .post_event(peer_slot_id, peer_slot_token, &signed)
-        .with_context(|| format!("POST pair_drop_ack to {peer_relay} slot {peer_slot_id}"))?;
+
+    // Bug 2 fix: try every advertised peer endpoint in priority order; only
+    // error if all fail. Pre-fix this function POSTed once to a single
+    // endpoint and gave up on the first 4xx — a peer with [bad, good]
+    // endpoints (e.g. the userinfo-malformed first endpoint surfaced by
+    // Bug 1) was unreachable even though a good endpoint sat behind it.
+    let (delivered_ep, _resp) =
+        crate::relay_client::try_post_event_with_failover(peer_endpoints, &signed, |ep, ev| {
+            crate::relay_client::post_event_to_endpoint(ep, ev)
+        })
+        .with_context(|| {
+            format!(
+                "pair_drop_ack to {peer_handle} failed across {} endpoint(s)",
+                peer_endpoints.len()
+            )
+        })?;
+    let _ = delivered_ep; // delivered_ep is available for future logging.
     Ok(())
 }
 
