@@ -668,9 +668,12 @@ pub fn detect_session_wire_home(cwd: &std::path::Path) -> Option<PathBuf> {
 ///   1. `WIRE_SESSION_ID` — explicit universal override (any harness).
 ///   2. `CLAUDE_CODE_SESSION_ID` — Claude Code adapter (stable per
 ///      conversation; the same id the auto-memory system keys off).
-///   3. `VSCODE_GIT_REPOSITORY_ROOT` — VS Code/GitHub Copilot workspace-based
+///   3. `COPILOT_AGENT_SESSION_ID` — GitHub Copilot CLI (`gh copilot` /
+///      `copilot`) adapter. Set by the Copilot CLI host for every
+///      session; stable per conversation; UUID-shaped.
+///   4. `VSCODE_GIT_REPOSITORY_ROOT` — VS Code/GitHub Copilot workspace-based
 ///      identity (stable per workspace).
-///   4. `None` — caller falls back to legacy cwd-detect (bare CLI /
+///   5. `None` — caller falls back to legacy cwd-detect (bare CLI /
 ///      pre-v0.13 hosts). Future host adapters slot in before this.
 ///
 /// Returns `(key, source-label)`.
@@ -678,6 +681,7 @@ pub fn resolve_session_key() -> Option<(String, &'static str)> {
     for (var, source) in [
         ("WIRE_SESSION_ID", "override"),
         ("CLAUDE_CODE_SESSION_ID", "claude-code"),
+        ("COPILOT_AGENT_SESSION_ID", "copilot-cli"),
         ("VSCODE_GIT_REPOSITORY_ROOT", "vscode-workspace"),
     ] {
         if let Ok(v) = std::env::var(var)
@@ -1052,11 +1056,13 @@ mod tests {
         // test is hermetic regardless of the harness environment.
         let prev_override = std::env::var_os("WIRE_SESSION_ID");
         let prev_claude = std::env::var_os("CLAUDE_CODE_SESSION_ID");
+        let prev_copilot = std::env::var_os("COPILOT_AGENT_SESSION_ID");
         let prev_vscode = std::env::var_os("VSCODE_GIT_REPOSITORY_ROOT");
         // SAFETY: ENV_LOCK is held, serializing all env access.
         unsafe {
             std::env::remove_var("WIRE_SESSION_ID");
             std::env::remove_var("CLAUDE_CODE_SESSION_ID");
+            std::env::remove_var("COPILOT_AGENT_SESSION_ID");
             std::env::remove_var("VSCODE_GIT_REPOSITORY_ROOT");
         }
 
@@ -1111,12 +1117,124 @@ mod tests {
         unsafe {
             std::env::remove_var("WIRE_SESSION_ID");
             std::env::remove_var("CLAUDE_CODE_SESSION_ID");
+            std::env::remove_var("COPILOT_AGENT_SESSION_ID");
             std::env::remove_var("VSCODE_GIT_REPOSITORY_ROOT");
             if let Some(v) = prev_override {
                 std::env::set_var("WIRE_SESSION_ID", v);
             }
             if let Some(v) = prev_claude {
                 std::env::set_var("CLAUDE_CODE_SESSION_ID", v);
+            }
+            if let Some(v) = prev_copilot {
+                std::env::set_var("COPILOT_AGENT_SESSION_ID", v);
+            }
+            if let Some(v) = prev_vscode {
+                std::env::set_var("VSCODE_GIT_REPOSITORY_ROOT", v);
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_session_key_copilot_cli_adapter_and_priority() {
+        // Per-adapter test for the GitHub Copilot CLI path (Phase 2 of #59):
+        // resolve_session_key reads COPILOT_AGENT_SESSION_ID (set by the
+        // `gh copilot` / `copilot` CLI host on every session) as a TARGETED
+        // env adapter — exactly like CLAUDE_CODE_SESSION_ID. Holds three
+        // invariants:
+        //
+        //   (a) Set to a real id -> that key wins resolution and two distinct
+        //       conversations map to two distinct session homes (per-
+        //       conversation identity contract).
+        //   (b) WIRE_SESSION_ID overrides COPILOT_AGENT_SESSION_ID (priority
+        //       1 trumps priority 3).
+        //   (c) Unexpanded ${...} literal is rejected by the ${} guard —
+        //       falls through to the None path, never hashed (mirrors the
+        //       guard inherited from CLAUDE_CODE_SESSION_ID / WIRE_SESSION_ID
+        //       / VSCODE_GIT_REPOSITORY_ROOT).
+        let _guard = crate::config::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        // Snapshot every env var resolve_session_key consults so the test is
+        // hermetic regardless of harness environment (this test literally
+        // runs under Copilot CLI, where COPILOT_AGENT_SESSION_ID is set).
+        let prev_override = std::env::var_os("WIRE_SESSION_ID");
+        let prev_claude = std::env::var_os("CLAUDE_CODE_SESSION_ID");
+        let prev_copilot = std::env::var_os("COPILOT_AGENT_SESSION_ID");
+        let prev_vscode = std::env::var_os("VSCODE_GIT_REPOSITORY_ROOT");
+        // SAFETY: ENV_LOCK is held, serializing all env access.
+        unsafe {
+            std::env::remove_var("WIRE_SESSION_ID");
+            std::env::remove_var("CLAUDE_CODE_SESSION_ID");
+            std::env::remove_var("COPILOT_AGENT_SESSION_ID");
+            std::env::remove_var("VSCODE_GIT_REPOSITORY_ROOT");
+        }
+
+        // (a) COPILOT_AGENT_SESSION_ID set -> wins resolution; distinct ids
+        //     map to distinct session homes.
+        unsafe {
+            std::env::set_var(
+                "COPILOT_AGENT_SESSION_ID",
+                "3869478a-33cc-4c33-82ee-b6403a24d734",
+            )
+        };
+        let r1 = resolve_session_key();
+        assert!(
+            matches!(&r1, Some((k, src)) if k == "3869478a-33cc-4c33-82ee-b6403a24d734" && *src == "copilot-cli"),
+            "COPILOT_AGENT_SESSION_ID must win resolution and be labeled copilot-cli; got {r1:?}"
+        );
+        let home_a = session_home_for_key(&r1.as_ref().unwrap().0).unwrap();
+
+        unsafe {
+            std::env::set_var(
+                "COPILOT_AGENT_SESSION_ID",
+                "deadbeef-0000-0000-0000-000000000000",
+            )
+        };
+        let r2 = resolve_session_key();
+        let home_b = session_home_for_key(&r2.as_ref().unwrap().0).unwrap();
+        assert_ne!(
+            home_a, home_b,
+            "distinct Copilot CLI session ids must map to distinct session homes"
+        );
+
+        // (b) WIRE_SESSION_ID at priority 1 overrides COPILOT_AGENT_SESSION_ID
+        //     at priority 3. Operator's explicit universal override always wins.
+        unsafe { std::env::set_var("WIRE_SESSION_ID", "operator-override") };
+        let r_override = resolve_session_key();
+        assert!(
+            matches!(&r_override, Some((k, src)) if k == "operator-override" && *src == "override"),
+            "WIRE_SESSION_ID must beat COPILOT_AGENT_SESSION_ID; got {r_override:?}"
+        );
+        unsafe { std::env::remove_var("WIRE_SESSION_ID") };
+
+        // (c) Unexpanded ${...} literal is rejected by the ${} guard.
+        //     `gh copilot` shouldn't ship literal placeholders in
+        //     COPILOT_AGENT_SESSION_ID, but if some future config-forwarding
+        //     path does, the guard must reject it (same as for the other
+        //     adapters) so we never hash the literal and collapse sessions.
+        unsafe { std::env::set_var("COPILOT_AGENT_SESSION_ID", "${SOME_PLACEHOLDER}") };
+        let r_guard = resolve_session_key();
+        assert!(
+            !matches!(&r_guard, Some((k, _)) if k.contains("${")),
+            "unexpanded ${{...}} in COPILOT_AGENT_SESSION_ID must be rejected by the ${{}} guard; got {r_guard:?}"
+        );
+
+        // Restore any env we displaced.
+        // SAFETY: ENV_LOCK still held.
+        unsafe {
+            std::env::remove_var("WIRE_SESSION_ID");
+            std::env::remove_var("CLAUDE_CODE_SESSION_ID");
+            std::env::remove_var("COPILOT_AGENT_SESSION_ID");
+            std::env::remove_var("VSCODE_GIT_REPOSITORY_ROOT");
+            if let Some(v) = prev_override {
+                std::env::set_var("WIRE_SESSION_ID", v);
+            }
+            if let Some(v) = prev_claude {
+                std::env::set_var("CLAUDE_CODE_SESSION_ID", v);
+            }
+            if let Some(v) = prev_copilot {
+                std::env::set_var("COPILOT_AGENT_SESSION_ID", v);
             }
             if let Some(v) = prev_vscode {
                 std::env::set_var("VSCODE_GIT_REPOSITORY_ROOT", v);

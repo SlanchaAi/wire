@@ -12512,6 +12512,18 @@ fn cmd_setup(apply: bool) -> Result<()> {
                 PathBuf::from(appdata).join("Code - Insiders/User/settings.json"),
             ));
         }
+
+        // GitHub Copilot CLI (`gh copilot` / `copilot`). v0.13.6: standard
+        // MCP shape (`mcpServers` root key, same as Claude Code), lives at
+        // `~/.copilot/mcp-config.json` on all platforms — XDG-overridable
+        // on Unix via `$XDG_CONFIG_HOME/copilot/mcp-config.json`.
+        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+            targets.push((
+                "GitHub Copilot CLI (XDG)",
+                PathBuf::from(xdg).join("copilot/mcp-config.json"),
+            ));
+        }
+        targets.push(("GitHub Copilot CLI", home.join(".copilot/mcp-config.json")));
     }
     // Workspace-local VS Code settings (GitHub Copilot workspace config)
     targets.push((
