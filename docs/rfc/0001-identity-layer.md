@@ -291,6 +291,60 @@ Each has an owner and a decision point. None are abandoned bullets.
 - **O3 — Statusline visual distinction.** Should `ORG_VERIFIED` peers render differently from `VERIFIED` in the statusline (`docs/STATUSLINE.md`)? Recommend yes (e.g., a small subscript org-emoji on the tier badge). **Owner:** @laulpogan.
 - **O4 — Auto-pair toggle UX.** Per-org policy stored where (`config/wire/org_policies.json`) and surfaced how (CLI: `wire org policy <org_did> --auto-pair`; MCP: new `wire_org_set_policy` tool requiring explicit user consent like `wire_pair_confirm`)? **Owner:** swift-harbor.
 - **O5 — Pre-computed SAS digits in roster bundle.** Cryptographic check: confirm the org-signed bundle cannot be replay-spliced (e.g., reuse Op A's bundle entry to impersonate Op A on a fresh session under attacker-controlled keys). Mitigation hypothesis: bundle entry binds (op_did, session_did, session_pubkey, sas_digits) inside a single org_sig, so any splice fails verification. **Owner:** maintainer (cryptographic review). **Decision:** RFC-001 v3 / pre-merge.
+- **O6 — Attestation expiry policy.** Surfaced by prior-art review (NATS / Sigstore / OIDF / GH Apps all use bounded TTLs; v0.13 wire trust is forever-until-revoked). Choices: (a) no expiry — simple, accretes zombies; (b) TTL on `member_cert` (e.g., 30 d) with org-side re-issuance — forces refresh, requires org online; (c) **version-based**, bound to roster epoch — matches Keybase precedent and reuses our liveness/GC pipeline. Proposed: (c) — `member_cert` is valid while its roster epoch is the current one served by the registry; epoch bump on any membership delta forces re-pull. **Owner:** swift-harbor. **Decision:** v0.14-beta.
+- **O7 — `op_did` correlation / privacy stance.** Surfaced by prior-art review (DID:peer pairwise DIDs, BBS+ selective disclosure). A stable `op_did` lets every org an operator joins link their sessions to a single anchor — convenient for accountability, problematic if the operator wants compartmentalized personas (work vs personal). Proposed: `op_did` is **strictly opt-in** (sessions without one stay anonymous as today and cannot reach `ORG_VERIFIED`); pairwise `op_did`s (one per org relationship) is a **deferred v0.15 feature** if operators request it; ZKP-based selective disclosure is out of scope (complexity disproportionate to current threat model). Document the linkability trade explicitly in `docs/AGENT_INTEGRATION.md`. **Owner:** swift-harbor. **Decision:** v0.14-RC1.
+
+## Prior art
+
+This section was added in response to a maintainer ask: enumerate similar concepts in the agent-identity, decentralized-identity, and federated-messaging spaces so v0.14 does not reinvent existing wheels and so reviewers can spot whether our design is missing a known footgun. Full annotated bibliography (16 systems, ~58 KB) lives in [`docs/rfc/0001-identity-layer.prior-art.md`](./0001-identity-layer.prior-art.md). This section is the synthesis.
+
+### Three strongest precedents
+
+**1. NATS JWT auth — Operator → Account → User ([docs.nats.io/.../jwt](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/auth_intro/jwt)).** The closest structural match. NATS pins the same three-tier hierarchy we are proposing, picks the same names ("Operator" at the top), and uses Ed25519 signing keys (NKeys). Each tier issues a JWT with `iss = parent public key` / `sub = subject public key`; verification walks the chain to a trusted Operator key. Convergence on the name "Operator" by an independent design is the strongest possible vote for keeping it. **Borrow:** the iss/sub chain shape — `member_cert` is conceptually a NATS-style Account JWT with `iss = org_did pubkey`, `sub = op_did pubkey`. **Diverge:** NATS treats the chain as *sufficient for trust* (no out-of-band ceremony). Wire keeps SAS as the only path to `VERIFIED`; `ORG_VERIFIED` is the ceiling the chain alone can reach.
+
+**2. OpenID Federation 1.0 — Trust Chain + Trust Marks ([openid.net/specs/openid-federation-1_0.html](https://openid.net/specs/openid-federation-1_0.html)).** The most mature published spec for the exact problem. Defines Entity Statements (signed JWTs from a superior entity about a subordinate), a Trust Chain walker, `metadata_policy` for downstream constraints, `max_path_length` for nesting depth, and Trust Marks for org vetting. **Borrow:** Entity-Statement claim names (`iss`, `sub`, `jwks`, `exp`, `metadata`, `metadata_policy`) as the schema for `org_memberships[]` entries — interop-friendly, and `metadata_policy` lets orgs constrain what member sessions can declare (e.g., max body size, allowed capabilities) without a wire-specific mechanism. **Diverge:** OIDF assumes intermediate statements are reachable via HTTP at resolve time; wire's relay-centric, offline-tolerant model is better served by carrying the statement inline in the agent-card and pulling the roster bundle for verification, instead of walking remote `/.well-known/openid-federation` endpoints live.
+
+**3. GitHub Apps — App → Installation → Repository ([docs.github.com/en/apps](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/about-authentication-with-a-github-app)).** The most widely deployed three-tier agent-identity model in production. App authenticates with a long-lived JWT signed by its private key; installation tokens are short-lived (1 h) and minted on demand; repository permissions are scoped at installation time. **Borrow:** the *separation* between "operator signs long-lived enrollment cert" and "session uses short-lived attestation derived from it" — answers O6 from the same direction NATS does. **Diverge:** GH Apps has a central authority (GitHub) issuing installation tokens; wire's enrollment cert is published by the operator and read directly by peers — no online minting service needed.
+
+### Compact table — naming + signing model across systems
+
+| System | Top tier | Middle tier | Leaf | Top-↔-middle binding | Notes |
+|---|---|---|---|---|---|
+| **wire RFC-001 v2** | Operator (`op_did`) | Organization (`org_did`) | Session DID + Project tag | `member_cert` (ed25519, `org_did` over `op_did`) | Project is unsigned routing metadata |
+| NATS JWT | Operator | Account | User | Account JWT (`iss=Op`, `sub=Acct`) | Decentralized; account can issue users with no server config |
+| OpenID Federation 1.0 | Trust Anchor | Intermediate Authority | Leaf Entity | Entity Statement JWT | `metadata_policy` constrains downstream |
+| GitHub Apps | App (developer) | Installation (org) | Repository perms | Installation token | Central minting authority |
+| ATProto (Bluesky) | DID | Handle (DNS, mutable) | PDS service endpoint | DID document | Adds *mutable handle* as 4th axis |
+| Matrix Spaces | Homeserver | Space | Room | `m.space.child` state events | ACL-as-membership, no signing chain |
+| Keybase Teams | Owner | Team | Subteam | Merkle-tree signed roster links | Rotate per-team key on every membership delta |
+| ActivityPub | — | Actor type=`Organization` / `Group` | — | none — actor-type declaration only | No org-membership cryptography |
+| SCITT (IETF) | — | Issuer | Statement on artifact | COSE signed statement + ledger receipt | Transparency-log timestamp guarantee |
+| Sigstore / Fulcio | OIDC IdP | (implicit in SAN) | Short-lived cert | OIDC token → X.509 SAN | Org lives in email domain or workflow URI |
+| W3C VC 2.0 | Issuer | (implicit) | Subject | VC w/ Ed25519 / BBS+ proof | Selective disclosure available via BBS+ |
+| Solid WebID | Domain owner | — | WebID | OIDC `webid` claim | Declarative `foaf:memberOf`, no org-side enforcement |
+| DIF Agent Trust (draft) | Operator | Org | Agent | AgentVC + DelegationVC | Direct map onto our `op_did` / `org_memberships[]` |
+| Google A2A | `AgentProvider.organization` (opaque string) | — | AgentCard | JWS over card; no chain | No operator distinct from org |
+| Anthropic MCP | — | — | server descriptor | none | Identity delegated to transport |
+
+### Three convergences worth pinning in our design
+
+- **Independent convergence on "Operator" as the top tier.** NATS, the DIF Agent Trust draft, and our operator addendum all land on the same name and the same semantic (the human / keyholder who runs N sessions across N tenants). This is strong evidence the term is right.
+- **Independent convergence on "membership = signed statement, not roster lookup."** NATS JWT, OIDF Entity Statement, Keybase signed roster links, and W3C VC all carry the org's signature *with* the member, so verification is a single key check, not a federation walk. This is exactly what Option B's roster bundle does. Keep it.
+- **Independent convergence on bounded-lifetime credentials.** NATS (account JWT `exp`), Fulcio (10-min cert), GH Apps (1-h installation token), OIDF (Entity Statement `exp`). v0.13 wire trust is forever-until-revoked; **O6 above** is the place this RFC catches up.
+
+### Three divergences worth being deliberate about
+
+- **Wire keeps SAS as the floor; everyone else trusts the chain.** This is the single most consequential design choice we make. The cost is friction (mitigated by Options A/B). The benefit is that a compromised org admin cannot reach `VERIFIED` on any non-bilaterally-paired member. NATS/OIDF/GH Apps all accept the org-side compromise as terminal for that tenant; wire does not. **Keep this divergence; it is the v0.5.14 closure expressed at the org tier.**
+- **Wire's project is routing metadata, not a trust scope.** Most systems treat the leaf tier (NATS User, OIDF Leaf, GH Repository) as a trust unit. Wire deliberately downgrades project to opaque metadata because trust-scoped projects multiply the rogue-admin blast radius without delivering a routing capability the application layer can't already express. **Document this divergence prominently.** A future RFC may revisit if a concrete use case demands it.
+- **Wire is offline-tolerant.** OIDF, GH Apps, NATS (with online account resolver), and ATProto (with PLC directory) all assume the trust hierarchy is resolvable at request time. Wire carries the roster bundle in the relay slot and verifies signatures locally. **Keep this — it is the property that makes wire usable inside air-gapped enclaves, ephemeral CI containers, and cold-storage replay.**
+
+### Known footguns from prior systems, mapped to our mitigations
+
+- **Keybase's implicit subteam admins.** Owners of a parent team could silently add themselves to a subteam — confused operators, audit-trail gaps. **Our analog:** Project must never become a trust scope; admins must not gain `ORG_VERIFIED` on a session whose `project` tag implies a sub-scope. Already enforced by §6 (project is metadata only).
+- **Matrix homeserver-operator impersonation.** A compromised homeserver admin can mint events on behalf of any of its users, because the homeserver key signs federation events. **Our analog:** `op_did` is operator-controlled, not relay-controlled — the relay can drop / spam / lose our slot but cannot sign as us. Already correct in v0.13 design; this RFC preserves it.
+- **OIDF live-resolve dependency.** When the org's `/.well-known/openid-federation` endpoint is down, the whole chain stops verifying. **Our analog:** carry the org-signed bundle inline (Option B path); only consult the registry for freshness checks (ETag), never for liveness-blocking lookups. Already in §7.
+- **Sigstore SAN-only org identity.** Org lives in an email domain or workflow URI; if the OIDC provider misconfigures domain ownership, identity is forgeable upstream. **Our analog:** DNS-TXT floor (§2) requires the org to prove control of the bound domain at claim time. Doesn't fully close the upstream-misconfig class, but at least bounds it to the org's own DNS posture, not a third-party OIDC IdP. Acceptable.
+- **NATS account-JWT renewal cliff.** When an account JWT expires and the operator is offline, every user under it instantly fails auth. **Our analog:** O6's version-based expiry — `member_cert` is valid while its roster epoch is current. Roster epoch only advances on membership delta; pure clock-passage doesn't invalidate it. Avoids the renewal cliff while still giving us a freshness lever.
 
 ## Alternatives considered
 
@@ -314,3 +368,41 @@ Each has an owner and a decision point. None are abandoned bullets.
 - `src/cli.rs:13131` — v0.13.1 one-name invariant. `op_did` / `org_did` MUST NOT reintroduce a free-choice name diverging from the DID-derived session handle.
 - `src/session.rs:752-762, 1001-1080` — per-session by-key identity model the operator/org/project layer composes over.
 - slate-lotus RFC-001 skeleton + operator addendum (2026-05-27) — direction-bless guardrails honored verbatim.
+- Prior-art research prompt + 16-system annotated bibliography (Appendix A; companion file `0001-identity-layer.prior-art.md`).
+
+## Appendix A — Prior-art research prompt
+
+This is the research prompt used to generate the prior-art companion file. Preserved here so future RFC iterations can re-run, narrow, or extend it. Companion bibliography: [`docs/rfc/0001-identity-layer.prior-art.md`](./0001-identity-layer.prior-art.md).
+
+> Wire's RFC-001 v2 introduces a three-tier identity layer: **Operator** (a human or a single deployment's keyholder), **Organization** (a group of operators with shared trust roots), and **Project** (a scoped subdivision of an org). Today wire only has per-session DIDs like `did:wire:swift-harbor-4092b577`. The RFC proposes adding `op_did`, `org_did`, `org_memberships[]`, and `project` fields to wire's agent-card.
+>
+> For each of the following systems, summarize how it models org-shaped identity, link to canonical spec + schema snippets, and analyze relevance to wire's Operator / Organization / Project hierarchy:
+>
+> 1. Google A2A protocol — Agent Card, `AgentProvider`, extension mechanism, signing chain.
+> 2. Anthropic MCP — server identity, operator identity, multi-tenancy posture.
+> 3. W3C Verifiable Credentials 2.0 — Organization as issuer, DIF organization-identity work.
+> 4. DID methods: `did:web`, `did:plc`, `did:peer`, `did:key`; org-specific DID methods if any.
+> 5. ATProto (Bluesky) — account/handle/PDS hierarchy, labelers as org-shaped entities.
+> 6. ActivityPub — Person / Organization / Service / Application / Group actor types; FEPs on org identity.
+> 7. OpenID Federation 1.0 — Entity Statements, Trust Chain, Trust Marks, `metadata_policy`.
+> 8. Matrix Spaces and Matrix federation — homeserver / Space / room hierarchy.
+> 9. SCITT (IETF) — Issuer → Signed Statement → Transparent Statement chain.
+> 10. Sigstore / Fulcio — OIDC → short-lived cert; org identity in SAN.
+> 11. GitHub Apps — App / Installation / Repository tiers; per-tier separate keys.
+> 12. Solid Project — WebID, WebID-OIDC, `foaf:memberOf`.
+> 13. Keybase teams — Merkle-tree team identity, per-device keys, subteams.
+> 14. NATS JWT auth — Operator / Account / User; iss/sub chain on Ed25519 NKeys.
+> 15. Recent (2024–2026) academic + industry work on agent identity (iAgents, DIF Agent Trust draft, etc.).
+>
+> For each, surface: convergent designs (where independent systems landed on similar hierarchies), divergent designs (interesting alternatives wire might miss), known footguns (failure modes others document), naming conventions (what they call operator / org / project / team / tenant / namespace), and signing/attestation chains (how they cryptographically link the tiers). End with a synthesis of the top 3–5 precedents and the 2–3 most novel tradeoffs wire should explicitly address.
+
+**Suggested future expansions to this prompt:**
+
+- **SPIFFE / SPIRE** workload identity (`spiffe://trust-domain/workload`) — three-tier model very close to ours; was omitted from v1 of the research.
+- **DIDComm v2** messaging envelopes — bilateral signing patterns relevant to wire's pair_invite flow.
+- **TUF / in-toto** supply-chain delegation — multi-signer key thresholds, useful precedent for the M-of-N quorum kill-criterion fallback in this RFC.
+- **W3C DID:peer with pairwise scoping** — direct prior art for O7 (pairwise `op_did`s).
+- **OpenWallet Foundation Architecture Task Force** outputs — actively defining issuer/holder/verifier identity flows for agents (2025–2026).
+- **Hyperledger Aries** RFCs on connection establishment and trust frameworks.
+
+To re-run: paste the prompt above into a research agent (or comparable tool) with the directive *"Return a single markdown document I can excerpt into RFC-001 v2's Prior art section. Cite everything."*
