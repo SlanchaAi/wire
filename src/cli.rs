@@ -10363,15 +10363,22 @@ fn cmd_session_current(as_json: bool) -> Result<()> {
     let cwd = std::env::current_dir().with_context(|| "reading cwd")?;
     let registry = crate::session::read_registry().unwrap_or_default();
     let cwd_key = crate::session::normalize_cwd_key(&cwd);
-    // Backward-compat: read-side fallback to the verbatim cwd string lets
-    // upgraders' pre-v0.13.6 entries (literal casing on Windows) still
-    // resolve under the normalized lookup. Mirrors the same pattern in
-    // session::derive_name_from_cwd / detect_session_wire_home.
-    let raw_key = cwd.to_string_lossy().into_owned();
+    // Backward-compat: O(n) normalized scan on read-miss. Mirrors the
+    // same pattern in session::derive_name_from_cwd /
+    // detect_session_wire_home — handles both consistent-casing and
+    // cross-casing upgraders (see session.rs for the full rationale).
     let name = registry
         .by_cwd
         .get(&cwd_key)
-        .or_else(|| registry.by_cwd.get(&raw_key))
+        .or_else(|| {
+            registry
+                .by_cwd
+                .iter()
+                .find(|(k, _)| {
+                    crate::session::normalize_cwd_key(std::path::Path::new(k)) == cwd_key
+                })
+                .map(|(_, v)| v)
+        })
         .cloned();
     if as_json {
         println!(
