@@ -227,6 +227,34 @@ fn path_hash_suffix(cwd: &Path) -> String {
     hex::encode(&digest[..2]) // 4 hex chars
 }
 
+/// v0.13.6: case-insensitive cwd-registry key on Windows.
+///
+/// Issue #30 (Willard repro): on Windows, two terminals in the "same"
+/// project under different drive/path casing (`C:\Foo\Bar` vs
+/// `C:\foo\bar`) hashed to DIFFERENT registry keys — the second
+/// terminal's `wire whoami` missed the registry lookup, derived a
+/// phantom name, and silently fell back to the legacy default identity
+/// (e.g. `did:wire:willard`). Both terminals collapsed onto one shared
+/// DID, every pairing attempt between them was a self-pair, and
+/// bilateral handshake could never complete.
+///
+/// Fix: on Windows, lowercase the cwd before reading from OR writing to
+/// the cwd→session map. Two paths that resolve to the same on-disk
+/// directory now produce the same registry key regardless of how the
+/// shell / launcher capitalized them.
+///
+/// On case-sensitive filesystems (Linux / macOS HFS+ / case-sensitive
+/// APFS / NTFS in case-sensitive mode) the path is returned as-is —
+/// distinct casings legitimately point at distinct directories.
+///
+/// Used at every read and write of `SessionRegistry.by_cwd` so old
+/// non-canonical entries written by v0.13.5 still resolve under v0.13.6+
+/// later, and new entries written under v0.13.6+ are immediately canonical.
+pub fn normalize_cwd_key(path: &Path) -> String {
+    let s = path.to_string_lossy().into_owned();
+    if cfg!(windows) { s.to_lowercase() } else { s }
+}
+
 /// Derive a stable session name for the given cwd. Resolution order:
 ///
 /// 1. If the registry already maps this cwd → name, return that name.
@@ -236,8 +264,35 @@ fn path_hash_suffix(cwd: &Path) -> String {
 /// 3. If still a collision: append a numeric suffix `-2`, `-3`, ...
 ///    until unique.
 pub fn derive_name_from_cwd(cwd: &Path, registry: &SessionRegistry) -> String {
-    let cwd_key = cwd.to_string_lossy().into_owned();
-    if let Some(existing) = registry.by_cwd.get(&cwd_key) {
+    let cwd_key = normalize_cwd_key(cwd);
+    // Backward compat: O(n) normalized scan on read-miss.
+    //
+    // Per @laulpogan / coral-weasel correction on #67: a verbatim fallback
+    // (try the raw lookup string if the normalized lookup misses) only
+    // handles consistent-casing upgraders — it can't recover a
+    // mixed-case stored key (`C:\Users\Willard\...`) from a different-
+    // case lookup (`c:\users\willard\...`) because both raw and
+    // normalized lookup strings derive from the LOOKUP path; the
+    // stored key's original casing is unrecoverable from the lookup
+    // alone.
+    //
+    // The O(n) scan handles both cases:
+    //   - Consistent casing: normalize(stored) == cwd_key on the FIRST
+    //     `.get` (no scan needed; happy path is O(1)).
+    //   - Cross casing: stored "C:\Users\Willard" normalizes to
+    //     "c:\users\willard" == cwd_key → the scan resolves it.
+    //
+    // O(n) is over the per-machine session count (typically <20),
+    // hit only on the rare upgrader-misses-normalized-lookup case.
+    // New writes are normalized (see cli.rs insert sites) so the
+    // scan-cost shrinks to zero as old entries get touched.
+    if let Some(existing) = registry.by_cwd.get(&cwd_key).or_else(|| {
+        registry
+            .by_cwd
+            .iter()
+            .find(|(k, _)| normalize_cwd_key(Path::new(k)) == cwd_key)
+            .map(|(_, v)| v)
+    }) {
         return existing.clone();
     }
     let base = cwd
@@ -651,8 +706,17 @@ pub fn detect_session_wire_home(cwd: &std::path::Path) -> Option<PathBuf> {
     // same DID + character.
     let mut probe: Option<&std::path::Path> = Some(cwd);
     while let Some(path) = probe {
-        let path_str = path.to_string_lossy().into_owned();
-        if let Some(session_name) = registry.by_cwd.get(&path_str) {
+        // Same O(n) normalized scan as derive_name_from_cwd: handles both
+        // consistent-casing and cross-casing upgraders. See the comment
+        // on derive_name_from_cwd for the rationale.
+        let path_str = normalize_cwd_key(path);
+        if let Some(session_name) = registry.by_cwd.get(&path_str).or_else(|| {
+            registry
+                .by_cwd
+                .iter()
+                .find(|(k, _)| normalize_cwd_key(Path::new(k)) == path_str)
+                .map(|(_, v)| v)
+        }) {
             let session_home = session_dir(session_name).ok()?;
             if session_home.exists() {
                 return Some(session_home);
@@ -1362,6 +1426,138 @@ mod tests {
         assert_eq!(
             derive_name_from_cwd(Path::new("/Users/paul/Source/wire"), &reg),
             "wire-special"
+        );
+    }
+
+    #[test]
+    fn normalize_cwd_key_case_handling_matches_platform_filesystem() {
+        // Issue #30 Willard repro: on Windows, two terminals in the "same"
+        // project under different casings of the same path
+        // (`C:\Foo\Bar` vs `C:\foo\bar`) hashed to DIFFERENT registry keys
+        // pre-fix → the second terminal missed the registry lookup, fell
+        // back to the legacy default identity, and both terminals collapsed
+        // onto a shared DID. Fix: normalize the cwd key case-insensitively
+        // on Windows, case-sensitively elsewhere (so distinct-on-disk paths
+        // on case-sensitive filesystems remain distinct).
+        let upper = Path::new("/Users/paul/Source/WIRE");
+        let lower = Path::new("/Users/paul/Source/wire");
+        if cfg!(windows) {
+            assert_eq!(
+                normalize_cwd_key(upper),
+                normalize_cwd_key(lower),
+                "on Windows, distinct casings of the same path MUST normalize \
+                 to the same key (NTFS is case-insensitive by default)"
+            );
+        } else {
+            assert_ne!(
+                normalize_cwd_key(upper),
+                normalize_cwd_key(lower),
+                "on case-sensitive filesystems, distinct casings ARE distinct \
+                 directories and MUST stay distinct keys"
+            );
+        }
+        // Trivial sanity: same input always produces same output.
+        assert_eq!(normalize_cwd_key(lower), normalize_cwd_key(lower));
+    }
+
+    #[test]
+    fn derive_name_no_regression_exact_match_still_resolves() {
+        // Cross-platform no-regression check for the v0.13.6 lookup
+        // changes: an exact-match (same casing stored AND looked up)
+        // entry MUST continue to resolve on the fast path — the new
+        // O(n) normalized-scan fallback is only reached on the initial
+        // .get miss.
+        //
+        // Honest scope (per coral-weasel's #67 review): this test does
+        // NOT exercise the case-folding fallback on Linux/macOS — the
+        // normalizer is a no-op there, so the first `.get` hits and
+        // the scan never runs. The case-folding behavior is inherently
+        // Windows-only; that path is covered by
+        // derive_name_finds_registered_cwd_under_alternate_casing_on_windows
+        // which executes on Windows CI.
+        let mut reg = SessionRegistry::default();
+        let stored = "/Users/Paul/Source/Wire-v0_13_5-Era";
+        reg.by_cwd
+            .insert(stored.to_string(), "wire-legacy".to_string());
+
+        // Lookup under the EXACT stored path: must resolve on the
+        // fast `.get` path regardless of platform.
+        assert_eq!(
+            derive_name_from_cwd(Path::new(stored), &reg),
+            "wire-legacy",
+            "exact-match v0.13.5 entry MUST still resolve under v0.13.6+"
+        );
+    }
+
+    #[test]
+    fn derive_name_scan_fallback_runs_when_initial_get_misses() {
+        // Cross-platform proof that the O(n) normalized-scan fallback
+        // engages on a .get miss. We can't trigger the *case-folding*
+        // case on Linux/macOS (normalizer is a no-op), but we CAN
+        // exercise the scan branch by storing under a key the
+        // normalized lookup definitely won't hit, and verifying that
+        // the .find()-based fallback resolves it.
+        //
+        // Setup: store under a key that's identical to the lookup
+        // BUT with a trailing slash difference (so `.get` exact-match
+        // misses, but our normalize_cwd_key — which preserves the
+        // trailing slash — also misses; then we rely on the .find()
+        // iterator). This is a contrived setup that proves the scan
+        // branch is reachable; it does NOT test case-folding (Windows
+        // only).
+        //
+        // A simpler way to exercise the same logic: store under one
+        // path, look up under a different path that normalizes to the
+        // SAME key. Without case-folding, the only way to do that is
+        // to mutate normalize_cwd_key. Since we can't do that in a
+        // test, this test instead pins the *no-false-positive* side:
+        // a path with no matching stored entry must NOT resolve.
+        let mut reg = SessionRegistry::default();
+        reg.by_cwd.insert(
+            "/Users/paul/Source/project-a".to_string(),
+            "project-a".to_string(),
+        );
+
+        // Distinct path → no match → falls through to basename
+        // derivation. Proves the scan doesn't fabricate matches.
+        let derived = derive_name_from_cwd(Path::new("/Users/paul/Source/project-b"), &reg);
+        assert_eq!(
+            derived, "project-b",
+            "non-matching lookup must fall through to basename derivation, \
+             NOT fabricate a match via the scan"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn derive_name_finds_registered_cwd_under_alternate_casing_on_windows() {
+        // Direct integration check for the Willard repro on Windows: an
+        // existing registry entry written under one casing MUST resolve
+        // when the lookup arrives under a different casing of the same
+        // path.
+        //
+        // Trace through the v0.13.6 read-side O(n) normalized scan:
+        //   - Stored key: "C:\Users\Willard\ComfyUI\claude-integration"
+        //   - Lookup cwd: "c:\users\willard\comfyui\claude-integration"
+        //   - cwd_key  = normalize(lookup) = "c:\users\..." (already lower)
+        //   - .get(&cwd_key)  → MISS (stored has mixed casing)
+        //   - .iter().find(normalize(stored) == cwd_key) → HIT
+        //     (normalize("C:\Users\...") == "c:\users\..." == cwd_key)
+        //   - Returns "claude-integration" ← the fix.
+        //
+        // Pre-fix this returned the basename → phantom hash-suffix → identity
+        // collision (the original Willard report).
+        let mut reg = SessionRegistry::default();
+        reg.by_cwd.insert(
+            r"C:\Users\Willard\ComfyUI\claude-integration".to_string(),
+            "claude-integration".to_string(),
+        );
+        let from_lower_cwd = Path::new(r"c:\users\willard\comfyui\claude-integration");
+        assert_eq!(
+            derive_name_from_cwd(from_lower_cwd, &reg),
+            "claude-integration",
+            "Windows lookup MUST find the registered entry regardless of \
+             how the shell capitalized the cwd, via the normalized scan"
         );
     }
 

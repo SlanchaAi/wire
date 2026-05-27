@@ -2812,7 +2812,7 @@ fn cmd_identity_persist(name: &str, as_name: Option<&str>, as_json: bool) -> Res
     // Register cwd → new_name (operator may have cd'd elsewhere; use the
     // session_home's grandparent as the conceptual "cwd" if no other).
     let cwd = std::env::current_dir().unwrap_or_else(|_| new_session_home.clone());
-    let cwd_key = cwd.to_string_lossy().into_owned();
+    let cwd_key = crate::session::normalize_cwd_key(&cwd);
     let new_name_for_reg = new_name.to_string();
     if let Err(e) = crate::session::update_registry(|reg| {
         reg.by_cwd.insert(cwd_key, new_name_for_reg);
@@ -8657,7 +8657,7 @@ fn cmd_session(cmd: SessionCommand) -> Result<()> {
 
 fn cmd_session_bind(name_arg: Option<&str>, json: bool) -> Result<()> {
     let cwd = std::env::current_dir().with_context(|| "reading cwd")?;
-    let cwd_str = cwd.to_string_lossy().into_owned();
+    let cwd_str = crate::session::normalize_cwd_key(&cwd);
 
     let resolved_name = match name_arg {
         Some(n) => crate::session::sanitize_name(n),
@@ -9539,7 +9539,7 @@ pub fn maybe_auto_init_cwd_session(label: &str) {
     // two cwds /a/projx + /b/projx both got name "projx", both
     // mapped to the same identity. Update the registry WHILE STILL
     // holding the auto-init lock so the next racer sees our claim.
-    let cwd_key = cwd.to_string_lossy().into_owned();
+    let cwd_key = crate::session::normalize_cwd_key(&cwd);
     let name_for_reg = name.clone();
     if let Err(e) = crate::session::update_registry(|reg| {
         reg.by_cwd.insert(cwd_key, name_for_reg);
@@ -10387,8 +10387,24 @@ fn cmd_session_env(name_arg: Option<&str>, as_json: bool) -> Result<()> {
 fn cmd_session_current(as_json: bool) -> Result<()> {
     let cwd = std::env::current_dir().with_context(|| "reading cwd")?;
     let registry = crate::session::read_registry().unwrap_or_default();
-    let cwd_key = cwd.to_string_lossy().into_owned();
-    let name = registry.by_cwd.get(&cwd_key).cloned();
+    let cwd_key = crate::session::normalize_cwd_key(&cwd);
+    // Backward-compat: O(n) normalized scan on read-miss. Mirrors the
+    // same pattern in session::derive_name_from_cwd /
+    // detect_session_wire_home — handles both consistent-casing and
+    // cross-casing upgraders (see session.rs for the full rationale).
+    let name = registry
+        .by_cwd
+        .get(&cwd_key)
+        .or_else(|| {
+            registry
+                .by_cwd
+                .iter()
+                .find(|(k, _)| {
+                    crate::session::normalize_cwd_key(std::path::Path::new(k)) == cwd_key
+                })
+                .map(|(_, v)| v)
+        })
+        .cloned();
     if as_json {
         println!(
             "{}",
