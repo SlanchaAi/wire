@@ -1369,9 +1369,7 @@ mod tests {
 
         // (a) CODEX_SESSION_ID set -> wins resolution over the no-id baseline;
         //     distinct thread ids map to distinct session homes.
-        unsafe {
-            std::env::set_var("CODEX_SESSION_ID", "019e66ad-277e-7be3-bdd9-b7708e069f3b")
-        };
+        unsafe { std::env::set_var("CODEX_SESSION_ID", "019e66ad-277e-7be3-bdd9-b7708e069f3b") };
         let r1 = resolve_session_key();
         assert!(
             matches!(&r1, Some((k, src)) if k == "019e66ad-277e-7be3-bdd9-b7708e069f3b" && *src == "codex-cli"),
@@ -1379,9 +1377,7 @@ mod tests {
         );
         let home_a = session_home_for_key(&r1.as_ref().unwrap().0).unwrap();
 
-        unsafe {
-            std::env::set_var("CODEX_SESSION_ID", "019e66b6-14de-7142-b43a-1861fe59e945")
-        };
+        unsafe { std::env::set_var("CODEX_SESSION_ID", "019e66b6-14de-7142-b43a-1861fe59e945") };
         let r2 = resolve_session_key();
         let home_b = session_home_for_key(&r2.as_ref().unwrap().0).unwrap();
         assert_ne!(
@@ -1391,9 +1387,7 @@ mod tests {
 
         // Same id again -> same home (resume stability — same thread reconnects
         // to the same persona).
-        unsafe {
-            std::env::set_var("CODEX_SESSION_ID", "019e66ad-277e-7be3-bdd9-b7708e069f3b")
-        };
+        unsafe { std::env::set_var("CODEX_SESSION_ID", "019e66ad-277e-7be3-bdd9-b7708e069f3b") };
         let home_a2 = session_home_for_key(&resolve_session_key().unwrap().0).unwrap();
         assert_eq!(
             home_a, home_a2,
@@ -1413,12 +1407,7 @@ mod tests {
         // CLAUDE_CODE_SESSION_ID at priority 2 also beats CODEX_SESSION_ID at
         // priority 3. (Earlier adapters get to claim the host they were
         // designed for; Codex slots in after Claude Code.)
-        unsafe {
-            std::env::set_var(
-                "CLAUDE_CODE_SESSION_ID",
-                "claude-wins-over-codex",
-            )
-        };
+        unsafe { std::env::set_var("CLAUDE_CODE_SESSION_ID", "claude-wins-over-codex") };
         let r_claude_wins = resolve_session_key();
         assert!(
             matches!(&r_claude_wins, Some((k, src)) if k == "claude-wins-over-codex" && *src == "claude-code"),
