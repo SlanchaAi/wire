@@ -11503,6 +11503,7 @@ fn cmd_doctor(as_json: bool, recent_rejections: usize) -> Result<()> {
         check_relay_reachable(),
         check_pair_rejections(recent_rejections),
         check_cursor_progress(),
+        check_peer_staleness(7),
     ];
 
     let fails = checks.iter().filter(|c| c.status == "FAIL").count();
@@ -11843,6 +11844,110 @@ fn check_pair_rejections(recent_n: usize) -> DoctorCheck {
 /// report the current cursor position so operators see if it changes.
 /// Real "stuck" detection needs two pulls separated in time; defer that
 /// behaviour to a `wire doctor --watch` mode.
+/// Issue #14: sender-side staleness signal for pinned peers.
+///
+/// Surfaces a soft WARN per pinned peer whose inbox file (`inbox/<peer>.jsonl`)
+/// has been silent — either missing or with mtime older than `max_silent_days`.
+///
+/// This is the inbox-side half of the asymmetric stale-pin failure mode #14
+/// describes (sender pushes successfully against a dead slot; peer never
+/// hears us; both sides report green). The push-count half — flagging peers
+/// where `N` events were pushed in a window — requires persistent push
+/// counters in the relay-state schema and is intentionally deferred to a
+/// follow-up (this would belong in the same release as the auto-resolve
+/// path from #15). Today's check uses ONLY existing on-disk signals (inbox
+/// mtime + pin presence) so it's additive, never a false positive, and
+/// ships value without a schema change.
+///
+/// Threshold: 7 days by default. Tunable here; if operators ask for a CLI
+/// flag (`wire doctor --peer-silence-days <N>`) we add it then.
+///
+/// Output shape:
+///   - PASS if no pinned peers, or every pinned peer has fresh inbox data.
+///   - WARN listing each silent peer with days-since-last-inbound + the
+///     remediation pointer (`wire add <peer>@<relay>` re-pair, which
+///     re-resolves the slot through whois once #15 lands).
+fn check_peer_staleness(max_silent_days: u64) -> DoctorCheck {
+    let state = match config::read_relay_state() {
+        Ok(s) => s,
+        Err(_) => {
+            return DoctorCheck::pass(
+                "peer-staleness",
+                "no relay state yet — nothing pinned to check".to_string(),
+            );
+        }
+    };
+    let peers = match state.get("peers").and_then(Value::as_object) {
+        Some(p) => p,
+        None => {
+            return DoctorCheck::pass("peer-staleness", "no pinned peers".to_string());
+        }
+    };
+    if peers.is_empty() {
+        return DoctorCheck::pass("peer-staleness", "no pinned peers".to_string());
+    }
+    let inbox_dir = match config::inbox_dir() {
+        Ok(d) => d,
+        Err(_) => {
+            return DoctorCheck::warn(
+                "peer-staleness",
+                "could not resolve inbox dir; skipping peer-staleness check".to_string(),
+                "check `wire status` for state-dir resolution".to_string(),
+            );
+        }
+    };
+    let threshold = std::time::Duration::from_secs(max_silent_days * 24 * 60 * 60);
+    let now = std::time::SystemTime::now();
+    let mut stale: Vec<(String, u64, &'static str)> = Vec::new();
+    for (peer, _info) in peers {
+        let path = inbox_dir.join(format!("{peer}.jsonl"));
+        let (age_days, kind) = match std::fs::metadata(&path) {
+            Ok(meta) => match meta
+                .modified()
+                .ok()
+                .and_then(|m| now.duration_since(m).ok())
+            {
+                Some(d) if d > threshold => (d.as_secs() / (24 * 60 * 60), "silent"),
+                Some(_) => continue, // fresh — not stale
+                None => (0, "unknown-mtime"),
+            },
+            Err(_) => (max_silent_days + 1, "no-inbox-file"),
+        };
+        stale.push((peer.clone(), age_days, kind));
+    }
+    if stale.is_empty() {
+        return DoctorCheck::pass(
+            "peer-staleness",
+            format!(
+                "all {} pinned peer(s) have inbox traffic within the last {max_silent_days} day(s)",
+                peers.len()
+            ),
+        );
+    }
+    let detail = stale
+        .iter()
+        .map(|(p, d, k)| match *k {
+            "no-inbox-file" => format!("{p} (no inbox file)"),
+            "unknown-mtime" => format!("{p} (unknown last-event time)"),
+            _ => format!("{p} ({d}d silent)"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    DoctorCheck::warn(
+        "peer-staleness",
+        format!(
+            "{} pinned peer(s) silent for >{max_silent_days}d: {detail}. \
+             If the peer re-bound their relay slot, our pin is now stale — \
+             we push successfully to a dead slot and they never see us \
+             (asymmetric failure, both sides report green).",
+            stale.len()
+        ),
+        "re-pair with `wire add <peer>@<relay>` to refresh the slot. \
+         Once issue #15 lands, this also auto-resolves on 410 Gone."
+            .to_string(),
+    )
+}
+
 fn check_cursor_progress() -> DoctorCheck {
     let state = match config::read_relay_state() {
         Ok(s) => s,
@@ -11918,6 +12023,99 @@ mod doctor_tests {
             assert_eq!(c.status, "WARN");
             assert!(c.detail.contains("1 pair failures"));
             assert!(c.detail.contains("willard/pair_drop_ack_send_failed"));
+        });
+    }
+
+    #[test]
+    fn check_peer_staleness_no_peers_is_pass() {
+        // Fresh box / no pin yet: must NOT report this as a problem
+        // (nothing to be stale about).
+        config::test_support::with_temp_home(|| {
+            config::ensure_dirs().unwrap();
+            let c = check_peer_staleness(7);
+            assert_eq!(c.status, "PASS", "no peers should be PASS, got {c:?}");
+        });
+    }
+
+    #[test]
+    fn check_peer_staleness_pinned_with_no_inbox_file_warns() {
+        // Issue #14 asymmetric-stale-pin: peer is pinned but we've NEVER
+        // received an event from them (no inbox file at all). That's
+        // exactly the "we pushed N events, got 0 back" smell the WARN is
+        // designed to catch.
+        config::test_support::with_temp_home(|| {
+            config::ensure_dirs().unwrap();
+            // Seed a pinned peer with no corresponding inbox file.
+            let mut state = json!({
+                "peers": {
+                    "stale-peer": {
+                        "relay_url": "https://wireup.net",
+                        "slot_id": "deadslot",
+                        "slot_token": "tok",
+                    }
+                }
+            });
+            state["self"] = json!({});
+            config::write_relay_state(&state).unwrap();
+
+            let c = check_peer_staleness(7);
+            assert_eq!(
+                c.status, "WARN",
+                "pinned peer with no inbox file must surface: {c:?}"
+            );
+            assert!(
+                c.detail.contains("stale-peer"),
+                "WARN must name the silent peer so the operator can act: {}",
+                c.detail
+            );
+            assert!(
+                c.detail.contains("asymmetric")
+                    || c.detail.contains("stale")
+                    || c.detail.contains("dead slot"),
+                "WARN must surface the failure-mode language so the operator \
+                 finds the diagnosis without re-tracing: {}",
+                c.detail
+            );
+            assert!(
+                c.fix
+                    .as_ref()
+                    .is_some_and(|f| f.contains("wire add") && f.contains("#15")),
+                "fix pointer must reference both the manual re-pair AND the \
+                 follow-up issue (#15) that will automate this: {:?}",
+                c.fix
+            );
+        });
+    }
+
+    #[test]
+    fn check_peer_staleness_pinned_with_fresh_inbox_is_pass() {
+        // Negative case: pinned peer with a recent inbox event must NOT
+        // be reported. This prevents the false-positive that would otherwise
+        // make operators ignore the WARN.
+        config::test_support::with_temp_home(|| {
+            config::ensure_dirs().unwrap();
+            let mut state = json!({
+                "peers": {
+                    "active-peer": {
+                        "relay_url": "https://wireup.net",
+                        "slot_id": "freshslot",
+                        "slot_token": "tok",
+                    }
+                }
+            });
+            state["self"] = json!({});
+            config::write_relay_state(&state).unwrap();
+
+            let inbox = config::inbox_dir().unwrap();
+            std::fs::create_dir_all(&inbox).unwrap();
+            std::fs::write(
+                inbox.join("active-peer.jsonl"),
+                "{\"event_id\":\"recent\"}\n",
+            )
+            .unwrap();
+
+            let c = check_peer_staleness(7);
+            assert_eq!(c.status, "PASS", "fresh inbox should not warn: {c:?}");
         });
     }
 }
