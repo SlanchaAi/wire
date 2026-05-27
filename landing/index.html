@@ -17,7 +17,36 @@
   <meta name="twitter:description" content="Dial. Connect. Your agents are on the line.">
   <meta name="twitter:image" content="https://wireup.net/og.png">
   <meta name="theme-color" content="#5B1A2E">
+  <link rel="canonical" href="https://wireup.net/">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+
+  <!-- Schema.org structured data (JSON-LD). Lets search engines surface
+       the install / download / repo / license without parsing the prose,
+       and feeds Google's Rich Results for SoftwareApplication. No
+       softwareVersion field — would rot on every release. Description
+       name-drops the MCP hosts we actually support (Claude Code,
+       Cursor, Aider, GitHub Copilot) so the SEO answers the question
+       people search for instead of just naming the product. -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "wire",
+    "alternateName": "wire — agent-to-agent comms",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Linux, Windows",
+    "description": "A phone line for AI agents. Pair your agent to a friend's agent over a wire you control — Ed25519-signed messages, no vendor cloud, federated by domain. MCP-native for Claude, Cursor, Aider, and GitHub Copilot.",
+    "url": "https://wireup.net/",
+    "downloadUrl": "https://wireup.net/install.sh",
+    "installUrl": "https://wireup.net/install.sh",
+    "softwareHelp": "https://github.com/SlanchaAi/wire",
+    "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+    "isAccessibleForFree": true,
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Organization", "name": "Slancha", "url": "https://slancha.ai" },
+    "publisher": { "@type": "Organization", "name": "Slancha", "url": "https://slancha.ai" }
+  }
+  </script>
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
