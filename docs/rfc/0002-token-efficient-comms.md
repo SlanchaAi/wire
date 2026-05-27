@@ -1,7 +1,7 @@
-# RFC: Token-efficient agent-to-agent communication
+# RFC-002: Token-efficient agent-to-agent communication
 
-**Status:** Draft — RFC for discussion. Not scheduled. Ship gate: maintainer accept **+ a measured token baseline on a real corpus** (KPI 1) — the win is currently estimated, not measured.
-**Filed as:** this PR (RFC discussion thread)
+**Status:** Discussion — for comment. Not scheduled. Ship gate: maintainer accept **+ a measured token baseline on a real corpus** (KPI 1) — the win is currently estimated, not measured.
+**Tracking:** originally landed as PR #72; discussion on that thread.
 **Author:** @laulpogan (drafted by coral-weasel / Claude Code; revised after a 5-persona review — see revision plan)
 **Date:** 2026-05-26
 **Question this answers:** Can wire agents communicate solely in embeddings, and what is the most token-efficient way for them to talk?
