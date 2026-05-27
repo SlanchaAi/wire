@@ -11618,6 +11618,7 @@ fn cmd_doctor(as_json: bool, recent_rejections: usize) -> Result<()> {
         check_pair_rejections(recent_rejections),
         check_cursor_progress(),
         check_peer_staleness(7),
+        check_and_heal_self_userinfo_endpoints(),
     ];
 
     let fails = checks.iter().filter(|c| c.status == "FAIL").count();
@@ -11958,29 +11959,199 @@ fn check_pair_rejections(recent_n: usize) -> DoctorCheck {
 /// report the current cursor position so operators see if it changes.
 /// Real "stuck" detection needs two pulls separated in time; defer that
 /// behaviour to a `wire doctor --watch` mode.
-/// Issue #14: sender-side staleness signal for pinned peers.
 ///
-/// Surfaces a soft WARN per pinned peer whose inbox file (`inbox/<peer>.jsonl`)
-/// has been silent — either missing or with mtime older than `max_silent_days`.
+/// Heal stale userinfo from this agent's own published relay endpoints.
 ///
-/// This is the inbox-side half of the asymmetric stale-pin failure mode #14
-/// describes (sender pushes successfully against a dead slot; peer never
-/// hears us; both sides report green). The push-count half — flagging peers
-/// where `N` events were pushed in a window — requires persistent push
-/// counters in the relay-state schema and is intentionally deferred to a
-/// follow-up (this would belong in the same release as the auto-resolve
-/// path from #15). Today's check uses ONLY existing on-disk signals (inbox
-/// mtime + pin presence) so it's additive, never a false positive, and
-/// ships value without a schema change.
+/// Failure mode this check closes:
+///   PR #61 added a guard at the WRITE side that prevents NEW userinfo-
+///   bearing endpoints (`https://<handle>@<host>`) from ever being
+///   persisted or published. But operators who ran a pre-#61 `wire up
+///   <handle>@<relay>` already had the malformed endpoint baked into
+///   their on-disk `self.endpoints[]` AND their signed agent-card AND
+///   their phonebook entry. The fix prevented the bleeding; it didn't
+///   heal the wound. Symptoms still visible:
+///     - Every inbound POST to the malformed endpoint (pair_drop_ack,
+///       messages) gets a Cloudflare 400 ("missing Bearer token" /
+///       bare 400). Peers running pre-#62 wire can't deliver to us at
+///       all (the failover from #62 lets newer peers walk past the
+///       bad first endpoint to a clean one if both are published —
+///       but two-endpoint operators still get a 400 for every event
+///       on their FIRST attempt, and operators with only the
+///       malformed endpoint are unreachable).
+///     - `wire pull` from our own malformed slot 400s on every cycle
+///       (the operator sees a stderr error line every poll).
+///     - Surfaced concretely when swift-harbor ↔ slate-lotus paired
+///       2026-05-27: slate-lotus's pair_drop_ack 400'd; my own pulls
+///       400'd; bilateral handshake couldn't complete via the bad
+///       endpoint.
 ///
-/// Threshold: 7 days by default. Tunable here; if operators ask for a CLI
-/// flag (`wire doctor --peer-silence-days <N>`) we add it then.
+/// This is a healable failure mode — the same `strip_relay_url_userinfo`
+/// logic from #61 can be applied to existing on-disk state. We do it
+/// inside `wire doctor` (rather than a separate `wire heal` command)
+/// because:
+///   1. `wire doctor` is the canonical "what's wrong + fix it" surface
+///      operators already know to run when something looks off.
+///   2. The mutation is unambiguously correct — userinfo on a self-
+///      published relay endpoint has zero legitimate cases (the
+///      one-name rule means the handle is DID-derived, never URL
+///      userinfo).
+///   3. Auto-heal is consistent with what `wire bind-relay https://...`
+///      / `wire claim` already do at the WRITE side under #61 —
+///      this just extends the same guard to read-side cleanup.
 ///
-/// Output shape:
-///   - PASS if no pinned peers, or every pinned peer has fresh inbox data.
-///   - WARN listing each silent peer with days-since-last-inbound + the
-///     remediation pointer (`wire add <peer>@<relay>` re-pair, which
-///     re-resolves the slot through whois once #15 lands).
+/// What this check does:
+///   - Reads `relay.json` and inspects `self.endpoints[]` plus the
+///     legacy top-level `self.relay_url`/`slot_id`/`slot_token` triple.
+///   - If any endpoint's `relay_url` contains userinfo, removes that
+///     endpoint from the array AND (if the legacy top-level was the
+///     malformed one) promotes the first clean endpoint's coords to
+///     the legacy slots.
+///   - Atomically writes back via `write_relay_state` (full lock +
+///     tmp+rename, same path every other writer uses).
+///   - Reports PASS if nothing needed healing, WARN if healing happened
+///     (with the list of stripped URLs + a remediation pointer to
+///     `wire claim <persona>` for re-publishing the agent-card to the
+///     phonebook).
+///
+/// Re-claim is NOT auto-run here: the doctor check is read-state-bound,
+/// and `wire claim` requires a clean agent-card resign + network
+/// round-trip + persona arg. Operators get the explicit next step in
+/// the WARN fix text. Two-step is the right friction: heal silently,
+/// claim explicitly.
+fn check_and_heal_self_userinfo_endpoints() -> DoctorCheck {
+    let mut state = match config::read_relay_state() {
+        Ok(s) => s,
+        Err(_) => {
+            return DoctorCheck::pass(
+                "self-userinfo-endpoints",
+                "no relay state yet — nothing published to heal".to_string(),
+            );
+        }
+    };
+    let self_block = match state.get_mut("self").and_then(Value::as_object_mut) {
+        Some(s) => s,
+        None => {
+            return DoctorCheck::pass(
+                "self-userinfo-endpoints",
+                "no self block in relay state — nothing published to heal".to_string(),
+            );
+        }
+    };
+
+    let mut stripped: Vec<String> = Vec::new();
+    let mut clean_seed: Option<(String, String, String)> = None;
+
+    if let Some(endpoints) = self_block
+        .get_mut("endpoints")
+        .and_then(Value::as_array_mut)
+    {
+        endpoints.retain(|ep| {
+            let url = ep.get("relay_url").and_then(Value::as_str).unwrap_or("");
+            // Reuse the exact same authority-only userinfo detection as
+            // #61's assert_relay_url_clean_for_publish so any future
+            // change to that authority parse stays in lockstep.
+            if assert_relay_url_clean_for_publish(url).is_err() {
+                stripped.push(url.to_string());
+                false
+            } else {
+                if clean_seed.is_none() {
+                    clean_seed = Some((
+                        url.to_string(),
+                        ep.get("slot_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        ep.get("slot_token")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    ));
+                }
+                true
+            }
+        });
+    }
+
+    // Heal the legacy top-level relay_url/slot_id/slot_token triple if it
+    // was the malformed one. Without this, v0.5.16-era readers (and the
+    // pair_drop_ack path that falls back to legacy fields) still pick up
+    // the userinfo URL even after we cleaned endpoints[].
+    let mut legacy_healed = false;
+    let legacy_url = self_block
+        .get("relay_url")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if !legacy_url.is_empty() && assert_relay_url_clean_for_publish(&legacy_url).is_err() {
+        if let Some((url, sid, tok)) = &clean_seed {
+            self_block.insert("relay_url".to_string(), Value::String(url.clone()));
+            self_block.insert("slot_id".to_string(), Value::String(sid.clone()));
+            self_block.insert("slot_token".to_string(), Value::String(tok.clone()));
+            legacy_healed = true;
+            stripped.push(format!("(legacy top-level) {legacy_url}"));
+        } else {
+            // No clean endpoint exists to promote — the operator only
+            // has malformed endpoints. We can't auto-heal this safely
+            // (would leave them with no inbox); surface as WARN with
+            // explicit re-bind instructions and DON'T mutate.
+            return DoctorCheck::warn(
+                "self-userinfo-endpoints",
+                format!(
+                    "your published endpoint is malformed (`{legacy_url}` — handle as URL \
+                     userinfo, the bug PR #61 prevents going forward) AND no clean endpoint \
+                     exists to fall back to. Inbound POSTs to this endpoint 4xx; bilateral \
+                     pairing can't complete."
+                ),
+                "Bind a clean federation slot first, then re-run doctor to heal: \
+                 `wire bind-relay https://wireup.net` (or your own relay). The bind \
+                 adds a clean endpoint additively; the next `wire doctor` run then \
+                 strips the malformed one safely. Finally re-publish your card with \
+                 `wire claim <your-persona>` so the phonebook serves the clean shape."
+                    .to_string(),
+            );
+        }
+    }
+
+    if stripped.is_empty() && !legacy_healed {
+        return DoctorCheck::pass(
+            "self-userinfo-endpoints",
+            "no malformed endpoints in self-state".to_string(),
+        );
+    }
+
+    // Persist the healed state. Best-effort: if the write fails, the
+    // operator still sees the WARN and can run `wire claim` to re-publish;
+    // they keep the malformed entry on disk until the next doctor cycle.
+    if let Err(e) = config::write_relay_state(&state) {
+        return DoctorCheck::warn(
+            "self-userinfo-endpoints",
+            format!(
+                "detected {} malformed userinfo-bearing endpoint(s) in self-state but \
+                 failed to persist the heal: {e:#}. Found: {}",
+                stripped.len(),
+                stripped.join(", ")
+            ),
+            "re-run `wire doctor` — likely a transient lock contention".to_string(),
+        );
+    }
+
+    DoctorCheck::warn(
+        "self-userinfo-endpoints",
+        format!(
+            "healed {} malformed endpoint(s) in self-state on disk: {}. \
+             These were the `https://<handle>@<host>` shape that PR #61 prevents \
+             at the write side but couldn't retroactively scrub from existing \
+             operators. relay.json is now clean.",
+            stripped.len(),
+            stripped.join(", ")
+        ),
+        "re-publish your agent-card to the phonebook so peers resolve to the \
+         clean endpoint: `wire claim <your-persona>` (find your persona with \
+         `wire whoami`)."
+            .to_string(),
+    )
+}
+
 fn check_peer_staleness(max_silent_days: u64) -> DoctorCheck {
     let state = match config::read_relay_state() {
         Ok(s) => s,
@@ -12230,6 +12401,160 @@ mod doctor_tests {
 
             let c = check_peer_staleness(7);
             assert_eq!(c.status, "PASS", "fresh inbox should not warn: {c:?}");
+        });
+    }
+
+    #[test]
+    fn check_self_userinfo_no_state_is_pass() {
+        // Fresh box (no relay.json yet) must NOT WARN — there's nothing
+        // published to heal, and treating a missing file as a problem
+        // would scare every new operator on first `wire doctor` run.
+        config::test_support::with_temp_home(|| {
+            // Don't even call ensure_dirs — simulate truly fresh state.
+            let c = check_and_heal_self_userinfo_endpoints();
+            assert_eq!(c.status, "PASS", "no state should be PASS, got {c:?}");
+        });
+    }
+
+    #[test]
+    fn check_self_userinfo_clean_state_is_pass_no_mutation() {
+        // Negative case: clean self.endpoints[] must not trigger a heal,
+        // must not mutate relay.json. Prevents the false-positive that
+        // would make operators distrust the doctor.
+        config::test_support::with_temp_home(|| {
+            config::ensure_dirs().unwrap();
+            let state = json!({
+                "self": {
+                    "endpoints": [
+                        {
+                            "relay_url": "https://wireup.net",
+                            "scope": "Federation",
+                            "slot_id": "abc",
+                            "slot_token": "tok"
+                        }
+                    ],
+                    "relay_url": "https://wireup.net",
+                    "slot_id": "abc",
+                    "slot_token": "tok"
+                },
+                "peers": {}
+            });
+            config::write_relay_state(&state).unwrap();
+
+            let c = check_and_heal_self_userinfo_endpoints();
+            assert_eq!(c.status, "PASS", "clean state should be PASS: {c:?}");
+
+            // Verify state is byte-identical (no spurious write).
+            let after = config::read_relay_state().unwrap();
+            assert_eq!(after, state, "PASS path must NOT mutate relay.json");
+        });
+    }
+
+    #[test]
+    fn check_self_userinfo_heals_malformed_endpoint_and_promotes_clean() {
+        // THE regression case (swift-harbor / slate-lotus pairing 2026-05-27):
+        // relay.json has a malformed first endpoint from before #61 AND a
+        // clean second endpoint from a later `wire bind-relay`. The check
+        // must (a) strip the malformed one, (b) promote the clean one's
+        // coords to the legacy top-level triple, (c) write back, (d) emit
+        // a WARN with the stripped URL + `wire claim` remediation pointer.
+        config::test_support::with_temp_home(|| {
+            config::ensure_dirs().unwrap();
+            let state = json!({
+                "self": {
+                    "endpoints": [
+                        {
+                            "relay_url": "https://copilot-agent@wireup.net",
+                            "scope": "Federation",
+                            "slot_id": "stale-id",
+                            "slot_token": "stale-token"
+                        },
+                        {
+                            "relay_url": "https://wireup.net",
+                            "scope": "Federation",
+                            "slot_id": "clean-id",
+                            "slot_token": "clean-token"
+                        }
+                    ],
+                    "relay_url": "https://copilot-agent@wireup.net",
+                    "slot_id": "stale-id",
+                    "slot_token": "stale-token"
+                },
+                "peers": {}
+            });
+            config::write_relay_state(&state).unwrap();
+
+            let c = check_and_heal_self_userinfo_endpoints();
+            assert_eq!(c.status, "WARN", "heal should report WARN: {c:?}");
+            assert!(
+                c.detail.contains("healed") && c.detail.contains("copilot-agent@wireup.net"),
+                "WARN must name the stripped URL so the operator sees what changed: {}",
+                c.detail
+            );
+            assert!(
+                c.fix.as_ref().is_some_and(|f| f.contains("wire claim")),
+                "fix must point at re-publishing the agent-card so the phonebook entry \
+                 matches the healed state on disk: {:?}",
+                c.fix
+            );
+
+            // Verify the file on disk is healed:
+            //   - endpoints[] contains ONLY the clean entry.
+            //   - legacy top-level fields promoted from the clean entry.
+            let after = config::read_relay_state().unwrap();
+            let endpoints = after["self"]["endpoints"].as_array().unwrap();
+            assert_eq!(endpoints.len(), 1, "malformed endpoint must be removed");
+            assert_eq!(endpoints[0]["relay_url"], "https://wireup.net");
+            assert_eq!(after["self"]["relay_url"], "https://wireup.net");
+            assert_eq!(after["self"]["slot_id"], "clean-id");
+            assert_eq!(after["self"]["slot_token"], "clean-token");
+        });
+    }
+
+    #[test]
+    fn check_self_userinfo_no_clean_fallback_warns_without_mutating() {
+        // Edge: operator only has the malformed endpoint, no clean fallback
+        // to promote. Auto-healing would leave them with NO inbox slot at
+        // all — strictly worse than the malformed shape (peers can at least
+        // try the bad endpoint). Check must surface a WARN with explicit
+        // re-bind instructions and DO NOT touch the state.
+        config::test_support::with_temp_home(|| {
+            config::ensure_dirs().unwrap();
+            let state = json!({
+                "self": {
+                    "endpoints": [
+                        {
+                            "relay_url": "https://copilot-agent@wireup.net",
+                            "scope": "Federation",
+                            "slot_id": "stale-id",
+                            "slot_token": "stale-token"
+                        }
+                    ],
+                    "relay_url": "https://copilot-agent@wireup.net",
+                    "slot_id": "stale-id",
+                    "slot_token": "stale-token"
+                },
+                "peers": {}
+            });
+            config::write_relay_state(&state).unwrap();
+
+            let c = check_and_heal_self_userinfo_endpoints();
+            assert_eq!(c.status, "WARN");
+            assert!(
+                c.fix
+                    .as_ref()
+                    .is_some_and(|f| f.contains("wire bind-relay") && f.contains("wire claim")),
+                "no-clean-fallback fix must require BOTH a clean bind AND a re-claim: {:?}",
+                c.fix
+            );
+
+            // CRITICAL: state must NOT be mutated (would leave operator with
+            // no inbox slot). Verify byte-identical.
+            let after = config::read_relay_state().unwrap();
+            assert_eq!(
+                after, state,
+                "no-clean-fallback path must NOT mutate state (would strand operator)"
+            );
         });
     }
 }
