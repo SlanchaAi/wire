@@ -4584,7 +4584,7 @@ fn cmd_add_peer_slot(
 // ---------- push ----------
 
 fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
-    let state = config::read_relay_state()?;
+    let mut state = config::read_relay_state()?;
     let peers = state["peers"].as_object().cloned().unwrap_or_default();
     if peers.is_empty() {
         bail!(
@@ -4639,6 +4639,15 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
     let mut pushed = Vec::new();
     let mut skipped = Vec::new();
 
+    // Issue #15: track which peers we've already re-resolved this push call
+    // so we don't whois more than once per peer per push (the rate limit the
+    // issue specifies). Lifetime is the whole `cmd_push` invocation; clears
+    // every time the operator (or daemon) runs `wire push` again.
+    let mut rotated_this_push: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Track whether we mutated `state` so we can write it back exactly
+    // once at the end (avoids a write per peer).
+    let mut state_dirty = false;
+
     // v0.5.17: walk each peer's pinned endpoints in priority order (local
     // first if we share a local relay, federation second). Try POST on the
     // first endpoint; on transport failure, fall through to the next.
@@ -4654,7 +4663,7 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
         if !outbox.exists() {
             continue;
         }
-        let ordered_endpoints =
+        let mut ordered_endpoints =
             crate::endpoints::peer_endpoints_in_priority_order(&state, peer_handle);
         if ordered_endpoints.is_empty() {
             // Unreachable peer (no federation endpoint AND our local
@@ -4733,23 +4742,128 @@ fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
                     }
                 }
                 Err(_) => {
-                    // Every endpoint failed. Preserve the prior "last reason
-                    // is what gets reported" UX (the closure captured the
-                    // last per-endpoint error via `last_err`) so this dedup
-                    // is a true zero-behavior-change refactor. The helper's
-                    // combined-error string is intentionally discarded here
-                    // — operators get the same single-line `reason` they got
-                    // before #62 introduced the helper.
-                    skipped.push(json!({
-                        "peer": peer_handle,
-                        "event_id": event_id,
-                        "reason": last_err
-                            .into_inner()
-                            .unwrap_or_else(|| "all endpoints failed".to_string()),
-                    }));
+                    // Issue #15: before reporting the event as skipped, see
+                    // if the failure smelled like a slot-rotation (4xx 404 /
+                    // 410). If yes AND we haven't already re-resolved this
+                    // peer in this push call, attempt one whois lookup. On
+                    // a real rotation, the helper updates `state.peers[peer]`
+                    // in place; we refresh `ordered_endpoints` from the
+                    // mutated state and retry the same event once. Composes
+                    // with the doctor #14 staleness check from PR #68: #14
+                    // surfaces the symptom, #15 closes the loop.
+                    let last_err_text = last_err.borrow().clone().unwrap_or_default();
+                    let mut delivered_via_retry: Option<(crate::endpoints::Endpoint, _)> = None;
+                    match try_reresolve_peer_on_slot_4xx(
+                        &mut state,
+                        peer_handle,
+                        &last_err_text,
+                        &rotated_this_push,
+                    ) {
+                        Ok(true) => {
+                            // Mark this peer as already re-resolved this push.
+                            rotated_this_push.insert(peer_handle.clone());
+                            state_dirty = true;
+                            // Refresh endpoints from the updated state and
+                            // retry exactly once. last_err is also reset so
+                            // the retry's error (if any) replaces the prior
+                            // one in the eventual skipped reason.
+                            ordered_endpoints = crate::endpoints::peer_endpoints_in_priority_order(
+                                &state,
+                                peer_handle,
+                            );
+                            *last_err.borrow_mut() = None;
+                            if let Ok((endpoint, resp)) =
+                                crate::relay_client::try_post_event_with_failover(
+                                    &ordered_endpoints,
+                                    &event,
+                                    |endpoint, ev| {
+                                        let client = crate::relay_client::RelayClient::new(
+                                            &endpoint.relay_url,
+                                        );
+                                        match client.post_event(
+                                            &endpoint.slot_id,
+                                            &endpoint.slot_token,
+                                            ev,
+                                        ) {
+                                            Ok(resp) => Ok(resp),
+                                            Err(e) => {
+                                                *last_err.borrow_mut() = Some(
+                                                    crate::relay_client::format_transport_error(&e),
+                                                );
+                                                Err(e)
+                                            }
+                                        }
+                                    },
+                                )
+                            {
+                                delivered_via_retry = Some((endpoint, resp));
+                            }
+                        }
+                        Ok(false) => {
+                            // Either not a slot-rotation shape, or already
+                            // re-resolved this push, or slot id unchanged —
+                            // fall through to the original skipped path.
+                        }
+                        Err(e) => {
+                            // Re-resolve itself failed (DNS down, relay 5xx,
+                            // handle unclaimed, etc.). Don't fail the push —
+                            // fall through to skipped with the resolve error
+                            // appended for diagnostic context.
+                            *last_err.borrow_mut() = Some(format!(
+                                "{}; re-resolve also failed: {e:#}",
+                                last_err.borrow().clone().unwrap_or_default()
+                            ));
+                            // Mark as tried so we don't loop on the next event.
+                            rotated_this_push.insert(peer_handle.clone());
+                        }
+                    }
+                    if let Some((endpoint, resp)) = delivered_via_retry {
+                        if resp.status == "duplicate" {
+                            skipped.push(json!({
+                                "peer": peer_handle,
+                                "event_id": event_id,
+                                "reason": "duplicate",
+                                "endpoint": endpoint.relay_url,
+                                "scope": serde_json::to_value(endpoint.scope).unwrap_or(json!("?")),
+                                "via": "slot_reresolve_retry",
+                            }));
+                        } else {
+                            pushed.push(json!({
+                                "peer": peer_handle,
+                                "event_id": event_id,
+                                "endpoint": endpoint.relay_url,
+                                "scope": serde_json::to_value(endpoint.scope).unwrap_or(json!("?")),
+                                "via": "slot_reresolve_retry",
+                            }));
+                        }
+                    } else {
+                        // Every endpoint failed even after (any) retry.
+                        // Preserve the prior "last reason is what gets
+                        // reported" UX (the closure captured the last per-
+                        // endpoint error via `last_err`).
+                        skipped.push(json!({
+                            "peer": peer_handle,
+                            "event_id": event_id,
+                            "reason": last_err
+                                .borrow()
+                                .clone()
+                                .unwrap_or_else(|| "all endpoints failed".to_string()),
+                        }));
+                    }
                 }
             }
         }
+    }
+
+    // Issue #15: persist any in-place slot rotations from the per-peer loop
+    // exactly once at the end. Best-effort: if the write fails the operator
+    // still gets a valid push report, and the next push will re-attempt the
+    // resolve (cheap) before retrying delivery.
+    if state_dirty && let Err(e) = config::write_relay_state(&state) {
+        eprintln!(
+            "wire push: WARN failed to persist rotated peer slots: {e:#}. \
+             Slot rotation will be re-attempted on next push."
+        );
     }
 
     if as_json {
@@ -12376,6 +12490,142 @@ fn strip_proto(url: &str) -> String {
 /// because case (2) — two collapsed terminals with DIFFERENT typed
 /// nicknames that BOTH resolve to the shared DID — can't be caught
 /// without the post-resolution comparison.
+/// Issue #15: detect a 4xx-shaped push failure that smells like "slot
+/// rotated by peer" and update the peer's pin in place with the freshly
+/// resolved slot from the relay's handle directory.
+///
+/// Returns:
+/// - `Ok(true)` — peer's pin was rotated; caller should refresh
+///   `peer_endpoints_in_priority_order(&state, ...)` and retry.
+/// - `Ok(false)` — re-resolve completed but the slot id was unchanged
+///   (false-alarm 4xx, e.g. throttling); caller should NOT retry.
+/// - `Err(e)` — re-resolve itself failed (network down, relay 5xx,
+///   handle no longer claimed, etc.); caller should fall through to the
+///   existing "skipped" path.
+///
+/// Only triggers when:
+///   - The error string contains "410" or "404" (the slot-rotation shape).
+///   - The peer has a pinned `relay_url` we can parse a handle@domain from.
+///   - The caller hasn't already re-resolved this peer in the current push
+///     call (caller's responsibility — pass `already_tried` from a set kept
+///     in the outer per-peer loop). One whois per peer per push call,
+///     exactly the rate limit the issue specifies.
+///
+/// Updates `state.peers[peer_handle]` in place (rotates the federation
+/// endpoint's slot_id + slot_token to the fresh resolve), and emits a
+/// stderr WARN so the operator can see the rotation event in their
+/// terminal alongside the unrelated `wire push` output. Caller is
+/// responsible for persisting `state` back to disk via
+/// `config::write_relay_state` after all per-peer re-resolves settle.
+fn try_reresolve_peer_on_slot_4xx(
+    state: &mut Value,
+    peer_handle: &str,
+    last_err: &str,
+    already_tried: &std::collections::HashSet<String>,
+) -> Result<bool> {
+    if !(last_err.contains("410") || last_err.contains("404")) {
+        // Not the slot-rotation shape. Don't waste a whois on this.
+        return Ok(false);
+    }
+    if already_tried.contains(peer_handle) {
+        // Rate limit: at most one whois per peer per push call.
+        return Ok(false);
+    }
+    // Find the peer's pinned federation endpoint to re-resolve against.
+    let peer_entry = state
+        .get("peers")
+        .and_then(|p| p.get(peer_handle))
+        .ok_or_else(|| anyhow!("peer `{peer_handle}` not in relay_state"))?;
+    let peer_relay = peer_entry
+        .get("endpoints")
+        .and_then(Value::as_array)
+        .and_then(|arr| {
+            arr.iter().find(|e| {
+                e.get("scope").and_then(Value::as_str) == Some("federation")
+                    || e.get("scope").and_then(Value::as_str) == Some("Federation")
+            })
+        })
+        .and_then(|e| e.get("relay_url").and_then(Value::as_str))
+        .or_else(|| peer_entry.get("relay_url").and_then(Value::as_str))
+        .ok_or_else(|| {
+            anyhow!("peer `{peer_handle}` has no federation endpoint to re-resolve against")
+        })?
+        .to_string();
+    // Strip scheme + path to get the relay domain. Same shape parse used by
+    // pair_profile::resolve_handle's input contract.
+    let domain = peer_relay
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or(&peer_relay)
+        .to_string();
+    let handle = crate::pair_profile::Handle {
+        nick: peer_handle.to_string(),
+        domain,
+    };
+    let resolved = crate::pair_profile::resolve_handle(&handle, Some(&peer_relay))?;
+    let new_slot_id = resolved
+        .get("slot_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("re-resolved payload missing slot_id"))?
+        .to_string();
+    // Compare against the currently-pinned federation slot.
+    let peers = state
+        .get_mut("peers")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("relay_state.peers missing or wrong shape"))?;
+    let peer_entry = peers
+        .get_mut(peer_handle)
+        .ok_or_else(|| anyhow!("peer `{peer_handle}` disappeared from state mid-resolve"))?;
+    let current_slot_id = peer_entry
+        .get("endpoints")
+        .and_then(Value::as_array)
+        .and_then(|arr| {
+            arr.iter().find(|e| {
+                let scope = e.get("scope").and_then(Value::as_str);
+                scope == Some("federation") || scope == Some("Federation")
+            })
+        })
+        .and_then(|e| e.get("slot_id").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string();
+    if current_slot_id == new_slot_id {
+        // Same slot — the 4xx was something else (rate limit, server burp).
+        return Ok(false);
+    }
+    // Rotate in place. We update slot_id but DROP the slot_token: only the
+    // peer's freshly-issued slot_token (which arrives via a new pair_drop_ack)
+    // is valid. Sending against the new slot without a fresh token gets 401,
+    // so the operator will see one more "skipped: 401" and the next pair
+    // cycle (or a manual `wire add <peer>@<relay>` per the doctor #14 fix)
+    // refreshes the token. This is the same trade-off the issue spells out:
+    // auto-rotation closes the slot mismatch; token refresh still needs the
+    // bilateral pair gate.
+    if let Some(endpoints) = peer_entry
+        .get_mut("endpoints")
+        .and_then(Value::as_array_mut)
+    {
+        for ep in endpoints.iter_mut() {
+            let scope = ep.get("scope").and_then(Value::as_str);
+            if scope == Some("federation") || scope == Some("Federation") {
+                ep["slot_id"] = Value::String(new_slot_id.clone());
+                ep["slot_token"] = Value::String(String::new());
+            }
+        }
+    }
+    // Also update the legacy top-level fields for v0.5.16-era readers (the
+    // same back-compat surface pair_drop_ack uses).
+    peer_entry["slot_id"] = Value::String(new_slot_id.clone());
+    peer_entry["slot_token"] = Value::String(String::new());
+    eprintln!(
+        "wire push: peer `{peer_handle}` rotated their relay slot (was `{current_slot_id}`, \
+         now `{new_slot_id}`); pin updated in place. Re-pair via `wire add \
+         {peer_handle}@<relay>` to refresh the slot_token."
+    );
+    Ok(true)
+}
+
 fn reject_self_pair_after_resolution(our_did: &str, peer_did: &str) -> Result<()> {
     if our_did == peer_did {
         bail!(
@@ -13459,5 +13709,139 @@ mod self_pair_guard_tests {
             "did:wire:noble-canyon-cafef00d",
         )
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod slot_reresolve_tests {
+    use super::*;
+
+    /// Issue #15: the gating logic of try_reresolve_peer_on_slot_4xx
+    /// must short-circuit BEFORE any network call when the error shape
+    /// doesn't smell like slot rotation, when the peer was already
+    /// re-resolved this push, or when there's no peer entry to work
+    /// against. Three of those four short-circuit paths are testable
+    /// without a mock relay; the fourth (the actual whois + slot
+    /// comparison) requires either a live test server or a mock
+    /// transport, so it's covered manually via the failover_tests
+    /// helper + integration check in a separate PR.
+    ///
+    /// What these tests pin:
+    ///   - 200/500/timeout-shape errors do NOT trigger a re-resolve
+    ///     (avoids wasted whois RTTs and churn in steady-state).
+    ///   - Same peer twice in one push call only attempts re-resolve
+    ///     once (rate limit the issue specifies).
+    ///   - Missing peer entry surfaces as an explicit error, NOT a
+    ///     silent skip (operator can see the malformed state).
+    ///   - Peer with no federation endpoint surfaces as an explicit
+    ///     error (you can't re-resolve a slot you can't address).
+
+    #[test]
+    fn try_reresolve_skips_when_error_is_not_4xx_shape() {
+        let mut state = json!({"peers": {"some-peer": {"endpoints": []}}});
+        let already = std::collections::HashSet::new();
+        // 200 OK shouldn't ever land in this path, but sanity check the
+        // negative filter: any error string without "404"/"410" is a no-op.
+        let res =
+            try_reresolve_peer_on_slot_4xx(&mut state, "some-peer", "post failed: 502", &already)
+                .unwrap();
+        assert!(!res, "502 must NOT trigger a re-resolve");
+
+        let res =
+            try_reresolve_peer_on_slot_4xx(&mut state, "some-peer", "connection refused", &already)
+                .unwrap();
+        assert!(!res, "transport errors must NOT trigger a re-resolve");
+
+        let res = try_reresolve_peer_on_slot_4xx(
+            &mut state,
+            "some-peer",
+            "post failed: 401 Unauthorized",
+            &already,
+        )
+        .unwrap();
+        assert!(
+            !res,
+            "401 (auth) is a token problem, not a slot rotation — must NOT trigger a re-resolve"
+        );
+    }
+
+    #[test]
+    fn try_reresolve_rate_limits_one_attempt_per_peer_per_push() {
+        // The issue's rate limit: "at most one whois per peer per push call."
+        // Caller tracks via `already_tried`; helper must honor it BEFORE
+        // attempting any I/O (otherwise a bad-state peer would burn a
+        // network call per event in the outbox).
+        let mut state = json!({"peers": {"some-peer": {"endpoints": []}}});
+        let mut already = std::collections::HashSet::new();
+        already.insert("some-peer".to_string());
+        let res = try_reresolve_peer_on_slot_4xx(
+            &mut state,
+            "some-peer",
+            "post failed: 410 Gone",
+            &already,
+        )
+        .unwrap();
+        assert!(
+            !res,
+            "peer already in `already_tried` must NOT trigger another re-resolve in the same push"
+        );
+    }
+
+    #[test]
+    fn try_reresolve_errors_when_peer_missing_from_state() {
+        // Surface state corruption explicitly rather than silently
+        // returning Ok(false). If a peer disappeared from relay_state
+        // mid-loop the operator needs to see it.
+        let mut state = json!({"peers": {}});
+        let already = std::collections::HashSet::new();
+        let err = try_reresolve_peer_on_slot_4xx(
+            &mut state,
+            "missing-peer",
+            "post failed: 410 Gone",
+            &already,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("missing-peer") && err.contains("not in relay_state"),
+            "missing-peer error must name the peer + the failure: {err}"
+        );
+    }
+
+    #[test]
+    fn try_reresolve_errors_when_peer_has_no_federation_endpoint() {
+        // A peer with only local-scope endpoints (UDS / 127.0.0.1) has
+        // no relay domain to whois against. Helper must surface this as
+        // an actionable error, not a silent skip — the operator's
+        // remediation is "pair via federation" or "you're on the same
+        // box, the slot can't be 410'd by a peer who controls the
+        // socket."
+        let mut state = json!({
+            "peers": {
+                "local-only": {
+                    "endpoints": [
+                        {
+                            "scope": "Local",
+                            "relay_url": "http://127.0.0.1:8771",
+                            "slot_id": "loc",
+                            "slot_token": "tok"
+                        }
+                    ]
+                }
+            }
+        });
+        let already = std::collections::HashSet::new();
+        let err = try_reresolve_peer_on_slot_4xx(
+            &mut state,
+            "local-only",
+            "post failed: 410 Gone",
+            &already,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("federation endpoint"),
+            "no-federation error must name the problem: {err}"
+        );
     }
 }
