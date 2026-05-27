@@ -75,11 +75,24 @@ case "$uname_s" in
 esac
 
 # Choose install dir.
+#
+# Default precedence:
+#   1. Explicit `--prefix <dir>` (or PREFIX env) — always wins.
+#   2. Running as root → /usr/local/bin (no sudo needed, system-wide).
+#   3. Else → $HOME/.local/bin (XDG-standard, no sudo prompt). We CREATE the
+#      directory if it doesn't exist and warn at the end if it isn't on $PATH
+#      so the operator knows the one-line fix to make `wire` discoverable.
+#
+# Why not default to /usr/local/bin? Hitting sudo on `curl | sh` interactively
+# is friction (and breaks in non-interactive `sh -c` / CI / Docker contexts);
+# leaving a binary at a path that isn't on $PATH is a worse silent failure than
+# either of the alternatives. Matches what `rustup` / `uv` / `ollama` /
+# `cargo install` all do.
 if [ -z "$PREFIX" ]; then
-    if [ -d "$HOME/.local/bin" ] && case ":$PATH:" in *":$HOME/.local/bin:"*) true ;; *) false ;; esac; then
-        PREFIX="$HOME/.local/bin"
-    else
+    if [ "$(id -u 2>/dev/null || echo 1000)" = "0" ]; then
         PREFIX="/usr/local/bin"
+    else
+        PREFIX="$HOME/.local/bin"
     fi
 fi
 mkdir -p "$PREFIX"
@@ -134,6 +147,59 @@ if [ -x "$target" ]; then
     "$target" --version
     echo
 
+    # PATH check: warn if $PREFIX isn't on $PATH so the operator gets the
+    # exact one-line fix instead of an opaque "command not found: wire" on
+    # the next invocation. Default install dir ($HOME/.local/bin) ISN'T on
+    # $PATH on many shells out-of-the-box (notably zsh + bash on macOS
+    # before Sequoia, and minimal Linux distros). Without this nudge, the
+    # user runs the install and then can't find `wire`.
+    on_path="no"
+    case ":$PATH:" in *":$PREFIX:"*) on_path="yes" ;; esac
+    if [ "$on_path" = "no" ]; then
+        # Detect the operator's interactive shell so we name the right rc
+        # file. SHELL env is set by login shells everywhere we care about
+        # (macOS, Linux, WSL, Git Bash); fall back to the binary basename
+        # of $SHELL, then to "your shell" if even that fails.
+        shell_name=""
+        if [ -n "${SHELL:-}" ]; then
+            shell_name="$(basename "$SHELL" 2>/dev/null || echo "")"
+        fi
+        case "$shell_name" in
+            zsh)  rc="$HOME/.zshrc" ;;
+            bash)
+                # bash reads ~/.bashrc on interactive non-login shells; on
+                # macOS login shells (Terminal.app default) read .bash_profile.
+                # Recommend .bashrc but mention .bash_profile for macOS users.
+                rc="$HOME/.bashrc"
+                ;;
+            fish) rc="$HOME/.config/fish/config.fish" ;;
+            *)    rc="" ;;
+        esac
+        echo "WARNING: $PREFIX is NOT on your \$PATH — running 'wire' will fail" >&2
+        echo "         until you add it. One-line fix:" >&2
+        echo >&2
+        if [ "$shell_name" = "fish" ]; then
+            echo "  fish_add_path $PREFIX" >&2
+            if [ -n "$rc" ]; then
+                echo "  # (or append to $rc:)" >&2
+                echo "  echo 'fish_add_path $PREFIX' >> $rc" >&2
+            fi
+        elif [ -n "$rc" ]; then
+            echo "  echo 'export PATH=\"$PREFIX:\$PATH\"' >> $rc" >&2
+            echo "  source $rc                          # reload current shell" >&2
+            if [ "$shell_name" = "bash" ] && [ "$uname_s" = "Darwin" ]; then
+                echo "  # macOS Terminal.app reads ~/.bash_profile for login shells;" >&2
+                echo "  # add the same line there if 'wire' still isn't found after relogin." >&2
+            fi
+        else
+            echo "  # Add this line to your shell's startup file (~/.zshrc, ~/.bashrc, etc.):" >&2
+            echo "  export PATH=\"$PREFIX:\$PATH\"" >&2
+        fi
+        echo >&2
+        echo "         Or run wire directly via its absolute path: $target" >&2
+        echo
+    fi
+
     # v0.6.8: stale-cleanup pass. After replacing the binary in place,
     # old daemons may still be running (with the previous binary text
     # loaded in memory) and old pidfiles may point at processes that
@@ -151,11 +217,21 @@ if [ -x "$target" ]; then
     fi
 
     echo "next steps:"
-    echo "  wire up                              # one-shot: identity + relay + claim your persona + daemon"
-    echo "  wire here                            # see your persona (handle == DID-derived name) + who's around"
-    echo "  wire dial <peer>@wireup.net          # pair a peer, then: wire send <peer> \"hi\""
-    echo "  wire session new --local-only        # per-project isolated identity (multi-agent box)"
-    echo "  wire session pair-all-local          # mesh-pair every sister"
+    # If wire isn't on $PATH, the next-steps need the absolute path so
+    # operators can copy-paste them and have them actually run.
+    if [ "$on_path" = "yes" ]; then
+        wire_cmd="wire"
+    else
+        wire_cmd="$target"
+        echo "  # NOTE: \$PATH doesn't include $PREFIX (see warning above);"
+        echo "  # commands below use the absolute path. After fixing \$PATH"
+        echo "  # you can drop the path and just say 'wire <verb>'."
+    fi
+    echo "  $wire_cmd up                              # one-shot: identity + relay + claim your persona + daemon"
+    echo "  $wire_cmd here                            # see your persona (handle == DID-derived name) + who's around"
+    echo "  $wire_cmd dial <peer>@wireup.net          # pair a peer, then: $wire_cmd send <peer> \"hi\""
+    echo "  $wire_cmd session new --local-only        # per-project isolated identity (multi-agent box)"
+    echo "  $wire_cmd session pair-all-local          # mesh-pair every sister"
     echo
-    echo "see 'wire --help' or https://github.com/SlanchaAi/wire for more."
+    echo "see '$wire_cmd --help' or https://github.com/SlanchaAi/wire for more."
 fi
