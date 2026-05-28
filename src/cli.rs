@@ -3957,6 +3957,11 @@ fn cmd_monitor(
     if !inbox_dir.exists() && !as_json {
         eprintln!("wire monitor: inbox dir {inbox_dir:?} missing — has the daemon ever run?");
     }
+    // v0.13.x identity work: monitor owns the inbox cursor across the
+    // long-running poll loop; collision with another wire process under
+    // the same WIRE_HOME causes "I'm not seeing X's events" debugging
+    // rabbit holes. Warn at startup so the operator catches it fast.
+    crate::session::warn_on_identity_collision(std::process::id(), "monitor");
     // Still proceed — InboxWatcher::from_dir_head handles missing dir.
 
     // Optional replay — read existing files and emit the last `replay` events
@@ -5320,6 +5325,13 @@ fn cmd_forget_peer(handle: &str, purge: bool, as_json: bool) -> Result<()> {
 fn cmd_daemon(interval_secs: u64, once: bool, as_json: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
+    }
+    // v0.13.x identity work: a long-running daemon racing another wire
+    // process for the same inbox cursor silently loses messages. Surface
+    // the collision the same way `wire mcp` does. Skipped under `--once`:
+    // a single sync cycle is atomic and doesn't own the cursor.
+    if !once {
+        crate::session::warn_on_identity_collision(std::process::id(), "daemon");
     }
     let interval = std::time::Duration::from_secs(interval_secs.max(1));
 
@@ -14296,6 +14308,12 @@ fn cmd_notify(
     use crate::inbox_watch::InboxWatcher;
     let cursor_path = config::state_dir()?.join("notify.cursor");
     let mut watcher = InboxWatcher::from_cursor_file(&cursor_path)?;
+    // v0.13.x identity work: a long-running notify loop racing another
+    // wire process on the same inbox cursor silently drops toasts.
+    // Skipped under `--once` (single sweep, no cursor ownership).
+    if !once {
+        crate::session::warn_on_identity_collision(std::process::id(), "notify");
+    }
 
     let sweep = |watcher: &mut InboxWatcher| -> Result<()> {
         let events = watcher.poll()?;

@@ -874,27 +874,58 @@ pub fn session_home_for_key(key: &str) -> Result<PathBuf> {
     Ok(sessions_root()?.join("by-key").join(hash))
 }
 
-/// v0.6.10: warn at MCP/CLI startup if another `wire mcp` process is
-/// already running with the same effective `WIRE_HOME`. Closes the
-/// "two Claudes in same cwd silently share an identity" failure mode
-/// that wasted hours of operator debugging time: today the collision
-/// is invisible (both Claudes resolve to the same wire session via
-/// v0.6.7 auto-detect, race the inbox cursor, "look identical" from
-/// the operator's view). This surfaces it explicitly with a clear
-/// remediation path.
+/// Long-running `wire <subcommand>` invocations that own the inbox
+/// cursor and therefore race each other under a shared `WIRE_HOME`.
+/// Keep this list in sync with [`warn_on_identity_collision`]'s pgrep
+/// predicate and the call-site list in `cli::run` / `mcp::run`.
+///
+/// `pair-host*` is intentionally absent: it works against the
+/// per-pair relay slot, not the shared inbox cursor, and is meant
+/// to coexist with a `wire daemon` that advances the queued pair —
+/// warning there would be a false positive for the documented
+/// "queue + daemon" pattern.
+///
+/// Short-lived commands (`whoami`, `status`, `send`, `peers`, …) are
+/// intentionally absent — they write atomically and don't race, and
+/// warning on every one would spam any operator running scripts.
+pub const INBOX_OWNING_SUBCOMMANDS: &[&str] = &["mcp", "daemon", "monitor", "notify"];
+
+/// v0.6.10: warn at MCP/CLI startup if another long-running `wire`
+/// process is already running with the same effective `WIRE_HOME`.
+/// Closes the "two Claudes in same cwd silently share an identity"
+/// failure mode that wasted hours of operator debugging time: today
+/// the collision is invisible (both Claudes resolve to the same wire
+/// session via v0.6.7 auto-detect, race the inbox cursor, "look
+/// identical" from the operator's view). This surfaces it explicitly
+/// with a clear remediation path.
+///
+/// `role` is the calling subcommand label (`"mcp"`, `"daemon"`,
+/// `"monitor"`, …) — used in the warning's leading tag so operators
+/// can tell which surface is observing the collision. Detection
+/// itself spans every inbox-owning role: a `wire daemon` colliding
+/// with an existing `wire mcp` warns just the same as an mcp/mcp
+/// pair.
 ///
 /// Best-effort: any subprocess / env-read failure is silent (the
 /// collision check should never block startup). Cross-platform via
 /// `ps -E -p <pid>` on macOS, `/proc/<pid>/environ` on Linux. Windows
 /// returns empty (no collision detected).
-pub fn warn_on_identity_collision(self_pid: u32) {
+pub fn warn_on_identity_collision(self_pid: u32, role: &str) {
     let our_wire_home = match std::env::var("WIRE_HOME") {
         Ok(h) => h,
         Err(_) => return,
     };
 
+    // Single pgrep call with an alternation predicate. `pgrep -f`
+    // matches against the full argv string, so `wire (mcp|daemon|…)`
+    // catches every inbox-owning subcommand in one shot. Falls back to
+    // silent no-op on platforms without pgrep (Windows) — the env-read
+    // path below also returns None there, so detection is end-to-end
+    // unsupported on Windows. Future: a powershell adapter for
+    // identity collisions, tracked in #29 / #30.
+    let predicate = format!("wire ({})", INBOX_OWNING_SUBCOMMANDS.join("|"));
     let pgrep_out = match std::process::Command::new("pgrep")
-        .args(["-f", "wire mcp"])
+        .args(["-f", &predicate])
         .output()
     {
         Ok(o) if o.status.success() => o,
@@ -907,21 +938,42 @@ pub fn warn_on_identity_collision(self_pid: u32) {
         .filter(|&p| p != self_pid)
         .collect();
 
-    let mut colliders: Vec<u32> = Vec::new();
-    for pid in &other_pids {
-        if let Some(their_home) = read_wire_home_from_pid(*pid)
-            && their_home == our_wire_home
-        {
-            colliders.push(*pid);
-        }
-    }
+    let other_homes: Vec<(u32, Option<String>)> = other_pids
+        .iter()
+        .map(|p| (*p, read_wire_home_from_pid(*p)))
+        .collect();
+
+    let colliders = find_colliders(&our_wire_home, &other_homes);
 
     if colliders.is_empty() {
         return;
     }
 
+    emit_collision_warning(role, &our_wire_home, &colliders);
+}
+
+/// Pure decision: from a snapshot of `(pid, their_wire_home)` for
+/// every other wire process on the host, return the pids whose
+/// `WIRE_HOME` exactly matches ours. Missing-home entries (process
+/// died, env unreadable on this platform) are skipped, never counted.
+pub(crate) fn find_colliders(
+    our_wire_home: &str,
+    other_homes: &[(u32, Option<String>)],
+) -> Vec<u32> {
+    other_homes
+        .iter()
+        .filter_map(|(pid, their_home)| match their_home {
+            Some(h) if h == our_wire_home => Some(*pid),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Render the collision warning. Extracted so the format is unit-
+/// testable without mocking a real pgrep / cross-process env read.
+pub(crate) fn emit_collision_warning(role: &str, our_wire_home: &str, colliders: &[u32]) {
     eprintln!(
-        "wire mcp: WARNING — {} other wire mcp process(es) already using WIRE_HOME=`{}` (pid {})",
+        "wire {role}: WARNING — {} other wire process(es) already using WIRE_HOME=`{}` (pid {})",
         colliders.len(),
         our_wire_home,
         colliders
@@ -1775,5 +1827,98 @@ mod tests {
         assert!(name.starts_with("wire-"));
         assert_eq!(name.len(), "wire-".len() + 4); // 4 hex chars
         assert_ne!(name, "wire");
+    }
+
+    // ---------- identity-collision warning (issue #29/#30 — broaden to
+    // every inbox-cursor-owning subcommand, not just `wire mcp`). ----------
+
+    #[test]
+    fn inbox_owning_subcommands_covers_each_runtime_role() {
+        // Lock the role list down — any addition / removal here must
+        // come with an updated call site (cli::cmd_daemon, cmd_monitor,
+        // cmd_notify, mcp::run) and an updated rendezvous in the pgrep
+        // predicate. The pgrep predicate is built from this list at
+        // call time, so adding "watch" here automatically extends
+        // detection — but the warning is only fired if a call site
+        // also invokes warn_on_identity_collision with that role.
+        assert!(INBOX_OWNING_SUBCOMMANDS.contains(&"mcp"));
+        assert!(INBOX_OWNING_SUBCOMMANDS.contains(&"daemon"));
+        assert!(INBOX_OWNING_SUBCOMMANDS.contains(&"monitor"));
+        assert!(INBOX_OWNING_SUBCOMMANDS.contains(&"notify"));
+        // Pair-host is documented-coexist with daemon — must NOT be in
+        // the list or operators get a false positive on every queued
+        // pair flow.
+        assert!(!INBOX_OWNING_SUBCOMMANDS.contains(&"pair-host"));
+    }
+
+    #[test]
+    fn find_colliders_returns_only_same_home_pids() {
+        let our_home = "/tmp/wire-home-A";
+        let others = vec![
+            (101, Some("/tmp/wire-home-A".to_string())), // collide
+            (102, Some("/tmp/wire-home-B".to_string())), // distinct home
+            (103, None),                                 // env-unreadable, skip
+            (104, Some("/tmp/wire-home-A".to_string())), // collide
+        ];
+        let colliders = find_colliders(our_home, &others);
+        assert_eq!(colliders, vec![101, 104]);
+    }
+
+    #[test]
+    fn find_colliders_no_match_returns_empty() {
+        let our_home = "/tmp/wire-home-A";
+        let others = vec![
+            (101, Some("/tmp/wire-home-B".to_string())),
+            (102, Some("/tmp/wire-home-C".to_string())),
+            (103, None),
+        ];
+        assert!(find_colliders(our_home, &others).is_empty());
+    }
+
+    #[test]
+    fn find_colliders_empty_input_is_empty() {
+        assert!(find_colliders("/tmp/anywhere", &[]).is_empty());
+    }
+
+    #[test]
+    fn find_colliders_ignores_substring_matches() {
+        // `WIRE_HOME=/wire-A` must NOT collide with `WIRE_HOME=/wire-A/sub`.
+        // Exact-match semantics protect against parent/child confusion.
+        let our_home = "/tmp/wire-A";
+        let others = vec![
+            (201, Some("/tmp/wire-A/sub".to_string())),
+            (202, Some("/wire-A".to_string())), // distinct path
+            (203, Some("/tmp/wire-A".to_string())), // real collision
+        ];
+        assert_eq!(find_colliders(our_home, &others), vec![203]);
+    }
+
+    #[test]
+    fn collision_warning_format_includes_role_home_and_pids() {
+        // Sanity-check the first warning line by reconstructing it
+        // exactly the way `emit_collision_warning` does. If anyone
+        // changes the format, this test must change with it — that's
+        // the point: the format is a documented operator-facing
+        // surface (Willard's #30 cited the older wording verbatim
+        // when filing the bug).
+        let role = "daemon";
+        let home = "/tmp/by-key/abc123";
+        let colliders = vec![4242u32, 4243u32];
+        let expected_head = format!(
+            "wire {role}: WARNING — {n} other wire process(es) already using WIRE_HOME=`{home}` (pid {pids})",
+            n = colliders.len(),
+            pids = colliders
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        assert_eq!(
+            expected_head,
+            "wire daemon: WARNING — 2 other wire process(es) already using WIRE_HOME=`/tmp/by-key/abc123` (pid 4242, 4243)"
+        );
+        // Exercise the renderer so it can't bit-rot via dead-code
+        // pruning. Output goes to stderr; under libtest it's captured.
+        emit_collision_warning(role, home, &colliders);
     }
 }
