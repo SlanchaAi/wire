@@ -188,15 +188,25 @@ pub enum Command {
         json: bool,
     },
     /// Stream signed events from peers.
+    ///
+    /// Defaults to NEWEST-N orientation: with `--limit N`, prints the most
+    /// recent N events across all matched peers, sorted chronologically
+    /// (oldest of the window first, newest last — same orientation as Unix
+    /// `tail`). Pass `--oldest` to flip back to first-N (FIFO) behaviour.
+    /// `--limit 0` returns the full inbox in chronological order.
     Tail {
         /// Optional peer filter; if omitted, tails all peers.
         peer: Option<String>,
         /// Emit JSONL (one event per line).
         #[arg(long)]
         json: bool,
-        /// Maximum events to read before exiting (0 = stream until SIGINT).
+        /// Maximum events to print. 0 = print everything (oldest → newest).
         #[arg(long, default_value_t = 0)]
         limit: usize,
+        /// Return the FIRST `--limit` events (oldest-N) instead of the
+        /// default last-N (newest-N). No effect when `--limit` is 0.
+        #[arg(long)]
+        oldest: bool,
     },
     /// Live tail of new inbox events across all pinned peers — one line per
     /// new event, handshake (pair_drop / pair_drop_ack / heartbeat) filtered
@@ -1575,7 +1585,12 @@ pub fn run() -> Result<()> {
             message,
             json,
         } => cmd_dial(&name, message.as_deref(), json_default(json)),
-        Command::Tail { peer, json, limit } => cmd_tail(peer.as_deref(), json, limit),
+        Command::Tail {
+            peer,
+            json,
+            limit,
+            oldest,
+        } => cmd_tail(peer.as_deref(), json, limit, oldest),
         Command::Monitor {
             peer,
             json,
@@ -3763,7 +3778,20 @@ fn resolve_name_to_target(name: &str) -> Result<DialTarget> {
 
 // ---------- tail ----------
 
-fn cmd_tail(peer: Option<&str>, as_json: bool, limit: usize) -> Result<()> {
+/// Print recent events from this agent's inbox.
+///
+/// **Orientation (wire #79):** defaults to NEWEST-N — with `limit > 0`, the
+/// last `limit` events across all matched peer jsonl files are returned,
+/// sorted chronologically (by `timestamp`, then by per-file append order as
+/// tiebreaker) and printed oldest-of-window first / newest last. This matches
+/// `tail -n` semantics on log files; previously `wire tail --limit N` returned
+/// the OLDEST N which silently hid live-context for any agent harness that
+/// re-tailed an established inbox.
+///
+/// `oldest=true` flips back to FIFO (first-N) for operators who need the
+/// original orientation (e.g. replaying an inbox from the start). `limit=0`
+/// prints every event in chronological order.
+fn cmd_tail(peer: Option<&str>, as_json: bool, limit: usize, oldest: bool) -> Result<()> {
     let inbox = config::inbox_dir()?;
     if !inbox.exists() {
         if !as_json {
@@ -3772,7 +3800,6 @@ fn cmd_tail(peer: Option<&str>, as_json: bool, limit: usize) -> Result<()> {
         return Ok(());
     }
     let trust = config::read_trust()?;
-    let mut count = 0usize;
 
     let entries: Vec<_> = std::fs::read_dir(&inbox)?
         .filter_map(|e| e.ok())
@@ -3786,47 +3813,70 @@ fn cmd_tail(peer: Option<&str>, as_json: bool, limit: usize) -> Result<()> {
         })
         .collect();
 
-    for path in entries {
-        let body = std::fs::read_to_string(&path)?;
-        for line in body.lines() {
+    // Collect every parseable event across all matched peer files. Each entry
+    // carries a sort key `(timestamp, line_idx)` so multi-peer interleaving
+    // sorts deterministically by event time, with append-order as the
+    // tiebreaker for events that share a timestamp (or for events with no
+    // timestamp string at all).
+    let mut events: Vec<(String, usize, Value)> = Vec::new();
+    for path in &entries {
+        let body = std::fs::read_to_string(path)?;
+        for (idx, line) in body.lines().enumerate() {
             let event: Value = match serde_json::from_str(line) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            let verified = verify_message_v31(&event, &trust).is_ok();
-            if as_json {
-                let mut event_with_meta = event.clone();
-                if let Some(obj) = event_with_meta.as_object_mut() {
-                    obj.insert("verified".into(), json!(verified));
-                }
-                println!("{}", serde_json::to_string(&event_with_meta)?);
-            } else {
-                let ts = event
-                    .get("timestamp")
-                    .and_then(Value::as_str)
-                    .unwrap_or("?");
-                let from = event.get("from").and_then(Value::as_str).unwrap_or("?");
-                let kind = event.get("kind").and_then(Value::as_u64).unwrap_or(0);
-                let kind_name = event.get("type").and_then(Value::as_str).unwrap_or("?");
-                let summary = event
-                    .get("body")
-                    .map(|b| match b {
-                        Value::String(s) => s.clone(),
-                        _ => b.to_string(),
-                    })
-                    .unwrap_or_default();
-                let mark = if verified { "✓" } else { "✗" };
-                let deadline = event
-                    .get("time_sensitive_until")
-                    .and_then(Value::as_str)
-                    .map(|d| format!(" deadline: {d}"))
-                    .unwrap_or_default();
-                println!("[{ts} {from} kind={kind} {kind_name}{deadline}] {summary} | sig {mark}");
+            let ts = event
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            events.push((ts, idx, event));
+        }
+    }
+    events.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    // Pick the window. limit=0 → all events; oldest → first N; default → last N.
+    let total = events.len();
+    let window: &[(String, usize, Value)] = if limit == 0 {
+        &events[..]
+    } else if oldest {
+        &events[..limit.min(total)]
+    } else {
+        let start = total.saturating_sub(limit);
+        &events[start..]
+    };
+
+    for (_, _, event) in window {
+        let verified = verify_message_v31(event, &trust).is_ok();
+        if as_json {
+            let mut event_with_meta = event.clone();
+            if let Some(obj) = event_with_meta.as_object_mut() {
+                obj.insert("verified".into(), json!(verified));
             }
-            count += 1;
-            if limit > 0 && count >= limit {
-                return Ok(());
-            }
+            println!("{}", serde_json::to_string(&event_with_meta)?);
+        } else {
+            let ts = event
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let from = event.get("from").and_then(Value::as_str).unwrap_or("?");
+            let kind = event.get("kind").and_then(Value::as_u64).unwrap_or(0);
+            let kind_name = event.get("type").and_then(Value::as_str).unwrap_or("?");
+            let summary = event
+                .get("body")
+                .map(|b| match b {
+                    Value::String(s) => s.clone(),
+                    _ => b.to_string(),
+                })
+                .unwrap_or_default();
+            let mark = if verified { "✓" } else { "✗" };
+            let deadline = event
+                .get("time_sensitive_until")
+                .and_then(Value::as_str)
+                .map(|d| format!(" deadline: {d}"))
+                .unwrap_or_default();
+            println!("[{ts} {from} kind={kind} {kind_name}{deadline}] {summary} | sig {mark}");
         }
     }
     Ok(())

@@ -588,12 +588,13 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "wire_tail",
-            "description": "Read recent signed events from this agent's inbox. Each event has a 'verified' field (bool) — the Ed25519 signature was checked against the trust state before the daemon wrote the inbox.",
+            "description": "Read recent signed events from this agent's inbox. Each event has a 'verified' field (bool) — the Ed25519 signature was checked against the trust state before the daemon wrote the inbox. **Orientation (wire #79):** defaults to NEWEST-N (last `limit` events across all matched peers, sorted chronologically by timestamp). Pass `oldest: true` for FIFO behaviour (first-N, for inbox replay from the start).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "peer": {"type": "string", "description": "Optional peer handle to filter inbox by."},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 50, "description": "Max events to return."}
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 50, "description": "Max events to return."},
+                    "oldest": {"type": "boolean", "default": false, "description": "Return the FIRST `limit` events (oldest-N) instead of the default last-N (newest-N)."}
                 },
                 "required": []
             }
@@ -1287,12 +1288,19 @@ fn tool_tail(args: &Value) -> Result<Value, String> {
 
     let peer_filter = args.get("peer").and_then(Value::as_str);
     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
+    // wire #79: orientation parity with `wire tail` CLI — default newest-N,
+    // `oldest=true` opts back into FIFO. Agents almost always want the
+    // freshest inbox slice when re-tailing an established peer, not the
+    // wire-init handshake noise.
+    let oldest = args
+        .get("oldest")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let inbox = config::inbox_dir().map_err(|e| e.to_string())?;
     if !inbox.exists() {
         return Ok(json!([]));
     }
     let trust = config::read_trust().map_err(|e| e.to_string())?;
-    let mut events = Vec::new();
     let entries: Vec<_> = std::fs::read_dir(&inbox)
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok())
@@ -1305,9 +1313,13 @@ fn tool_tail(args: &Value) -> Result<Value, String> {
                 }
         })
         .collect();
-    for path in entries {
-        let body = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        for line in body.lines() {
+
+    // (timestamp, per-file line index, event with verified meta). Sort key
+    // mirrors the CLI cmd_tail for cross-tool consistency.
+    let mut collected: Vec<(String, usize, Value)> = Vec::new();
+    for path in &entries {
+        let body = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        for (idx, line) in body.lines().enumerate() {
             let event: Value = match serde_json::from_str(line) {
                 Ok(v) => v,
                 Err(_) => continue,
@@ -1317,13 +1329,34 @@ fn tool_tail(args: &Value) -> Result<Value, String> {
             if let Some(obj) = event_with_meta.as_object_mut() {
                 obj.insert("verified".into(), json!(verified));
             }
-            events.push(event_with_meta);
-            if events.len() >= limit {
-                return Ok(Value::Array(events));
-            }
+            let ts = event
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            collected.push((ts, idx, event_with_meta));
         }
     }
-    Ok(Value::Array(events))
+    collected.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    let total = collected.len();
+    let window: Vec<Value> = if limit == 0 {
+        collected.into_iter().map(|(_, _, e)| e).collect()
+    } else if oldest {
+        collected
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, e)| e)
+            .collect()
+    } else {
+        let start = total.saturating_sub(limit);
+        collected
+            .into_iter()
+            .skip(start)
+            .map(|(_, _, e)| e)
+            .collect()
+    };
+    Ok(Value::Array(window))
 }
 
 fn tool_verify(args: &Value) -> Result<Value, String> {
