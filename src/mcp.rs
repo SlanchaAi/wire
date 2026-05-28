@@ -131,7 +131,7 @@ pub fn run() -> Result<()> {
     // the cwd's session"); operators hit it as "they look identical"
     // and burn hours debugging. The warning gives them a clear
     // remediation path the first time they see it.
-    crate::session::warn_on_identity_collision(std::process::id());
+    crate::session::warn_on_identity_collision(std::process::id(), "mcp");
 
     let state = McpState::default();
     let shutdown = Arc::new(AtomicBool::new(false));
