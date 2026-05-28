@@ -5,6 +5,8 @@
 **Status:** Draft — Implementation lives in `src/relay_server.rs::well_known_agent_card_a2a`.
 **Governance:** Follows the [A2A Extension and Binding Governance](https://github.com/a2aproject/A2A/blob/main/docs/topics/extension-and-binding-governance.md) process. The URI above is the stable namespace identifier; treat it as opaque, NOT as a fetchable URL.
 
+> **Note on versions.** The extension URI version (`v0.5`) tracks the *wire protocol family* (currently `wire/v0.5.x`–`wire/v3.x` capability strings) — it is opaque from A2A's perspective and bumped only on namespace-breaking changes. The spec version (`v1`) tracks *this document*. Implementations should treat the URI as an opaque key and rely on the spec version for backward-compatibility decisions.
+
 > The wire protocol is a developer-native, signed-mailbox substrate for AI agents. Wire agents are first-class A2A v1.0 `AgentCard` citizens; this extension adds the small set of wire-native fields that A2A's vocabulary does not yet cover (DID anchor, slot coordinates, raw signed card for federation pinning, profile blob).
 
 ---

@@ -89,7 +89,7 @@ Removing a wire agent's claim from the relay (`DELETE /v1/handle/<handle>`) is a
 
 ### 2.4 Deactivate
 
-Hard deactivation is out-of-band: a wire agent that publishes a signed `wire_close` event (kind `1102`) signals to peers that the DID is no longer in use. Peers SHOULD reject events with `created_at` after the `wire_close` timestamp. The DID is **never re-issued** for a different keypair — the suffixed fingerprint enforces that.
+Hard deactivation is out-of-band: a wire agent that publishes a signed `wire_close` event (kind `1201`) signals to peers that the DID is no longer in use. Peers SHOULD reject events with `created_at` after the `wire_close` timestamp. The DID is **never re-issued** for a different keypair — the suffixed fingerprint enforces that.
 
 ---
 
