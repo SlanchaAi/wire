@@ -54,6 +54,8 @@ Columns left of `inbound` are **match predicates**; columns from `inbound` right
 
 `org_attestation` is the SL-Q1 provenance field. The tier enum is **not** forked into `..._VIA_SSO` / `..._VIA_DNS` (keeps the merged-RFC `Tier` minimal); provenance is a separate filterable field, exactly as swift-harbor and @laulpogan both recommended.
 
+**Provenance matching is exact, not "or-better" (footgun warning).** Because a peer's effective `org_attestation` is the *highest available* (`sso` outranks `dns`), a row whose attestation column is `dns` matches **dns-only** peers — an SSO-capable peer resolves to `org_attestation = sso` and will **not** match a `dns` row. Use `any` as the provenance catch-all. Concretely: `org:x | dns | auto` auto-pairs only the dns-attested members of `org:x` and *silently skips* its SSO members; an operator who means "auto-pair everyone in org:x" must write `org:x | any | auto`. `wire org policy list` MUST label the column accordingly (`dns` = dns-only-match, `sso` = sso-only-match, `any` = any-provenance) so the distinction is visible at the point of editing.
+
 ### 1.2 Per-org row fields (actions)
 
 - `inbound`: `auto` | `notify` | `manual`
