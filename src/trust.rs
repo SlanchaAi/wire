@@ -1,13 +1,24 @@
-//! Trust state machine — v0.1 minimal subset.
+//! Trust state machine — v0.1 minimal subset, extended in v3.2 (RFC-001).
 //!
 //! Tier semantics:
-//!   - UNTRUSTED: card pinned, SAS not yet confirmed; messages ignored.
-//!   - VERIFIED:  SAS confirmed bilateral; messages accepted.
-//!   - ATTESTED:  reserved (v0.2+) — used today only for self-attest.
-//!   - TRUSTED:   reserved (v0.2+).
+//!   - UNTRUSTED: card pinned, no claim verified yet; messages ignored.
+//!   - ORG_VERIFIED: (v3.2 / RFC-001 §5) peer shares a verified `org_did`
+//!     with us — *organisational* trust, NOT personal. Bilateral SAS is
+//!     still required to cross into VERIFIED. Promotion from UNTRUSTED is
+//!     one-way.
+//!   - VERIFIED: SAS confirmed bilateral; messages accepted. Promotion
+//!     accepts UNTRUSTED-or-ORG_VERIFIED as source (RFC-001 §5: "a
+//!     SAS-paired peer that happens to share our org is recorded at
+//!     VERIFIED, not downgraded").
+//!   - ATTESTED: reserved (v0.2+) — used today only for self-attest.
+//!   - TRUSTED: reserved (v0.2+).
 //!
-//! Promotion is one-way (UNTRUSTED → VERIFIED). Demotion would be
-//! ambiguous in a bilateral setting and is deliberately not modeled.
+//! Promotion is one-way. Demotion would be ambiguous in a bilateral setting
+//! and is deliberately not modeled. RFC-001 §5 invariant:
+//!   "ORG_VERIFIED never satisfies a `>= VERIFIED` policy check."
+//! That invariant is captured by `tier_order` (ORG_VERIFIED=1 < VERIFIED=2)
+//! and by AC2 property test (tests/trust_ceiling_prop.rs) asserting no
+//! claim-event walk reaches VERIFIED without a SasConfirmed step.
 
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -17,12 +28,17 @@ use time::format_description::well_known::Rfc3339;
 use crate::signing::{b64encode, make_key_id};
 
 /// Tier ranking — higher is more trusted. Useful for `>=` gating.
+///
+/// RFC-001 §5 invariant: ORG_VERIFIED sits strictly between UNTRUSTED and
+/// VERIFIED. A policy check of `tier >= VERIFIED` MUST NOT pass for an
+/// ORG_VERIFIED peer — only an explicit SAS-confirmation can cross that line.
 pub fn tier_order() -> BTreeMap<&'static str, u32> {
     [
         ("UNTRUSTED", 0u32),
-        ("VERIFIED", 1),
-        ("ATTESTED", 2),
-        ("TRUSTED", 3),
+        ("ORG_VERIFIED", 1),
+        ("VERIFIED", 2),
+        ("ATTESTED", 3),
+        ("TRUSTED", 4),
     ]
     .into_iter()
     .collect()
@@ -31,6 +47,7 @@ pub fn tier_order() -> BTreeMap<&'static str, u32> {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Tier {
     Untrusted,
+    OrgVerified,
     Verified,
     Attested,
     Trusted,
@@ -40,6 +57,7 @@ impl Tier {
     pub fn as_str(self) -> &'static str {
         match self {
             Tier::Untrusted => "UNTRUSTED",
+            Tier::OrgVerified => "ORG_VERIFIED",
             Tier::Verified => "VERIFIED",
             Tier::Attested => "ATTESTED",
             Tier::Trusted => "TRUSTED",
@@ -115,9 +133,55 @@ pub fn add_agent_card_pin(trust: &mut Trust, card: &Value, tier: Option<&str>) {
     });
 }
 
-/// Promote UNTRUSTED → VERIFIED. Returns `Err(reason)` if not pinned or
-/// already past UNTRUSTED (promotion is one-way).
+/// Promote UNTRUSTED or ORG_VERIFIED → VERIFIED. Returns `Err(reason)` if
+/// not pinned or already past VERIFIED.
+///
+/// RFC-001 §5: a SAS-confirmed peer that happens to share our org is
+/// recorded at VERIFIED, not downgraded — so ORG_VERIFIED is an accepted
+/// source for VERIFIED promotion. ATTESTED and TRUSTED are above VERIFIED
+/// and would be a downgrade; we refuse.
 pub fn promote_to_verified(trust: &mut Trust, peer_handle: &str) -> Result<(), String> {
+    let agents = trust
+        .as_object_mut()
+        .ok_or("trust is not an object")?
+        .get_mut("agents")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| format!("peer {peer_handle:?} not pinned"))?;
+
+    let agent = agents
+        .get_mut(peer_handle)
+        .ok_or_else(|| format!("peer {peer_handle:?} not pinned"))?;
+
+    let current = agent
+        .get("tier")
+        .and_then(Value::as_str)
+        .unwrap_or("UNTRUSTED")
+        .to_string();
+    if current != "UNTRUSTED" && current != "ORG_VERIFIED" {
+        return Err(format!(
+            "peer {peer_handle:?} already at tier {current:?} — promotion is one-way"
+        ));
+    }
+    agent["tier"] = json!("VERIFIED");
+    agent["verified_at"] = json!(now_iso());
+    Ok(())
+}
+
+/// Promote UNTRUSTED → ORG_VERIFIED. Returns `Err(reason)` if not pinned or
+/// already past UNTRUSTED.
+///
+/// RFC-001 §5: ORG_VERIFIED is granted on cryptographic + policy grounds
+/// (the peer's `member_cert` for an org we accept verifies against that
+/// org's pubkey) but DOES NOT satisfy the SAS-confirmation ceremony that
+/// VERIFIED requires. It is a one-way intermediate step a peer may cross
+/// before or after VERIFIED, but never *instead of* VERIFIED.
+///
+/// This function does NOT perform the cryptographic verification of
+/// `member_cert` — that lives in [`crate::identity::verify_member_cert`]
+/// and the caller must run it first. The trust mutation here is the policy
+/// recording: "we accept this peer as ORG_VERIFIED under our active org
+/// policy."
+pub fn promote_to_org_verified(trust: &mut Trust, peer_handle: &str) -> Result<(), String> {
     let agents = trust
         .as_object_mut()
         .ok_or("trust is not an object")?
@@ -136,11 +200,12 @@ pub fn promote_to_verified(trust: &mut Trust, peer_handle: &str) -> Result<(), S
         .to_string();
     if current != "UNTRUSTED" {
         return Err(format!(
-            "peer {peer_handle:?} already at tier {current:?} — promotion is one-way"
+            "peer {peer_handle:?} already at tier {current:?} — \
+             org_verified promotion fires from UNTRUSTED only"
         ));
     }
-    agent["tier"] = json!("VERIFIED");
-    agent["verified_at"] = json!(now_iso());
+    agent["tier"] = json!("ORG_VERIFIED");
+    agent["org_verified_at"] = json!(now_iso());
     Ok(())
 }
 
@@ -256,8 +321,94 @@ mod tests {
     #[test]
     fn tier_order_matches_promotion_semantics() {
         let order = tier_order();
-        assert!(order["UNTRUSTED"] < order["VERIFIED"]);
+        assert!(order["UNTRUSTED"] < order["ORG_VERIFIED"]);
+        assert!(order["ORG_VERIFIED"] < order["VERIFIED"]);
         assert!(order["VERIFIED"] < order["ATTESTED"]);
         assert!(order["ATTESTED"] < order["TRUSTED"]);
+    }
+
+    // ─── RFC-001 §5: Tier::OrgVerified ────────────────────────────────────
+
+    #[test]
+    fn tier_as_str_covers_org_verified() {
+        assert_eq!(Tier::OrgVerified.as_str(), "ORG_VERIFIED");
+    }
+
+    #[test]
+    fn promote_to_org_verified_one_way() {
+        let (sk, pk) = generate_keypair();
+        let card = sign_agent_card(&build_agent_card("paul", &pk, None, None, None), &sk);
+        let mut t = empty_trust();
+        add_agent_card_pin(&mut t, &card, None);
+        promote_to_org_verified(&mut t, "paul").unwrap();
+        assert_eq!(get_tier(&t, "paul"), "ORG_VERIFIED");
+        assert!(t["agents"]["paul"]["org_verified_at"].is_string());
+    }
+
+    #[test]
+    fn promote_to_org_verified_refuses_already_verified() {
+        // Once a peer is VERIFIED (bilateral SAS), regressing them to
+        // ORG_VERIFIED would be a downgrade. Refuse.
+        let (sk, pk) = generate_keypair();
+        let card = sign_agent_card(&build_agent_card("paul", &pk, None, None, None), &sk);
+        let mut t = empty_trust();
+        add_agent_card_pin(&mut t, &card, None);
+        promote_to_verified(&mut t, "paul").unwrap();
+        let err = promote_to_org_verified(&mut t, "paul").unwrap_err();
+        assert!(err.contains("VERIFIED"), "got: {err}");
+        assert_eq!(get_tier(&t, "paul"), "VERIFIED");
+    }
+
+    #[test]
+    fn promote_to_org_verified_refuses_self_idempotent() {
+        // Twice-applied org promotion is a no-op error, not a silent reset
+        // of `org_verified_at` — keeps the audit trail intact.
+        let (sk, pk) = generate_keypair();
+        let card = sign_agent_card(&build_agent_card("paul", &pk, None, None, None), &sk);
+        let mut t = empty_trust();
+        add_agent_card_pin(&mut t, &card, None);
+        promote_to_org_verified(&mut t, "paul").unwrap();
+        let err = promote_to_org_verified(&mut t, "paul").unwrap_err();
+        assert!(err.contains("ORG_VERIFIED"), "got: {err}");
+    }
+
+    #[test]
+    fn promote_to_verified_accepts_org_verified_source() {
+        // RFC-001 §5: a peer can be ORG_VERIFIED then later cross the SAS
+        // ceremony into VERIFIED — without losing the cryptographic
+        // membership claim. We preserve `org_verified_at` for audit.
+        let (sk, pk) = generate_keypair();
+        let card = sign_agent_card(&build_agent_card("paul", &pk, None, None, None), &sk);
+        let mut t = empty_trust();
+        add_agent_card_pin(&mut t, &card, None);
+        promote_to_org_verified(&mut t, "paul").unwrap();
+        promote_to_verified(&mut t, "paul").unwrap();
+        assert_eq!(get_tier(&t, "paul"), "VERIFIED");
+        assert!(t["agents"]["paul"]["org_verified_at"].is_string());
+        assert!(t["agents"]["paul"]["verified_at"].is_string());
+    }
+
+    #[test]
+    fn promote_to_verified_refuses_attested_source() {
+        // ATTESTED is reserved-but-above VERIFIED; a downgrade would lose
+        // information. Refuse.
+        let (_, pk) = generate_keypair();
+        let mut t = empty_trust();
+        add_self_to_trust(&mut t, "self", &pk);
+        let err = promote_to_verified(&mut t, "self").unwrap_err();
+        assert!(err.contains("ATTESTED"), "got: {err}");
+    }
+
+    #[test]
+    fn org_verified_does_not_satisfy_verified_policy_check() {
+        // The load-bearing RFC-001 invariant: a policy gate of
+        // `tier >= VERIFIED` MUST refuse an ORG_VERIFIED peer.
+        let order = tier_order();
+        let verified_rank = order["VERIFIED"];
+        let org_rank = order["ORG_VERIFIED"];
+        assert!(
+            org_rank < verified_rank,
+            "ORG_VERIFIED ({org_rank}) must rank strictly below VERIFIED ({verified_rank})"
+        );
     }
 }
