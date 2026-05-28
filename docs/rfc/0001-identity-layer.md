@@ -178,9 +178,19 @@ POST /v1/op/enroll
   body: { op_did, op_pubkey, signed_nonce, org_memberships: [{org_did, member_cert}, ...] }
   response: 201 with op_did anchored, member_certs verified.
 
+GET  /v1/op/<op_did>
+  response: { op_did, op_pubkey, signed_self_claim, org_memberships: [...], discoverable: bool },
+            with ETag. Resolution-by-known-id (caller must already hold the op_did);
+            no /v1/operators bulk-listing endpoint is exposed (see O8).
+
 GET  /v1/op/<op_did>/sessions
   auth: caller must be the same op_did OR an org_did the op is enrolled in.
   response: [{session_did, agent_card, liveness}], paginated.
+
+GET  /v1/operators?search=<prefix>          (v0.14-beta, see O8)
+  response: [{op_did, handle}] for operators with op_state.discoverable=true ONLY.
+            Default empty. Operators opt in via `wire op set --discoverable`;
+            non-discoverable operators are never returned, regardless of prefix match.
 ```
 
 Per-event body cap stays at 64 KB; identity claims add ≤ 2 KB worst-case (3-org operator with did:web + dns-txt proofs). No relay-protocol-breaking changes; this is additive.
@@ -293,6 +303,7 @@ Each has an owner and a decision point. None are abandoned bullets.
 - **O5 — Pre-computed SAS digits in roster bundle.** Cryptographic check: confirm the org-signed bundle cannot be replay-spliced (e.g., reuse Op A's bundle entry to impersonate Op A on a fresh session under attacker-controlled keys). Mitigation hypothesis: bundle entry binds (op_did, session_did, session_pubkey, sas_digits) inside a single org_sig, so any splice fails verification. **Owner:** maintainer (cryptographic review). **Decision:** RFC-001 v3 / pre-merge.
 - **O6 — Attestation expiry policy.** Surfaced by prior-art review (NATS / Sigstore / OIDF / GH Apps all use bounded TTLs; v0.13 wire trust is forever-until-revoked). Choices: (a) no expiry — simple, accretes zombies; (b) TTL on `member_cert` (e.g., 30 d) with org-side re-issuance — forces refresh, requires org online; (c) **version-based**, bound to roster epoch — matches Keybase precedent and reuses our liveness/GC pipeline. Proposed: (c) — `member_cert` is valid while its roster epoch is the current one served by the registry; epoch bump on any membership delta forces re-pull. **Owner:** swift-harbor. **Decision:** v0.14-beta.
 - **O7 — `op_did` correlation / privacy stance.** Surfaced by prior-art review (DID:peer pairwise DIDs, BBS+ selective disclosure). A stable `op_did` lets every org an operator joins link their sessions to a single anchor — convenient for accountability, problematic if the operator wants compartmentalized personas (work vs personal). Proposed: `op_did` is **strictly opt-in** (sessions without one stay anonymous as today and cannot reach `ORG_VERIFIED`); pairwise `op_did`s (one per org relationship) is a **deferred v0.15 feature** if operators request it; ZKP-based selective disclosure is out of scope (complexity disproportionate to current threat model). Document the linkability trade explicitly in `docs/AGENT_INTEGRATION.md`. **Owner:** swift-harbor. **Decision:** v0.14-RC1.
+- **O8 — Operator discoverability in the phonebook.** Distinct axis from O7 (which asks *whether to declare* `op_did`); this asks *whether declared `op_did`s are bulk-indexable*. Today wire publishes per-session handles to the `/v1/handles` directory (`handles_directory` in `src/relay_server.rs:1543`); the natural question is whether operators get the same treatment. **Proposed: no public bulk listing; resolution-by-known-id only; opt-in discoverable flag for operators who want public lookup.** Concretely: (a) `/v1/handles` continues to list *session* handles only, no `/v1/operators` directory endpoint exists by default; (b) `GET /v1/op/<op_did>` returns operator pubkey + signed self-claim + claimed orgs — usable for verifying a presented `op_cert`, but the caller must already know the `op_did`; (c) discovery is via shared org context (roster bundle includes member `op_did`s) — pair with one org-mate, see who else is in the org; (d) operators who actively want to be findable (public maintainers, consultants) set `op_state.discoverable = true` (stored on the registry, not on the card) and appear in a separate `/v1/operators?search=<prefix>` endpoint, default-off. Rationale: a public operator listing regresses the v0.5.14 phonebook-scrape closure at a coarser, more durable grain than sessions; contradicts every prior-art precedent surveyed (NATS, OIDF, GH Apps, ATProto, Keybase all deliberately don't enumerate top-tier identities); turns O7's voluntary-disclosure stance into involuntary cross-org correlation; and raises T20's leverage by giving attackers a target list. The opt-in flag preserves the use case while keeping default behavior conservative. **Owner:** swift-harbor + relay-team. **Decision:** v0.14-beta.
 
 ## Prior art
 
