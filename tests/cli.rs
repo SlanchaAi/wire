@@ -1572,3 +1572,136 @@ fn status_after_send_shows_outbox_depth() {
     assert_eq!(parsed["outbox"]["files"], 1);
     assert_eq!(parsed["outbox"]["events"], 2);
 }
+
+// ---------- wire #79: `tail` orientation regression ----------
+
+/// Seed `<home>/state/wire/inbox/<peer>.jsonl` with N synthetic events whose
+/// `timestamp` strings sort lexicographically in append order. We bypass the
+/// daemon entirely — `cmd_tail` only inspects raw jsonl files + the trust
+/// store, so a hand-rolled fixture is enough to exercise its orientation +
+/// windowing logic in isolation. Trust is left empty (events will be
+/// `verified: false`), but `--json` output still emits one line per event and
+/// preserves their original `body` and `timestamp` so the test can identify
+/// which window the CLI picked.
+fn seed_inbox(home: &std::path::Path, peer: &str, n: usize) {
+    let dir = home.join("state/wire/inbox");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{peer}.jsonl"));
+    let mut body = String::new();
+    for i in 1..=n {
+        let ts = format!("2024-01-01T00:00:{i:02}Z");
+        body.push_str(&format!(
+            r#"{{"timestamp":"{ts}","from":"did:wire:test","kind":2,"type":"decision","body":"evt-{i:02}"}}"#
+        ));
+        body.push('\n');
+    }
+    std::fs::write(&path, body).unwrap();
+}
+
+fn tail_json_bodies(home: &PathBuf, args: &[&str]) -> Vec<String> {
+    let out = run(home, args);
+    assert!(out.status.success(), "tail failed: {:?}", out);
+    let s = String::from_utf8(out.stdout).unwrap();
+    s.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap();
+            v["body"].as_str().unwrap().to_string()
+        })
+        .collect()
+}
+
+/// wire #79 — without `--oldest`, `wire tail --limit N` returns the LAST N
+/// events (newest-N) sorted chronologically (oldest-of-window first, newest
+/// last), matching `tail -n` orientation. Previously returned the FIRST N.
+#[test]
+fn tail_default_returns_newest_n() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul", "--offline"]);
+    seed_inbox(&home, "willard", 10);
+
+    let bodies = tail_json_bodies(&home, &["tail", "willard", "--json", "--limit", "3"]);
+    assert_eq!(
+        bodies,
+        vec!["evt-08", "evt-09", "evt-10"],
+        "default tail --limit N must return newest N (chronological order)"
+    );
+}
+
+/// wire #79 — `--oldest` preserves FIFO behaviour for operators who want to
+/// replay an inbox from the start (e.g. forensic walks).
+#[test]
+fn tail_oldest_flag_returns_first_n() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul", "--offline"]);
+    seed_inbox(&home, "willard", 10);
+
+    let bodies = tail_json_bodies(
+        &home,
+        &["tail", "willard", "--json", "--limit", "3", "--oldest"],
+    );
+    assert_eq!(
+        bodies,
+        vec!["evt-01", "evt-02", "evt-03"],
+        "tail --oldest --limit N must return first N (FIFO)"
+    );
+}
+
+/// wire #79 — `--limit 0` returns every event in chronological order, in both
+/// orientations.
+#[test]
+fn tail_limit_zero_returns_all_chronological() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul", "--offline"]);
+    seed_inbox(&home, "willard", 5);
+
+    let default_bodies = tail_json_bodies(&home, &["tail", "willard", "--json", "--limit", "0"]);
+    assert_eq!(
+        default_bodies,
+        vec!["evt-01", "evt-02", "evt-03", "evt-04", "evt-05"]
+    );
+
+    let oldest_bodies = tail_json_bodies(
+        &home,
+        &["tail", "willard", "--json", "--limit", "0", "--oldest"],
+    );
+    assert_eq!(default_bodies, oldest_bodies);
+}
+
+/// wire #79 — without a peer filter, events from multiple peer files are
+/// interleaved by timestamp before windowing. Two peers with alternating
+/// timestamps; the newest 3 events must come from BOTH files, not just one
+/// (which is what the old per-file `break` logic would have produced).
+#[test]
+fn tail_multi_peer_sorts_by_timestamp() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul", "--offline"]);
+    let dir = home.join("state/wire/inbox");
+    std::fs::create_dir_all(&dir).unwrap();
+    // alice: events at :01, :03, :05  bob: events at :02, :04, :06
+    std::fs::write(
+        dir.join("alice.jsonl"),
+        concat!(
+            r#"{"timestamp":"2024-01-01T00:00:01Z","from":"did:wire:alice","kind":2,"type":"decision","body":"a1"}"#, "\n",
+            r#"{"timestamp":"2024-01-01T00:00:03Z","from":"did:wire:alice","kind":2,"type":"decision","body":"a3"}"#, "\n",
+            r#"{"timestamp":"2024-01-01T00:00:05Z","from":"did:wire:alice","kind":2,"type":"decision","body":"a5"}"#, "\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("bob.jsonl"),
+        concat!(
+            r#"{"timestamp":"2024-01-01T00:00:02Z","from":"did:wire:bob","kind":2,"type":"decision","body":"b2"}"#, "\n",
+            r#"{"timestamp":"2024-01-01T00:00:04Z","from":"did:wire:bob","kind":2,"type":"decision","body":"b4"}"#, "\n",
+            r#"{"timestamp":"2024-01-01T00:00:06Z","from":"did:wire:bob","kind":2,"type":"decision","body":"b6"}"#, "\n",
+        ),
+    )
+    .unwrap();
+
+    let bodies = tail_json_bodies(&home, &["tail", "--json", "--limit", "3"]);
+    assert_eq!(
+        bodies,
+        vec!["b4", "a5", "b6"],
+        "expected 3 newest across peers (interleaved by timestamp)"
+    );
+}
