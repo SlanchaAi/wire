@@ -424,7 +424,6 @@ impl Relay {
                 .route("/", get(landing_index))
                 .route("/favicon.svg", get(landing_favicon))
                 .route("/og.png", get(landing_og))
-                .route("/demo.cast", get(landing_demo_cast))
                 .route("/install", get(landing_install_sh))
                 .route("/install.sh", get(landing_install_sh))
                 .route("/openshell-policy.sh", get(landing_openshell_policy_sh))
@@ -750,18 +749,6 @@ async fn landing_og() -> impl IntoResponse {
             (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         OG_PNG,
-    )
-}
-
-async fn landing_demo_cast() -> impl IntoResponse {
-    static DEMO_CAST: &[u8] = include_bytes!("../landing/demo.cast");
-    (
-        StatusCode::OK,
-        [
-            (axum::http::header::CONTENT_TYPE, "application/x-asciicast"),
-            (axum::http::header::CACHE_CONTROL, "public, max-age=3600"),
-        ],
-        DEMO_CAST,
     )
 }
 
