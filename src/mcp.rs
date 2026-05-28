@@ -1057,7 +1057,7 @@ fn tool_whoami() -> Result<Value, String> {
     let capabilities = card
         .get("capabilities")
         .cloned()
-        .unwrap_or_else(|| json!(["wire/v3.1"]));
+        .unwrap_or_else(|| json!(["wire/v3.2"]));
     // v0.12: surface the DID-derived persona (nickname + emoji + palette)
     // that the CLI `wire whoami`/`here` already emit, so agents and toasts
     // see the persona, not just the raw handle.
