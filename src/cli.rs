@@ -12815,6 +12815,59 @@ fn strip_proto(url: &str) -> String {
 /// because case (2) — two collapsed terminals with DIFFERENT typed
 /// nicknames that BOTH resolve to the shared DID — can't be caught
 /// without the post-resolution comparison.
+/// Issue #69 follow-up to #15: predicate "does this error smell like a
+/// 4xx slot rotation?" — used by `try_reresolve_peer_on_slot_4xx` to
+/// decide whether to spend a whois RTT on a re-resolve.
+///
+/// Original #15 implementation used `last_err.contains("410") ||
+/// last_err.contains("404")`, which false-triggers on any unrelated
+/// substring with `"410"`/`"404"` in it — e.g. `"slot 4101 expired"`,
+/// `"request_id=410abc..."`, `"received 4040 bytes"`. False-trigger cost
+/// is a single wasted whois per push call per peer (rate-limited by
+/// `already_tried`), but it muddies the doctor diagnostic by inserting
+/// spurious "peer slot rotated" log lines.
+///
+/// This predicate gates on the status code appearing as a *whole token*
+/// — preceded by start-of-string / space / colon / tab / newline AND
+/// followed by end-of-string / space / colon / tab / newline. That
+/// matches both real-world shapes:
+///
+/// - `reqwest::StatusCode` Display, via `relay_client.rs` line ~339
+///   `format!("post_event failed: {status}: {detail}")` →
+///   `"post_event failed: 410 Gone: <body>"` (token `"410"` is followed
+///   by space).
+/// - UDS bare-`u16` Display, via `relay_client.rs` line ~227
+///   `format!("post_event (uds {socket_path}) failed: {status}: ...")` →
+///   `"post_event (uds /tmp/...sock) failed: 410: <body>"` (token
+///   `"410"` is followed by colon).
+///
+/// And rejects the false-positive shapes documented in
+/// `error_smells_like_slot_4xx_tests` below.
+fn error_smells_like_slot_4xx(last_err: &str) -> bool {
+    fn is_token_boundary(b: u8) -> bool {
+        matches!(b, b' ' | b':' | b'\t' | b'\n' | b'\r')
+    }
+    let bytes = last_err.as_bytes();
+    for code in ["410", "404"] {
+        let code_bytes = code.as_bytes();
+        let mut search_from = 0usize;
+        while let Some(rel) = last_err[search_from..].find(code) {
+            let abs = search_from + rel;
+            let end = abs + code_bytes.len();
+            let before_ok = abs == 0 || is_token_boundary(bytes[abs - 1]);
+            let after_ok = end == bytes.len() || is_token_boundary(bytes[end]);
+            if before_ok && after_ok {
+                return true;
+            }
+            // Step past this candidate to find the next occurrence; using
+            // `+ 1` (rather than `+ code_bytes.len()`) keeps the scan
+            // cheap and guarantees forward progress even on overlap.
+            search_from = abs + 1;
+        }
+    }
+    false
+}
+
 /// Issue #15: detect a 4xx-shaped push failure that smells like "slot
 /// rotated by peer" and update the peer's pin in place with the freshly
 /// resolved slot from the relay's handle directory.
@@ -12829,7 +12882,14 @@ fn strip_proto(url: &str) -> String {
 ///   existing "skipped" path.
 ///
 /// Only triggers when:
-///   - The error string contains "410" or "404" (the slot-rotation shape).
+///   - The error string carries a 4xx slot-rotation status token (`410`/`404`)
+///     as a *whole token* — preceded by start/space/colon/tab/newline and
+///     followed by end/space/colon/tab/newline. This matches both the
+///     `reqwest::StatusCode` Display shape (`": 410 Gone"`) and the UDS
+///     bare-`u16` shape (`": 410:"`) emitted by `post_event` in
+///     `src/relay_client.rs`, while rejecting substring false-positives
+///     like `"slot 4101 expired"` or `"request_id=410abc..."`. See
+///     `error_smells_like_slot_4xx` below.
 ///   - The peer has a pinned `relay_url` we can parse a handle@domain from.
 ///   - The caller hasn't already re-resolved this peer in the current push
 ///     call (caller's responsibility — pass `already_tried` from a set kept
@@ -12848,7 +12908,7 @@ fn try_reresolve_peer_on_slot_4xx(
     last_err: &str,
     already_tried: &std::collections::HashSet<String>,
 ) -> Result<bool> {
-    if !(last_err.contains("410") || last_err.contains("404")) {
+    if !error_smells_like_slot_4xx(last_err) {
         // Not the slot-rotation shape. Don't waste a whois on this.
         return Ok(false);
     }
@@ -14168,5 +14228,99 @@ mod slot_reresolve_tests {
             err.contains("federation endpoint"),
             "no-federation error must name the problem: {err}"
         );
+    }
+
+    /// Issue #69: pin the word-boundary behavior of
+    /// `error_smells_like_slot_4xx`. Prior implementation used a bare
+    /// `contains("410") || contains("404")` substring match, which
+    /// false-triggered on any unrelated error string containing those
+    /// digits — e.g. slot ids that happen to start with `410`, request
+    /// IDs, byte counts, etc.  Each false-positive cost a wasted whois
+    /// per peer per push and a misleading "peer slot rotated" log line.
+    ///
+    /// These tests pin three classes:
+    ///   - Real reqwest StatusCode Display shapes (`": 410 Gone"`,
+    ///     `": 404 Not Found"`) trigger.
+    ///   - Real UDS bare-`u16` shapes (`": 410:"`, `": 404:"`) trigger.
+    ///   - Substring lookalikes (`"slot 4101 expired"`,
+    ///     `"request_id=410abc"`, `"received 4040 bytes"`,
+    ///     `"event 0x4104"`) do NOT trigger.
+    #[test]
+    fn error_smells_like_slot_4xx_matches_reqwest_status_display_shape() {
+        // reqwest::StatusCode Display is "<u16> <reason>", embedded in
+        // the post_event failure format string as "...failed: <status>: <detail>".
+        assert!(error_smells_like_slot_4xx(
+            "post_event failed: 410 Gone: slot rotated by peer"
+        ));
+        assert!(error_smells_like_slot_4xx(
+            "post_event failed: 404 Not Found: handle no longer claimed"
+        ));
+    }
+
+    #[test]
+    fn error_smells_like_slot_4xx_matches_uds_bare_u16_shape() {
+        // UDS path formats status as a bare u16, so the shape is
+        // "...failed: 410: <detail>" with the status flanked by spaces
+        // and colons (no reason phrase).
+        assert!(error_smells_like_slot_4xx(
+            "post_event (uds /tmp/wire-relay.sock) failed: 410: gone"
+        ));
+        assert!(error_smells_like_slot_4xx(
+            "post_event (uds /tmp/wire-relay.sock) failed: 404: not found"
+        ));
+    }
+
+    #[test]
+    fn error_smells_like_slot_4xx_rejects_substring_lookalikes() {
+        // The bug being fixed: the prior `contains("410")` predicate
+        // matched ALL of these, burning a whois RTT and emitting a
+        // spurious "peer slot rotated" log line each time.
+        let false_positives = [
+            "push aborted: slot 4101 expired",
+            "post_event failed: 502 Bad Gateway: request_id=410abc-deadbeef",
+            "post_event failed: 500: received 4040 bytes, expected envelope",
+            "post_event failed: 500: event 0x4104 malformed",
+            "post_event failed: 503: backlog=4102 entries pending",
+            // 4044 is "received bytes" or anything containing 404 mid-token.
+            "post_event failed: 500: tx_id=4044beef",
+            // pure digit substrings inside identifiers / hashes:
+            "post_event failed: 500: hash=abc410def",
+        ];
+        for case in false_positives {
+            assert!(
+                !error_smells_like_slot_4xx(case),
+                "must NOT trigger re-resolve on substring lookalike: {case:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn error_smells_like_slot_4xx_handles_edge_positions() {
+        // Token at start of string (no preceding char).
+        assert!(error_smells_like_slot_4xx("410 Gone"));
+        assert!(error_smells_like_slot_4xx("404 Not Found"));
+        // Token at end of string (no trailing char).
+        assert!(error_smells_like_slot_4xx("got 410"));
+        assert!(error_smells_like_slot_4xx("got 404"));
+        // Tab and newline as separators (logs sometimes carry these).
+        assert!(error_smells_like_slot_4xx("post_event failed:\t410\tGone"));
+        assert!(error_smells_like_slot_4xx("post_event failed:\n410\nGone"));
+        // Pure digit-only input that IS the code — token at start AND end.
+        assert!(error_smells_like_slot_4xx("410"));
+        assert!(error_smells_like_slot_4xx("404"));
+        // Empty / no-match.
+        assert!(!error_smells_like_slot_4xx(""));
+        assert!(!error_smells_like_slot_4xx("no relevant status"));
+        // 411-414, 401-403, 405-409 must NOT trigger (only 410/404 are
+        // the slot-rotation shape per issue #15).
+        assert!(!error_smells_like_slot_4xx(
+            "post_event failed: 401 Unauthorized"
+        ));
+        assert!(!error_smells_like_slot_4xx(
+            "post_event failed: 403 Forbidden"
+        ));
+        assert!(!error_smells_like_slot_4xx(
+            "post_event failed: 411 Length Required"
+        ));
     }
 }
