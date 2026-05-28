@@ -10952,6 +10952,258 @@ fn upgrade_kill_set(
     k
 }
 
+/// One distinct `wire` binary discovered on `$PATH`, with enrichment used by
+/// the `wire upgrade` PATH-shadowing diagnostic (issue #80).
+///
+/// "Distinct" = unique canonical path; symlink chains collapse to a single
+/// entry at the FIRST PATH position that surfaced them. This is what
+/// `which -a` would show modulo symlink dedup.
+#[derive(Debug, Clone)]
+struct PathWireBinary {
+    /// PATH entry under which this binary was discovered (NOT canonicalized,
+    /// so the operator sees the path they wrote in their shell config).
+    path: std::path::PathBuf,
+    /// Canonical filesystem path (symlinks resolved). Used for dedup so a
+    /// symlink that points at the real binary doesn't show up as a second
+    /// "distinct" entry.
+    canonical: std::path::PathBuf,
+    /// SHA-256 hex of the binary contents. `None` if unreadable (rare; would
+    /// require a race or perms change after the existence check).
+    sha256: Option<String>,
+    /// Last-modified time of the binary. `None` if metadata unreadable.
+    mtime: Option<std::time::SystemTime>,
+    /// Zero-based PATH position (after dedup). `0` = the binary bare `wire`
+    /// resolves to (the winner of PATH precedence).
+    path_index: usize,
+    /// True iff this is the binary currently executing the running `wire
+    /// upgrade` process (i.e. `std::env::current_exe()` canonicalized matches).
+    /// When this is NOT the `path_index == 0` entry, the operator just ran
+    /// `wire upgrade` against a SHADOWED binary and bare `wire` will continue
+    /// to use the active one — the central footgun #80 exists to catch.
+    is_current_exe: bool,
+}
+
+impl PathWireBinary {
+    /// True iff bare `wire` resolves here (the PATH-precedence winner).
+    fn is_active(&self) -> bool {
+        self.path_index == 0
+    }
+    /// Short sha256 (first 8 hex chars) for compact display; `?` filler when
+    /// the hash couldn't be computed.
+    fn sha256_short(&self) -> String {
+        self.sha256
+            .as_deref()
+            .map(|s| s[..s.len().min(8)].to_string())
+            .unwrap_or_else(|| "????????".to_string())
+    }
+    /// Pretty mtime in UTC RFC3339 seconds; `?` when missing or unrepresentable.
+    fn mtime_display(&self) -> String {
+        let Some(ts) = self.mtime else {
+            return "?".to_string();
+        };
+        let secs = match ts.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_secs() as i64,
+            Err(_) => return "?".to_string(),
+        };
+        time::OffsetDateTime::from_unix_timestamp(secs)
+            .ok()
+            .and_then(|dt| {
+                dt.format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            })
+            .unwrap_or_else(|| "?".to_string())
+    }
+}
+
+/// SHA-256 hex of a file's contents (streamed; safe for any size).
+fn sha256_file(p: &std::path::Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut f = std::fs::File::open(p).with_context(|| format!("opening {}", p.display()))?;
+    let mut h = Sha256::new();
+    std::io::copy(&mut f, &mut h).with_context(|| format!("hashing {}", p.display()))?;
+    Ok(hex::encode(h.finalize()))
+}
+
+/// Walk `$PATH` left-to-right, find all distinct files named `wire` (plus
+/// `wire.exe` on Windows), and return them in PATH order with sha256+mtime
+/// enrichment. Issue #80.
+///
+/// Invariants:
+/// - First entry (`path_index == 0`) is what bare `wire` resolves to.
+/// - Symlink chains collapse: only the first PATH position surfaces; later
+///   entries pointing at the same canonical file are dropped (NOT counted
+///   as a "shadow").
+/// - Best-effort: I/O errors degrade to `None` on per-binary fields,
+///   never abort the whole walk.
+/// - Empty / missing PATH → empty Vec (NOT an error; the caller is already
+///   running, so SOMETHING resolved this binary, just not via PATH).
+fn enumerate_path_wire_binaries() -> Vec<PathWireBinary> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let current_exe_canon: Option<std::path::PathBuf> = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok());
+    enumerate_path_wire_binaries_from(&path, current_exe_canon.as_deref())
+}
+
+/// Pure (testable) inner of [`enumerate_path_wire_binaries`]: takes the PATH
+/// string and an optional already-canonicalized `current_exe` so tests don't
+/// have to mutate process-wide environment (which would race with any other
+/// test that reads PATH).
+fn enumerate_path_wire_binaries_from(
+    path: &str,
+    current_exe_canon: Option<&std::path::Path>,
+) -> Vec<PathWireBinary> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    // Unix splits PATH on ':', Windows on ';'. We don't use
+    // `std::env::split_paths` because we want to be explicit and consistent
+    // with the existing v0.6.8 detection that this helper replaces (which
+    // used `.split(':')` unconditionally — a Unix-only bug; fixed here).
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    let names: &[&str] = if cfg!(windows) {
+        // Try .exe first — that's what CreateProcess resolves bare `wire` to
+        // under PATHEXT. A plain `wire` script (e.g. msys) only wins if
+        // there's no wire.exe in the same directory.
+        &["wire.exe", "wire"]
+    } else {
+        &["wire"]
+    };
+
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let mut out: Vec<PathWireBinary> = Vec::new();
+    for dir in path.split(separator) {
+        if dir.is_empty() {
+            continue;
+        }
+        for name in names {
+            let candidate = std::path::PathBuf::from(dir).join(name);
+            // `is_file()` (not `.exists()`) so a directory named `wire`
+            // doesn't false-positive — `.exists()` returns true for dirs.
+            if !candidate.is_file() {
+                continue;
+            }
+            let canon = candidate
+                .canonicalize()
+                .unwrap_or_else(|_| candidate.clone());
+            if !seen.insert(canon.clone()) {
+                // An earlier PATH entry already surfaced this canonical file
+                // (symlink chain). Don't double-count as a shadow.
+                break;
+            }
+            let meta = std::fs::metadata(&canon).ok();
+            let mtime = meta.as_ref().and_then(|m| m.modified().ok());
+            let sha256 = sha256_file(&canon).ok();
+            let is_current_exe = current_exe_canon
+                .map(|c| c == canon.as_path())
+                .unwrap_or(false);
+            let path_index = out.len();
+            out.push(PathWireBinary {
+                path: candidate,
+                canonical: canon,
+                sha256,
+                mtime,
+                path_index,
+                is_current_exe,
+            });
+            // One entry per PATH dir — don't surface both wire AND wire.exe
+            // from the same directory.
+            break;
+        }
+    }
+    out
+}
+
+/// Render a multi-line WARN message for the PATH-shadow case, or `None` if
+/// there's nothing to warn about. Issue #80.
+///
+/// Triggers (any one fires the warning):
+/// - `>= 2 distinct wire binaries` on PATH (classic shadow case).
+/// - Exactly 1 binary on PATH AND that binary isn't the one currently
+///   running this `wire upgrade` (operator ran an off-PATH binary; bare
+///   `wire` would resolve to a DIFFERENT binary that this upgrade just
+///   bypassed).
+/// - `0 binaries` on PATH at all (this `wire upgrade` ran via an absolute
+///   path; bare `wire` would fail in any future shell).
+fn path_shadow_warning(bins: &[PathWireBinary]) -> Option<String> {
+    let any_current = bins.iter().any(|b| b.is_current_exe);
+    let multi = bins.len() >= 2;
+    let off_path = !bins.is_empty() && !any_current;
+    let none_on_path = bins.is_empty();
+    if !multi && !off_path && !none_on_path {
+        return None;
+    }
+    let mut out = String::new();
+    if multi {
+        out.push_str(&format!(
+            "WARN: {} distinct `wire` binaries on PATH — older entries can shadow your fresh install:\n",
+            bins.len()
+        ));
+        for b in bins {
+            let mut tags: Vec<&str> = Vec::new();
+            if b.is_active() {
+                tags.push("ACTIVE (bare `wire` resolves here)");
+            }
+            if b.is_current_exe {
+                tags.push("THIS upgrade ran against this binary");
+            }
+            let tag_str = if tags.is_empty() {
+                String::new()
+            } else {
+                format!("  ← {}", tags.join("; "))
+            };
+            out.push_str(&format!(
+                "  [{}] {}  (sha256:{}  mtime:{}){}\n",
+                b.path_index,
+                b.path.display(),
+                b.sha256_short(),
+                b.mtime_display(),
+                tag_str,
+            ));
+        }
+        if !any_current {
+            out.push_str(
+                "  NOTE: none of the PATH-resident binaries is the one running this `wire upgrade`.\n",
+            );
+            out.push_str(
+                "        Your upgrade will NOT affect bare `wire` calls in shells, scripts, or peer agents.\n",
+            );
+        } else if !bins[0].is_current_exe {
+            out.push_str(
+                "  Bare `wire` calls (shells, scripts, daemons, peer agents) will use the\n",
+            );
+            out.push_str(
+                "  ACTIVE binary [0], NOT the one you just upgraded. Recommended fixes:\n",
+            );
+            out.push_str(&format!(
+                "    - rm {}  (or symlink it to the upgraded binary)\n",
+                bins[0].path.display(),
+            ));
+            out.push_str(
+                "    - or reorder PATH so the upgraded binary's directory precedes the active one\n",
+            );
+            out.push_str("  Verify with: which -a wire\n");
+        }
+    } else if off_path {
+        // Single PATH binary, but THIS upgrade ran against a different file.
+        let active = &bins[0];
+        out.push_str("WARN: this `wire upgrade` is running against an off-PATH binary;\n");
+        out.push_str(&format!(
+            "      bare `wire` resolves to {} (sha256:{}),\n",
+            active.path.display(),
+            active.sha256_short(),
+        ));
+        out.push_str(
+            "      which was NOT touched by this upgrade. Shells, scripts, and peer agents\n",
+        );
+        out.push_str("      will continue to invoke the old binary.\n");
+    } else if none_on_path {
+        out.push_str("WARN: no `wire` binary on PATH; bare `wire` will fail in future shells.\n");
+        out.push_str("      This upgrade ran against an absolute-path invocation only.\n");
+    }
+    Some(out.trim_end().to_string())
+}
+
 #[cfg(test)]
 mod upgrade_tests {
     use super::*;
@@ -10978,6 +11230,138 @@ mod upgrade_tests {
 
         // Uninitialized session (no own daemon): only true orphans.
         assert_eq!(upgrade_kill_set(None, &[999], &HashSet::new()), vec![999]);
+    }
+
+    // ----- issue #80: PATH-shadow detection -----
+    //
+    // We test the pure inner `enumerate_path_wire_binaries_from(path, cur)`
+    // so we never mutate the process-wide PATH — that would race with any
+    // other test in the binary that reads PATH (e.g. `process_alive_self`
+    // resolving the test binary via PATH).
+
+    fn write_fake_wire(dir: &std::path::Path, body: &[u8]) -> std::path::PathBuf {
+        use std::io::Write;
+        let p = dir.join("wire");
+        let mut f = std::fs::File::create(&p).expect("create fake wire");
+        f.write_all(body).expect("write fake wire");
+        drop(f);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(&p).unwrap().permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(&p, perm).unwrap();
+        }
+        p
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore = "PATH separator + .exe semantics differ")]
+    fn enumerate_finds_no_binaries_when_path_empty() {
+        let bins = enumerate_path_wire_binaries_from("", None);
+        assert!(
+            bins.is_empty(),
+            "empty PATH yields no binaries, got {bins:?}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore = "PATH separator + .exe semantics differ")]
+    fn enumerate_detects_two_distinct_binaries_in_path_order() {
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let p1 = write_fake_wire(d1.path(), b"#!/bin/sh\necho A\n");
+        let p2 = write_fake_wire(d2.path(), b"#!/bin/sh\necho B\n");
+        let path = format!("{}:{}", d1.path().display(), d2.path().display());
+
+        let bins = enumerate_path_wire_binaries_from(&path, None);
+        assert_eq!(bins.len(), 2, "expected two distinct binaries: {bins:?}");
+        assert_eq!(bins[0].path_index, 0);
+        assert_eq!(bins[1].path_index, 1);
+        assert!(bins[0].is_active(), "first PATH entry is active");
+        assert!(!bins[1].is_active(), "second PATH entry is not active");
+        // sha256 differs because contents differ.
+        assert_ne!(
+            bins[0].sha256, bins[1].sha256,
+            "distinct contents must hash differently"
+        );
+        // path field is the un-canonicalized PATH-relative shape.
+        assert_eq!(bins[0].path, p1);
+        assert_eq!(bins[1].path, p2);
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore = "PATH separator + symlink semantics differ")]
+    fn enumerate_collapses_symlink_chains_to_one_entry() {
+        let real_dir = tempfile::tempdir().unwrap();
+        let link_dir = tempfile::tempdir().unwrap();
+        let real = write_fake_wire(real_dir.path(), b"#!/bin/sh\necho real\n");
+        let link = link_dir.path().join("wire");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // Put the SYMLINK first in PATH; the real binary second. Both
+        // resolve to the same canonical file — should collapse to ONE entry
+        // at the first PATH position.
+        let path = format!(
+            "{}:{}",
+            link_dir.path().display(),
+            real_dir.path().display()
+        );
+        let bins = enumerate_path_wire_binaries_from(&path, None);
+        assert_eq!(
+            bins.len(),
+            1,
+            "symlink chain must collapse to a single entry: {bins:?}"
+        );
+        assert!(bins[0].is_active());
+        // path is the symlink (what the operator wrote), canonical is the real file.
+        assert_eq!(bins[0].path, link);
+        assert_eq!(bins[0].canonical, real.canonicalize().unwrap());
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore = "PATH separator + .exe semantics differ")]
+    fn shadow_warning_off_path_when_current_exe_not_on_path() {
+        // One binary on PATH, but current_exe points somewhere else.
+        // The off-PATH branch fires.
+        let d = tempfile::tempdir().unwrap();
+        write_fake_wire(d.path(), b"#!/bin/sh\necho only\n");
+        let elsewhere = tempfile::tempdir().unwrap();
+        let cur = elsewhere.path().join("not-on-path-wire");
+        let bins = enumerate_path_wire_binaries_from(&d.path().display().to_string(), Some(&cur));
+        assert_eq!(bins.len(), 1);
+        assert!(!bins[0].is_current_exe);
+        let warn = path_shadow_warning(&bins).expect("off-path single bin must warn");
+        assert!(
+            warn.contains("off-PATH binary"),
+            "off-path WARN must mention off-PATH; got: {warn}"
+        );
+    }
+
+    #[test]
+    fn shadow_warning_fires_when_no_binaries_at_all() {
+        let bins: Vec<PathWireBinary> = Vec::new();
+        let warn = path_shadow_warning(&bins).expect("empty must warn");
+        assert!(warn.contains("no `wire` binary on PATH"), "got: {warn}");
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore = "PATH separator differs")]
+    fn shadow_warning_multi_binaries_names_active_and_recommends_fix() {
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        write_fake_wire(d1.path(), b"published\n");
+        write_fake_wire(d2.path(), b"head\n");
+        let path = format!("{}:{}", d1.path().display(), d2.path().display());
+        let bins = enumerate_path_wire_binaries_from(&path, None);
+        let warn = path_shadow_warning(&bins).expect("two distinct bins must warn");
+        assert!(warn.contains("2 distinct"), "got: {warn}");
+        assert!(warn.contains("ACTIVE"), "must mark the active binary");
+        assert!(
+            warn.contains("which -a wire") || warn.contains("none of the PATH-resident"),
+            "must guide the operator to a fix; got: {warn}"
+        );
     }
 }
 
@@ -11066,20 +11450,26 @@ fn cmd_upgrade(check_only: bool, local: bool, as_json: bool) -> Result<()> {
             .filter(|s| s.daemon_running)
             .map(|s| s.name.clone())
             .collect();
-        let mut path_dupes: Vec<String> = Vec::new();
-        if let Ok(path) = std::env::var("PATH") {
-            let mut seen: std::collections::HashSet<std::path::PathBuf> =
-                std::collections::HashSet::new();
-            for dir in path.split(':') {
-                let candidate = std::path::PathBuf::from(dir).join("wire");
-                if candidate.exists() {
-                    let canon = candidate.canonicalize().unwrap_or(candidate);
-                    if seen.insert(canon.clone()) {
-                        path_dupes.push(canon.to_string_lossy().into_owned());
-                    }
-                }
-            }
-        }
+        let path_bins = enumerate_path_wire_binaries();
+        let path_dupes: Vec<String> = path_bins
+            .iter()
+            .map(|b| b.canonical.to_string_lossy().into_owned())
+            .collect();
+        let path_binaries_detail: Vec<serde_json::Value> = path_bins
+            .iter()
+            .map(|b| {
+                json!({
+                    "path": b.path.to_string_lossy(),
+                    "canonical": b.canonical.to_string_lossy(),
+                    "sha256": b.sha256,
+                    "mtime_rfc3339": b.mtime.map(|_| b.mtime_display()),
+                    "path_index": b.path_index,
+                    "is_active": b.is_active(),
+                    "is_current_exe": b.is_current_exe,
+                })
+            })
+            .collect();
+        let path_warning_check = path_shadow_warning(&path_bins);
         // v0.7.3: enumerate which service units WOULD be refreshed.
         // Read-only — `status_kind` doesn't touch anything.
         let installed_service_kinds: Vec<&'static str> = [
@@ -11110,7 +11500,9 @@ fn cmd_upgrade(check_only: bool, local: bool, as_json: bool) -> Result<()> {
             "would_refresh_services": installed_service_kinds,
             "session_daemons_running": sessions_with_daemons,
             "path_binaries": path_dupes,
+            "path_binaries_detail": path_binaries_detail,
             "path_duplicate_warning": path_dupes.len() > 1,
+            "path_warning": path_warning_check,
         });
         if as_json {
             println!("{}", serde_json::to_string(&report)?);
@@ -11156,15 +11548,11 @@ fn cmd_upgrade(check_only: bool, local: bool, as_json: bool) -> Result<()> {
                     sessions_with_daemons.join(", ")
                 );
             }
-            if path_dupes.len() > 1 {
-                println!(
-                    "  PATH warning:     {} distinct `wire` binaries on PATH:",
-                    path_dupes.len()
-                );
-                for b in &path_dupes {
-                    println!("                      {b}");
+            if let Some(w) = &path_warning_check {
+                println!("  PATH check:");
+                for line in w.lines() {
+                    println!("    {line}");
                 }
-                println!("                    operators should remove the stale ones");
             }
         }
         return Ok(());
@@ -11225,29 +11613,26 @@ fn cmd_upgrade(check_only: bool, local: bool, as_json: bool) -> Result<()> {
     // multiple distinct files on $PATH, surface the conflict — operators
     // get bitten when an old binary at /usr/local/bin shadows a fresh
     // ~/.local/bin install (or vice versa). Warning only; no auto-fix.
-    let mut path_dupes: Vec<String> = Vec::new();
-    if let Ok(path) = std::env::var("PATH") {
-        let mut seen: std::collections::HashSet<std::path::PathBuf> =
-            std::collections::HashSet::new();
-        for dir in path.split(':') {
-            let candidate = std::path::PathBuf::from(dir).join("wire");
-            if candidate.exists() {
-                let canon = candidate.canonicalize().unwrap_or(candidate);
-                if seen.insert(canon.clone()) {
-                    path_dupes.push(canon.to_string_lossy().into_owned());
-                }
-            }
-        }
-    }
-    let path_warning = if path_dupes.len() > 1 {
-        Some(format!(
-            "WARN: {} distinct `wire` binaries on PATH — old versions can shadow the fresh install:\n  {}",
-            path_dupes.len(),
-            path_dupes.join("\n  ")
-        ))
-    } else {
-        None
-    };
+    let path_bins = enumerate_path_wire_binaries();
+    let path_dupes: Vec<String> = path_bins
+        .iter()
+        .map(|b| b.canonical.to_string_lossy().into_owned())
+        .collect();
+    let path_binaries_detail: Vec<Value> = path_bins
+        .iter()
+        .map(|b| {
+            json!({
+                "path": b.path.to_string_lossy(),
+                "canonical": b.canonical.to_string_lossy(),
+                "sha256": b.sha256,
+                "mtime_rfc3339": b.mtime.map(|_| b.mtime_display()),
+                "path_index": b.path_index,
+                "is_active": b.is_active(),
+                "is_current_exe": b.is_current_exe,
+            })
+        })
+        .collect();
+    let path_warning = path_shadow_warning(&path_bins);
 
     // 4d. v0.7.3 NEW: refresh installed service units so they point at
     // the freshly-installed binary path. Without this step, an upgrade
@@ -11324,6 +11709,7 @@ fn cmd_upgrade(check_only: bool, local: bool, as_json: bool) -> Result<()> {
                 "cli_version": cli_version,
                 "session_respawns": session_respawns,
                 "path_binaries": path_dupes,
+                "path_binaries_detail": path_binaries_detail,
                 "path_warning": path_warning,
             }))?
         );
