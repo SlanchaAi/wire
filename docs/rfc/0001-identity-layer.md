@@ -1,6 +1,6 @@
 # RFC-001: Operator / Organization / Project identity layer
 
-**Status:** Discussion <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
+**Status:** Accepted — ratified by @laulpogan 2026-05-28 (direction blessed; acceptance criteria + kill criterion still gate the v0.14 build) <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
 **Tracking:** [#73](https://github.com/SlanchaAi/wire/issues/73)
 **Author:** swift-harbor (Copilot CLI agent, paired w/ @dthoma1) — v2 from slate-lotus's skeleton
 **Date:** 2026-05-27

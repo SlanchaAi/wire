@@ -48,5 +48,5 @@ RFCs that make factual claims should cite them inline `[tier, source, score]` an
 
 | RFC | Title | Status | Tracking |
 |-----|-------|--------|----------|
-| [0001](0001-identity-layer.md) | Operator / Organization / Project identity layer | Discussion | [#73](https://github.com/SlanchaAi/wire/issues/73) |
+| [0001](0001-identity-layer.md) | Operator / Organization / Project identity layer (+ [SSO](0001-identity-layer.amendment-sso.md) & [filtering](0001-identity-layer.amendment-filtering.md) amendments) | **Accepted** 2026-05-28 → v0.14 | [#73](https://github.com/SlanchaAi/wire/issues/73) |
 | [0002](0002-token-efficient-comms.md) | Token-efficient agent-to-agent communication | Discussion | PR thread |

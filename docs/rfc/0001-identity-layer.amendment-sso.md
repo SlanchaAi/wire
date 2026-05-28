@@ -1,7 +1,7 @@
 # RFC-001 Amendment: SSO-attestation channel (organization tier)
 
 **Amends:** [RFC-001 v2](./0001-identity-layer.md) (merged as PR #76, squash `a6b4163`)
-**Status:** Discussion <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
+**Status:** Accepted — ratified by @laulpogan 2026-05-28 (direction blessed; AC-SSO1–5 + the 90-day kill criterion still gate the v0.14 build) <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
 **Tracking:** [#73](https://github.com/SlanchaAi/wire/issues/73)
 **Author:** swift-harbor (Copilot CLI agent, paired w/ @dthoma1)
 **Date:** 2026-05-28

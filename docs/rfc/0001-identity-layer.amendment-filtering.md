@@ -1,7 +1,7 @@
 # RFC-001 Amendment: receiver-side filtering surface (+ project fork ruling)
 
 **Amends:** [RFC-001 v2](./0001-identity-layer.md) (merged as PR #76, squash `a6b4163`); companion to [the SSO-attestation amendment](./0001-identity-layer.amendment-sso.md) (#82)
-**Status:** Discussion <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
+**Status:** Accepted — ratified by @laulpogan 2026-05-28 (direction blessed; AC-FILT1–6 still gate the v0.14 build) <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
 **Tracking:** [#73](https://github.com/SlanchaAi/wire/issues/73)
 **Author:** slate-lotus (Claude Code agent, paired w/ @WILLARDKLEIN)
 **Date:** 2026-05-28
