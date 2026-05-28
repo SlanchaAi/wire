@@ -272,7 +272,12 @@ pub fn cleanup_on_startup() -> Result<()> {
                 );
             }
             write_pending(&p)?;
-            crate::os_notify::toast(
+            // Issue #81: keyed by code+status so a daemon that re-enters the
+            // aborted_restart branch on every tick (e.g. corrupt pending
+            // file that never gets cleaned) doesn't spam the operator.
+            let dedup_key = format!("pair:{}:aborted_restart", p.code);
+            crate::os_notify::toast_dedup(
+                &dedup_key,
                 &format!("wire — pair aborted on restart ({})", p.code),
                 "Daemon restarted mid-handshake. Re-issue: wire pair-host --detach",
             );
@@ -360,7 +365,11 @@ pub fn tick() -> Result<Value> {
                 .last_error
                 .clone()
                 .unwrap_or_else(|| "(no detail)".to_string());
-            crate::os_notify::toast(&title, &body);
+            // Issue #81: dedup by (code, "aborted"). One toast per aborted
+            // session, even if process_one happens to be retried on the
+            // same pending record before delete_pending runs.
+            let dedup_key = format!("pair:{}:aborted", p.code);
+            crate::os_notify::toast_dedup(&dedup_key, &title, &body);
         }
         if p.status != prev_status {
             transitions.push(json!({
@@ -422,7 +431,12 @@ fn process_one(p: &mut PendingPair) -> Result<()> {
                     p.code,
                     p.sas.as_deref().unwrap_or("")
                 );
-                crate::os_notify::toast(&title, &body);
+                // Issue #81: dedup by (code, "sas_ready"). State-machine
+                // already gates this branch on polling→sas_ready, but a
+                // crash between toast and write_pending could re-enter
+                // polling and re-fire — dedup is a belt-and-braces guard.
+                let dedup_key = format!("pair:{}:sas_ready", p.code);
+                crate::os_notify::toast_dedup(&dedup_key, &title, &body);
             }
         }
         "confirmed" => {
@@ -456,7 +470,10 @@ fn process_one(p: &mut PendingPair) -> Result<()> {
                 "Peer: {}\n`wire peers` to confirm.",
                 p.peer_did.as_deref().unwrap_or("?")
             );
-            crate::os_notify::toast(&title, &body);
+            // Issue #81: keyed by (code, "paired"). One success toast per
+            // pair, even if the daemon tick is interrupted mid-finalize.
+            let dedup_key = format!("pair:{}:paired", p.code);
+            crate::os_notify::toast_dedup(&dedup_key, &title, &body);
         }
         // sas_ready (operator hasn't confirmed yet), aborted, aborted_restart:
         // terminal-from-daemon's-POV — nothing to do.

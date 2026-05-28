@@ -13900,7 +13900,18 @@ fn os_notify_inbox_event(ev: &crate::inbox_watch::InboxEvent) {
         format!("wire ← {who} (UNVERIFIED)")
     };
     let body = format!("{}: {}", ev.kind, ev.body_preview);
-    crate::os_notify::toast(&title, &body);
+    // Issue #81: dedup by (peer, event_id) so that overlapping monitor
+    // sweeps / restarts with a torn cursor don't fire the same toast over
+    // and over. `event_id` may be empty for pre-v0.5 legacy events; fall
+    // back to the body preview in that case so the key still varies per
+    // event rather than collapsing every keyless event into one entry.
+    let id = if ev.event_id.is_empty() {
+        ev.body_preview.as_str()
+    } else {
+        ev.event_id.as_str()
+    };
+    let dedup_key = format!("inbox:{}:{}", ev.peer, id);
+    crate::os_notify::toast_dedup(&dedup_key, &title, &body);
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
