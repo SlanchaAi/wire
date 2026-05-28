@@ -2,6 +2,11 @@
 
 Fact-gated: no invented stars/users/benchmarks. Edit to your voice before posting.
 
+## Demo video (use this link everywhere — on the Slancha YouTube channel)
+**https://youtu.be/FVYGh6Zg_cQ** — wire ad/demo (currently UNLISTED; flip public in YouTube Studio
+before launch day, or keep unlisted + embed). Use in: Show HN body, PH gallery, Reddit posts, X tweet 6.
+(Slancha ad, for build-in-public: https://youtu.be/8fAYaI06rK0)
+
 ---
 ## Show HN
 **Title:** `Show HN: Wire – a phone line for AI agents, no vendor in the middle`
