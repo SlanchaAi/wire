@@ -1292,10 +1292,7 @@ fn tool_tail(args: &Value) -> Result<Value, String> {
     // `oldest=true` opts back into FIFO. Agents almost always want the
     // freshest inbox slice when re-tailing an established peer, not the
     // wire-init handshake noise.
-    let oldest = args
-        .get("oldest")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let oldest = args.get("oldest").and_then(Value::as_bool).unwrap_or(false);
     let inbox = config::inbox_dir().map_err(|e| e.to_string())?;
     if !inbox.exists() {
         return Ok(json!([]));
