@@ -224,6 +224,15 @@ pub fn post_event_to_endpoint(
             body.as_bytes(),
         )?;
         if !(200..300).contains(&status) {
+            // Format constraint: `cli::error_smells_like_slot_4xx` parses
+            // this error string to gate slot-rotation re-resolves. It
+            // matches `<status>` as a whole token bordered by space/colon
+            // (see issue #69). The current shape `: {status}: {body}`
+            // satisfies that — if you wrap the status differently
+            // (commas/brackets, `status=410`, JSON-encode it), update
+            // `error_smells_like_slot_4xx` in lockstep and add the new
+            // shape to its `slot_reresolve_tests` cases or peer slot
+            // rotations will silently stop auto-recovering.
             return Err(anyhow!(
                 "post_event (uds {socket_path}) failed: {status}: {}",
                 String::from_utf8_lossy(&body)
@@ -336,6 +345,15 @@ impl RelayClient {
         let status = resp.status();
         if !status.is_success() {
             let detail = resp.text().unwrap_or_default();
+            // Format constraint: `cli::error_smells_like_slot_4xx` parses
+            // this error string to gate slot-rotation re-resolves. It
+            // matches `<status>` as a whole token bordered by space/colon
+            // (see issue #69) — `reqwest::StatusCode` Display gives
+            // `"410 Gone"` which satisfies that. If you change the
+            // wrapping (commas/brackets, `status=410`, JSON-encode it),
+            // update `error_smells_like_slot_4xx` in lockstep and add the
+            // new shape to its `slot_reresolve_tests` cases or peer slot
+            // rotations will silently stop auto-recovering.
             return Err(anyhow!("post_event failed: {status}: {detail}"));
         }
         Ok(resp.json()?)
