@@ -13,7 +13,7 @@
 
 - Add three optional, **orthogonal-axis** claims to `agent-card.json`: `op_did` (operator), `org_did` (organization), `project` (routing tag). DID-derived session handle stays the one canonical name.
 - Express **orgs as a flavor of `wire group`** (v0.13.3): creator-signed roster, replaced by org-signed roster; attested via a DNS-TXT floor on the org's domain.
-- Introduce **`ORG_VERIFIED`** between `INTRODUCED` and `VERIFIED` on the bilateral tier ladder. Org membership *eases* pairing, **never substitutes for bilateral SAS** — the v0.5.14 cryptographic invariant is preserved.
+- Introduce **`ORG_VERIFIED`** between `UNTRUSTED` and `VERIFIED` on the bilateral tier ladder. Org membership *eases* pairing, **never substitutes for bilateral SAS** — the v0.5.14 cryptographic invariant is preserved.
 - Default ease-of-pair mechanism: **signed-card-on-discovery + one-tap accept** (Option B). Operator gets one notification per new org-mate session, taps once, reaches `ORG_VERIFIED`. Optional opt-in upgrade: **eager auto-pair** (Option A) for orgs that explicitly trade the tap for zero-friction.
 - Liveness: heartbeat on agent-card; relay marks slot stale after 24 h; roster GCs entries after 7 d. Project is a routing tag, **never a trust scope**.
 
@@ -127,18 +127,20 @@ The maintainer guardrail says `ORG_VERIFIED < VERIFIED, always`. That guardrail 
 
 ### 5. Tier ladder
 
+The bilateral `Tier` enum (`src/trust.rs:32`) is `{Untrusted, Verified, Attested, Trusted}`. This RFC inserts `ORG_VERIFIED` between `UNTRUSTED` and `VERIFIED`:
+
 ```
-UNTRUSTED → INTRODUCED → ORG_VERIFIED → VERIFIED → (ATTESTED, TRUSTED — reserved)
+UNTRUSTED → ORG_VERIFIED → VERIFIED → (ATTESTED, TRUSTED — reserved)
 ```
 
-`Tier::ORG_VERIFIED` is added between `INTRODUCED` and `VERIFIED` (extend the enum in `src/trust.rs`). Granted when:
+`Tier::ORG_VERIFIED` is added between `UNTRUSTED` and `VERIFIED` (extend the enum in `src/trust.rs`). Granted when:
 
 1. Peer presents a valid `org_memberships` entry with verified `member_cert`, AND
 2. Either: receiver has previously consented per-org (Option B path), OR receiver has set per-org `auto-pair` policy (Option A path).
 
 Promotion remains one-way. `Tier::VERIFIED` continues to require bilateral SPAKE2+SAS (the v0.5.14 invariant). A bilaterally-SAS-paired peer that *also* happens to be in a shared org is recorded at `VERIFIED`, not downgraded.
 
-**Two new tiers are not needed.** `INTRODUCED` already covers the introduce-pinning case (group-mate at no-tap, verify-only). `ORG_VERIFIED` is the new attested-org-cert case. The reserved `ATTESTED` slot stays free for future high-assurance attestations (key-transparency log, hardware-attested keys).
+**The bilateral and group ladders stay disjoint.** Introduce-pinning is `GroupTier::Introduced` (group-scoped; `src/group.rs:31`) which pins the *bilateral* `Tier` at `UNTRUSTED` — exactly as §3 above states (verify-only, never auto-promote). `ORG_VERIFIED` is the genuinely-new bilateral tier for the attested-org-cert case; no new `GroupTier` variant is needed. The reserved `ATTESTED` slot stays free for future high-assurance attestations (key-transparency log, hardware-attested keys).
 
 ### 6. Project routing
 
@@ -191,6 +193,10 @@ GET  /v1/operators?search=<prefix>          (v0.14-beta, see O8)
   response: [{op_did, handle}] for operators with op_state.discoverable=true ONLY.
             Default empty. Operators opt in via `wire op set --discoverable`;
             non-discoverable operators are never returned, regardless of prefix match.
+            **Shipping constraint:** the `discoverable=false`-default flag MUST ship
+            in the same release as this endpoint (not after). Shipping the endpoint
+            without the per-op opt-in gate would default every claimed op_did into
+            public listing — exactly the regression O8 is designed to prevent.
 ```
 
 Per-event body cap stays at 64 KB; identity claims add ≤ 2 KB worst-case (3-org operator with did:web + dns-txt proofs). No relay-protocol-breaking changes; this is additive.
@@ -287,7 +293,7 @@ Each criterion is falsifiable; the owner has merge authority on the correspondin
 
 1. **AC1 — Pairing friction (the headline win).** Two operators enrolled in the same org, each with 4 sessions, can fully mesh-pair across all 16 session-pairs with **≤ 16 operator taps total** (one per session-pair, Option B default) — down from the current ≤ 16 SAS dances. Measured by `tests/e2e_org_pair.rs`: harness spawns 4+4 sessions in `org:test`, asserts mesh completion under that tap budget. **Owner:** swift-harbor.
 2. **AC2 — Tier ceiling integrity.** No code path (Option A or Option B, no agent-card construction, no relay endpoint) can promote a peer to `VERIFIED` without a successful local bilateral SPAKE2+SAS confirmation. Measured by a property test in `tests/trust_ceiling_prop.rs`: random walks over `org_memberships`, `op_certs`, `pair_drop_acks` never raise `Tier::VERIFIED` absent a `SasConfirmed` event. **Owner:** maintainer review.
-3. **AC3 — Attestation gate.** `POST /v1/org/claim` refuses every request without a successful DNS-TXT (or did:web) proof. Measured by `tests/relay_org_claim.rs` covering: missing proof → 400; wrong domain → 400; revoked TXT record → 410 on next attestation refresh. **Owner:** relay-team.
+3. **AC3 — Attestation gate.** `POST /v1/org/claim` refuses every request without a successful DNS-TXT (or did:web) proof. Measured by `tests/relay_org_claim.rs` covering: missing proof → 400; wrong domain → 400; revoked TXT record → 410 on next attestation refresh. Refresh cadence: relay re-checks each pinned org's DNS-TXT (or did:web fetch) on a configurable interval (default 6h, min 1h, max 24h) and on every claim-touching write, so revocation propagates within one cadence window without operator action. **Owner:** relay-team.
 4. **AC4 — Rogue-admin containment.** When an org admin signs an adversary into the roster, the adversary's tier on every non-bilaterally-paired member remains exactly `ORG_VERIFIED`. Adversary cannot reach `VERIFIED` via any combination of claims, certs, or auto-pair. Measured by `tests/rogue_admin_scenario.rs`. **Owner:** swift-harbor + maintainer.
 
 **KILL CRITERION.** If at the close of the 2-week comment window the maintainer (`@laulpogan`) + ≥ 1 implementer hold that the per-tier policy split (T16 mitigation) cannot realistically defend tool ecosystems at `ORG_VERIFIED` — i.e., tools act on `ORG_VERIFIED` events without rogue-admin assumptions and the operator cannot reasonably bound the blast radius — **abandon this design and revisit a multi-signature org-cert quorum model** (e.g., M-of-N admin signatures for roster mutation) as RFC-001 v3.
@@ -362,7 +368,7 @@ This section was added in response to a maintainer ask: enumerate similar concep
 - **"Do nothing."** Friction is real; the N²-pair-discovery scaling becomes a hard cap on org adoption beyond ~5 operators × ~5 sessions. Acceptable defer if v0.14 scope is tight; not acceptable indefinitely.
 - **Eager auto-pair as the default (Option A).** Strictly more friction-win than Option B at the cost of the rogue-admin amplification. Rejected as *default* per operator addendum; kept as opt-in.
 - **Macaroon-style scoped delegation tokens.** Different problem (cross-machine action authority, `docs/CONSENT_DESIGN.md`). Composable later; not a substitute for identity claims that the protocol can route on.
-- **Two new tiers (`ORG_INTRODUCED` + `ORG_VERIFIED`).** Overlap with existing `INTRODUCED` and adds complexity without distinct semantics. Rejected.
+- **Two new tiers (`ORG_INTRODUCED` + `ORG_VERIFIED`).** `ORG_INTRODUCED` would duplicate what `GroupTier::Introduced` already expresses for the group-scoped axis; the bilateral axis needs only `ORG_VERIFIED` for the new attested-org-cert case. Rejected (single new bilateral tier suffices; group axis untouched).
 - **Org as a brand-new primitive (not a `wire group` flavor).** Larger protocol surface; duplicated machinery (rosters, epoch bumps, signature verification). Rejected per maintainer guardrail and to keep the threat surface smaller (`wire group`'s introduce-pinning is exactly the property we need).
 - **Project as a trust scope.** Tempting but a foot-gun (project tags are unsigned by design). Project is metadata only; if a trust-scoped fan-out unit is later needed, add `team` as a separate signed claim.
 - **GitHub-org verification as part of the floor.** Adds wire-trust-path dependency on GitHub; convenience win but security cost. Deferred to v0.15.
@@ -372,7 +378,7 @@ This section was added in response to a maintainer ask: enumerate similar concep
 - `docs/THREAT_MODEL.md` — T-tier numbering continued (T15..T20); v0.5.14 phonebook-scrape closure language; defense-in-depth list (item 6 "per-key tier state machine, promotion one-way" remains intact).
 - `docs/CONSENT_DESIGN.md` — receiver-side policy stance; macaroon-as-alternative-not-substitute framing; identity-vs-consent boundary inherited.
 - `src/group.rs` (v0.13.3) — `GroupTier`, creator-signed roster, epoch bumps, introduce-pinning at `Tier::UNTRUSTED`. Substrate for "org as enriched group."
-- `src/trust.rs` — `Tier::{UNTRUSTED, INTRODUCED, VERIFIED, ATTESTED, TRUSTED}`. `ORG_VERIFIED` inserts between `INTRODUCED` and `VERIFIED`; one-way promotion preserved.
+- `src/trust.rs` — bilateral `Tier::{UNTRUSTED, VERIFIED, ATTESTED, TRUSTED}` (`src/trust.rs:32`). `ORG_VERIFIED` inserts between `UNTRUSTED` and `VERIFIED`; one-way promotion preserved. Note: `INTRODUCED` is a `GroupTier` variant (`src/group.rs:31`), not a bilateral `Tier` — the two ladders are disjoint per §3 and §5.
 - `src/agent_card.rs:111-178` — `schema_version` field, `capabilities` list. Card delta is additive (`v3.2`).
 - `src/pair_invite.rs:557-571` — v0.5.14 bilateral-required split; Option B reuses the `pending-inbound-pairs` queue rather than introducing a new transport.
 - `src/pending_inbound_pair.rs` — substrate for one-tap accept.
