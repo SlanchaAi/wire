@@ -9,6 +9,19 @@
 
 ---
 
+## Implementation status (as-built, v0.14)
+
+> This RFC describes the full design space. **v0.14 ships the offline-minimal subset of it.** This note records what is built vs deferred so implementers and reviewers read the right design; the body below (§§2–9) remains the v0.15+ roadmap.
+>
+> **Built (v0.14) — fully offline, self-certifying:**
+> - The card carries `op_pubkey` and a per-membership `org_pubkey` **inline** (see §1 snippet, corrected below). Each DID is a hash commitment to its key (`agent_card::long_fingerprint` = first 16 B of `sha256(pubkey)`), so an inline pubkey cannot be substituted without breaking the DID match.
+> - Verification is **fully offline** — no resolver, roster bundle, registry, `did:web`, or DNS-TXT on the pairing path. `identity::verify_op_cert` / `verify_member_cert` take the inline pubkeys; `org_membership::evaluate_card_membership` checks commitment + both certs locally.
+> - Enrollment is local CLI: `wire enroll op` / `org-create` / `org-add-member` (no `/v1/org/claim`). Receiver opt-in is a local `config/wire/org_policies.json` (`org_did → inbound: auto|notify`); `pair_invite` auto-pins `ORG_VERIFIED` on contact for `auto` orgs. Live proof: `tests/e2e_org_verified.rs` (PR #105).
+>
+> **Deferred to v0.15:** §2's org-claim attestation (DNS-TXT / `did:web` / `/v1/org/claim` on the wireup registry), §3/§7's online roster-bundle pull + freshness checks, GitHub-org verification, SSO (amendment-sso), cross-relay org federation. None are on the v0.14 pairing hot path.
+
+---
+
 ## TL;DR
 
 - Add three optional, **orthogonal-axis** claims to `agent-card.json`: `op_did` (operator), `org_did` (organization), `project` (routing tag). DID-derived session handle stays the one canonical name.
@@ -41,9 +54,11 @@ Three new optional fields on `agent-card.json` (current schema `v3.1`, see `src/
   "capabilities": ["wire/v3.2", "org/v1"],
   "op_did":      "did:wire:op:darby-<32hex>",          // NEW: operator anchor
   "op_cert":     "<base64 ed25519 sig: op_did over session did>",
+  "op_pubkey":   "<base64 op root pubkey>",            // v0.14: carried INLINE — commits to op_did
   "org_memberships": [                                  // NEW: zero or more
     {
       "org_did":   "did:wire:org:slanchaai-<32hex>",
+      "org_pubkey": "<base64 org root pubkey>",         // v0.14: carried INLINE — commits to org_did
       "member_cert": "<base64 ed25519 sig: org_did over op_did>"
     }
   ],
