@@ -602,6 +602,46 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
     }
 
     // ----- Handle path: stash in pending-inbound, no capability flows -----
+    // RFC-001 Phase 1b (Option A): if the peer's card proves org membership the
+    // operator opted into auto-pairing (org_policies.json `inbound=auto`), pin
+    // ORG_VERIFIED + endpoints + ack now — the per-org opt-in IS the standing
+    // consent (distinct from accepting an anonymous stranger). Safe-by-default:
+    // no policy / no v3.2 org-claims → decide=Manual → falls through to the
+    // normal pending-inbound flow below. Never reaches VERIFIED (that needs the
+    // per-peer gesture/SAS path); ORG_VERIFIED < VERIFIED.
+    if let Some(org_did) =
+        org_auto_pin_decision(&peer_card, &crate::org_policy::FileOrgPolicy::load())
+    {
+        let mut trust = crate::config::read_trust()?;
+        crate::trust::add_agent_card_pin(&mut trust, &peer_card, Some("ORG_VERIFIED"));
+        crate::config::write_trust(&trust)?;
+
+        let endpoints_to_pin = if peer_endpoints.is_empty() {
+            vec![crate::endpoints::Endpoint::federation(
+                peer_relay.to_string(),
+                peer_slot_id.to_string(),
+                peer_slot_token.to_string(),
+            )]
+        } else {
+            peer_endpoints.clone()
+        };
+        let mut relay_state = crate::config::read_relay_state()?;
+        crate::endpoints::pin_peer_endpoints(&mut relay_state, &peer_handle, &endpoints_to_pin)?;
+        crate::config::write_relay_state(&relay_state)?;
+
+        send_pair_drop_ack(&peer_handle, &endpoints_to_pin)
+            .with_context(|| format!("org-auto pair_drop_ack send to {peer_handle} failed"))?;
+
+        crate::os_notify::toast_dedup(
+            &format!("org-pair:{peer_handle}"),
+            &format!("wire — auto-paired {peer_handle}"),
+            &format!(
+                "org-verified member of {org_did}; pinned ORG_VERIFIED (your org_policies.json opt-in)"
+            ),
+        );
+        return Ok(Some(peer_did));
+    }
+
     let now_iso = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
@@ -636,6 +676,24 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
     );
 
     Ok(Some(peer_did))
+}
+
+/// RFC-001 Phase 1b — decide whether a received card's org membership earns an
+/// auto-pin to `ORG_VERIFIED` under the receiver's policy. Returns the matched
+/// `org_did` iff the membership verifies offline AND the policy opts that org
+/// into auto (Option A). Pure over `policy`; never yields anything above
+/// `ORG_VERIFIED`. Safe-by-default: an empty/absent policy → `None`.
+fn org_auto_pin_decision(
+    card: &Value,
+    policy: &dyn crate::pair_decision::OrgPolicy,
+) -> Option<String> {
+    match crate::pair_decision::decide(
+        &crate::org_membership::evaluate_card_membership(card),
+        policy,
+    ) {
+        crate::pair_decision::PairAction::AutoOrgVerified { org_did } => Some(org_did),
+        _ => None,
+    }
 }
 
 /// Send a `pair_drop_ack` event (kind=1101) carrying OUR slot_token to a peer
@@ -838,6 +896,80 @@ pub fn maybe_consume_pair_drop_ack(event: &Value) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- RFC-001 Phase 1b: org-auto-pin decision gate ----
+
+    struct AutoFor(String);
+    impl crate::pair_decision::OrgPolicy for AutoFor {
+        fn inbound_mode(&self, org_did: &str) -> Option<crate::pair_decision::InboundMode> {
+            (org_did == self.0).then_some(crate::pair_decision::InboundMode::Auto)
+        }
+    }
+    struct EmptyPolicy;
+    impl crate::pair_decision::OrgPolicy for EmptyPolicy {
+        fn inbound_mode(&self, _: &str) -> Option<crate::pair_decision::InboundMode> {
+            None
+        }
+    }
+
+    /// Build a signed v3.2 card for an operator enrolled in one org.
+    fn org_verified_card() -> (Value, String) {
+        let (op_sk, op_pk) = crate::signing::generate_keypair();
+        let (org_sk, org_pk) = crate::signing::generate_keypair();
+        let (sess_sk, sess_pk) = crate::signing::generate_keypair();
+        let op_did = crate::agent_card::did_for_op("darby", &op_pk);
+        let org_did = crate::agent_card::did_for_org("slanchaai", &org_pk);
+        let member_cert = crate::enroll::issue_member_cert(&org_sk, &op_did).unwrap();
+        let base = crate::agent_card::build_agent_card("vesper-valley", &sess_pk, None, None, None);
+        let session_did = base
+            .get("did")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        let claims = crate::enroll::build_member_claims(
+            "darby",
+            &op_sk,
+            &op_pk,
+            &session_did,
+            &[crate::enroll::MemberOf {
+                org_did: org_did.clone(),
+                org_pubkey: org_pk,
+                member_cert,
+            }],
+            None,
+        )
+        .unwrap();
+        let card = crate::agent_card::sign_agent_card(
+            &crate::agent_card::with_identity_claims(&base, &claims).unwrap(),
+            &sess_sk,
+        );
+        (card, org_did)
+    }
+
+    #[test]
+    fn org_auto_pin_decision_auto_only_when_policy_opts_in() {
+        let (card, org_did) = org_verified_card();
+        // Policy opts this org into auto → Some(org_did).
+        assert_eq!(
+            org_auto_pin_decision(&card, &AutoFor(org_did.clone())),
+            Some(org_did.clone())
+        );
+        // Empty policy → None (safe-by-default: no opt-in, no auto-pin).
+        assert_eq!(org_auto_pin_decision(&card, &EmptyPolicy), None);
+    }
+
+    #[test]
+    fn org_auto_pin_decision_none_for_plain_card() {
+        // A v3.1 card with no op/org claims never auto-pins, even with an
+        // auto-everything policy — there's no verified membership to match.
+        let plain = serde_json::json!({
+            "schema_version": "v3.1", "did": "did:wire:plain-deadbeef", "handle": "plain"
+        });
+        assert_eq!(
+            org_auto_pin_decision(&plain, &AutoFor("did:wire:org:x-1".into())),
+            None
+        );
+    }
     use crate::config;
 
     #[test]
