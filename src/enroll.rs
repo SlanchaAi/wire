@@ -87,13 +87,16 @@ pub fn with_op_claims_if_enrolled(
     if session_did.is_empty() {
         return Ok(card);
     }
-    let op_handle = crate::config::read_op_handle()?.unwrap_or_else(|| "operator".to_string());
+    let op_handle = crate::config::read_op_handle()
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "operator".to_string());
     let op_pk = ed25519_dalek::SigningKey::from_bytes(&op_sk)
         .verifying_key()
         .to_bytes();
 
     let mut memberships = Vec::new();
-    for m in crate::config::read_memberships()? {
+    for m in crate::config::read_memberships().unwrap_or_default() {
         let (Some(org_did), Some(org_pubkey_b64), Some(member_cert)) = (
             m.get("org_did").and_then(|v| v.as_str()),
             m.get("org_pubkey").and_then(|v| v.as_str()),
@@ -120,15 +123,30 @@ pub fn with_op_claims_if_enrolled(
         .get("project")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let claims = build_member_claims(
+    // Fail-soft: a cert-build / attach error degrades to "no claims" rather than
+    // breaking card-build (init/up is critical-path; a broken identity config
+    // must never stop a basic agent from coming up).
+    let claims = match build_member_claims(
         &op_handle,
         &op_sk,
         &op_pk,
         &session_did,
         &memberships,
         project,
-    )?;
-    Ok(crate::agent_card::with_identity_claims(&card, &claims)?)
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("wire: op-claims skipped (cert build failed: {e:?})");
+            return Ok(card);
+        }
+    };
+    match crate::agent_card::with_identity_claims(&card, &claims) {
+        Ok(c) => Ok(c),
+        Err(e) => {
+            eprintln!("wire: op-claims skipped (attach failed: {e:?})");
+            Ok(card)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -174,6 +192,24 @@ mod tests {
             let out = with_op_claims_if_enrolled(base.clone()).unwrap();
             assert_eq!(out, base); // unchanged — not enrolled
             assert_eq!(crate::agent_card::card_op_did(&out), None);
+        });
+    }
+
+    #[test]
+    fn with_op_claims_failsoft_on_corrupt_memberships() {
+        crate::config::test_support::with_temp_home(|| {
+            let (op_sk, _op_pk) = generate_keypair();
+            crate::config::write_op_key(&op_sk).unwrap(); // creates config dir
+            crate::config::write_op_handle("darby").unwrap();
+            // Corrupt the memberships store — must NOT break card-build.
+            std::fs::write(crate::config::memberships_path().unwrap(), b"{ not json").unwrap();
+
+            let (_s, pk) = generate_keypair();
+            let base = build_agent_card("vesper-valley", &pk, None, None, None);
+            // Degrades to op-claim-only (no orgs), never errors.
+            let out = with_op_claims_if_enrolled(base).unwrap();
+            assert!(crate::agent_card::card_op_did(&out).is_some());
+            assert_eq!(crate::agent_card::card_org_memberships(&out).len(), 0);
         });
     }
 
