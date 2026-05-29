@@ -1,6 +1,8 @@
-# wire protocol — v0.1
+# wire protocol — v0.1 (extended through v0.13.5)
 
 This document defines the wire format that two `wire` implementations must agree on to interoperate. The Rust implementation in this repository is the reference; this document is normative.
+
+> **Audit status:** This document was originally written for wire v0.1. The core message-signing rules (§§ 2, 3) and the agent-card crypto layer (§ 1) remain accurate through v0.13.5. Sections later in the doc note where the v0.13 reality has moved past the original v0.1 scoping (federation, handle directories, group rooms, RFC-001 identity layer). For the formal A2A interoperability surface see [`a2a-extension/wire-identity-v1.md`](a2a-extension/wire-identity-v1.md); for the operator/org identity layer see [RFC-001](rfc/0001-identity-layer.md).
 
 ## Conventions
 
@@ -35,6 +37,30 @@ The signed **agent-card** binds the DID to one or more public keys plus capabili
   "signature": "<base64-encoded Ed25519 signature>"
 }
 ```
+
+> **v3.2 / RFC-001 additions (`schema_version: "v3.2"`, default capability `wire/v3.2`):**
+>
+> v3.2 cards MAY additionally carry an operator-identity claim and any number of organisation-membership claims. These are optional; a v3.2 card without them is wire-compatible with v3.1 readers (the `verify_agent_card` routine does not inspect `schema_version` and `verify_keys`-only cards continue to verify).
+>
+> ```jsonc
+> {
+>   "schema_version": "v3.2",
+>   "did": "did:wire:paul-b2e5aae7",                              // v0.5.7+: pubkey-suffixed
+>   "op_did": "did:wire:op:alice-<32hex>",                        // RFC-001 §1
+>   "op_pubkey": "<base64 Ed25519 pubkey: operator>",             // inline — enables offline verify
+>   "op_cert": "<base64 Ed25519 sig: operator over session DID>", // verify with op_pubkey above
+>   "org_memberships": [{
+>     "org_did": "did:wire:org:acme-<32hex>",
+>     "org_pubkey": "<base64 Ed25519 pubkey: org>",               // inline — enables offline verify
+>     "member_cert": "<base64 Ed25519 sig: org over op_did>"      // verify with org_pubkey above
+>   }],
+>   ...
+> }
+> ```
+>
+> Cert primitives live in `src/identity.rs` (`sign_did_cert` / `verify_op_cert` / `verify_member_cert`). Both verifiers take the inline pubkey directly — the design is **fully-offline self-certifying**: no resolver lookup on the pairing hot path. The 16-byte (32-hex) fingerprint for operator and organisation DIDs is computed by `agent_card::long_fingerprint`. See the [did:wire method spec](did-methods/did-wire-method.md) for the full DID shape catalogue.
+
+**v0.13 DID format note:** since v0.5.7 the per-session DID is **pubkey-suffixed** (`did:wire:<handle>-<8hex>`) to prevent handle collisions across distinct keypairs. v0.1 cards using the bare `did:wire:<handle>` form remain verifiable for backward compatibility but new claims always carry the suffix.
 
 **Key id format:** `<handle>:<fingerprint>` where fingerprint = first 8 hex chars of SHA-256(public_key_bytes). Cards on disk prefix this with `ed25519:` to allow algorithm migration in v0.2+.
 
@@ -158,11 +184,12 @@ Each agent maintains a local trust state, persisted to `~/.config/wire/trust.jso
 | Tier | Promotion path | Acceptance |
 |------|----------------|-----------|
 | `UNTRUSTED` | initial pin | events ignored |
+| `ORG_VERIFIED` | `member_cert` verifies against an accepted org (RFC-001 §5, v3.2+) | events accepted with org-policy gating only; does NOT satisfy `>= VERIFIED` checks |
 | `VERIFIED` | SAS confirm or `wire pin` of signed card | events accepted |
 | `ATTESTED` | self-attestation only | self events accepted |
 | `TRUSTED` | reserved for v0.2+ | reserved |
 
-Promotion is **one-way**: `UNTRUSTED → VERIFIED → ATTESTED`. Reverting requires removing the agent record entirely.
+Promotion is **one-way**. `UNTRUSTED → ORG_VERIFIED → VERIFIED → ATTESTED`. `promote_to_verified` accepts either `UNTRUSTED` or `ORG_VERIFIED` as source per RFC-001 §5 ("a SAS-paired peer that happens to share our org is recorded at VERIFIED, not downgraded"). Reverting requires removing the agent record entirely. The strict `ORG_VERIFIED < VERIFIED` invariant is property-tested in `tests/trust_ceiling_prop.rs`.
 
 ## 5. Pairing — SPAKE2 + SAS + AEAD
 
@@ -250,9 +277,21 @@ A relay MUST reload event slots and tokens on startup to provide restart-recover
 
 ## 9. What this protocol does NOT specify
 
-- Discovery (pairings are out-of-band; no DHT, no registry in v0.1)
-- Group rooms (mesh-of-bilateral only — see `ANTI_FEATURES.md`)
-- Message encryption above the wire layer (events are signed-plaintext in v0.1; encryption pending NIP-44 v2 or DIDComm authcrypt in v0.2+)
-- Spam control (relay accepts any signed event under the body cap; rate limiting is operator-side)
-- File transfer above 256 KiB (deferred to v0.2)
-- Federation between relays (each pair shares one relay; cross-relay roaming is v0.3+)
+- ~~Discovery (pairings are out-of-band; no DHT, no registry in v0.1)~~ — **superseded.** v0.5+ ships a handle directory served via `GET /.well-known/agent-card.json?handle=<nick>`; see [`a2a-extension/wire-identity-v1.md`](a2a-extension/wire-identity-v1.md).
+- ~~Group rooms (mesh-of-bilateral only — see `ANTI_FEATURES.md`)~~ — **superseded.** v0.13.3+ ships shared-slot group rooms via `wire group create / invite / join / send / tail` (see `src/group.rs`).
+- Message encryption above the wire layer (events are signed-plaintext today; encryption pending NIP-44 v2 or DIDComm authcrypt in a future revision).
+- Spam control (relay accepts any signed event under the body cap; rate limiting is operator-side).
+- File transfer above 256 KiB (deferred; not currently implemented).
+- ~~Federation between relays (each pair shares one relay; cross-relay roaming is v0.3+)~~ — **superseded.** v0.5+ resolves `<handle>@<relay>` via `.well-known` lookup against the relay's domain; peers behind different relays pair through the federation directly.
+
+## 10. Revision notes
+
+| Wire version | Schema | Notable protocol changes |
+| --- | --- | --- |
+| v0.1 | v3.1 | Initial spec — bilateral SAS, single-relay, mesh-of-pairs. |
+| v0.5.7 | v3.1 | Pubkey-suffixed DIDs (`did:wire:<handle>-<8hex>`) to prevent handle collisions. |
+| v0.5 | v3.1 | Federated handle directory + `.well-known/agent-card.json`; A2A v1.0 AgentCard emission with wire as an A2A extension. |
+| v0.6 | v3.1 | Mesh / local-sister sessions + intra-machine pair-all. |
+| v0.13.3 | v3.1 | Group rooms via shared relay slot. |
+| v0.13.5 | v3.1 | Last cut release (Cargo `0.13.5`). |
+| v0.14 (main, unreleased) | v3.2 | RFC-001 — operator + organisation identity claims on the card (inline `op_pubkey` / `org_pubkey` + certs), `Tier::OrgVerified`, `identity::*` cert primitives, fully-offline self-certifying verification. Backward-compatible with v3.1 readers. |
