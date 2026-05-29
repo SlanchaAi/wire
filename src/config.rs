@@ -192,6 +192,69 @@ pub fn read_private_key() -> Result<[u8; 32]> {
     Ok(seed)
 }
 
+// ── RFC-001 operator / organization key storage ───────────────────────────
+// Operator + org root private keys live alongside the session `private.key`,
+// same 0600 raw-32-byte-seed convention. These anchor the offline identity
+// layer's `op_did` / `org_did` (each DID commits to its key).
+
+pub fn op_key_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("op.key"))
+}
+
+/// Sanitize a DID into a safe filename component (DIDs carry `:`).
+fn did_filename(did: &str) -> String {
+    did.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+pub fn org_key_path(org_did: &str) -> Result<PathBuf> {
+    Ok(config_dir()?
+        .join("orgs")
+        .join(format!("{}.key", did_filename(org_did))))
+}
+
+fn write_seed_0600(path: &Path, seed: &[u8; 32]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, seed).with_context(|| format!("writing {path:?}"))?;
+    set_file_mode_0600(path)?;
+    Ok(())
+}
+
+fn read_seed(path: &Path) -> Result<[u8; 32]> {
+    let bytes = fs::read(path).with_context(|| format!("reading {path:?}"))?;
+    if bytes.len() != 32 {
+        return Err(anyhow!(
+            "key file {path:?} has wrong length ({} != 32)",
+            bytes.len()
+        ));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&bytes);
+    Ok(seed)
+}
+
+pub fn write_op_key(seed: &[u8; 32]) -> Result<()> {
+    write_seed_0600(&op_key_path()?, seed)
+}
+pub fn read_op_key() -> Result<[u8; 32]> {
+    read_seed(&op_key_path()?)
+}
+pub fn write_org_key(org_did: &str, seed: &[u8; 32]) -> Result<()> {
+    write_seed_0600(&org_key_path(org_did)?, seed)
+}
+pub fn read_org_key(org_did: &str) -> Result<[u8; 32]> {
+    read_seed(&org_key_path(org_did)?)
+}
+
 pub fn write_agent_card(card: &Value) -> Result<()> {
     let path = agent_card_path()?;
     let body = serde_json::to_vec_pretty(card)?;
@@ -431,6 +494,31 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn did_filename_sanitizes_did_punctuation() {
+        assert_eq!(
+            did_filename("did:wire:org:slanchaai-abc123"),
+            "did_wire_org_slanchaai-abc123"
+        );
+        // No path-traversal characters survive into the filename.
+        let f = did_filename("did:wire:org:x/../../etc");
+        assert!(!f.contains('/') && !f.contains('.'));
+    }
+
+    #[test]
+    fn op_and_org_key_roundtrip() {
+        with_temp_home(|| {
+            let op_seed = [7u8; 32];
+            write_op_key(&op_seed).unwrap();
+            assert_eq!(read_op_key().unwrap(), op_seed);
+
+            let org_did = "did:wire:org:slanchaai-deadbeef";
+            let org_seed = [9u8; 32];
+            write_org_key(org_did, &org_seed).unwrap();
+            assert_eq!(read_org_key(org_did).unwrap(), org_seed);
+        });
+    }
 
     fn with_temp_home<F: FnOnce()>(f: F) {
         super::test_support::with_temp_home(f)

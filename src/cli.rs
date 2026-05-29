@@ -625,6 +625,10 @@ pub enum Command {
     /// roster (group-scoped tiers, separate from bilateral peer trust).
     #[command(subcommand)]
     Group(GroupCommand),
+    /// Mint operator / organization identities for the offline org-membership
+    /// layer (RFC-001): `wire enroll op` / `org-create` / `org-add-member`.
+    #[command(subcommand)]
+    Enroll(EnrollCommand),
     /// Detect known MCP host config locations (Claude Desktop, Claude Code,
     /// Cursor, project-local) and either print or auto-merge the wire MCP
     /// server entry. Default prints; pass `--apply` to actually modify config
@@ -916,6 +920,42 @@ pub enum DiagAction {
     Disable,
     /// Report whether diag is currently enabled + the file's size.
     Status {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `wire enroll …` — mint the operator/org identities + certs the offline
+/// org-membership layer (RFC-001) consumes. Keys are stored 0600 alongside
+/// `private.key`. (Publishing these claims on the agent's own card — the
+/// card-emit integration — is a separate follow-up.)
+#[derive(Subcommand, Debug)]
+pub enum EnrollCommand {
+    /// Mint this machine's operator root key (`op.key`) and print its `op_did`.
+    Op {
+        /// Operator handle (display only; the op_did commits to the key).
+        #[arg(long, default_value = "operator")]
+        handle: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mint an organization root key and print its `org_did` + `org_pubkey`.
+    OrgCreate {
+        /// Org handle (display only; the org_did commits to the key).
+        #[arg(long)]
+        handle: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Issue a membership cert: the named org signs an operator's `op_did`.
+    /// Prints the `{org_did, org_pubkey, member_cert}` bundle for the operator
+    /// to add to their card's `org_memberships[]`.
+    OrgAddMember {
+        /// The operator DID to vouch for (`did:wire:op:…`).
+        op_did: String,
+        /// Which org signs (its `org_did`).
+        #[arg(long)]
+        org: String,
         #[arg(long)]
         json: bool,
     },
@@ -1734,6 +1774,7 @@ pub fn run() -> Result<()> {
         Command::Identity { cmd } => cmd_identity(cmd),
         Command::Mesh(cmd) => cmd_mesh(cmd),
         Command::Group(cmd) => cmd_group(cmd),
+        Command::Enroll(cmd) => cmd_enroll(cmd),
         Command::Invite {
             relay,
             ttl,
@@ -2645,6 +2686,73 @@ fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
 }
 
 // ---------- identity (v0.7.0-alpha.3) ----------
+
+fn cmd_enroll(cmd: EnrollCommand) -> Result<()> {
+    match cmd {
+        EnrollCommand::Op { handle, json } => {
+            let (sk, pk) = crate::signing::generate_keypair();
+            crate::config::write_op_key(&sk)?;
+            let op_did = crate::agent_card::did_for_op(&handle, &pk);
+            let op_pubkey = crate::signing::b64encode(&pk);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({"op_did": op_did, "op_pubkey": op_pubkey}))?
+                );
+            } else {
+                println!(
+                    "→ operator enrolled\n  op_did:    {op_did}\n  op_pubkey: {op_pubkey}\n  key saved 0600 at {:?}",
+                    crate::config::op_key_path()?
+                );
+            }
+            Ok(())
+        }
+        EnrollCommand::OrgCreate { handle, json } => {
+            let (sk, pk) = crate::signing::generate_keypair();
+            let org_did = crate::agent_card::did_for_org(&handle, &pk);
+            crate::config::write_org_key(&org_did, &sk)?;
+            let org_pubkey = crate::signing::b64encode(&pk);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({"org_did": org_did, "org_pubkey": org_pubkey}))?
+                );
+            } else {
+                println!(
+                    "→ organization created\n  org_did:    {org_did}\n  org_pubkey: {org_pubkey}\n  key saved 0600 at {:?}",
+                    crate::config::org_key_path(&org_did)?
+                );
+            }
+            Ok(())
+        }
+        EnrollCommand::OrgAddMember { op_did, org, json } => {
+            if !crate::agent_card::is_op_did(&op_did) {
+                bail!("not a valid operator DID (did:wire:op:<handle>-<32hex>): {op_did}");
+            }
+            let org_sk = crate::config::read_org_key(&org).with_context(|| {
+                format!("no stored key for org {org} — run `wire enroll org-create` first")
+            })?;
+            let org_pk = ed25519_dalek::SigningKey::from_bytes(&org_sk)
+                .verifying_key()
+                .to_bytes();
+            let member_cert = crate::enroll::issue_member_cert(&org_sk, &op_did)?;
+            let org_pubkey = crate::signing::b64encode(&org_pk);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "org_did": org, "org_pubkey": org_pubkey, "member_cert": member_cert
+                    }))?
+                );
+            } else {
+                println!(
+                    "→ membership issued for {op_did}\n  add to the operator's card org_memberships[]:\n  {{\"org_did\": \"{org}\", \"org_pubkey\": \"{org_pubkey}\", \"member_cert\": \"{member_cert}\"}}"
+                );
+            }
+            Ok(())
+        }
+    }
+}
 
 fn cmd_identity(cmd: IdentityCommand) -> Result<()> {
     match cmd {
