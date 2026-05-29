@@ -41,11 +41,11 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.13.5 (latest)
+## Status — v0.14.0 (latest)
 
-**v0.13.5 — Reliable per-session identity (PID-file adapter).**
+**v0.14.0 — RFC-001 identity layer: operator + organization + project, fully-offline self-certifying.**
 
-v0.13.4's env-forward was unreliable: Claude Code passes the literal `${CLAUDE_CODE_SESSION_ID}` unexpanded on clean terminals, which wire hashed → every session collapsed onto one identity. Fixed two ways: a guard that never hashes an unexpanded `${...}` placeholder, and the **Claude Code PID-file adapter** (@WILLARDKLEIN, #56) — wire walks its parent-process chain to the owning `claude` process and reads `~/.claude/sessions/<pid>.json` → `sessionId`, recovering the session id with zero env dependency. The MCP server now resolves the SAME identity as the CLI → true per-session identity, validated on Windows + macOS.
+Ships the offline-minimal subset of [RFC-001](docs/rfc/0001-identity-layer.md): three optional, orthogonal-axis claims on the agent-card (`op_did`, `org_memberships[]`, `project`), a new tier `ORG_VERIFIED` strictly between `UNTRUSTED` and `VERIFIED`, and the smallest receive-side surface that closes the N²-pair-discovery problem inside trust scopes without weakening the v0.5.14 phonebook-scrape closure or the bilateral SAS invariant. Each card carries `op_pubkey` + per-membership `org_pubkey` inline; each DID is a hash commitment to its key, so verification is fully offline — no resolver, no `did:web`, no DNS-TXT, no registry on the pairing hot path. `wire enroll op / org-create / org-add-member` mints the keys + certs; a one-line `org_policies.json` opt-in on the receiver auto-pins org-mates at `ORG_VERIFIED` on contact (default-deny otherwise). Bilateral SAS is still the ONLY path to `VERIFIED`. v3.2 cards are backward-compatible with v3.1 readers.
 
 ## Status — v0.13.4
 
