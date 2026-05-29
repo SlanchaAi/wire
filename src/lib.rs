@@ -41,6 +41,7 @@ pub mod sas;
 pub mod service;
 pub mod session;
 pub mod signing;
+pub mod sso_provider;
 pub mod trust;
 
 // Curated re-exports for ergonomic call sites.
