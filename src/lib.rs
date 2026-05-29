@@ -24,6 +24,7 @@ pub mod inbox_watch;
 pub mod macaroon;
 pub mod mcp;
 pub mod org_membership;
+pub mod org_policy;
 pub mod os_notify;
 pub mod pair_decision;
 pub mod pair_invite;
