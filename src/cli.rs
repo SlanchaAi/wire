@@ -2019,6 +2019,9 @@ fn cmd_init(
     }
 
     let card = build_agent_card(canonical_handle, &pk_bytes, name, None, None);
+    // Card-emit (RFC-001 Phase 1b): attach operator/org claims if enrolled
+    // (fail-soft no-op otherwise; signed below so the sig covers the claims).
+    let card = crate::enroll::with_op_claims_if_enrolled(card)?;
     let signed = sign_agent_card(&card, &sk_seed);
     config::write_agent_card(&signed)?;
 

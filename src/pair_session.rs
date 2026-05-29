@@ -604,6 +604,10 @@ pub fn init_self_idempotent(
     let handle: &str = &persona;
 
     let card = build_agent_card(handle, &pk_bytes, name, None, None);
+    // Card-emit (RFC-001 Phase 1b): attach operator/org claims if this machine
+    // is enrolled. Fail-soft no-op when not enrolled — non-enrolled cards are
+    // byte-identical. Signed below, so the self-signature covers the claims.
+    let card = crate::enroll::with_op_claims_if_enrolled(card)?;
     let signed = sign_agent_card(&card, &sk_seed);
     crate::config::write_agent_card(&signed)?;
     let mut trust = empty_trust();
