@@ -245,6 +245,11 @@ fn capitalize(s: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct OrgMembership {
     pub org_did: String,
+    /// Base64 Ed25519 public key of the org, carried inline so a receiver
+    /// verifies the vouch fully offline — `org_did` commits to this key
+    /// (`did:wire:org:<h>-<32hex sha256(org_pubkey)>`) and `member_cert` is
+    /// checked against it (RFC-001 Phase 1, `org_membership::evaluate_card_membership`).
+    pub org_pubkey: String,
     /// Base64 Ed25519 signature by the org's key over `op_did` UTF-8 bytes.
     pub member_cert: String,
 }
@@ -264,6 +269,11 @@ pub struct IdentityClaims {
     /// session DID (UTF-8 bytes). Verifiable with `identity::verify_op_cert`.
     /// Meaningful only when `op_did` is set.
     pub op_cert: Option<String>,
+    /// Base64 Ed25519 operator root public key, carried inline so the operator
+    /// binding verifies offline — `op_did` commits to this key and `op_cert` is
+    /// checked against it. Set whenever `op_did` is set; without it the operator
+    /// claim is unverifiable and a receiver fails it closed (RFC-001 Phase 1).
+    pub op_pubkey: Option<String>,
     /// Zero or more org membership entries. An operator may sit in
     /// multiple orgs simultaneously; each entry stands on its own.
     pub org_memberships: Vec<OrgMembership>,
@@ -305,6 +315,9 @@ pub fn with_identity_claims(
     if let Some(op_cert) = &claims.op_cert {
         out.insert("op_cert".into(), Value::String(op_cert.clone()));
     }
+    if let Some(op_pubkey) = &claims.op_pubkey {
+        out.insert("op_pubkey".into(), Value::String(op_pubkey.clone()));
+    }
     if !claims.org_memberships.is_empty() {
         let arr: Vec<Value> = claims
             .org_memberships
@@ -312,6 +325,7 @@ pub fn with_identity_claims(
             .map(|m| {
                 json!({
                     "org_did": m.org_did,
+                    "org_pubkey": m.org_pubkey,
                     "member_cert": m.member_cert,
                 })
             })
@@ -668,13 +682,17 @@ mod tests {
     fn with_identity_claims_attaches_all_fields() {
         let (sk, pk) = generate_keypair();
         let card = build_agent_card("vesper-valley", &pk, None, None, None);
-        let (op_did, _, _) = op_did_for_test("darby");
-        let (org_did, _, _) = org_did_for_test("slanchaai");
+        let (op_did, _, op_pk) = op_did_for_test("darby");
+        let (org_did, _, org_pk) = org_did_for_test("slanchaai");
+        let op_pubkey = crate::signing::b64encode(&op_pk);
+        let org_pubkey = crate::signing::b64encode(&org_pk);
         let claims = IdentityClaims {
             op_did: Some(op_did.clone()),
             op_cert: Some("AAAA".into()),
+            op_pubkey: Some(op_pubkey.clone()),
             org_memberships: vec![OrgMembership {
                 org_did: org_did.clone(),
+                org_pubkey: org_pubkey.clone(),
                 member_cert: "BBBB".into(),
             }],
             project: Some("wire-codex-integration".into()),
@@ -682,10 +700,20 @@ mod tests {
         let with = with_identity_claims(&card, &claims).unwrap();
         assert_eq!(card_op_did(&with), Some(op_did.as_str()));
         assert_eq!(card_op_cert(&with), Some("AAAA"));
+        assert_eq!(
+            with.get("op_pubkey").and_then(|v| v.as_str()),
+            Some(op_pubkey.as_str())
+        );
         assert_eq!(card_project(&with), Some("wire-codex-integration"));
         let orgs = card_org_memberships(&with);
         assert_eq!(orgs.len(), 1);
         assert_eq!(orgs[0], (org_did.as_str(), "BBBB"));
+        assert_eq!(
+            with.get("org_memberships").unwrap()[0]
+                .get("org_pubkey")
+                .and_then(|v| v.as_str()),
+            Some(org_pubkey.as_str())
+        );
         // Card still signs + verifies after identity claims are layered.
         let signed = sign_agent_card(&with, &sk);
         verify_agent_card(&signed).unwrap();
@@ -727,6 +755,7 @@ mod tests {
         let claims = IdentityClaims {
             org_memberships: vec![OrgMembership {
                 org_did: "did:wire:slanchaai".into(),
+                org_pubkey: "AAAA".into(),
                 member_cert: "BBBB".into(),
             }],
             ..Default::default()
