@@ -2692,6 +2692,7 @@ fn cmd_enroll(cmd: EnrollCommand) -> Result<()> {
         EnrollCommand::Op { handle, json } => {
             let (sk, pk) = crate::signing::generate_keypair();
             crate::config::write_op_key(&sk)?;
+            crate::config::write_op_handle(&handle)?;
             let op_did = crate::agent_card::did_for_op(&handle, &pk);
             let op_pubkey = crate::signing::b64encode(&pk);
             if json {
@@ -2737,6 +2738,9 @@ fn cmd_enroll(cmd: EnrollCommand) -> Result<()> {
                 .to_bytes();
             let member_cert = crate::enroll::issue_member_cert(&org_sk, &op_did)?;
             let org_pubkey = crate::signing::b64encode(&org_pk);
+            // Store locally so card-emit can attach it (same-machine operator);
+            // also printed below for the cross-machine share case.
+            crate::config::add_membership(&org, &org_pubkey, &member_cert)?;
             if json {
                 println!(
                     "{}",

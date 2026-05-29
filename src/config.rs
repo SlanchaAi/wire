@@ -255,6 +255,65 @@ pub fn read_org_key(org_did: &str) -> Result<[u8; 32]> {
     read_seed(&org_key_path(org_did)?)
 }
 
+pub fn op_meta_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("op.json"))
+}
+
+/// Persist the operator handle chosen at `wire enroll op`. The op_did derives
+/// from handle + op key; card-emit re-derives it at card-build time.
+pub fn write_op_handle(handle: &str) -> Result<()> {
+    let path = op_meta_path()?;
+    if let Some(p) = path.parent() {
+        fs::create_dir_all(p)?;
+    }
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({ "handle": handle }))?,
+    )?;
+    set_file_mode_0600(&path)?;
+    Ok(())
+}
+
+pub fn read_op_handle() -> Result<Option<String>> {
+    let Ok(bytes) = fs::read(op_meta_path()?) else {
+        return Ok(None);
+    };
+    let v: Value = serde_json::from_slice(&bytes)?;
+    Ok(v.get("handle").and_then(Value::as_str).map(str::to_string))
+}
+
+pub fn memberships_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("memberships.json"))
+}
+
+/// Append an org membership the operator holds (org_did / org_pubkey /
+/// member_cert) for card-emit to attach. Replaces any existing entry for the
+/// same org_did (re-issued certs supersede).
+pub fn add_membership(org_did: &str, org_pubkey: &str, member_cert: &str) -> Result<()> {
+    let mut list = read_memberships()?;
+    list.retain(|m| m.get("org_did").and_then(Value::as_str) != Some(org_did));
+    list.push(serde_json::json!({
+        "org_did": org_did, "org_pubkey": org_pubkey, "member_cert": member_cert
+    }));
+    let path = memberships_path()?;
+    if let Some(p) = path.parent() {
+        fs::create_dir_all(p)?;
+    }
+    fs::write(&path, serde_json::to_vec_pretty(&Value::Array(list))?)?;
+    Ok(())
+}
+
+/// Read the operator's stored org memberships (empty if none/malformed).
+pub fn read_memberships() -> Result<Vec<Value>> {
+    let Ok(bytes) = fs::read(memberships_path()?) else {
+        return Ok(vec![]);
+    };
+    Ok(serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default())
+}
+
 pub fn write_agent_card(card: &Value) -> Result<()> {
     let path = agent_card_path()?;
     let body = serde_json::to_vec_pretty(card)?;

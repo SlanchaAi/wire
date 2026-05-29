@@ -67,6 +67,70 @@ pub fn build_member_claims(
     })
 }
 
+/// Card-emit (RFC-001 Phase 1b): if this machine has an enrolled operator
+/// (`op.key` present), attach the operator's identity claims + stored org
+/// memberships to `card`. Returns the card unchanged when not enrolled, so
+/// card-build stays correct for the common case. The returned card is UNSIGNED;
+/// the caller signs it (`sign_agent_card`). Malformed stored memberships are
+/// skipped, not fatal.
+pub fn with_op_claims_if_enrolled(
+    card: crate::agent_card::AgentCard,
+) -> anyhow::Result<crate::agent_card::AgentCard> {
+    let Ok(op_sk) = crate::config::read_op_key() else {
+        return Ok(card); // not enrolled → no claims
+    };
+    let session_did = card
+        .get("did")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if session_did.is_empty() {
+        return Ok(card);
+    }
+    let op_handle = crate::config::read_op_handle()?.unwrap_or_else(|| "operator".to_string());
+    let op_pk = ed25519_dalek::SigningKey::from_bytes(&op_sk)
+        .verifying_key()
+        .to_bytes();
+
+    let mut memberships = Vec::new();
+    for m in crate::config::read_memberships()? {
+        let (Some(org_did), Some(org_pubkey_b64), Some(member_cert)) = (
+            m.get("org_did").and_then(|v| v.as_str()),
+            m.get("org_pubkey").and_then(|v| v.as_str()),
+            m.get("member_cert").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        let Ok(bytes) = crate::signing::b64decode(org_pubkey_b64) else {
+            continue;
+        };
+        if bytes.len() != 32 {
+            continue;
+        }
+        let mut org_pk = [0u8; 32];
+        org_pk.copy_from_slice(&bytes);
+        memberships.push(MemberOf {
+            org_did: org_did.to_string(),
+            org_pubkey: org_pk,
+            member_cert: member_cert.to_string(),
+        });
+    }
+
+    let project = card
+        .get("project")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let claims = build_member_claims(
+        &op_handle,
+        &op_sk,
+        &op_pk,
+        &session_did,
+        &memberships,
+        project,
+    )?;
+    Ok(crate::agent_card::with_identity_claims(&card, &claims)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,6 +139,43 @@ mod tests {
     };
     use crate::org_membership::{MembershipOutcome, evaluate_card_membership};
     use crate::signing::generate_keypair;
+
+    #[test]
+    fn with_op_claims_attaches_when_enrolled() {
+        crate::config::test_support::with_temp_home(|| {
+            let (op_sk, op_pk) = generate_keypair();
+            crate::config::write_op_key(&op_sk).unwrap();
+            crate::config::write_op_handle("darby").unwrap();
+            let op_did = did_for_op("darby", &op_pk);
+
+            let (org_sk, org_pk) = generate_keypair();
+            let org_did = did_for_org("slanchaai", &org_pk);
+            let member_cert = issue_member_cert(&org_sk, &op_did).unwrap();
+            crate::config::add_membership(
+                &org_did,
+                &crate::signing::b64encode(&org_pk),
+                &member_cert,
+            )
+            .unwrap();
+
+            let (_sess_sk, sess_pk) = generate_keypair();
+            let base = build_agent_card("vesper-valley", &sess_pk, None, None, None);
+            let with = with_op_claims_if_enrolled(base).unwrap();
+            assert_eq!(crate::agent_card::card_op_did(&with), Some(op_did.as_str()));
+            assert_eq!(crate::agent_card::card_org_memberships(&with).len(), 1);
+        });
+    }
+
+    #[test]
+    fn with_op_claims_noop_when_not_enrolled() {
+        crate::config::test_support::with_temp_home(|| {
+            let (_sk, pk) = generate_keypair();
+            let base = build_agent_card("plain", &pk, None, None, None);
+            let out = with_op_claims_if_enrolled(base.clone()).unwrap();
+            assert_eq!(out, base); // unchanged — not enrolled
+            assert_eq!(crate::agent_card::card_op_did(&out), None);
+        });
+    }
 
     /// Producer → consumer round-trip: claims built here verify on the other side.
     #[test]
