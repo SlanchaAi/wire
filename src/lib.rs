@@ -25,6 +25,7 @@ pub mod macaroon;
 pub mod mcp;
 pub mod org_membership;
 pub mod os_notify;
+pub mod pair_decision;
 pub mod pair_invite;
 pub mod pair_profile;
 pub mod pair_session;
