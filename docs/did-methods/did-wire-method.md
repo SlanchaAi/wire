@@ -40,7 +40,7 @@ HEXDIG          = DIGIT / %x61-66        ; lowercase hex only
 
 ### 1.2 One-name invariant
 
-The substring before the `-<fingerprint>` suffix MUST equal the agent's `handle` field on its signed agent-card. Wire implementations enforce this at card-build time (`agent_card::did_for`, `agent_card::did_for_op`, `agent_card::did_for_org`). A DID whose handle does not match the card's handle MUST be rejected on resolution.
+The substring before the `-<fingerprint>` suffix MUST equal the agent's `handle` field on its signed agent-card. Wire implementations enforce this at card-build time: session DIDs are built by `agent_card::did_for_with_key(handle, pubkey)` (the canonical pubkey-suffixed form); `agent_card::did_for(handle)` is the bare legacy form retained only for backward-compat. Operator and org DIDs are built by `agent_card::did_for_op` / `did_for_org`. A DID whose handle does not match the card's handle MUST be rejected on resolution.
 
 ---
 
@@ -51,12 +51,13 @@ The substring before the `-<fingerprint>` suffix MUST equal the agent's `handle`
 A wire agent generates a fresh Ed25519 keypair, builds a signed agent-card binding the DID to the public key, and (for federated visibility) claims the handle on a relay via `POST /v1/handle/claim`. The signed card IS the DID document; no separate registry update is needed.
 
 ```
-wire init <handle>
-wire bind <relay-url>
-wire claim <relay-url> <handle> <public-url>
+wire init <handle> --relay <relay-url>          # creates keypair + binds inbound slot
+wire bind-relay <relay-url>                     # (re-)bind to a relay if not done at init
+wire claim <handle> --relay <relay-url> --public-url <public-url>
+wire up <handle>@<relay-domain>                 # one-shot: init + bind + claim
 ```
 
-Operator and organisation DIDs (`did:wire:op:*`, `did:wire:org:*`) are created the same way but use the 32-hex `long_fingerprint`. They are typically minted by the operator's identity tooling (forthcoming `wire op enroll` / `wire org create`) rather than per-session, and are referenced from session cards via the `op_did` field and `org_memberships[].org_did` field added in [RFC-001](../rfc/0001-identity-layer.md) (agent-card `schema_version: "v3.2"`).
+Operator and organisation DIDs (`did:wire:op:*`, `did:wire:org:*`) are created the same way but use the 32-hex `long_fingerprint`. They are minted by the operator's identity tooling — `wire enroll op` mints the operator root key; `wire enroll org-create` mints an organisation root key; `wire enroll org-add-member` issues a membership cert binding an `op_did` to an `org_did` (shipped in [#102](https://github.com/SlanchaAi/wire/pull/102)). Their pubkeys (and the membership certs) are embedded **inline** on each session card via the `op_pubkey` / `op_did` / `op_cert` and `org_memberships[].{org_did, org_pubkey, member_cert}` fields added in [RFC-001](../rfc/0001-identity-layer.md) (agent-card `schema_version: "v3.2"`) — verification is fully offline (no resolver, no lookup) on the pairing hot path.
 
 ### 2.2 Read (resolution)
 
@@ -116,7 +117,8 @@ Hard deactivation is out-of-band: a wire agent that publishes a signed `wire_clo
 
 | Concern | File / function |
 | --- | --- |
-| DID construction | `src/agent_card.rs::did_for`, `did_for_op`, `did_for_org` |
+| DID construction (session) | `src/agent_card.rs::did_for_with_key` (pubkey-suffixed, canonical); `did_for` (bare, legacy back-compat) |
+| DID construction (operator/org) | `src/agent_card.rs::did_for_op`, `did_for_org` |
 | Long fingerprint | `src/agent_card.rs::long_fingerprint` |
 | Card signing | `src/agent_card.rs::sign_agent_card` |
 | Card verification | `src/agent_card.rs::verify_agent_card` |
@@ -128,4 +130,4 @@ Hard deactivation is out-of-band: a wire agent that publishes a signed `wire_clo
 
 ## Changelog
 
-- **v1 (this draft)** — Initial method spec covering the three DID shapes shipped in wire v0.13 (session) and added in v3.2 / RFC-001 (operator + organisation). Resolution path normalised against the A2A `/.well-known/agent-card.json` endpoint already served by every wire relay.
+- **v1 (this draft)** — Initial method spec covering the three DID shapes shipped in wire v0.13 (session) and added in v3.2 / RFC-001 — landing in **v0.14** (currently `main`, unreleased; Cargo last tagged `0.13.5`). Resolution path normalised against the A2A `/.well-known/agent-card.json` endpoint already served by every wire relay.

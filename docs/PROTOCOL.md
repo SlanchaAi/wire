@@ -47,16 +47,18 @@ The signed **agent-card** binds the DID to one or more public keys plus capabili
 >   "schema_version": "v3.2",
 >   "did": "did:wire:paul-b2e5aae7",                              // v0.5.7+: pubkey-suffixed
 >   "op_did": "did:wire:op:alice-<32hex>",                        // RFC-001 §1
->   "op_cert": "<base64 Ed25519 sig: operator over session DID>", // verify with op pubkey
+>   "op_pubkey": "<base64 Ed25519 pubkey: operator>",             // inline — enables offline verify
+>   "op_cert": "<base64 Ed25519 sig: operator over session DID>", // verify with op_pubkey above
 >   "org_memberships": [{
 >     "org_did": "did:wire:org:acme-<32hex>",
->     "member_cert": "<base64 Ed25519 sig: org over op_did>"
+>     "org_pubkey": "<base64 Ed25519 pubkey: org>",               // inline — enables offline verify
+>     "member_cert": "<base64 Ed25519 sig: org over op_did>"      // verify with org_pubkey above
 >   }],
 >   ...
 > }
 > ```
 >
-> Cert primitives live in `src/identity.rs` (`sign_did_cert` / `verify_op_cert` / `verify_member_cert`). The 16-byte (32-hex) fingerprint for operator and organisation DIDs is computed by `agent_card::long_fingerprint`. See the [did:wire method spec](did-methods/did-wire-method.md) for the full DID shape catalogue.
+> Cert primitives live in `src/identity.rs` (`sign_did_cert` / `verify_op_cert` / `verify_member_cert`). Both verifiers take the inline pubkey directly — the design is **fully-offline self-certifying**: no resolver lookup on the pairing hot path. The 16-byte (32-hex) fingerprint for operator and organisation DIDs is computed by `agent_card::long_fingerprint`. See the [did:wire method spec](did-methods/did-wire-method.md) for the full DID shape catalogue.
 
 **v0.13 DID format note:** since v0.5.7 the per-session DID is **pubkey-suffixed** (`did:wire:<handle>-<8hex>`) to prevent handle collisions across distinct keypairs. v0.1 cards using the bare `did:wire:<handle>` form remain verifiable for backward compatibility but new claims always carry the suffix.
 
@@ -291,4 +293,5 @@ A relay MUST reload event slots and tokens on startup to provide restart-recover
 | v0.5 | v3.1 | Federated handle directory + `.well-known/agent-card.json`; A2A v1.0 AgentCard emission with wire as an A2A extension. |
 | v0.6 | v3.1 | Mesh / local-sister sessions + intra-machine pair-all. |
 | v0.13.3 | v3.1 | Group rooms via shared relay slot. |
-| v0.13.5 | v3.2 | RFC-001 Phase 0 — operator + organisation identity claims on the card, `Tier::OrgVerified`, `identity::*` cert primitives. Backward-compatible with v3.1 readers. |
+| v0.13.5 | v3.1 | Last cut release (Cargo `0.13.5`). |
+| v0.14 (main, unreleased) | v3.2 | RFC-001 — operator + organisation identity claims on the card (inline `op_pubkey` / `org_pubkey` + certs), `Tier::OrgVerified`, `identity::*` cert primitives, fully-offline self-certifying verification. Backward-compatible with v3.1 readers. |

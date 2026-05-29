@@ -93,8 +93,8 @@ A wire-native client activating this extension SHOULD:
 
 1. Verify the inner `card` signature against `card.verify_keys` (Ed25519 over canonical JSON; see [docs/PROTOCOL.md](../PROTOCOL.md#3-canonical-json-and-event-id)).
 2. Confirm `did` matches `card.did` and `handle` matches the suffix-stripped form.
-3. (v3.2 only) If `card.op_did` is present, verify `card.op_cert` against the operator's pubkey resolved separately (operator card lookup is out-of-band; future PRs will add a `wire op resolve` endpoint).
-4. (v3.2 only) For each entry in `card.org_memberships`, verify `member_cert` against the org's pubkey using `wire::identity::verify_member_cert`.
+3. (v3.2 only) If `card.op_did` is present, verify `card.op_cert` against the **inline** `card.op_pubkey` using `wire::identity::verify_op_cert`. Verification is fully offline — no resolver, no operator-card lookup, no network step on the pairing hot path.
+4. (v3.2 only) For each entry in `card.org_memberships`, verify `member_cert` against that membership's **inline** `org_pubkey` using `wire::identity::verify_member_cert`. Verification is fully offline; the org pubkey travels with the membership claim.
 5. Pin the peer in local trust per [RFC-001](../rfc/0001-identity-layer.md):
    - cryptographic claim only → `Tier::Untrusted` (claim-aware getters available but no policy lift).
    - org-cert verifies against an accepted org → `Tier::OrgVerified`.
