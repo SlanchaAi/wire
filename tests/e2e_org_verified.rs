@@ -74,12 +74,16 @@ fn read_handle(home: &PathBuf) -> String {
     card["handle"].as_str().unwrap().to_string()
 }
 
+// Poll cadence is deliberately gentle (750ms). Each predicate iteration cold-
+// starts a `wire` subprocess; a tight loop spawning binaries floods the process
+// scheduler and starves the real background daemons that the heavier e2e
+// binaries (e.g. detached-pair SAS) run concurrently, tipping their deadlines.
 fn wait_until<F: Fn() -> bool>(deadline: Instant, f: F) -> bool {
     while Instant::now() < deadline {
         if f() {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(750));
     }
     false
 }
@@ -108,6 +112,12 @@ async fn spawn_relay() -> (String, String) {
     (format!("http://{addr}"), addr.ip().to_string())
 }
 
+// Heavy real-process e2e (spawns a relay + many `wire` subprocesses). Run
+// serially out of the default parallel suite — `cargo test --test
+// e2e_org_verified -- --ignored --test-threads=1` — so its subprocess churn
+// doesn't starve the other real-daemon e2e binaries (notably detached-pair SAS)
+// when `cargo test --all-targets` fans every binary out at once.
+#[ignore = "heavy live e2e — run via `-- --ignored --test-threads=1`"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn org_member_auto_pins_org_verified_offline() {
     let (relay_url, host_only) = spawn_relay().await;
@@ -214,6 +224,7 @@ async fn org_member_auto_pins_org_verified_offline() {
 /// Negative control: a plain (non-member) dialer is NOT auto-pinned — it still
 /// lands in pending-inbound under the default-deny bilateral gate, even though
 /// B has an org policy. Proves the auto-pin is org-scoped, not a blanket door.
+#[ignore = "heavy live e2e — run via `-- --ignored --test-threads=1`"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn non_member_dialer_still_gated_to_pending() {
     let (relay_url, host_only) = spawn_relay().await;
