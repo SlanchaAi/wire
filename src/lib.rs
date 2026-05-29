@@ -23,6 +23,7 @@ pub mod identity;
 pub mod inbox_watch;
 pub mod macaroon;
 pub mod mcp;
+pub mod org_membership;
 pub mod os_notify;
 pub mod pair_invite;
 pub mod pair_profile;
