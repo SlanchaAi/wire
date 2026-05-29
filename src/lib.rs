@@ -17,6 +17,7 @@ pub mod config;
 pub mod daemon_stream;
 pub mod diag;
 pub mod endpoints;
+pub mod enroll;
 pub mod ensure_up;
 pub mod group;
 pub mod identity;
