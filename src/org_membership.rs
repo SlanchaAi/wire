@@ -198,7 +198,7 @@ mod tests {
                     .map(|(od, opk, cert)| {
                         let mut e = json!({"org_did": od, "member_cert": cert});
                         if let Some(pk) = opk {
-                            e["org_pubkey"] = json!(b64encode(pk));
+                            e["org_pubkey"] = json!(b64encode(*pk));
                         }
                         e
                     })
