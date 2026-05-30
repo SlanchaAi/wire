@@ -26,6 +26,11 @@ private/
 .org-identity/
 .gitnexus
 
+# Demo scratch — ad-hoc demo runs write persona homes / artifacts here.
+# Not part of the crate, not part of any test; safe to ignore. Add new
+# top-level demo-* dirs as they appear.
+demo-narrator/
+
 # Agent-local files. Excluded from the published crate via Cargo.toml
 # `exclude`, and intentionally NOT tracked in git either — each
 # contributor's machine has its own. Accidentally committed once in
