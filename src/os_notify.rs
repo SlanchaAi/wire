@@ -84,14 +84,52 @@ pub fn toast_dedup(key: &str, title: &str, body: &str) {
     }
 }
 
+/// v0.14.x kill switch: the operator silences ALL wire desktop toasts by
+/// either (a) `wire quiet on` — which touches `<config_dir>/quiet` — or
+/// (b) exporting `WIRE_NO_TOASTS=1` in the daemon's environment (e.g. via
+/// `launchctl setenv WIRE_NO_TOASTS 1` then `wire upgrade --local`).
+///
+/// Checked at every `toast`/`toast_dedup` entry. The file check is a
+/// per-call `fs::metadata` stat (cheap; bounded by the 30s dedup TTL); the
+/// env check is a `std::env::var`. Either match ⇒ no-op return; nothing
+/// shells out to `osascript`/`notify-send`/`powershell`.
+///
+/// Intentionally bypasses dedup — disabled means disabled, no leakage.
+/// Note: callers that DROP a notification because of this guard MUST NOT
+/// also bail their downstream side effects (pending stash still runs,
+/// receive path still pins per policy, etc.) — the toast is the ONLY
+/// thing suppressed.
+fn toasts_disabled() -> bool {
+    if std::env::var("WIRE_NO_TOASTS").is_ok_and(|v| !v.is_empty() && v != "0") {
+        return true;
+    }
+    if let Ok(cfg) = crate::config::config_dir()
+        && cfg.join("quiet").exists()
+    {
+        return true;
+    }
+    false
+}
+
 /// Test-only escape hatch: empty the in-process dedup cache.
 #[cfg(test)]
 pub(crate) fn _reset_dedup_cache_for_tests() {
     dedup_cache().lock().unwrap().clear();
 }
 
-#[cfg(target_os = "linux")]
+/// v0.14.x kill-switch wrapper. EVERY toast — including those that ride
+/// `toast_dedup` — funnels here, so a single `wire quiet on` (or
+/// `WIRE_NO_TOASTS=1` in launchd env) silences all desktop notification
+/// surfaces in one shot.
 pub fn toast(title: &str, body: &str) {
+    if toasts_disabled() {
+        return;
+    }
+    emit_toast(title, body);
+}
+
+#[cfg(target_os = "linux")]
+fn emit_toast(title: &str, body: &str) {
     let _ = std::process::Command::new("notify-send")
         .arg("--app-name=wire")
         .arg("--icon=mail-message-new")
@@ -101,7 +139,7 @@ pub fn toast(title: &str, body: &str) {
 }
 
 #[cfg(target_os = "macos")]
-pub fn toast(title: &str, body: &str) {
+fn emit_toast(title: &str, body: &str) {
     let safe = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(
         "display notification \"{}\" with title \"{}\"",
@@ -115,18 +153,73 @@ pub fn toast(title: &str, body: &str) {
 }
 
 #[cfg(target_os = "windows")]
-pub fn toast(title: &str, body: &str) {
+fn emit_toast(title: &str, body: &str) {
     eprintln!("[wire notify] {title}\n  {body}");
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub fn toast(title: &str, body: &str) {
+fn emit_toast(title: &str, body: &str) {
     eprintln!("[wire notify] {title}\n  {body}");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // v0.14.x kill-switch tests. `toasts_disabled` is process-state-leaky
+    // (env var + filesystem), so each test sets its own WIRE_HOME tempdir
+    // and clears the env var explicitly. Run under --test-threads=1 (CI
+    // default since #111) to avoid env-mutation races.
+    #[test]
+    fn disabled_false_in_clean_env_and_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: tests are gated to --test-threads=1.
+        unsafe {
+            std::env::remove_var("WIRE_NO_TOASTS");
+            std::env::set_var("WIRE_HOME", tmp.path());
+        }
+        assert!(!toasts_disabled());
+    }
+
+    #[test]
+    fn disabled_true_when_env_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("WIRE_HOME", tmp.path());
+            std::env::set_var("WIRE_NO_TOASTS", "1");
+        }
+        assert!(toasts_disabled());
+        unsafe {
+            std::env::remove_var("WIRE_NO_TOASTS");
+        }
+    }
+
+    #[test]
+    fn disabled_true_when_quiet_flag_file_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::remove_var("WIRE_NO_TOASTS");
+            std::env::set_var("WIRE_HOME", tmp.path());
+        }
+        let cfg = tmp.path().join("config").join("wire");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(cfg.join("quiet"), b"").unwrap();
+        assert!(toasts_disabled());
+    }
+
+    #[test]
+    fn env_var_zero_string_does_not_silence() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("WIRE_HOME", tmp.path());
+            std::env::set_var("WIRE_NO_TOASTS", "0");
+        }
+        // "0" / empty is operator-explicit "off"; respect it.
+        assert!(!toasts_disabled());
+        unsafe {
+            std::env::remove_var("WIRE_NO_TOASTS");
+        }
+    }
 
     #[test]
     fn first_emission_for_a_key_passes() {
