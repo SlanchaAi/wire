@@ -38,6 +38,8 @@ Read these in order before touching code:
 - **Deprovision is monotone-eject and idempotent.** SCIM 410 GONE / refresh-permanent-fail / OIDC `token_revoked` → eject membership claim → re-republish card → audit-log. On persistent eject failure (e.g. card write blocked), audit-log + alarm; do NOT loop. The eject signal also carries an outbound `kind=1001, t: "sso_deprovision"` body so paired peers can drop their pin proactively (operator MAY ignore; the receive-side trust-ladder drop happens on natural card refresh regardless).
 - **Per-tenant rate limits.** OIDC discovery / JWKS / SCIM polling cached per-tenant with defaults: JWKS 1h, SCIM 15m (configurable up to 1h, below 15m → CI fails the connector-config test), OIDC discovery 6h. Token refresh on its own TTL schedule (typically refresh at TTL/2).
 - **Group/role enumeration is bind-time + scheduled-refresh, never pairing-time.** The wire card carries the bound roles inline; refreshing the binding refreshes the roles.
+- **Read paths stay in lock-step via `op_claims_from_card`.** The v0.14 helper `cli::op_claims_from_card` (pub(crate), used by both CLI `cmd_whoami`/`cmd_peers`/`cmd_whois_local` AND MCP `tool_whoami`/`tool_peers`) is the single source of truth for "which inline card fields surface on every read verb". v0.15 EXTENDS that helper to include `sso_attest` + `roles`; does NOT create a parallel helper. Verify via PRs #114 + #115 (the lesson that motivated this rule: v0.14 shipped op_did on the card but CLI + MCP serializers stripped it independently, ⇒ TWO regressions to fix instead of one). Memory note: `feedback_wire_upgrade_skips_mcp_servers`.
+- **`schema_version` MUST bump on emit when inline fields land.** v0.14 stored `op_did` on the card but kept emitting `schema_version: "v3.1"` ⇒ readers can't tell from the version alone whether the card carries op_*. v0.15 PR #12 fixes the write-side bump to `v3.3` *and* retroactively fixes the v0.14 emit-side to `v3.2`. Readers stay backward-compatible with both versions via `#[serde(default)]`.
 
 ## Providers to build (full-connector surface)
 
@@ -123,7 +125,8 @@ For each connector you MUST produce:
    - Revoke happy (POST succeeds → eject membership → re-emit card).
    - Deprovision via SCIM 410 → eject within 1 poll interval + audit-log entry.
 10. **Card-emit wiring + receive-side branch** — extend `OrgMembership` with `sso_attest: Option<String>` and `roles: Option<Vec<OrgRole>>` (schema bump to `v3.3`; v3.3 must stay backward-compatible with v3.2 readers via `#[serde(default, skip_serializing_if = "Option::is_none")]`). Receive-side: `pair_decision::PairAction::AutoOrgVerifiedViaSso { org_did, issuer, roles }`.
-11. **Per-connector README** at `docs/connectors/<provider>.md` covering: required IdP-side setup (app registration, redirect URI, required scopes), operator env vars for the nightly test, gotchas. The implementing agent reads these when bringing up real-IdP tests; future operators read them when onboarding.
+11. **Read-path surfacing on BOTH CLI and MCP** — every connector PR adds the new card fields (`sso_attest`, `roles`) to `cli::op_claims_from_card`. That single helper covers both CLI (`cmd_whoami`/`cmd_peers`/`cmd_whois_local`) AND MCP (`tool_whoami`/`tool_peers`) — they share the helper since #115. Acceptance criterion: the connector PR adds a test that drives `wire mcp` directly via JSON-RPC (one-shot `initialize` + `notifications/initialized` + `tools/call wire_whoami`) and asserts the new fields appear in the MCP response. CLI-only verification is insufficient: in v0.14, CLI and MCP shipped TWO independent regressions because they were tested + fixed separately (#114 + #115). The shared helper closes that loop; the dual-surface test enforces it.
+12. **Per-connector README** at `docs/connectors/<provider>.md` covering: required IdP-side setup (app registration, redirect URI, required scopes), operator env vars for the nightly test, gotchas. The implementing agent reads these when bringing up real-IdP tests; future operators read them when onboarding.
 
 ## Process
 
@@ -135,6 +138,8 @@ For each connector you MUST produce:
 - **CI is `--test-threads=1`** since #111 — your heavy real-process tests can be regular (not `#[ignore]`d) as long as they're robust. Local detached-pair-style flake = environmental on busy boxes; verify isolated.
 - **Real-IdP credentials NEVER touch CI secrets.** Operator runs nightly integration with `WIRE_REAL_IDP_<PROVIDER>_*` env. CI only runs the mock-IdP fixture tests.
 - **Each PR is REVIEW-gated** (`@dthoma1` for RFC-001 semantics, `@WILLARDKLEIN` for the three-guarantee audit). Trust-adjacent; do not self-merge without explicit operator authorization per PR.
+- **Post-`/compact` branch state verification.** v0.15 connector PRs are long-running; you WILL hit `/compact` mid-flow. The system-reminder's "Current branch: main" snapshot at the next session-start is STALE — it reflects the previous session's start, not the working-tree state at resume. Before any `git push` after a `/compact`: run `git rev-parse --abbrev-ref HEAD` + `git log --oneline main..HEAD`, READ the output, and only push when the commit set matches your intent. Lesson learned: v0.14.0's #113 absorbed #112's `pair_invite.rs` content silently because the post-/compact `git checkout -b` rooted off the wrong branch. Memory note: `feedback_post_compact_branch_state_verification`.
+- **MCP-server upgrade UX gap.** After `cargo install --path .` + `wire upgrade --local` lands a connector PR, the running `wire mcp` server subprocesses (one per Claude tab) are still pinned to the pre-patch code (macOS mmap semantics). Sister Claude sessions see stale MCP responses until each tab `/mcp` reconnects OR Claude Code/Claude.app restarts. Connector PR #1's `wire enroll sso status` CLI should surface a warning when it detects a binary version mismatch between the local binary and the running `wire mcp` server (compare `wire --version` vs the MCP server's response). Tracking issue for the deeper fix: `wire upgrade` should enumerate `wire mcp` PIDs and prompt the operator to /mcp reconnect each. Memory note: `feedback_wire_upgrade_skips_mcp_servers`.
 
 ## Order to ship (suggested)
 
@@ -149,7 +154,7 @@ For each connector you MUST produce:
 9. PR #9 — GitHub + GitLab (hybrid: OAuth + org-membership / `groups_direct`).
 10. PR #10 — Authentik + Ory (Hydra + Kratos) (self-hosted OIDC).
 11. PR #11 — SAML enterprise: ADFS + PingFederate + Shibboleth + Generic SAML (XML-DSig).
-12. PR #12 — Receive-side `AutoOrgVerifiedViaSso` wiring + v3.3 schema bump (carries inline `sso_attest` + `roles`) + cross-connector integration tests.
+12. PR #12 — Receive-side `AutoOrgVerifiedViaSso` wiring + v3.3 schema bump (carries inline `sso_attest` + `roles`) + cross-connector integration tests + **v0.14 emit-side schema_version retro-fix to `v3.2`** (separate commit in the same PR: cards that carry `op_did`/`op_pubkey`/`op_cert`/`org_memberships` MUST emit `schema_version: "v3.2"` per the RFC-001 amendment, not `v3.1`. Currently still `v3.1` on emit — caught during v0.14.x regression testing). Property test: when `op_did` is present, emitted schema_version >= `v3.2`; when `sso_attest` is present, schema_version >= `v3.3`. Readers stay forward-compatible via `#[serde(default)]`.
 
 ## Anti-patterns (instant-reject in review)
 
@@ -166,6 +171,8 @@ For each connector you MUST produce:
 - **Coupling connectors to a specific HTTP client / async runtime in trait surface** — the trait is pure-over-data; HTTP lives in the `BindContext` impl.
 - **Mixing real-IdP credentials into CI secrets** — credentials live in the operator's `WIRE_REAL_IDP_<PROVIDER>_*` env, never repo-secrets.
 - **A connector with no deprovisioning hook** — connector PR is incomplete without it. Operators that bind via Okta and have an employee leave MUST see the membership eject within one SCIM poll interval.
+- **A parallel MCP serializer that drifts from CLI.** If you add a card field (`sso_attest`, `roles`, etc.) to `cli::cmd_whoami` but forget to extend the shared `cli::op_claims_from_card` helper, MCP `tool_whoami` silently strips it (it reads via the same helper). The fix is to always extend the helper, never the call sites directly; the dual-surface test (CLI exit-code shape + JSON-RPC `wire mcp` shape) catches forgotten paths. Lesson: v0.14 shipped this exact regression in TWO independent forms (#114 for CLI, #115 for MCP) — don't repeat.
+- **Skipping the MCP-server restart smoke after `cargo install`.** A connector PR's smoke plan must include: (1) `cargo install --path .`, (2) `wire upgrade --local` (kills + respawns daemons), (3) drive `wire mcp` directly via JSON-RPC for the new tool surface, (4) assert response shape. Trusting `mcp__wire__*` tools in the current session as the verification surface is a false negative — those tools call the PRE-PATCH MCP subprocess pinned at session start.
 
 ## Stop conditions / when to ask
 
