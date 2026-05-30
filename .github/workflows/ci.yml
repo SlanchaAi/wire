@@ -14,7 +14,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --all-targets
-      - run: cargo test --all-targets
+      # Force single-threaded test execution to keep the heavy real-process
+      # e2e binaries (e.g. e2e_detached_pair, with real daemons + a SAS
+      # handshake under a tight deadline) from self-contending under default
+      # parallelism on the 2-core ubuntu-latest runner. Also reduces the UDS
+      # round-trip flake seen intermittently on Broken-pipe (os error 32).
+      # Lib + non-heavy e2e cost is negligible serialized; heavy e2e is where
+      # the wins are. See feedback/heavy-e2e-subprocess-contention.
+      - run: cargo test --all-targets -- --test-threads=1
 
   fmt:
     runs-on: ubuntu-latest
