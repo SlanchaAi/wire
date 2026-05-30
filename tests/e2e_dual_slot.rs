@@ -61,7 +61,7 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
 /// handle on the agent-card is derived from the keypair.
 fn read_handle(home: &PathBuf) -> String {
     let out = wire(home, &["whoami", "--json"]);
-    assert!(out.status.success(), "whoami failed: {:?}", out);
+    assert!(out.status.success(), "whoami failed: {out:?}");
     let card: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     card["handle"].as_str().unwrap().to_string()
 }

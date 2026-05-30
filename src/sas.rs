@@ -59,7 +59,7 @@ pub fn generate_code_phrase() -> String {
         let idx = rng.gen_range(0..BASE32_ALPHABET.len());
         token.push(BASE32_ALPHABET[idx] as char);
     }
-    format!("{:02}-{}", digits, token)
+    format!("{digits:02}-{token}")
 }
 
 /// Validate a code phrase has the expected shape.

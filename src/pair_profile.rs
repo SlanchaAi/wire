@@ -366,7 +366,7 @@ pub fn render_self_summary() -> Result<String> {
         }
     };
 
-    out.push_str(&format!("{}\n", did));
+    out.push_str(&format!("{did}\n"));
 
     if let Some(handle) = profile.get("handle").and_then(Value::as_str) {
         line(&mut out, "handle:", handle);

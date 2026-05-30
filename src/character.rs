@@ -198,8 +198,8 @@ impl Character {
             nickname: format!("{}-{}", ADJECTIVES[adj_idx], NOUNS[noun_idx]),
             emoji: EMOJIS[emoji_idx].to_string(),
             palette: Palette {
-                primary_hex: format!("#{:02x}{:02x}{:02x}", pr, pg, pb),
-                accent_hex: format!("#{:02x}{:02x}{:02x}", ar, ag, ab),
+                primary_hex: format!("#{pr:02x}{pg:02x}{pb:02x}"),
+                accent_hex: format!("#{ar:02x}{ag:02x}{ab:02x}"),
                 ansi256_primary: rgb_to_ansi256(pr, pg, pb),
                 ansi256_accent: rgb_to_ansi256(ar, ag, ab),
             },
@@ -989,7 +989,7 @@ mod tests {
         let mut chars: HashSet<(String, String, String)> = HashSet::new();
         let mut collisions = 0;
         for i in 0..10_000 {
-            let did = format!("did:wire:test-{:08x}", i);
+            let did = format!("did:wire:test-{i:08x}");
             let c = Character::from_did(&did);
             let key = (
                 c.nickname.clone(),
