@@ -41,7 +41,24 @@ Restart your agent client. That's it.
 
 ---
 
-## Status — v0.14.0 (latest)
+## Status — v0.14.1 (latest)
+
+**v0.14.1 — v0.14.x DX completion: identity layer visible end-to-end, operator quality-of-life fixes.**
+
+Closes every documented v0.14.0 follow-up plus operator-felt UX gaps surfaced during heavy dogfooding:
+
+- **Identity layer visible everywhere.** v0.14.0 stored `op_did` / `op_pubkey` / `op_cert` / `org_memberships` on the card but every read surface stripped them — operators couldn't tell from `wire whoami` whether enrollment had taken. Now CLI (`whoami` / `peers` / `whois`) AND MCP (`wire_whoami` / `wire_peers` / `wire_whois`) surface the inline op claims via the shared `op_claims_from_card` helper. Single source of truth across both surfaces.
+- **`wire whois` bare-nick on MCP.** MCP's `wire_whois` previously rejected bare nicks (`missing '@' separator`) — agents reading via MCP couldn't introspect a peer they were already pairing with. Now mirrors the CLI's resolution order: pinned peers + local sisters first, federation second.
+- **`schema_version` write-side bump.** Cards carrying op claims now emit `v3.2` (was stuck at `v3.1` despite v0.14 fields). Monotonic (never downgrades), defensive on malformed input. Readers can discriminate "carries op claims" from the version field alone.
+- **`wire enroll republish`** (v0.13.5 carry-over): rebuilds the card with current enrollment + republishes. Closes the enroll-after-`init` DX gap.
+- **`wire quiet on/off/status`** — operator kill switch for desktop toasts. File-based (`<config_dir>/quiet`) + env-based (`WIRE_NO_TOASTS=1`) shut everything off at the single `os_notify::toast` guard. For noisy environments or live demos.
+- **`wire upgrade` warns about stale `wire mcp` server subprocesses.** Sister Claude tabs run a `wire mcp` subprocess pinned at session start; `wire upgrade` swaps daemons but can't swap these. Now surfaces the pid list with explicit "each Claude tab must `/mcp` reconnect" guidance, in both `--check` and action-run output.
+- **`wire setup` template cleaned.** Drops the redundant `{"WIRE_SESSION_ID": "${CLAUDE_CODE_SESSION_ID}"}` env mapping that triggered the MCP Config Diagnostics validator warning. Modern Claude Code propagates `CLAUDE_CODE_SESSION_ID` to MCP subprocesses by default; wire's resolver reads it natively via fallback.
+- **CI: `--test-threads=1`** by default to eliminate heavy-e2e parallel-self-contention. Repo cleanup: dead `strip_did_wire` removed; `clippy::uninlined_format_args` modernized repo-wide (`format!("{}", x)` → `format!("{x}")`, 14 files, -16 LOC); branch graveyard (18 → 4 local).
+
+12 PRs since v0.14.0 (#109 - #124, minus closed #112 / #113-#116-#120 docs-only). No trust ladder changes; no schema-version protocol bump (v3.2 was already the constant). All cards remain backward-compatible with v3.1 readers.
+
+## Status — v0.14.0
 
 **v0.14.0 — RFC-001 identity layer: operator + organization + project, fully-offline self-certifying.**
 

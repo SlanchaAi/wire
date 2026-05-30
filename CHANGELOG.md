@@ -8,6 +8,44 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.14.1] — 2026-05-30
+
+**v0.14.1 — v0.14.x DX completion: identity layer visible end-to-end, operator quality-of-life fixes.**
+
+Closes every documented v0.14.0 follow-up plus operator-felt UX gaps surfaced during heavy dogfooding. 12 PRs since the v0.14.0 tag, no trust ladder change, no protocol bump (v3.2 was already the constant). All cards remain backward-compatible with v3.1 readers.
+
+### Identity layer visible end-to-end
+
+- **CLI op-claims surfacing (#114).** `wire whoami` / `wire peers` / `wire whois` JSON + human output now surface inline `op_did` / `op_pubkey` / `op_cert` / `org_memberships` / `schema_version` when present on the stored card. Pre-patch: the marquee v0.14 identity layer existed on disk but was stripped by every read surface — operators couldn't tell from `wire whoami --json` whether enrollment had taken. Single helper `cli::op_claims_from_card` centralizes the field list; pre-v0.14 / unenrolled cards surface identically (no JSON `null`-spam).
+- **MCP op-claims surfacing (#115).** `mcp__wire__wire_whoami` and `mcp__wire__wire_peers` extend the same shared helper, closing the parallel-serializer gap (CLI and MCP had separate hard-coded JSON shapes that both stripped op_*).
+- **MCP `wire_whois` bare-nick (#122).** Previously rejected bare nicks with `missing '@' separator`, even when the nick was a pinned peer or local sister already in the trust ring. Now routes through `cli::resolve_name_to_target` first (mirroring `wire whois <name>` in the CLI), federation handles fall through unchanged. Closes the agent-discovery surface for v0.14's marquee identity layer.
+- **`schema_version` write-side bump (#121).** Cards carrying op claims now emit `v3.2` (was stuck at `v3.1` despite v0.14 fields). Bumps at `agent_card::with_identity_claims` via the new `max_schema_version` helper. Monotonic — a card already at `v3.5` (hypothetical future extension peer) is NOT downgraded. Numeric parse so `v3.10 > v3.2` (not lexicographic). Readers can now discriminate "carries op claims" from the version field alone.
+- **`wire enroll republish` (#110).** Rebuilds the stored card with the **current** enrollment state and republishes. Closes the enroll-after-`init` DX gap: claims are normally attached at card-build time, but an operator who enrolls AFTER `init` had a stored card that pre-dated the claims. Idempotent: not-enrolled rebuilds a claims-free card; not-bound prints "local only".
+
+### Operator quality of life
+
+- **`wire quiet on/off/status` (#117).** Operator kill switch for desktop toasts. File-based (`<config_dir>/quiet`) for per-session silence + env-based (`WIRE_NO_TOASTS=1`) for launchd-spawned daemons. Both check at the single `os_notify::toast` guard — disabled means disabled, no dedup leakage. Status reports mechanism (`via file` / `via env` / `none`).
+- **`wire upgrade` warns about stale `wire mcp` server subprocesses (#123).** `wire upgrade --local` swaps daemons but not the `wire mcp` server subprocesses that Claude Code / Claude.app pin at session start (macOS mmap semantics keep the old code in already-open processes when the file path is replaced). Now `--check`, action-run, and the `--json` shape surface the stale MCP pid list with explicit "each Claude tab must `/mcp` reconnect" guidance. The MCP procs are NEVER added to the kill set — killing them would disconnect every tab's wire toolset until each one explicitly reconnects. Warn-only, behavior unchanged.
+- **Drop redundant `WIRE_SESSION_ID` env mapping in `wire setup` (#124).** Closes the MCP Config Diagnostics validator warning `Missing environment variables: CLAUDE_CODE_SESSION_ID`. Modern Claude Code (verified 2026-05-30) propagates `CLAUDE_CODE_SESSION_ID` into every MCP subprocess by default; wire's `session::resolve_session_key` reads it natively as a fallback. The historical mapping `{"WIRE_SESSION_ID": "${CLAUDE_CODE_SESSION_ID}"}` was duplicating a value wire already had AND triggering the validator warning. Dropped from the `wire setup` template; the existing fallback chain preserves per-session identity exactly.
+- **Notify-mode wiring (#112 → shipped via #113 by branch-state accident).** The receive-side `notify` org-policy mode parses to `FileOrgPolicy::Notify` and routes the pending-stash toast through an enriched org-aware path (`notify-pair:<handle>` dedup key, "org-verified pair request from `<handle>`" wording). Pre-patch: `notify` parsed-but-unwired since v0.14.0; the generic toast fired regardless. Default-deny + `ORG_VERIFIED` ceiling + auto-wins-over-notify property all preserved.
+
+### CI + repo hygiene
+
+- **CI serializes test threads (#111).** `cargo test --all-targets -- --test-threads=1` eliminates heavy-e2e parallel-self-contention (a busy-polling subprocess-spawning e2e was starving sibling real-daemon e2es under `--test-threads=$(nproc)`).
+- **Dead code removed (#118).** `signing::strip_did_wire` (added with `#[allow(dead_code)]` "kept for v0.6 — once a caller exists" comment) was never adopted; `agent_card::display_handle_from_did` covers the same need. Repo `#[allow]` count 4 → 3.
+- **Repo-wide format-arg modernization (#119).** `cargo clippy --fix -- -W clippy::uninlined_format_args` across 14 files: `format!("{}", x)` → `format!("{x}")` and the same for `println!` / `eprintln!` / `assert_eq!` / `panic!` / `anyhow!` / `bail!` / `write!`. Net −16 LOC.
+- **RFC-001 typo fix (#109).** "doubled" → "tail length quadrupled (8 hex → 32 hex)" in the rationale for op/org DID suffix width.
+
+### Docs
+
+- **SSO connectors prompt (#113 + #116).** `docs/PROMPT_v0.15_sso_connectors.md` — self-contained, paste-able prompt for the v0.15 SSO-connector buildout (auth flow runner + token lifecycle + verify + group/role enumeration + SCIM 2.0 ingest + deprovisioning hooks + CLI + card-emit + receive-side branch). 21 providers spec'd; 9 hard constraints; 12-PR landing order. Iterated via #116 to fold in the v0.14.x regression-debug lessons (CLI+MCP serializers must stay in lock-step via the shared helper; dual-surface JSON-RPC tests; post-`/compact` branch-state verification; MCP-server-pin in `wire upgrade`).
+- **Repo-scrub prompt (#120).** `docs/PROMPT_repo_scrub.md` — durable artifact encoding the bounded-cleanup discipline (5-phase order of operations, per-PR `done` definition, suggested cuts by priority, anti-patterns to instant-reject, stop conditions).
+
+### Net diff
+
+Lib: 341 → 355 tests (+14 across the surfacing + identity + cleanup PRs). No release-surface protocol change. No trust ladder mutation. Six cross-platform binaries (`aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, `aarch64-unknown-linux-{gnu,musl}`, `x86_64-unknown-linux-{gnu,musl}`) + `.sha256`s built via `release.yml` on tag push.
+
+
 ## [v0.14.0] — 2026-05-29
 
 **v0.14.0 — RFC-001 identity layer: operator + organization + project, fully-offline self-certifying.**
