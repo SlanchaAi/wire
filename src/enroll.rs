@@ -76,6 +76,46 @@ pub fn build_member_claims(
 pub fn with_op_claims_if_enrolled(
     card: crate::agent_card::AgentCard,
 ) -> anyhow::Result<crate::agent_card::AgentCard> {
+    with_op_claims_if_enrolled_inner(card)
+}
+
+/// Rebuild the on-disk agent card with the **current** enrollment state and
+/// re-sign it. Closes the enroll-after-`init` DX gap: claims are normally
+/// attached at card-build time (`pair_session::init_self` / `cli.rs` init via
+/// [`with_op_claims_if_enrolled`]), but an operator who enrolls AFTER `init`
+/// has a stored card that pre-dates the claims. This reads the stored card,
+/// strips any pre-existing identity-claim fields + signature, overlays the
+/// current claims via the same helper used at init, re-signs with the existing
+/// session key, and writes the card back. **Pure rebuild** — does NOT publish;
+/// callers (the `wire enroll republish` CLI dispatcher) chain the existing
+/// `republish_card_to_phonebook` to push to the phonebook. Bails if `wire init`
+/// hasn't run; idempotent when not enrolled (strips stale claims → identical to
+/// a freshly-init'd non-enrolled card → re-signed → written).
+pub fn rebuild_card_with_current_claims() -> anyhow::Result<crate::agent_card::AgentCard> {
+    use anyhow::Context;
+    let mut card = crate::config::read_agent_card()
+        .context("no stored agent card — run `wire init` before `wire enroll republish`")?;
+    if let Some(obj) = card.as_object_mut() {
+        // Strip any pre-existing identity claims + the old self-signature so
+        // the rebuilt card is constructed exactly as init would have built it
+        // for the current enrollment state (no stale claims survive).
+        obj.remove("op_did");
+        obj.remove("op_cert");
+        obj.remove("op_pubkey");
+        obj.remove("org_memberships");
+        obj.remove("signature");
+    }
+    let card = with_op_claims_if_enrolled_inner(card)?;
+    let sk = crate::config::read_private_key()
+        .context("no session signing key on disk — re-run `wire init`")?;
+    let signed = crate::agent_card::sign_agent_card(&card, &sk);
+    crate::config::write_agent_card(&signed)?;
+    Ok(signed)
+}
+
+fn with_op_claims_if_enrolled_inner(
+    card: crate::agent_card::AgentCard,
+) -> anyhow::Result<crate::agent_card::AgentCard> {
     let Ok(op_sk) = crate::config::read_op_key() else {
         return Ok(card); // not enrolled → no claims
     };
@@ -281,5 +321,107 @@ mod tests {
             evaluate_card_membership(&card),
             MembershipOutcome::Rejected { .. }
         ));
+    }
+
+    /// The DX-gap fix: an operator who enrolls AFTER `wire init` can run
+    /// `wire enroll republish` to pick up their fresh claims without a re-init.
+    #[test]
+    fn rebuild_picks_up_post_init_enrollment() {
+        crate::config::test_support::with_temp_home(|| {
+            std::fs::create_dir_all(crate::config::config_dir().unwrap()).unwrap();
+            // Simulate `wire init`: write a session key + a stored card without claims.
+            let (sess_sk, sess_pk) = generate_keypair();
+            crate::config::write_private_key(&sess_sk).unwrap();
+            let base = build_agent_card("vesper-valley", &sess_pk, None, None, None);
+            crate::config::write_agent_card(&sign_agent_card(&base, &sess_sk)).unwrap();
+            assert_eq!(
+                crate::agent_card::card_op_did(&crate::config::read_agent_card().unwrap()),
+                None
+            );
+
+            // Operator enrolls AFTER init.
+            let (op_sk, op_pk) = generate_keypair();
+            crate::config::write_op_key(&op_sk).unwrap();
+            crate::config::write_op_handle("darby").unwrap();
+            let op_did = crate::agent_card::did_for_op("darby", &op_pk);
+            let (org_sk, org_pk) = generate_keypair();
+            let org_did = did_for_org("slanchaai", &org_pk);
+            let member_cert = issue_member_cert(&org_sk, &op_did).unwrap();
+            crate::config::add_membership(
+                &org_did,
+                &crate::signing::b64encode(&org_pk),
+                &member_cert,
+            )
+            .unwrap();
+
+            // Republish rebuild — picks up the post-init claims.
+            let signed = rebuild_card_with_current_claims().unwrap();
+            verify_agent_card(&signed).unwrap();
+            assert_eq!(
+                crate::agent_card::card_op_did(&signed),
+                Some(op_did.as_str())
+            );
+            assert_eq!(crate::agent_card::card_org_memberships(&signed).len(), 1);
+            // The new card is what's on disk now.
+            let on_disk = crate::config::read_agent_card().unwrap();
+            assert_eq!(on_disk, signed);
+        });
+    }
+
+    /// Idempotent / fail-soft: not-enrolled stays not-enrolled, AND any stale
+    /// claims on the on-disk card get stripped (the as-current invariant).
+    #[test]
+    fn rebuild_strips_stale_claims_when_unenrolled() {
+        crate::config::test_support::with_temp_home(|| {
+            std::fs::create_dir_all(crate::config::config_dir().unwrap()).unwrap();
+            let (sess_sk, sess_pk) = generate_keypair();
+            crate::config::write_private_key(&sess_sk).unwrap();
+
+            // Manufacture a card with stale claims (as if the operator was once
+            // enrolled, ran republish, then later un-enrolled by removing op.key).
+            let (op_sk, op_pk) = generate_keypair();
+            let op_did = crate::agent_card::did_for_op("darby", &op_pk);
+            let (org_sk, org_pk) = generate_keypair();
+            let org_did = did_for_org("slanchaai", &org_pk);
+            let stale = with_identity_claims(
+                &build_agent_card("vesper-valley", &sess_pk, None, None, None),
+                &IdentityClaims {
+                    op_did: Some(op_did.clone()),
+                    op_cert: Some(crate::identity::sign_did_cert(&op_sk, &op_did).unwrap()),
+                    op_pubkey: Some(crate::signing::b64encode(&op_pk)),
+                    org_memberships: vec![OrgMembership {
+                        org_did,
+                        org_pubkey: crate::signing::b64encode(&org_pk),
+                        member_cert: issue_member_cert(&org_sk, &op_did).unwrap(),
+                    }],
+                    project: None,
+                },
+            )
+            .unwrap();
+            crate::config::write_agent_card(&sign_agent_card(&stale, &sess_sk)).unwrap();
+            assert!(
+                crate::agent_card::card_op_did(&crate::config::read_agent_card().unwrap())
+                    .is_some()
+            );
+
+            // No op.key on disk → not enrolled → rebuild strips the stale claims.
+            let signed = rebuild_card_with_current_claims().unwrap();
+            verify_agent_card(&signed).unwrap();
+            assert_eq!(crate::agent_card::card_op_did(&signed), None);
+            assert_eq!(crate::agent_card::card_org_memberships(&signed).len(), 0);
+        });
+    }
+
+    /// No `wire init` → no stored card → clear error (not a panic).
+    #[test]
+    fn rebuild_bails_without_init() {
+        crate::config::test_support::with_temp_home(|| {
+            let err = rebuild_card_with_current_claims().unwrap_err();
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains("agent card") || msg.contains("init"),
+                "got: {msg}"
+            );
+        });
     }
 }
