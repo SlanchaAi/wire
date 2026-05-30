@@ -2618,6 +2618,33 @@ fn current_cwd_display() -> String {
     cwd.to_string_lossy().into_owned()
 }
 
+/// v0.14: extract the inline op claims from an agent card (or pinned
+/// trust row) for surfacing on operator-facing read paths. Returns the
+/// subset of fields actually present and non-null — operators read the
+/// absence to mean "not enrolled / older peer".
+///
+/// Surfaced fields: `op_did`, `op_pubkey`, `op_cert`, `org_memberships`,
+/// `schema_version`. All RFC-001-defined; all public commits, safe to
+/// surface on every read verb. Centralized here so whoami / peers / whois
+/// stay in lock-step as the inline set grows (e.g. `sso_attest` in v0.15).
+fn op_claims_from_card(card: &Value) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    for key in [
+        "op_did",
+        "op_pubkey",
+        "op_cert",
+        "org_memberships",
+        "schema_version",
+    ] {
+        if let Some(v) = card.get(key)
+            && !v.is_null()
+        {
+            out.insert(key.to_string(), v.clone());
+        }
+    }
+    out
+}
+
 fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
@@ -2676,25 +2703,44 @@ fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
         // no display.json reads). Field stays for back-compat with v0.10
         // JSON consumers that key off it.
         let has_override = false;
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "did": did,
-                "handle": handle,
-                "fingerprint": fp,
-                "key_id": key_id,
-                "public_key_b64": pk_b64,
-                "capabilities": capabilities,
-                "config_dir": config::config_dir()?.to_string_lossy(),
-                "persona": character,
-                "persona_override": has_override,
-            }))?
+        let mut payload = serde_json::Map::new();
+        payload.insert("did".into(), json!(did));
+        payload.insert("handle".into(), json!(handle));
+        payload.insert("fingerprint".into(), json!(fp));
+        payload.insert("key_id".into(), json!(key_id));
+        payload.insert("public_key_b64".into(), json!(pk_b64));
+        payload.insert("capabilities".into(), capabilities);
+        payload.insert(
+            "config_dir".into(),
+            json!(config::config_dir()?.to_string_lossy()),
         );
+        payload.insert("persona".into(), serde_json::to_value(&character)?);
+        payload.insert("persona_override".into(), json!(has_override));
+        // v0.14: surface the RFC-001 op claims (when enrolled) on the
+        // canonical operator read verb. Absent ⇒ pre-v0.14 card or not
+        // yet enrolled. See `op_claims_from_card` rationale.
+        for (k, v) in op_claims_from_card(&card) {
+            payload.insert(k, v);
+        }
+        println!("{}", serde_json::to_string(&payload)?);
     } else {
         println!("{}", character.colored());
         println!("{did} (ed25519:{key_id})");
         println!("fingerprint: {fp}");
         println!("capabilities: {capabilities}");
+        // v0.14: when enrolled, surface op_did + membership count so
+        // the operator can spot at a glance whether the marquee identity
+        // layer is active. Silent when not enrolled (no clutter for
+        // pre-v0.14 cards).
+        if let Some(op_did) = card.get("op_did").and_then(Value::as_str) {
+            let memberships = card
+                .get("org_memberships")
+                .and_then(Value::as_array)
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let plural = if memberships == 1 { "" } else { "s" };
+            println!("enrolled: {op_did} ({memberships} org membership{plural})");
+        }
     }
     Ok(())
 }
@@ -3153,13 +3199,23 @@ fn cmd_peers(as_json: bool) -> Result<()> {
                 None => crate::character::Character::from_did(&did),
             })
         };
-        peers.push(json!({
-            "handle": handle,
-            "did": did,
-            "tier": tier,
-            "capabilities": capabilities,
-            "persona": character,
-        }));
+        // v0.14: surface peer's op claims when their pinned card carries
+        // them (post-v0.14 peers). Older peers ⇒ absent keys; same shape
+        // as `wire whoami --json` so operators have one mental model.
+        let peer_op_claims = agent
+            .get("card")
+            .map(op_claims_from_card)
+            .unwrap_or_default();
+        let mut row = serde_json::Map::new();
+        row.insert("handle".into(), json!(handle));
+        row.insert("did".into(), json!(did));
+        row.insert("tier".into(), json!(tier));
+        row.insert("capabilities".into(), capabilities);
+        row.insert("persona".into(), serde_json::to_value(&character)?);
+        for (k, v) in peer_op_claims {
+            row.insert(k, v);
+        }
+        peers.push(Value::Object(row));
     }
 
     if as_json {
@@ -3781,18 +3837,32 @@ fn cmd_whois_local(name: &str, as_json: bool) -> Result<()> {
             emoji,
             tier,
         } => {
+            // v0.14: re-read trust to pull the pinned peer's card for op
+            // claims surfacing. Pinned ⇒ card lives in trust.json (no
+            // network round-trip). Older peers ⇒ no op_* fields ⇒ empty.
+            let op_claims = config::read_trust()
+                .ok()
+                .and_then(|t| {
+                    t.get("agents")
+                        .and_then(Value::as_object)
+                        .and_then(|m| m.get(&handle))
+                        .and_then(|a| a.get("card").cloned())
+                })
+                .map(|c| op_claims_from_card(&c))
+                .unwrap_or_default();
+
             if as_json {
-                println!(
-                    "{}",
-                    serde_json::to_string(&json!({
-                        "kind": "pinned_peer",
-                        "handle": handle,
-                        "did": did,
-                        "nickname": nickname,
-                        "emoji": emoji,
-                        "tier": tier,
-                    }))?
-                );
+                let mut payload = serde_json::Map::new();
+                payload.insert("kind".into(), json!("pinned_peer"));
+                payload.insert("handle".into(), json!(handle));
+                payload.insert("did".into(), json!(did));
+                payload.insert("nickname".into(), json!(nickname));
+                payload.insert("emoji".into(), json!(emoji));
+                payload.insert("tier".into(), json!(tier));
+                for (k, v) in &op_claims {
+                    payload.insert(k.clone(), v.clone());
+                }
+                println!("{}", serde_json::to_string(&payload)?);
             } else {
                 let n = nickname.as_deref().unwrap_or("(no character)");
                 let e = emoji.as_deref().unwrap_or("?");
@@ -3800,6 +3870,11 @@ fn cmd_whois_local(name: &str, as_json: bool) -> Result<()> {
                 println!("  handle:   {handle}");
                 println!("  did:      {did}");
                 println!("  tier:     {tier}");
+                // v0.14: surface peer's op_did when the pinned card
+                // carries one. Silent for pre-v0.14 peers.
+                if let Some(op_did) = op_claims.get("op_did").and_then(Value::as_str) {
+                    println!("  op_did:   {op_did}");
+                }
                 println!("  reach:    pinned peer (already in trust ring + slot pinned)");
             }
         }
@@ -6595,13 +6670,19 @@ fn cmd_whois(handle: Option<&str>, as_json: bool, relay_override: Option<&str>) 
     let card = config::read_agent_card()?;
     if as_json {
         let profile = card.get("profile").cloned().unwrap_or(Value::Null);
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "did": card.get("did").cloned().unwrap_or(Value::Null),
-                "profile": profile,
-            }))?
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "did".into(),
+            card.get("did").cloned().unwrap_or(Value::Null),
         );
+        payload.insert("profile".into(), profile);
+        // v0.14: surface inline op claims on self-whois too, for parity
+        // with `wire whoami --json`. Single mental model across read
+        // verbs; absent ⇒ not enrolled.
+        for (k, v) in op_claims_from_card(&card) {
+            payload.insert(k, v);
+        }
+        println!("{}", serde_json::to_string(&payload)?);
     } else {
         print!("{}", crate::pair_profile::render_self_summary()?);
     }
@@ -14950,5 +15031,72 @@ mod slot_reresolve_tests {
         assert!(!error_smells_like_slot_4xx(
             "post_event failed: 411 Length Required"
         ));
+    }
+}
+
+// v0.14: tests for op-claims surfacing on operator read verbs.
+// Pure-over-Value helper; no I/O, no filesystem fixtures needed.
+#[cfg(test)]
+mod op_claims_surfacing_tests {
+    use super::*;
+
+    #[test]
+    fn op_claims_extracts_present_non_null_fields() {
+        let card = json!({
+            "did": "did:wire:foo-deadbeef",
+            "handle": "foo",
+            "op_did": "did:wire:op:foo-aaaa",
+            "op_pubkey": "PKB64==",
+            "op_cert": "SIGB64==",
+            "org_memberships": [{"org_did": "did:wire:org:slancha-bbbb"}],
+            "schema_version": "v3.2",
+        });
+        let claims = op_claims_from_card(&card);
+        assert_eq!(claims.len(), 5);
+        assert_eq!(
+            claims.get("op_did").and_then(Value::as_str),
+            Some("did:wire:op:foo-aaaa")
+        );
+        assert!(
+            claims
+                .get("org_memberships")
+                .and_then(Value::as_array)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn op_claims_empty_on_pre_v014_card() {
+        // A pre-v0.14 card has none of the inline op_* fields. The
+        // helper must return an EMPTY map so older peers surface
+        // identically on every read verb (no `null`-spam in JSON,
+        // no new lines in human output).
+        let card = json!({
+            "did": "did:wire:bar-cafebabe",
+            "handle": "bar",
+            "capabilities": ["wire/v3.1"],
+        });
+        assert!(op_claims_from_card(&card).is_empty());
+    }
+
+    #[test]
+    fn op_claims_skips_explicit_null_fields() {
+        // Defensive: a card where republish has serialized op_did as
+        // `null` (e.g., post-unenroll rebuild) must not surface a
+        // `null` field — operators read absence to mean "not enrolled".
+        let card = json!({
+            "did": "did:wire:baz-12341234",
+            "op_did": Value::Null,
+            "org_memberships": Value::Null,
+            "schema_version": "v3.2",
+        });
+        let claims = op_claims_from_card(&card);
+        assert_eq!(claims.len(), 1);
+        assert!(claims.get("op_did").is_none());
+        assert!(claims.get("org_memberships").is_none());
+        assert_eq!(
+            claims.get("schema_version").and_then(Value::as_str),
+            Some("v3.2")
+        );
     }
 }
