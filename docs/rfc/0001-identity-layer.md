@@ -75,7 +75,7 @@ Semantics:
 - **`org_memberships`** is a list (the same operator can sit in multiple orgs simultaneously). Each entry carries an org-signed `member_cert` binding `op_did → org_did`. Verifier checks: `verify(org_did_pubkey, member_cert, op_did)` AND `op_did` appears in this card's `op_cert` chain.
 - **`project`** is opaque metadata with no signature. Routing tag only. Carrying it in the card lets routing decisions happen client-side without an extra protocol round-trip; it is **never trust-bearing**.
 
-`op_did` and `org_did` use a new DID-method prefix `did:wire:op:` and `did:wire:org:` so they cannot be confused with session DIDs. The `<32hex>` tail is the first 32 hex digits of `sha256(pubkey)` — same construction as the session DID but doubled to make collision search 2^128 instead of 2^32.
+`op_did` and `org_did` use a new DID-method prefix `did:wire:op:` and `did:wire:org:` so they cannot be confused with session DIDs. The `<32hex>` tail is the first 32 hex digits of `sha256(pubkey)` — same construction as the session DID but with the tail length quadrupled (8 hex → 32 hex) to make collision search 2^128 instead of 2^32.
 
 **Critical invariant (closes Q-Reuse).** New claims are **orthogonal axes**. They do not introduce a free-choice display name diverging from the DID-derived session handle — v0.13.1's one-name invariant (see `src/cli.rs:13131`) still holds. The agent-card's `handle` field continues to come deterministically from the DID; `op_did` / `org_did` add context but not aliasing.
 
