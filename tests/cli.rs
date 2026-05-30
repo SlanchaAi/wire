@@ -51,7 +51,7 @@ fn version_flag_prints_semver() {
 fn help_flag_lists_subcommands() {
     let home = fresh_home();
     let out = run(&home, &["--help"]);
-    assert!(out.status.success(), "help failed: {:?}", out);
+    assert!(out.status.success(), "help failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
     for cmd in [
         "init", "join", "whoami", "peers", "send", "tail", "verify", "mcp",
@@ -73,7 +73,7 @@ fn whoami_before_init_errors() {
 fn init_creates_keypair_and_card() {
     let home = fresh_home();
     let out = run(&home, &["init", "paul", "--offline", "--json"]);
-    assert!(out.status.success(), "init failed: {:?}", out);
+    assert!(out.status.success(), "init failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
     {
@@ -158,7 +158,7 @@ fn send_writes_to_outbox() {
             "--json",
         ],
     );
-    assert!(out.status.success(), "send failed: {:?}", out);
+    assert!(out.status.success(), "send failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
     assert_eq!(parsed["status"], "queued");
@@ -221,7 +221,7 @@ fn pair_list_inbound_surfaces_pending_v0_5_14() {
     // v0.10: migrated from `wire pair-list-inbound` (removed) to
     // `wire pending`. Same underlying handler; canonical verb.
     let out = run(&home, &["pending", "--json"]);
-    assert!(out.status.success(), "pending failed: {:?}", out);
+    assert!(out.status.success(), "pending failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
     let arr = parsed.as_array().expect("flat array of pending-inbound");
@@ -240,7 +240,7 @@ fn status_reports_pending_inbound_count_v0_5_14() {
     write_pending_inbound_fixture(&home, "alice");
     write_pending_inbound_fixture(&home, "bob");
     let out = run(&home, &["status", "--json"]);
-    assert!(out.status.success(), "status failed: {:?}", out);
+    assert!(out.status.success(), "status failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
     assert_eq!(parsed["pending_pairs"]["inbound_count"], 2);
@@ -266,7 +266,7 @@ fn pair_reject_deletes_pending_inbound_v0_5_14() {
 
     // v0.10: migrated from `wire pair-reject` (removed) to `wire reject`.
     let out = run(&home, &["reject", "spammer", "--json"]);
-    assert!(out.status.success(), "reject failed: {:?}", out);
+    assert!(out.status.success(), "reject failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
     assert_eq!(parsed["rejected"], true);
@@ -336,7 +336,7 @@ fn write_session_fixture(
 fn session_list_empty_reports_no_sessions_v0_5_16() {
     let home = fresh_home();
     let out = run(&home, &["session", "list"]);
-    assert!(out.status.success(), "session list failed: {:?}", out);
+    assert!(out.status.success(), "session list failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
         stdout.contains("no sessions on this machine"),
@@ -355,11 +355,7 @@ fn session_list_enumerates_on_disk_sessions_v0_5_16() {
     );
 
     let out = run(&home, &["session", "list", "--json"]);
-    assert!(
-        out.status.success(),
-        "session list --json failed: {:?}",
-        out
-    );
+    assert!(out.status.success(), "session list --json failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
     let arr: serde_json::Value = serde_json::from_str(&s).unwrap();
     let items = arr.as_array().expect("flat array");
@@ -379,7 +375,7 @@ fn session_env_emits_export_line_for_named_session_v0_5_16() {
     let home = fresh_home();
     write_session_fixture(&home, "wire", None);
     let out = run(&home, &["session", "env", "wire"]);
-    assert!(out.status.success(), "session env failed: {:?}", out);
+    assert!(out.status.success(), "session env failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.starts_with("export WIRE_HOME="), "got: {stdout}");
     assert!(stdout.contains("/sessions/wire"), "got: {stdout}");
@@ -389,7 +385,7 @@ fn session_env_emits_export_line_for_named_session_v0_5_16() {
 fn session_env_errors_cleanly_for_missing_session_v0_5_16() {
     let home = fresh_home();
     let out = run(&home, &["session", "env", "ghost"]);
-    assert!(!out.status.success(), "expected failure: {:?}", out);
+    assert!(!out.status.success(), "expected failure: {out:?}");
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("no session named"), "stderr: {stderr}");
     assert!(
@@ -405,8 +401,7 @@ fn session_destroy_requires_force_flag_v0_5_16() {
     let out = run(&home, &["session", "destroy", "wire"]);
     assert!(
         !out.status.success(),
-        "destroy without --force must fail: {:?}",
-        out
+        "destroy without --force must fail: {out:?}"
     );
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("--force"), "stderr: {stderr}");
@@ -440,7 +435,7 @@ fn legacy_pair_verbs_still_callable_but_hidden_v0_10() {
 fn send_no_auto_pair_flag_exists_v0_10() {
     let home = fresh_home();
     let out = run(&home, &["send", "--help"]);
-    assert!(out.status.success(), "send --help: {:?}", out);
+    assert!(out.status.success(), "send --help: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
         stdout.contains("--no-auto-pair"),
@@ -462,8 +457,7 @@ fn pair_hidden_from_help_v0_10() {
     let out = run(&home, &["pair", "--help"]);
     assert!(
         out.status.success(),
-        "wire pair --help should still work (back-compat): {:?}",
-        out
+        "wire pair --help should still work (back-compat): {out:?}"
     );
 }
 
@@ -471,7 +465,7 @@ fn pair_hidden_from_help_v0_10() {
 fn completions_emits_bash_script_v0_9_5() {
     let home = fresh_home();
     let out = run(&home, &["completions", "bash"]);
-    assert!(out.status.success(), "completions bash failed: {:?}", out);
+    assert!(out.status.success(), "completions bash failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
         stdout.starts_with("_wire()"),
@@ -493,7 +487,7 @@ fn completions_emits_bash_script_v0_9_5() {
 fn completions_emits_zsh_script_v0_9_5() {
     let home = fresh_home();
     let out = run(&home, &["completions", "zsh"]);
-    assert!(out.status.success(), "completions zsh failed: {:?}", out);
+    assert!(out.status.success(), "completions zsh failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
         stdout.starts_with("#compdef wire"),
@@ -507,11 +501,7 @@ fn completions_supports_fish_and_powershell_v0_9_5() {
     let home = fresh_home();
     for shell in ["fish", "powershell", "elvish"] {
         let out = run(&home, &["completions", shell]);
-        assert!(
-            out.status.success(),
-            "completions {shell} failed: {:?}",
-            out
-        );
+        assert!(out.status.success(), "completions {shell} failed: {out:?}");
         assert!(
             !out.stdout.is_empty(),
             "completions {shell} produced empty output"
@@ -557,7 +547,7 @@ fn accept_invite_verb_exists_v0_9_4() {
     // v0.9.4: federation invite URL accept gets its own explicit verb.
     let home = fresh_home();
     let out = run(&home, &["accept-invite", "--help"]);
-    assert!(out.status.success(), "accept-invite --help: {:?}", out);
+    assert!(out.status.success(), "accept-invite --help: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
         stdout.contains("federation invite URL"),
@@ -619,7 +609,7 @@ fn here_prints_self_when_no_neighbors_v0_9_3() {
         .env("WIRE_EMOJI", "off") // deterministic in CI
         .output()
         .expect("spawn wire");
-    assert!(out.status.success(), "here failed: {:?}", out);
+    assert!(out.status.success(), "here failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
         stdout.contains("you are") && stdout.contains(&canonical),
@@ -640,7 +630,7 @@ fn here_json_includes_self_sisters_peers_v0_9_3() {
         .env("WIRE_HOME", &home)
         .output()
         .expect("spawn wire");
-    assert!(out.status.success(), "here --json failed: {:?}", out);
+    assert!(out.status.success(), "here --json failed: {out:?}");
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(parsed.get("self").is_some(), "self field: {parsed}");
     // v0.11: handle = DID-derived character. Assert non-empty + matches
@@ -735,8 +725,7 @@ fn whois_typo_returns_json_success_with_candidates_v0_9_2() {
         .expect("spawn wire");
     assert!(
         out.status.success(),
-        "whois --json on miss should succeed (exit 0): {:?}",
-        out
+        "whois --json on miss should succeed (exit 0): {out:?}"
     );
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(parsed["found"], serde_json::Value::Bool(false));
@@ -764,7 +753,7 @@ fn deprecated_verbs_hidden_from_help_v0_9_1() {
     // checks subcommand-listing position, not arbitrary substring.
     let home = fresh_home();
     let out = run(&home, &["--help"]);
-    assert!(out.status.success(), "--help failed: {:?}", out);
+    assert!(out.status.success(), "--help failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     for hidden in [
         "pair-host",
@@ -798,7 +787,7 @@ fn init_offline_creates_keypair_without_slot_v0_9_1() {
     // DID-derived character. Assert shape, not the operator's input.
     let home = fresh_home();
     let out = run(&home, &["init", "alice", "--offline", "--json"]);
-    assert!(out.status.success(), "init --offline failed: {:?}", out);
+    assert!(out.status.success(), "init --offline failed: {out:?}");
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let did = parsed["did"].as_str().unwrap();
     assert!(
@@ -816,7 +805,7 @@ fn json_emitted_when_stdout_is_piped_v0_9_1() {
     let home = fresh_home();
     let _ = run(&home, &["init", "alice", "--offline"]);
     let out = run(&home, &["whoami"]);
-    assert!(out.status.success(), "whoami failed: {:?}", out);
+    assert!(out.status.success(), "whoami failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|_| panic!("whoami stdout should be JSON when piped — got: {stdout}"));
@@ -833,7 +822,7 @@ fn json_auto_can_be_opted_out_v0_9_1() {
         .env("WIRE_NO_AUTO_JSON", "1")
         .output()
         .expect("spawn wire");
-    assert!(out.status.success(), "whoami failed: {:?}", out);
+    assert!(out.status.success(), "whoami failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     // v0.11: human format prints DID with character handle, not "alice".
     assert!(
@@ -873,7 +862,7 @@ fn session_bind_attaches_existing_session_to_cwd_v0_7_1() {
         .current_dir(project_cwd.path())
         .output()
         .expect("failed to spawn wire");
-    assert!(out.status.success(), "bind failed: {:?}", out);
+    assert!(out.status.success(), "bind failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(parsed["session"], "wire");
@@ -912,7 +901,7 @@ fn session_bind_errors_on_unknown_session_v0_7_1() {
         .current_dir(project_cwd.path())
         .output()
         .expect("failed to spawn wire");
-    assert!(!out.status.success(), "bind should fail: {:?}", out);
+    assert!(!out.status.success(), "bind should fail: {out:?}");
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
         stderr.contains("ghost"),
@@ -945,7 +934,7 @@ fn session_bind_is_idempotent_when_already_bound_v0_7_1() {
         .current_dir(project_cwd.path())
         .output()
         .expect("second bind");
-    assert!(out.status.success(), "second bind: {:?}", out);
+    assert!(out.status.success(), "second bind: {out:?}");
     let parsed: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("valid json on second bind");
     assert_eq!(parsed["changed"], false);
@@ -959,7 +948,7 @@ fn session_destroy_with_force_removes_state_and_registry_entry_v0_5_16() {
     assert!(registry_path.exists());
 
     let out = run(&home, &["session", "destroy", "wire", "--force", "--json"]);
-    assert!(out.status.success(), "destroy failed: {:?}", out);
+    assert!(out.status.success(), "destroy failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
     assert_eq!(parsed["destroyed"], true);
@@ -1011,7 +1000,7 @@ fn write_local_endpoint(session_home: &std::path::Path, local_relay: &str, slot_
 fn session_list_local_reports_empty_state_v0_5_19() {
     let home = fresh_home();
     let out = run(&home, &["session", "list-local"]);
-    assert!(out.status.success(), "list-local failed: {:?}", out);
+    assert!(out.status.success(), "list-local failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
         stdout.contains("no sessions on this machine"),
@@ -1030,7 +1019,7 @@ fn session_list_local_groups_by_local_relay_url_v0_5_19() {
     // legacy intentionally has no relay.json — should land in federation_only.
 
     let out = run(&home, &["session", "list-local", "--json"]);
-    assert!(out.status.success(), "list-local --json failed: {:?}", out);
+    assert!(out.status.success(), "list-local --json failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let local_group = parsed["local"]["http://127.0.0.1:8771"]
@@ -1065,7 +1054,7 @@ fn session_list_local_redacts_slot_token_in_json_v0_5_19() {
     write_local_endpoint(&alpha, "http://127.0.0.1:8771", "alpha");
 
     let out = run(&home, &["session", "list-local", "--json"]);
-    assert!(out.status.success(), "list-local --json failed: {:?}", out);
+    assert!(out.status.success(), "list-local --json failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
         !stdout.contains("loop-tok"),
@@ -1084,7 +1073,7 @@ fn accept_errors_cleanly_when_no_pending_request_v0_5_14() {
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
     let out = run(&home, &["accept", "ghost"]);
-    assert!(!out.status.success(), "expected failure: {:?}", out);
+    assert!(!out.status.success(), "expected failure: {out:?}");
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
         stderr.contains("no pending pair request from ghost"),
@@ -1098,7 +1087,7 @@ fn reject_idempotent_on_missing_peer_v0_5_14() {
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
     let out = run(&home, &["reject", "ghost", "--json"]);
-    assert!(out.status.success(), "reject failed: {:?}", out);
+    assert!(out.status.success(), "reject failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
     assert_eq!(parsed["rejected"], false);
@@ -1124,7 +1113,7 @@ fn send_with_fqdn_peer_normalizes_to_bare_handle_outbox() {
             "--json",
         ],
     );
-    assert!(out.status.success(), "send failed: {:?}", out);
+    assert!(out.status.success(), "send failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
     assert_eq!(parsed["peer"], "willard", "peer field must be bare handle");
@@ -1159,7 +1148,7 @@ fn send_deadline_writes_signed_time_sensitive_until() {
             "--json",
         ],
     );
-    assert!(out.status.success(), "send failed: {:?}", out);
+    assert!(out.status.success(), "send failed: {out:?}");
 
     let outbox = home.join("state/wire/outbox/willard.jsonl");
     let body = std::fs::read_to_string(&outbox).unwrap();
@@ -1292,7 +1281,7 @@ fn mcp_initialize_then_tools_list_round_trip() {
     } // drops stdin → server reads EOF → exits
 
     let out = child.wait_with_output().expect("server didn't exit");
-    assert!(out.status.success(), "mcp server crashed: {:?}", out);
+    assert!(out.status.success(), "mcp server crashed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(
@@ -1600,7 +1589,7 @@ fn seed_inbox(home: &std::path::Path, peer: &str, n: usize) {
 
 fn tail_json_bodies(home: &PathBuf, args: &[&str]) -> Vec<String> {
     let out = run(home, args);
-    assert!(out.status.success(), "tail failed: {:?}", out);
+    assert!(out.status.success(), "tail failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
     s.lines()
         .filter(|l| !l.trim().is_empty())

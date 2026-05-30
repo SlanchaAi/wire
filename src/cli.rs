@@ -2728,7 +2728,7 @@ fn current_cwd_display() -> String {
         if rel_str.is_empty() {
             return String::from("~");
         }
-        return format!("~/{}", rel_str);
+        return format!("~/{rel_str}");
     }
     cwd.to_string_lossy().into_owned()
 }
@@ -4753,11 +4753,10 @@ fn validate_loopback_bind(bind: &str) -> Result<()> {
         };
         if !is_acceptable {
             bail!(
-                "--local-only refuses non-private bind: {host:?} resolves to {} \
+                "--local-only refuses non-private bind: {host:?} resolves to {ip} \
                  which is not loopback (127/8, ::1), RFC 1918 private \
                  (10/8, 172.16/12, 192.168/16), or RFC 6598 CGNAT/Tailscale \
-                 (100.64.0.0/10). Remove --local-only to bind publicly.",
-                ip
+                 (100.64.0.0/10). Remove --local-only to bind publicly."
             );
         }
     }
@@ -10669,11 +10668,11 @@ fn cmd_session_mesh_status(stale_secs: u64, as_json: bool) -> Result<()> {
     let col_w = names.iter().map(|n| n.len()).max().unwrap_or(8).max(7) + 1;
     print!("\n{:>col_w$}", "", col_w = col_w);
     for n in &names {
-        print!("{:>col_w$}", n, col_w = col_w);
+        print!("{n:>col_w$}");
     }
     println!();
     for (i, row) in names.iter().enumerate() {
-        print!("{:>col_w$}", row, col_w = col_w);
+        print!("{row:>col_w$}");
         for (j, col) in names.iter().enumerate() {
             let cell = if i == j {
                 "self".to_string()
@@ -10685,7 +10684,7 @@ fn cmd_session_mesh_status(stale_secs: u64, as_json: bool) -> Result<()> {
                     _ => "—".to_string(),
                 }
             };
-            print!("{:>col_w$}", cell, col_w = col_w);
+            print!("{cell:>col_w$}");
         }
         println!();
     }

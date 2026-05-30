@@ -895,7 +895,7 @@ async fn mcp_subscribe_emits_updated_notification_on_inbox_grow() {
                 if v.get("method").and_then(Value::as_str)
                     == Some("notifications/resources/updated")
                 {
-                    panic!("unexpected notification after unsubscribe: {}", line);
+                    panic!("unexpected notification after unsubscribe: {line}");
                 }
             }
             Err(_) => break,

@@ -59,7 +59,7 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
 /// handle on the agent-card is derived from the keypair.
 fn read_handle(home: &PathBuf) -> String {
     let out = wire(home, &["whoami", "--json"]);
-    assert!(out.status.success(), "whoami failed: {:?}", out);
+    assert!(out.status.success(), "whoami failed: {out:?}");
     let card: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     card["handle"].as_str().unwrap().to_string()
 }
@@ -1027,7 +1027,7 @@ async fn mesh_broadcast_fans_to_every_paired_sister_v0_6_3() {
             .join("state")
             .join("wire")
             .join("inbox")
-            .join(format!("{}.jsonl", alpha_h_for_finder));
+            .join(format!("{alpha_h_for_finder}.jsonl"));
         let body = std::fs::read_to_string(&inbox).ok()?;
         for line in body.lines() {
             let v: Value = serde_json::from_str(line).ok()?;

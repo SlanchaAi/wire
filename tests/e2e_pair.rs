@@ -49,7 +49,7 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
 /// handle on the agent-card is derived from the keypair.
 fn read_handle(home: &PathBuf) -> String {
     let out = wire(home, &["whoami", "--json"]);
-    assert!(out.status.success(), "whoami failed: {:?}", out);
+    assert!(out.status.success(), "whoami failed: {out:?}");
     let card: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     card["handle"].as_str().unwrap().to_string()
 }
@@ -243,11 +243,7 @@ async fn rotate_slot_after_pairing_orphans_old_slot() {
 
     // Rotate.
     let rotate_out = wire(&paul, &["rotate-slot", "--json"]);
-    assert!(
-        rotate_out.status.success(),
-        "rotate failed: {:?}",
-        rotate_out
-    );
+    assert!(rotate_out.status.success(), "rotate failed: {rotate_out:?}");
     let rj: serde_json::Value = serde_json::from_slice(&rotate_out.stdout).unwrap();
     assert_eq!(rj["rotated"], true);
     assert_eq!(rj["old_slot_id"], old_slot);

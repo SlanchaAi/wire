@@ -55,7 +55,7 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
 /// always character-derived, so tests must discover it.
 fn read_handle(home: &PathBuf) -> String {
     let out = wire(home, &["whoami", "--json"]);
-    assert!(out.status.success(), "whoami failed: {:?}", out);
+    assert!(out.status.success(), "whoami failed: {out:?}");
     let card: Value = serde_json::from_slice(&out.stdout).unwrap();
     card["handle"].as_str().unwrap().to_string()
 }
