@@ -959,6 +959,17 @@ pub enum EnrollCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Rebuild the agent card with the **current** enrollment state and
+    /// republish to the phonebook. Closes the enroll-after-`init` DX gap:
+    /// claims are normally attached at card-build time, but an operator who
+    /// enrolls AFTER `init` has a stored card that pre-dates the claims. Run
+    /// this once after `wire enroll op` / `org-add-member` to surface them.
+    /// Idempotent: not-enrolled rebuilds a claims-free card; not-bound prints
+    /// "local only".
+    Republish {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2755,6 +2766,43 @@ fn cmd_enroll(cmd: EnrollCommand) -> Result<()> {
                 println!(
                     "→ membership issued for {op_did}\n  add to the operator's card org_memberships[]:\n  {{\"org_did\": \"{org}\", \"org_pubkey\": \"{org_pubkey}\", \"member_cert\": \"{member_cert}\"}}"
                 );
+            }
+            Ok(())
+        }
+        EnrollCommand::Republish { json } => {
+            // Rebuild the on-disk card with current enrollment, then republish
+            // via the same path `profile set` uses. Closes the enroll-after-init
+            // DX gap (see `enroll::rebuild_card_with_current_claims`).
+            let card = crate::enroll::rebuild_card_with_current_claims()?;
+            let published = republish_card_to_phonebook();
+            let op_did = card
+                .get("op_did")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let n_memberships = card
+                .get("org_memberships")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "op_did": op_did,
+                        "org_memberships": n_memberships,
+                        "published": published,
+                    }))?
+                );
+            } else {
+                match op_did {
+                    Some(did) => println!(
+                        "→ card rebuilt with current enrollment\n  op_did:    {did}\n  memberships: {n_memberships}"
+                    ),
+                    None => println!(
+                        "→ card rebuilt — no operator enrolled (claims stripped if previously present)"
+                    ),
+                }
+                print_profile_publish_result(&published);
             }
             Ok(())
         }
