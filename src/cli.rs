@@ -14224,19 +14224,24 @@ fn print_profile_publish_result(published: &[String]) {
 fn cmd_setup(apply: bool) -> Result<()> {
     use std::path::PathBuf;
 
-    // The `env` mapping forwards Claude Code's per-session id into the MCP
-    // server. CRITICAL for per-session identity: the MCP server process does
-    // NOT inherit CLAUDE_CODE_SESSION_ID (Claude Code sets it for Bash-tool
-    // subprocesses only), and the MCP `initialize` handshake carries no session
-    // id — so without this, the server can't tell sessions apart, falls back to
-    // cwd-detection, and every Claude session under a shared parent dir
-    // collapses onto ONE identity. Claude Code expands `${CLAUDE_CODE_SESSION_ID}`
-    // from its own env at MCP launch; wire's `resolve_session_key` reads
-    // WIRE_SESSION_ID first, so each session becomes its own `by-key/<hash>`.
+    // v0.14.x: no `env` mapping. Per-session identity for Claude Code is
+    // resolved by `crate::session::resolve_session_key`, which reads
+    // `WIRE_SESSION_ID` then falls back to `CLAUDE_CODE_SESSION_ID`. Current
+    // Claude Code (verified 2026-05) propagates `CLAUDE_CODE_SESSION_ID`
+    // into every MCP subprocess by default (`ps eww` on a running
+    // `wire mcp` PID shows it in the inherited env), so the historical
+    // `{"WIRE_SESSION_ID": "${CLAUDE_CODE_SESSION_ID}"}` mapping was
+    // redundant. Worse, it triggered the MCP Config Diagnostics validator
+    // warning `Missing environment variables: CLAUDE_CODE_SESSION_ID`
+    // when the validator runs in a context without that env var set,
+    // even though the runtime invocation works fine. Dropping the env
+    // block silences the diagnostic AND keeps per-session identity intact
+    // via the documented fallback chain. If a future Claude Code release
+    // stops propagating `CLAUDE_CODE_SESSION_ID`, the comment + emit
+    // here is the one place to restore the explicit mapping.
     let entry = json!({
         "command": "wire",
-        "args": ["mcp"],
-        "env": {"WIRE_SESSION_ID": "${CLAUDE_CODE_SESSION_ID}"}
+        "args": ["mcp"]
     });
     let entry_pretty = serde_json::to_string_pretty(&json!({"wire": &entry}))?;
 
