@@ -336,7 +336,56 @@ pub fn with_identity_claims(
         out.insert("project".into(), Value::String(project.clone()));
     }
 
+    // v0.14.x retro-fix: when ANY RFC-001 op claim lands on the card,
+    // bump `schema_version` to at least `CARD_SCHEMA_VERSION` (currently
+    // "v3.2"). Existing cards minted at v3.1 keep their version field
+    // until republish hits this path — at which point the version
+    // matches the inline-fields shape. Monotonic (never downgrades): a
+    // card already at >= v3.2 is unchanged. Readers that key off
+    // `schema_version >= "v3.2"` to discriminate "carries op claims"
+    // now have a truthful signal. (The bug it closes: v0.14 stored
+    // op_did but kept emitting `schema_version: "v3.1"` — readers
+    // couldn't tell from the version alone whether the card had
+    // op claims; they had to probe the inline fields directly.)
+    let has_any_op_claim = claims.op_did.is_some()
+        || claims.op_cert.is_some()
+        || claims.op_pubkey.is_some()
+        || !claims.org_memberships.is_empty();
+    if has_any_op_claim {
+        let current = out
+            .get("schema_version")
+            .and_then(Value::as_str)
+            .unwrap_or("v3.0");
+        let target = max_schema_version(current, CARD_SCHEMA_VERSION);
+        out.insert("schema_version".into(), Value::String(target.to_string()));
+    }
+
     Ok(Value::Object(out))
+}
+
+/// Compare two `vX.Y` schema-version strings as `(major, minor)` integer
+/// tuples and return the higher. Defensive: unparseable inputs fall back
+/// to the OTHER argument (so a malformed stored card doesn't poison the
+/// republish). `v3.10` correctly compares as > `v3.2`.
+fn max_schema_version<'a>(a: &'a str, b: &'a str) -> &'a str {
+    fn parse(s: &str) -> Option<(u32, u32)> {
+        let rest = s.strip_prefix('v')?;
+        let (maj, min) = rest.split_once('.')?;
+        Some((maj.parse().ok()?, min.parse().ok()?))
+    }
+    match (parse(a), parse(b)) {
+        (Some(pa), Some(pb)) => {
+            if pa >= pb {
+                a
+            } else {
+                b
+            }
+        }
+        // Bias toward the parseable one; if neither parses, keep `a`.
+        (Some(_), None) => a,
+        (None, Some(_)) => b,
+        (None, None) => a,
+    }
 }
 
 #[derive(Debug, Error)]
@@ -784,5 +833,99 @@ mod tests {
         let caps = card["capabilities"].as_array().unwrap();
         let has_v32 = caps.iter().any(|v| v.as_str() == Some("wire/v3.2"));
         assert!(has_v32, "default caps should advertise wire/v3.2: {caps:?}");
+    }
+
+    // v0.14.x retro-fix tests: when op claims are attached, the card's
+    // `schema_version` field bumps to at least `CARD_SCHEMA_VERSION`. The
+    // bump is monotonic (never downgrades), conditional (claim-less
+    // attach leaves the field alone), and version-numeric (v3.10 > v3.2,
+    // not lexicographic).
+
+    #[test]
+    fn with_identity_claims_bumps_schema_version_when_op_did_attached() {
+        // A card that was minted at v3.1 (the pre-v0.14 emit version)
+        // must surface as >= v3.2 once op claims are attached — readers
+        // discriminate "card carries op_*" off the version field.
+        let (_, pk) = generate_keypair();
+        let mut card = build_agent_card("vesper-valley", &pk, None, None, None);
+        // Roll back to v3.1 to simulate a pre-v0.14 stored card.
+        card.as_object_mut()
+            .unwrap()
+            .insert("schema_version".into(), json!("v3.1"));
+        let (op_did, _, op_pk) = op_did_for_test("darby");
+        let claims = IdentityClaims {
+            op_did: Some(op_did),
+            op_pubkey: Some(crate::signing::b64encode(&op_pk)),
+            op_cert: Some("AAAA".into()),
+            ..Default::default()
+        };
+        let with = with_identity_claims(&card, &claims).unwrap();
+        assert_eq!(
+            with.get("schema_version").and_then(|v| v.as_str()),
+            Some(CARD_SCHEMA_VERSION),
+            "post-attach schema_version must bump to {CARD_SCHEMA_VERSION}",
+        );
+    }
+
+    #[test]
+    fn with_identity_claims_does_not_touch_schema_version_when_no_claims() {
+        // Claim-less attach (e.g. an unenrolled operator's republish)
+        // leaves the version field exactly as it was — no spurious bump
+        // for a v3.1 peer that has zero op_* fields to surface.
+        let (_, pk) = generate_keypair();
+        let mut card = build_agent_card("vesper-valley", &pk, None, None, None);
+        card.as_object_mut()
+            .unwrap()
+            .insert("schema_version".into(), json!("v3.1"));
+        let with = with_identity_claims(&card, &IdentityClaims::default()).unwrap();
+        assert_eq!(
+            with.get("schema_version").and_then(|v| v.as_str()),
+            Some("v3.1"),
+            "claim-less attach must NOT bump",
+        );
+    }
+
+    #[test]
+    fn with_identity_claims_never_downgrades_schema_version() {
+        // A hypothetical v3.5 card (future extension peer) attaching op
+        // claims via an older `CARD_SCHEMA_VERSION` build must NOT lose
+        // its higher version. Monotonic invariant.
+        let (_, pk) = generate_keypair();
+        let mut card = build_agent_card("vesper-valley", &pk, None, None, None);
+        card.as_object_mut()
+            .unwrap()
+            .insert("schema_version".into(), json!("v3.5"));
+        let (op_did, _, op_pk) = op_did_for_test("darby");
+        let claims = IdentityClaims {
+            op_did: Some(op_did),
+            op_pubkey: Some(crate::signing::b64encode(&op_pk)),
+            op_cert: Some("AAAA".into()),
+            ..Default::default()
+        };
+        let with = with_identity_claims(&card, &claims).unwrap();
+        assert_eq!(
+            with.get("schema_version").and_then(|v| v.as_str()),
+            Some("v3.5"),
+            "monotonic bump must not downgrade v3.5 to {CARD_SCHEMA_VERSION}",
+        );
+    }
+
+    #[test]
+    fn max_schema_version_compares_numerically_not_lexicographically() {
+        // Lexicographic compare would call "v3.10" < "v3.2" because '1' <
+        // '2'. The helper parses to (major, minor) ints so v3.10 > v3.2.
+        assert_eq!(max_schema_version("v3.10", "v3.2"), "v3.10");
+        assert_eq!(max_schema_version("v3.2", "v3.10"), "v3.10");
+        assert_eq!(max_schema_version("v3.2", "v3.2"), "v3.2");
+        assert_eq!(max_schema_version("v4.0", "v3.99"), "v4.0");
+    }
+
+    #[test]
+    fn max_schema_version_biases_to_parseable_on_malformed_input() {
+        // A malformed stored card must not poison the republish: parseable
+        // wins, both-malformed keeps `a` (deterministic, no panic).
+        assert_eq!(max_schema_version("garbage", "v3.2"), "v3.2");
+        assert_eq!(max_schema_version("v3.2", "garbage"), "v3.2");
+        assert_eq!(max_schema_version("garbage1", "garbage2"), "garbage1");
     }
 }
