@@ -668,12 +668,28 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
         received_at: now_iso,
     };
     crate::pending_inbound_pair::write_pending_inbound(&pending_inbound)?;
-    crate::os_notify::toast(
-        &format!("wire — pair request from {peer_handle}"),
-        &format!(
-            "run `wire pair-accept {peer_handle}` (or `wire add {peer_handle}@{peer_relay}`) to accept, or `wire pair-reject {peer_handle}` to refuse",
+
+    // RFC-001 Phase 1b — Notify mode: default-deny pending stash above runs
+    // unchanged (no auto-pin, no auto-ack), but we ENRICH the lock-screen
+    // notification with org context when the peer's verified membership is in
+    // an org the operator marked `notify`. Same `toast_dedup` keying pattern
+    // the auto branch uses so a flurry of pair_drops doesn't spam the
+    // notification center. Falls through to the generic toast otherwise.
+    match org_notify_decision(&peer_card, &crate::org_policy::FileOrgPolicy::load()) {
+        Some(org_did) => crate::os_notify::toast_dedup(
+            &format!("notify-pair:{peer_handle}"),
+            &format!("wire — org-verified pair request from {peer_handle}"),
+            &format!(
+                "verified member of {org_did} (your org_policies.json says `notify`). run `wire pair-accept {peer_handle}` to pin VERIFIED, or `wire pair-reject {peer_handle}`",
+            ),
         ),
-    );
+        None => crate::os_notify::toast(
+            &format!("wire — pair request from {peer_handle}"),
+            &format!(
+                "run `wire pair-accept {peer_handle}` (or `wire add {peer_handle}@{peer_relay}`) to accept, or `wire pair-reject {peer_handle}` to refuse",
+            ),
+        ),
+    }
 
     Ok(Some(peer_did))
 }
@@ -692,6 +708,28 @@ fn org_auto_pin_decision(
         policy,
     ) {
         crate::pair_decision::PairAction::AutoOrgVerified { org_did } => Some(org_did),
+        _ => None,
+    }
+}
+
+/// RFC-001 Phase 1b — decide whether a received card's org membership is
+/// **eligible** for a one-tap accept under the receiver's policy (Notify mode,
+/// Option B in RFC-001 §"Default ease-of-pair mechanism"). Returns the matched
+/// `org_did` iff the membership verifies offline AND the policy opts that org
+/// into `notify`. The default-deny pending stash still fires; this decision
+/// only enriches the toast with org context so the operator can recognize the
+/// vouch on the lock-screen. Safe-by-default: empty/absent policy → `None`.
+/// Auto mode wins over Notify when both apply (auto returns first; this is
+/// only consulted on the non-auto path).
+fn org_notify_decision(
+    card: &Value,
+    policy: &dyn crate::pair_decision::OrgPolicy,
+) -> Option<String> {
+    match crate::pair_decision::decide(
+        &crate::org_membership::evaluate_card_membership(card),
+        policy,
+    ) {
+        crate::pair_decision::PairAction::NotifyOrgEligible { org_did } => Some(org_did),
         _ => None,
     }
 }
@@ -967,6 +1005,49 @@ mod tests {
         });
         assert_eq!(
             org_auto_pin_decision(&plain, &AutoFor("did:wire:org:x-1".into())),
+            None
+        );
+    }
+
+    // ---- RFC-001 Phase 1b: org-notify decision gate ----
+
+    struct NotifyFor(String);
+    impl crate::pair_decision::OrgPolicy for NotifyFor {
+        fn inbound_mode(&self, org_did: &str) -> Option<crate::pair_decision::InboundMode> {
+            (org_did == self.0).then_some(crate::pair_decision::InboundMode::Notify)
+        }
+    }
+
+    #[test]
+    fn org_notify_decision_notify_only_when_policy_opts_in() {
+        let (card, org_did) = org_verified_card();
+        // Policy opts this org into notify → Some(org_did).
+        assert_eq!(
+            org_notify_decision(&card, &NotifyFor(org_did.clone())),
+            Some(org_did.clone())
+        );
+        // Empty policy → None.
+        assert_eq!(org_notify_decision(&card, &EmptyPolicy), None);
+    }
+
+    #[test]
+    fn org_notify_decision_returns_none_when_policy_is_auto() {
+        // Auto and Notify are mutually exclusive PairActions — a card whose
+        // org is in the policy as `auto` must NOT also surface via the notify
+        // helper (auto wins; notify is only consulted on the non-auto path).
+        let (card, org_did) = org_verified_card();
+        assert_eq!(org_notify_decision(&card, &AutoFor(org_did)), None);
+    }
+
+    #[test]
+    fn org_notify_decision_none_for_plain_card() {
+        // A v3.1 card with no op/org claims never matches notify — no
+        // verified membership to match against the policy.
+        let plain = serde_json::json!({
+            "schema_version": "v3.1", "did": "did:wire:plain-deadbeef", "handle": "plain"
+        });
+        assert_eq!(
+            org_notify_decision(&plain, &NotifyFor("did:wire:org:x-1".into())),
             None
         );
     }
