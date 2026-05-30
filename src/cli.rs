@@ -902,6 +902,34 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Silence (or re-enable) all wire desktop toasts. Persistent across
+    /// daemon restarts via a file at `<config_dir>/quiet`. `wire quiet on`
+    /// = silence; `wire quiet off` = restore; `wire quiet status` = report.
+    /// Same effect as exporting `WIRE_NO_TOASTS=1` (the env-var override
+    /// is for launchd contexts where the daemon's env isn't writable from
+    /// the operator's shell).
+    Quiet {
+        #[command(subcommand)]
+        action: QuietAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum QuietAction {
+    /// Touch `<config_dir>/quiet` — silences every wire desktop toast
+    /// (pair_drop, pending_pair, monitor, inbox). Idempotent.
+    On,
+    /// Remove `<config_dir>/quiet` — re-enables toasts. Idempotent (no
+    /// error if already off / file absent).
+    Off,
+    /// Report current state: `on` (file present) / `off` (file absent) /
+    /// `forced-on-by-env` (`WIRE_NO_TOASTS=1` in env, overrides file).
+    Status {
+        /// Emit `{"state": "...", "via": "file"|"env"|"none"}` JSON
+        /// instead of the human one-liner.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1877,6 +1905,93 @@ pub fn run() -> Result<()> {
             once,
             json,
         } => cmd_notify(interval, peer.as_deref(), once, json),
+        Command::Quiet { action } => cmd_quiet(action),
+    }
+}
+
+// ---------- quiet (v0.14.x toast kill switch) ----------
+
+/// Path to the file that, when present, silences every wire desktop
+/// toast. Created by `wire quiet on`, removed by `wire quiet off`. Read
+/// per-toast-call by `crate::os_notify::toasts_disabled` — no daemon
+/// restart needed for the toggle to take effect, just for binary swap.
+fn quiet_flag_path() -> Result<std::path::PathBuf> {
+    Ok(config::config_dir()?.join("quiet"))
+}
+
+fn cmd_quiet(action: QuietAction) -> Result<()> {
+    match action {
+        QuietAction::On => {
+            let path = quiet_flag_path()?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("creating config dir for quiet flag: {}", parent.display())
+                })?;
+            }
+            // Idempotent: open with create-if-missing, write nothing.
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&path)
+                .with_context(|| format!("writing {}", path.display()))?;
+            println!(
+                "wire quiet: ON (toasts silenced — file at {})",
+                path.display()
+            );
+            Ok(())
+        }
+        QuietAction::Off => {
+            let path = quiet_flag_path()?;
+            match std::fs::remove_file(&path) {
+                Ok(()) => println!("wire quiet: OFF (toasts re-enabled)"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    println!("wire quiet: OFF (was already off)")
+                }
+                Err(e) => return Err(anyhow!("removing {}: {e}", path.display())),
+            }
+            // Re-check env: a user can override file-off with WIRE_NO_TOASTS=1.
+            if std::env::var("WIRE_NO_TOASTS").is_ok_and(|v| !v.is_empty() && v != "0") {
+                println!(
+                    "  note: WIRE_NO_TOASTS={} is still set in env — toasts stay silenced for this process / daemon until `launchctl unsetenv WIRE_NO_TOASTS` (or unset in your shell).",
+                    std::env::var("WIRE_NO_TOASTS").unwrap_or_default()
+                );
+            }
+            Ok(())
+        }
+        QuietAction::Status { json } => {
+            let env_set = std::env::var("WIRE_NO_TOASTS").is_ok_and(|v| !v.is_empty() && v != "0");
+            let file_present = quiet_flag_path()?.exists();
+            let (state, via) = match (env_set, file_present) {
+                (true, _) => ("on", "env"),
+                (false, true) => ("on", "file"),
+                (false, false) => ("off", "none"),
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "state": state,
+                        "via": via,
+                        "file": quiet_flag_path()?.display().to_string(),
+                        "env_WIRE_NO_TOASTS": std::env::var("WIRE_NO_TOASTS").ok(),
+                    }))?
+                );
+            } else {
+                match (env_set, file_present) {
+                    (true, _) => println!(
+                        "wire quiet: ON (via WIRE_NO_TOASTS={} in env)",
+                        std::env::var("WIRE_NO_TOASTS").unwrap_or_default()
+                    ),
+                    (false, true) => println!(
+                        "wire quiet: ON (via file at {})",
+                        quiet_flag_path()?.display()
+                    ),
+                    (false, false) => println!("wire quiet: OFF"),
+                }
+            }
+            Ok(())
+        }
     }
 }
 
