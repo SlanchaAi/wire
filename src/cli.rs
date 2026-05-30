@@ -2627,7 +2627,11 @@ fn current_cwd_display() -> String {
 /// `schema_version`. All RFC-001-defined; all public commits, safe to
 /// surface on every read verb. Centralized here so whoami / peers / whois
 /// stay in lock-step as the inline set grows (e.g. `sso_attest` in v0.15).
-fn op_claims_from_card(card: &Value) -> serde_json::Map<String, Value> {
+///
+/// `pub(crate)` so the MCP surface (`src/mcp.rs`) wires the same helper
+/// into `tool_whoami` / `tool_peers` — agents reading MCP responses must
+/// see the same op claims that operators see via CLI.
+pub(crate) fn op_claims_from_card(card: &Value) -> serde_json::Map<String, Value> {
     let mut out = serde_json::Map::new();
     for key in [
         "op_did",

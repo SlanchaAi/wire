@@ -1063,15 +1063,23 @@ fn tool_whoami() -> Result<Value, String> {
     // see the persona, not just the raw handle.
     let persona =
         serde_json::to_value(crate::character::Character::from_card(&card)).unwrap_or(Value::Null);
-    Ok(json!({
-        "did": did,
-        "handle": handle,
-        "persona": persona,
-        "fingerprint": fp,
-        "key_id": key_id,
-        "public_key_b64": pk_b64,
-        "capabilities": capabilities,
-    }))
+    // v0.14: surface the RFC-001 op claims (op_did / op_pubkey / op_cert /
+    // org_memberships / schema_version) when enrolled, mirroring the CLI
+    // `wire whoami --json` shape. Same `op_claims_from_card` helper as
+    // CLI ⇒ MCP + CLI stay in lock-step as the inline set grows. Older
+    // cards / unenrolled ⇒ no extra keys (no JSON null-spam).
+    let mut payload = serde_json::Map::new();
+    payload.insert("did".into(), json!(did));
+    payload.insert("handle".into(), json!(handle));
+    payload.insert("persona".into(), persona);
+    payload.insert("fingerprint".into(), json!(fp));
+    payload.insert("key_id".into(), json!(key_id));
+    payload.insert("public_key_b64".into(), json!(pk_b64));
+    payload.insert("capabilities".into(), capabilities);
+    for (k, v) in crate::cli::op_claims_from_card(&card) {
+        payload.insert(k, v);
+    }
+    Ok(Value::Object(payload))
 }
 
 fn tool_peers() -> Result<Value, String> {
@@ -1105,13 +1113,34 @@ fn tool_peers() -> Result<Value, String> {
             Some(c) => crate::character::Character::from_card(c),
             None => crate::character::Character::from_did(&did),
         };
-        peers.push(json!({
-            "handle": handle,
-            "persona": serde_json::to_value(&persona).unwrap_or(Value::Null),
-            "did": did,
-            "tier": get_tier(&trust, handle),
-            "capabilities": agent.get("card").and_then(|c| c.get("capabilities")).cloned().unwrap_or_else(|| json!([])),
-        }));
+        // v0.14: surface peer's inline op claims (when their pinned card
+        // carries them) so paired agents see ORG_VERIFIED-source membership
+        // without reading trust.json directly. Identical shape to the CLI
+        // `wire peers --json` row; older peers ⇒ no extra keys.
+        let peer_op_claims = agent
+            .get("card")
+            .map(crate::cli::op_claims_from_card)
+            .unwrap_or_default();
+        let mut row = serde_json::Map::new();
+        row.insert("handle".into(), json!(handle));
+        row.insert(
+            "persona".into(),
+            serde_json::to_value(&persona).unwrap_or(Value::Null),
+        );
+        row.insert("did".into(), json!(did));
+        row.insert("tier".into(), json!(get_tier(&trust, handle)));
+        row.insert(
+            "capabilities".into(),
+            agent
+                .get("card")
+                .and_then(|c| c.get("capabilities"))
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        );
+        for (k, v) in peer_op_claims {
+            row.insert(k, v);
+        }
+        peers.push(Value::Object(row));
     }
     Ok(json!(peers))
 }
