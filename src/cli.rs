@@ -4033,7 +4033,7 @@ fn cmd_whois_local(name: &str, as_json: bool) -> Result<()> {
     Ok(())
 }
 
-enum DialTarget {
+pub(crate) enum DialTarget {
     PinnedPeer {
         handle: String,
         did: String,
@@ -4053,7 +4053,13 @@ enum DialTarget {
 /// Resolution order: pinned peers first (already in our trust ring),
 /// then local sister sessions (on-disk discovery). Case-insensitive
 /// match against handle, character nickname, session name, or DID.
-fn resolve_name_to_target(name: &str) -> Result<DialTarget> {
+///
+/// `pub(crate)` so the MCP `tool_whois` surface mirrors the CLI's
+/// bare-nick resolution (closes the known `missing '@' separator`
+/// rejection on bare nicks — agents reading via MCP now resolve
+/// pinned peers + local sisters identically to operators reading via
+/// CLI).
+pub(crate) fn resolve_name_to_target(name: &str) -> Result<DialTarget> {
     let needle = name.trim();
     if needle.is_empty() {
         bail!("empty name");

@@ -2192,16 +2192,95 @@ fn tool_claim_handle(args: &Value) -> Result<Value, String> {
 
 fn tool_whois(args: &Value) -> Result<Value, String> {
     if let Some(handle) = args.get("handle").and_then(Value::as_str) {
+        // v0.14.x: mirror the CLI's resolution order. Bare nicks (no `@`)
+        // route through the local resolver first (pinned peers + local
+        // sister sessions); federation handles fall through to
+        // `parse_handle` + remote resolution. Previously the MCP
+        // surface only accepted federation-shaped handles and rejected
+        // bare nicks with `missing '@' separator`, breaking
+        // agent-side discovery of paired-but-not-federated peers.
+        // Mirrors `cli::cmd_whois_local` for the local arms; mirrors
+        // `cli::cmd_whois` for the federation arm.
+        if !handle.contains('@')
+            && let Ok(target) = crate::cli::resolve_name_to_target(handle)
+        {
+            return Ok(dial_target_to_whois_json(&target));
+        }
         let parsed = crate::pair_profile::parse_handle(handle).map_err(|e| format!("{e:#}"))?;
         let relay_override = args.get("relay_url").and_then(Value::as_str);
         crate::pair_profile::resolve_handle(&parsed, relay_override).map_err(|e| format!("{e:#}"))
     } else {
-        // Self.
+        // Self. v0.14.x: surface inline op claims so MCP whois stays in
+        // parity with `wire whoami --json` / CLI self-whois (#114 + #115
+        // shared the same helper).
         let card = crate::config::read_agent_card().map_err(|e| format!("{e:#}"))?;
-        Ok(json!({
-            "did": card.get("did").cloned().unwrap_or(Value::Null),
-            "profile": card.get("profile").cloned().unwrap_or(Value::Null),
-        }))
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "did".into(),
+            card.get("did").cloned().unwrap_or(Value::Null),
+        );
+        payload.insert(
+            "profile".into(),
+            card.get("profile").cloned().unwrap_or(Value::Null),
+        );
+        for (k, v) in crate::cli::op_claims_from_card(&card) {
+            payload.insert(k, v);
+        }
+        Ok(Value::Object(payload))
+    }
+}
+
+/// Convert a `cli::DialTarget` (the CLI's local-resolver hit) into the
+/// JSON shape MCP whois callers expect. Mirrors the human-readable arms
+/// of `cli::cmd_whois_local` but keyed for programmatic consumption.
+/// Surfaces inline op claims from the peer's pinned card via the same
+/// `op_claims_from_card` helper used everywhere else in v0.14.x.
+fn dial_target_to_whois_json(target: &crate::cli::DialTarget) -> Value {
+    use crate::cli::DialTarget;
+    match target {
+        DialTarget::PinnedPeer {
+            handle,
+            did,
+            nickname,
+            emoji,
+            tier,
+        } => {
+            let op_claims = crate::config::read_trust()
+                .ok()
+                .and_then(|t| {
+                    t.get("agents")
+                        .and_then(Value::as_object)
+                        .and_then(|m| m.get(handle))
+                        .and_then(|a| a.get("card").cloned())
+                })
+                .map(|c| crate::cli::op_claims_from_card(&c))
+                .unwrap_or_default();
+            let mut payload = serde_json::Map::new();
+            payload.insert("kind".into(), json!("pinned_peer"));
+            payload.insert("handle".into(), json!(handle));
+            payload.insert("did".into(), json!(did));
+            payload.insert("nickname".into(), json!(nickname));
+            payload.insert("emoji".into(), json!(emoji));
+            payload.insert("tier".into(), json!(tier));
+            for (k, v) in op_claims {
+                payload.insert(k, v);
+            }
+            Value::Object(payload)
+        }
+        DialTarget::LocalSister {
+            session_name,
+            handle,
+            did,
+            nickname,
+            emoji,
+        } => json!({
+            "kind": "local_sister",
+            "session_name": session_name,
+            "handle": handle,
+            "did": did,
+            "nickname": nickname,
+            "emoji": emoji,
+        }),
     }
 }
 
@@ -2474,5 +2553,63 @@ mod tests {
                 "registered cwd whose session dir is missing must return None"
             );
         });
+    }
+
+    // v0.14.x: shape tests for `dial_target_to_whois_json`. The MCP whois
+    // bare-nick fix routes through `cli::resolve_name_to_target` (returns
+    // a `DialTarget`) and reshapes it for JSON-RPC consumption. These
+    // tests pin the response shape so a future refactor of either side
+    // (resolver or wire shape) catches the contract drift.
+
+    #[test]
+    fn dial_target_to_whois_json_pinned_peer_shape() {
+        let target = crate::cli::DialTarget::PinnedPeer {
+            handle: "slate-lotus".into(),
+            did: "did:wire:slate-lotus-88232017".into(),
+            nickname: Some("slate-lotus".into()),
+            emoji: Some("🪴".into()),
+            tier: "VERIFIED".into(),
+        };
+        crate::config::test_support::with_temp_home(|| {
+            let out = dial_target_to_whois_json(&target);
+            assert_eq!(out.get("kind").and_then(Value::as_str), Some("pinned_peer"));
+            assert_eq!(
+                out.get("handle").and_then(Value::as_str),
+                Some("slate-lotus")
+            );
+            assert_eq!(out.get("tier").and_then(Value::as_str), Some("VERIFIED"));
+            // op claims are absent when trust.json has no row for this
+            // peer (the helper falls through to an empty map). No
+            // spurious `null` op_did keys.
+            assert!(out.get("op_did").is_none());
+        });
+    }
+
+    #[test]
+    fn dial_target_to_whois_json_local_sister_shape() {
+        let target = crate::cli::DialTarget::LocalSister {
+            session_name: "vesper-valley".into(),
+            handle: "vesper-valley".into(),
+            did: Some("did:wire:vesper-valley-deadbeef".into()),
+            nickname: Some("vesper-valley".into()),
+            emoji: Some("🦌".into()),
+        };
+        let out = dial_target_to_whois_json(&target);
+        assert_eq!(
+            out.get("kind").and_then(Value::as_str),
+            Some("local_sister")
+        );
+        assert_eq!(
+            out.get("session_name").and_then(Value::as_str),
+            Some("vesper-valley")
+        );
+        assert_eq!(
+            out.get("did").and_then(Value::as_str),
+            Some("did:wire:vesper-valley-deadbeef")
+        );
+        // LocalSister carries no card → no op_claims path. Spot-check
+        // no leakage from the PinnedPeer arm.
+        assert!(out.get("tier").is_none());
+        assert!(out.get("op_did").is_none());
     }
 }
