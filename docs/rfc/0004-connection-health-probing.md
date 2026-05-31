@@ -82,6 +82,17 @@ The `responder_state` block answers the second-tier health question: *"is the pe
 
 **Why NOT `kind=1001` (claim) like SSO control plane:** claim is identity-mutating semantically (even when the body discriminator restricts it); heartbeat is presence-only. Mixing probes onto claim would blur the type boundary. Separate carrier per semantic neighborhood is the cleaner shape; `kind=heartbeat` body discrimination is restricted to non-identity-mutating intents.
 
+**Ephemeral-class body preservation (load-bearing invariant).** `kind=heartbeat` is registered `KindClass::Ephemeral` (`src/signing.rs:63`, `src/signing.rs:106` v3 heartbeat carve-out). Ephemeral describes **retention** (relay no-store) — it does NOT describe body content. Relay paths MUST NOT optimize body content out of `KindClass::Ephemeral` events: a probe with `responder_state: {...}` MUST round-trip byte-identical from sender to receiver. Any future relay-side optimization that strips ephemeral-event bodies would silently murder probes without alerting anyone. Pinned by `tests/heartbeat_body_roundtrip.rs` (v0.15) — see AC-HP7.
+
+**Two responder modes share one auto-respond code path.** Wire ships in two concrete topologies; AC-HP2 binds equally in both:
+
+| Context | Responder | LLM in loop? |
+|---|---|---|
+| Standalone — pure-CLI / Spark / VPS / `slancha.ai` relay box | `wire daemon` background process | No |
+| Harness-bound — Copilot CLI / Claude Code / Cursor / Codex | `wire mcp` server's daemon-tier poll-loop | No |
+
+In the harness-bound case there is no separate `wire daemon` process per session — the MCP server IS the daemon for that session's identity (`src/mcp.rs:548` hosts inbox subscriptions + pair-flow + monitor). Auto-respond MUST fire on the responder's own scheduled tick, not on any LLM-initiated MCP tool call. The probe/ack handler lives at the poll-loop layer in both modes; the LLM never sees `t: "probe"` body intents bubble through the MCP tool surface. AC-HP2 splits into **AC-HP2a** (standalone daemon) and **AC-HP2b** (`wire mcp` with idle MCP client, no LLM probe-surface bubbling) — both required for kill criterion.
+
 ### 2. Probe protocol
 
 **Sender daemon, every `WIRE_PROBE_INTERVAL_S` (default 60):**
@@ -148,7 +159,7 @@ The `probe_ack.responder_state` block (introduced in §1's body shape) is the **
 **Detection rules (responder daemon, local introspection only):**
 
 - `daemon_uptime_s` — daemon process start timestamp; trivial.
-- `monitor_armed` — true if `pgrep -f "wire monitor"` (or platform equivalent) returns a process owned by the same OS user, with the `--json` flag and either `--persistent` or no exit-on-empty flag. False otherwise. **Daemon checks its own host's process table — never the peer's.** This is the load-bearing signal: an armed `wire monitor --json` process is the wire-canonical indicator that an LLM agent is consuming the inbox and will auto-reply to incoming events (per `MCP_SERVER_INSTRUCTIONS` `"WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you"`).
+- `monitor_armed` — true if the process table contains a process owned by the same OS user whose argv satisfies ALL of: (a) command name `wire monitor`, (b) `--json` flag present, (c) NEITHER `--help` NOR `--version` present, (d) `--persistent` flag present OR no exit-on-empty flag. False otherwise. **Daemon checks its own host's process table — never the peer's.** Conditions (b)+(c) reject transient invocations (a shell pipeline running `wire monitor --help` briefly during operator inspection should NOT flip the bit). This is the load-bearing signal: an armed `wire monitor --json` process is the wire-canonical indicator that an LLM agent is consuming the inbox and will auto-reply to incoming events (per `MCP_SERVER_INSTRUCTIONS` `"WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you"`).
 - `monitor_uptime_s` — process uptime of the detected `wire monitor` PID, or `null` if `monitor_armed=false`. Surfaces "armed for 5min" (might still be initializing) vs "armed for 8h" (settled, reliable).
 - `mcp_attached` — true if the daemon's MCP-server child process has at least one active client connection (counted from `wire mcp` accept logs in the last 60s). False otherwise. Complements `monitor_armed` for MCP-host-based auto-reply flows (Claude Code's MCP `Monitor` tool with `persistent:true` is a `monitor`-like signal but uses the MCP server instead of CLI `wire monitor`).
 - `wire_version` — `env!("CARGO_PKG_VERSION")` from the responder's binary.
@@ -234,6 +245,8 @@ The `auto-resp` column renders the latest `responder_state` snapshot per peer:
 
 `--json` output mirrors the per-peer state surface in §3 (including the full `last_responder_state` block), suitable for piping to a TSDB or monitoring stack.
 
+**Read-from-state-file, not re-tail-monitor.** `wire health` reads the per-peer state file (`<config_dir>/peer_health/<did>.json`, §3); it does NOT re-tail `wire monitor`. The dependency on the monitor noise filter is one-way: the monitor strips `kind=heartbeat` (`src/cli.rs:3891` — applies to all heartbeat traffic, including probes), and the dashboard surfaces the operator-actionable health view from the dedicated state file. This keeps the noise-filter independent of the health-view (changing one does not silently break the other). Pinned by AC-HP8.
+
 **`wire health watch [--interval-s S]`** — continuous tail (analogous to `wire monitor` but health-scoped):
 
 Re-renders the table every S seconds (default 5). Foreground; backgroundable.
@@ -256,7 +269,8 @@ Three knobs in `<config_dir>/health.json` (no flag explosion; one config file):
   "probe_interval_s": 60,
   "probe_timeout_s": 30,
   "rate_limit_per_pair_s": 10,
-  "publish_responder_state": true
+  "publish_responder_state": true,
+  "respond_to": "all"
 }
 ```
 
@@ -282,6 +296,16 @@ When `enabled=false`:
 - `wire health` still renders, but `last_alive_at` will be sourced from incoming-event timestamps only (peer's own probes + any other wire traffic), not from probe-acks.
 
 This preserves "opt-out of active probing" without breaking peers' ability to verify you're alive.
+
+### 8. Org-tier asymmetry — `respond_to` policy knob
+
+The §6 config's `respond_to` field lets org-tier deployments refuse probes from non-org-members, addressing the cross-tier presence-inference surface (P3 in §Privacy). Accepted values:
+
+- `"all"` (default for personal-tier and current shared `wireup.net` behavior) — respond to probes from any bilateral-paired peer regardless of org membership.
+- `"verified_only"` — respond to probes only from peers at tier ≥ VERIFIED. UNTRUSTED + ORG_VERIFIED + ATTESTED tiers do not receive acks. Mostly hypothetical for v0.15 — strictest knob, may be folded with "all" if no operator demand surfaces.
+- `"org_members_only"` (recommended default for org-tier per RFC-003-amendment-deployment-tiers) — respond only to peers whose card carries an `org_membership` matching at least one of this responder's pinned org_dids. Personal-tier strangers cannot infer org-member presence patterns by probing.
+
+This is a v0.15-scoped addition; finer-grained filtering (per-org responder policy, per-peer overrides) defers to v0.16 if demand surfaces. The default for org-tier deployments — set automatically by `wire enroll org-create` / by org-tier relay onboarding scripts — is `"org_members_only"`; personal-tier installs default to `"all"`.
 
 ## Security
 
@@ -333,6 +357,12 @@ This preserves "opt-out of active probing" without breaking peers' ability to ve
 - Probe nonce is single-use; once consumed (`outstanding_probes.remove`), a second ack with the same nonce is unmatched and dropped.
 - Probe nonces are 32B random — collision probability negligible.
 
+**Replay defense composition.** Two layers, both required:
+- Sender-side **nonce-cache** (`outstanding_probes` map) — drops `probe_ack` whose `probe_nonce` does not match an outstanding probe. Closes replay-of-prior-ack-after-cycle-completion.
+- Responder-side **60s `iat` window** (`probe.iat in [now-60s, now]`) — drops stale or future-dated probes. Closes replay-of-old-probe.
+
+Neither alone is sufficient: nonce-cache without iat window allows infinite-age probe replay if the sender still has the nonce outstanding; iat window without nonce-cache allows fresh-iat replays from intercepted probe envelopes. Together they close the standard replay surface.
+
 ### S6: Fingerprinting via probe shape
 
 **Threat:** an observer fingerprints wire versions by probe envelope characteristics.
@@ -362,15 +392,18 @@ Probes operate at the bilateral-pair layer; they do not interact with RFC-003 de
 ≤5 falsifiable, time-bound. Each MUST have a test that fails before implementation and passes after.
 
 - **AC-HP1: Daemon-level auto-probe lands per peer.** Given two paired daemons A + B at default config, within 60s of pair completion A's `peer_health[B].last_alive_at` is non-null. Test: spin up A + B in isolated harness, pair, wait 75s, read A's health state, assert `last_alive_at > pair_completed_at`. Owner: v0.15 implementer.
-- **AC-HP2: Auto-respond is daemon-only (no LLM involvement).** Given B's wire daemon is running with no LLM agent attached (e.g., headless daemon-only mode), A's probes still receive acks within `probe_timeout_s`. Test: harness runs B as `wire daemon` only (no MCP server, no Claude/Codex/Copilot session), A probes 10 times, assert ≥ 9 acks received. Owner: v0.15 implementer.
+- **AC-HP2a: Auto-respond from headless `wire daemon`.** Given B's `wire daemon` is running with no MCP server, no LLM agent attached, A's probes still receive acks within `probe_timeout_s`. Test: harness runs B as `wire daemon` only (no MCP server, no Claude/Codex/Copilot session), A probes 10 times, assert ≥ 9 acks received. Owner: v0.15 implementer. **Kill criterion if unbuildable.**
+- **AC-HP2b: Auto-respond from `wire mcp` with idle MCP client.** Given B is running `wire mcp` as the de-facto daemon (no separate `wire daemon` process — the harness-bound shape used by Claude Code / Copilot CLI / Codex / Cursor), with an MCP client connected but no LLM tool calls in-flight, A's probes still receive acks within `probe_timeout_s`. Probe handling MUST live at the poll-loop layer; `t: "probe"` body intents MUST NOT bubble up the MCP tool surface to the LLM. Test: harness runs B as `wire mcp` with an idle MCP client stub (no LLM); A probes 10 times; assert ≥ 9 acks received AND zero MCP tool invocations recorded. Owner: v0.15 implementer. **Kill criterion if unbuildable.**
 - **AC-HP3: Probe spam rate-limit.** A sends 100 probes to B in 1s. B drops > 90 of them (rate limit 10s by default, so at most 1 probe-ack pair completes); B's responder code path consumes < 50ms CPU total. Test: harness floods + measures responder CPU. Owner: v0.15 implementer.
 - **AC-HP4: Cursor-PAST gracefully on unknown body intent.** A sends `kind=heartbeat` with `body.t = "probe_v2_future_intent"` to a B running v0.15. B logs a warning and advances cursor; A's next standard probe still acks. Test: harness emits unknown body intent, asserts no `TRANSIENT_REJECT`, no daemon crash, cursor moves. Owner: v0.15 implementer.
 - **AC-HP5: `wire health` surfaces peer staleness threshold visually.** If `consecutive_probe_failures > (24h / probe_interval_s)`, dashboard renders peer with `⚠ stale (Nh)` marker. Test: harness simulates 24h of dropped acks, assert dashboard text contains "⚠ stale". Owner: v0.15 implementer.
 - **AC-HP6: `responder_state` reflects local monitor process truthfully.** With B running `wire daemon` only, A's probe_ack carries `responder_state.monitor_armed: false`. With B running `wire daemon` AND `wire monitor --json --persistent` (separate process), the next probe_ack carries `responder_state.monitor_armed: true` and a `monitor_uptime_s` matching the process-start delta within ±2s. Test: harness runs the two configurations in sequence, probes between each, asserts each ack's `responder_state` reflects the actual local process state. Verifies §2.5 detection rules at the daemon layer; does NOT verify peer truthfulness (which is operator-side disbelief per §2.5 threat-model). Owner: v0.15 implementer.
+- **AC-HP7: Ephemeral-class body preservation.** Property test at `tests/heartbeat_body_roundtrip.rs` asserting that `kind=heartbeat` (id=100) events with arbitrary non-trivial bodies round-trip byte-identical through sign → serialize → relay → parse → verify. Two property cases: (a) arbitrary-shape body containing `t: String` + extra fields preserved byte-equal end-to-end; (b) unknown `t` body intents trigger `CursorAdvanceWithWarning` outcome, NEVER `TRANSIENT_REJECT`. Pins the §1 Ephemeral-class invariant that retention semantics MUST NOT mutate body content. Owner: v0.15 implementer.
+- **AC-HP8: `wire health` reads state file, not monitor.** `wire health` dashboard sources its per-peer view from `<config_dir>/peer_health/<did>.json` (§3), NOT from `wire monitor` output. Test: harness strips heartbeat events from monitor output (the production noise-filter behavior), runs `wire health` against state files populated with synthetic probe-ack data, asserts dashboard renders correctly. Pins the one-way dependency from §4 — monitor noise-filter changes do NOT silently break the health view. Owner: v0.15 implementer.
 
 ## Kill criterion
 
-If implementing AC-HP2 (auto-respond from daemon-only mode) requires probe/ack handling logic to live in the MCP server layer (above the daemon), abandon this RFC. The whole point is "no LLM involvement"; if the architecture forces probe handling above the daemon transport, the feature reduces to "send a wire message and hope the LLM replies" — which is what we have today.
+If implementing **either AC-HP2a (`wire daemon` headless) or AC-HP2b (`wire mcp` with idle MCP client)** requires probe/ack handling logic to live in the MCP server's LLM-facing tool surface (rather than the daemon-tier poll-loop), abandon this RFC. The whole point is "no LLM involvement"; if the architecture forces probe handling above the daemon transport in either mode, the feature reduces to "send a wire message and hope the LLM replies" — which is what we have today. Both kill triggers are independent; failure of one kills the RFC regardless of the other.
 
 ## Out of scope
 
