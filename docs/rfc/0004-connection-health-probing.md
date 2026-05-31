@@ -59,9 +59,19 @@ Wire's existing `kind=heartbeat` events are already filtered from `wire monitor`
 {
   "t": "probe_ack",
   "probe_nonce": "<32B nonce from received probe, b64>",
-  "iat": 1716938401
+  "iat": 1716938401,
+  "responder_state": {                    // OPTIONAL — see §2.5
+    "daemon_uptime_s": 86400,
+    "monitor_armed": true,
+    "monitor_uptime_s": 3200,
+    "mcp_attached": true,
+    "wire_version": "0.15.0",
+    "schema_version": "v3.2"
+  }
 }
 ```
+
+The `responder_state` block answers the second-tier health question: *"is the peer's daemon alive AND is there a live LLM session armed to auto-respond to my messages?"* `wire doctor` answers tier 1 locally; the probe protocol answers tier 1 across the pair; `responder_state` adds tier 2 (auto-response readiness) on top — see §2.5.
 
 **Why `kind=heartbeat` (not a new kind):**
 
@@ -118,6 +128,42 @@ state.peer_health[record.peer_did].record_probe(roundtrip_ms, now())
 
 **Outstanding-probe GC:** any nonce in `outstanding_probes` whose `sent_at` exceeds `WIRE_PROBE_TIMEOUT_S` (default 30) is removed and counted as a probe failure for that peer. No retry within the same probe cycle; next cycle re-probes.
 
+### 2.5. Responder state — auto-response capability signal
+
+The `probe_ack.responder_state` block (introduced in §1's body shape) is the **second observability tier**: it answers *"does the peer have a live LLM session armed to auto-respond to messages I send them?"* Without this, an operator sending `wire send <peer> "..."` cannot distinguish three outcomes — (a) peer's daemon is offline (no ack arrives), (b) peer's daemon is alive but no LLM monitor is attached (message queues until the human checks), (c) peer's daemon is alive AND a monitor is auto-replying (same-day response expected). Tier-1 probe distinguishes (a) from (b)+(c); tier-2 `responder_state` distinguishes (b) from (c).
+
+**Fields and how the daemon populates them:**
+
+```json
+"responder_state": {
+  "daemon_uptime_s": 86400,        // wire daemon process uptime
+  "monitor_armed": true,            // wire monitor --json process detected locally
+  "monitor_uptime_s": 3200,         // monitor process uptime (or null if monitor_armed=false)
+  "mcp_attached": true,             // wire MCP server has a live client connection
+  "wire_version": "0.15.0",         // crate version reporting the ack
+  "schema_version": "v3.2"          // card schema_version (for cross-version detection)
+}
+```
+
+**Detection rules (responder daemon, local introspection only):**
+
+- `daemon_uptime_s` — daemon process start timestamp; trivial.
+- `monitor_armed` — true if `pgrep -f "wire monitor"` (or platform equivalent) returns a process owned by the same OS user, with the `--json` flag and either `--persistent` or no exit-on-empty flag. False otherwise. **Daemon checks its own host's process table — never the peer's.** This is the load-bearing signal: an armed `wire monitor --json` process is the wire-canonical indicator that an LLM agent is consuming the inbox and will auto-reply to incoming events (per `MCP_SERVER_INSTRUCTIONS` `"WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you"`).
+- `monitor_uptime_s` — process uptime of the detected `wire monitor` PID, or `null` if `monitor_armed=false`. Surfaces "armed for 5min" (might still be initializing) vs "armed for 8h" (settled, reliable).
+- `mcp_attached` — true if the daemon's MCP-server child process has at least one active client connection (counted from `wire mcp` accept logs in the last 60s). False otherwise. Complements `monitor_armed` for MCP-host-based auto-reply flows (Claude Code's MCP `Monitor` tool with `persistent:true` is a `monitor`-like signal but uses the MCP server instead of CLI `wire monitor`).
+- `wire_version` — `env!("CARGO_PKG_VERSION")` from the responder's binary.
+- `schema_version` — pulled from the responder's own agent card; helps the prober detect mixed-version mesh state.
+
+**The whole block is OPTIONAL.** Operators MAY suppress it with `health.json` knob `publish_responder_state: false` (default `true`). When suppressed, the daemon omits the field entirely (NOT a stub with all `null`s — absence is the signal). Probers MUST treat missing `responder_state` as "unknown" — NOT "no auto-response," NOT "down" — and surface accordingly in the dashboard.
+
+**Truthfulness floor + threat model:** `responder_state` is operator-controlled and trivially forgeable by the responder's daemon. A peer can claim `monitor_armed: true` while running no monitor. This is **acceptable** because:
+
+- The signal lives at the trust floor `responder_state` already operates within (bilateral-paired peers; you already trust their daemon's correctness for every other wire event).
+- Forging "monitor armed when it isn't" only hurts the forger — the prober sends messages expecting a response, none arrives, prober escalates / pages the operator. The forger has no incentive to lie about UP-state for downstream attacks.
+- An adversary lying about `monitor_armed: false` while serving auto-replies just suppresses one bit of operator UX; no security boundary crossed.
+
+The verification cost of an oracle-side check (e.g., embed a challenge in the probe that requires LLM-tier wakeup to satisfy) would defeat the daemon-only invariant (AC-HP2 kill criterion) and force every probe into the LLM cost lane. **Operator-side disbelief** (treating `responder_state` as an advertisement, not a guarantee) is the design floor; operators with strong reachability requirements should escalate to `wire send <peer> "test"` and wait, exactly as today.
+
 ### 3. State surface
 
 Each daemon maintains per-peer health state at `<config_dir>/peer_health/<peer_did_hex>.json`:
@@ -132,11 +178,20 @@ Each daemon maintains per-peer health state at `<config_dir>/peer_health/<peer_d
   "roundtrip_ms_p95": 148,
   "last_probe_sent_at": 1716938400,
   "last_ack_received_at": 1716938401,
+  "last_responder_state": {
+    "as_of": 1716938401,
+    "daemon_uptime_s": 86400,
+    "monitor_armed": true,
+    "monitor_uptime_s": 3200,
+    "mcp_attached": true,
+    "wire_version": "0.15.0",
+    "schema_version": "v3.2"
+  },
   "schema_version": "v1"
 }
 ```
 
-Rolling window: last 100 roundtrips (≈ last 100 minutes at default interval). Older samples evicted FIFO.
+Rolling window: last 100 roundtrips (≈ last 100 minutes at default interval). Older samples evicted FIFO. The `last_responder_state` block stores only the MOST RECENT snapshot (overwritten on each successful ack); historical capability state is out of scope for v0.15 — only current readiness matters for routing decisions. If the latest ack carried no `responder_state` (peer opted out), `last_responder_state` is set to `null` and dashboards render "unknown" for the auto-response column.
 
 ### 4. CLI surface
 
@@ -162,14 +217,22 @@ Operator-triggered probes bypass the per-pair rate limit on the SENDER side but 
 
 ```
 $ wire health
-peer            tier            last_alive          p50    p95    fail
-coral-weasel    VERIFIED        2026-05-31 18:42Z   118ms  142ms  0/96
+peer            tier            last_alive          p50    p95    fail     auto-resp
+coral-weasel    VERIFIED        2026-05-31 18:42Z   118ms  142ms  0/96     ✓ monitor 53m
 onyx-ridge      VERIFIED        2026-05-30 04:11Z   —      —      24/24    ⚠ stale (32h)
-orchid-savanna  VERIFIED        2026-05-31 18:41Z   89ms   104ms  0/96
-swift-harbor    VERIFIED        2026-05-31 18:42Z   128ms  148ms  1/96
+orchid-savanna  VERIFIED        2026-05-31 18:41Z   89ms   104ms  0/96     ✗ daemon-only
+swift-harbor    VERIFIED        2026-05-31 18:42Z   128ms  148ms  1/96     ? (no signal)
 ```
 
-`--json` output mirrors the per-peer state surface in §3, suitable for piping to a TSDB or monitoring stack.
+The `auto-resp` column renders the latest `responder_state` snapshot per peer:
+
+- `✓ monitor 53m` — `monitor_armed: true`, monitor uptime ≥ 60s (settled). Operator can expect same-day reply to messages.
+- `✓ mcp-only Nh` — `mcp_attached: true` but `monitor_armed: false`. An MCP host (Claude Code / Codex / Copilot) is connected and may auto-respond depending on host config; less reliable than dedicated `wire monitor`. The `Nh` is `mcp` session uptime.
+- `✗ daemon-only` — `monitor_armed: false` and `mcp_attached: false`. Peer's daemon is alive but no LLM-tier auto-reply lane is armed. Messages queue until the operator manually checks.
+- `? (no signal)` — peer's last ack did not include `responder_state` (opt-out or pre-v0.15 daemon). Distinct from `⚠ stale` — peer IS alive but capability is unknown.
+- `⚠ stale (Nh)` — `consecutive_probe_failures > threshold`. Peer's daemon hasn't responded for `Nh` hours; capability column irrelevant.
+
+`--json` output mirrors the per-peer state surface in §3 (including the full `last_responder_state` block), suitable for piping to a TSDB or monitoring stack.
 
 **`wire health watch [--interval-s S]`** — continuous tail (analogous to `wire monitor` but health-scoped):
 
@@ -179,8 +242,8 @@ Re-renders the table every S seconds (default 5). Foreground; backgroundable.
 
 Two new MCP tools:
 
-- `mcp__wire__wire_ping` — wraps `wire ping <peer>`; returns `{peer, probes_sent, probes_acked, roundtrip_ms_p50, loss_pct}`.
-- `mcp__wire__wire_health` — wraps `wire health --json`; returns the per-peer health array.
+- `mcp__wire__wire_ping` — wraps `wire ping <peer>`; returns `{peer, probes_sent, probes_acked, roundtrip_ms_p50, loss_pct, last_responder_state}`. The `last_responder_state` field lets the operator's LLM act on auto-response readiness without parsing the dashboard.
+- `mcp__wire__wire_health` — wraps `wire health --json`; returns the per-peer health array including each peer's `last_responder_state` block (or `null` if peer opted out / pre-v0.15). LLMs deciding whether to route a delegation to peer X can check `last_responder_state.monitor_armed` + `last_responder_state.monitor_uptime_s > 60` before sending.
 
 The MCP tools intentionally return cached daemon state (the auto-probe lane has been running in background), so the operator's LLM gets fresh stats without paying probe-latency per tool call. The `mcp__wire__wire_ping` tool MAY trigger a fresh probe-burst if the operator's prompt makes it explicit (e.g., "ping coral now"); default is read-from-cache.
 
@@ -192,7 +255,8 @@ Three knobs in `<config_dir>/health.json` (no flag explosion; one config file):
 {
   "probe_interval_s": 60,
   "probe_timeout_s": 30,
-  "rate_limit_per_pair_s": 10
+  "rate_limit_per_pair_s": 10,
+  "publish_responder_state": true
 }
 ```
 
@@ -302,6 +366,7 @@ Probes operate at the bilateral-pair layer; they do not interact with RFC-003 de
 - **AC-HP3: Probe spam rate-limit.** A sends 100 probes to B in 1s. B drops > 90 of them (rate limit 10s by default, so at most 1 probe-ack pair completes); B's responder code path consumes < 50ms CPU total. Test: harness floods + measures responder CPU. Owner: v0.15 implementer.
 - **AC-HP4: Cursor-PAST gracefully on unknown body intent.** A sends `kind=heartbeat` with `body.t = "probe_v2_future_intent"` to a B running v0.15. B logs a warning and advances cursor; A's next standard probe still acks. Test: harness emits unknown body intent, asserts no `TRANSIENT_REJECT`, no daemon crash, cursor moves. Owner: v0.15 implementer.
 - **AC-HP5: `wire health` surfaces peer staleness threshold visually.** If `consecutive_probe_failures > (24h / probe_interval_s)`, dashboard renders peer with `⚠ stale (Nh)` marker. Test: harness simulates 24h of dropped acks, assert dashboard text contains "⚠ stale". Owner: v0.15 implementer.
+- **AC-HP6: `responder_state` reflects local monitor process truthfully.** With B running `wire daemon` only, A's probe_ack carries `responder_state.monitor_armed: false`. With B running `wire daemon` AND `wire monitor --json --persistent` (separate process), the next probe_ack carries `responder_state.monitor_armed: true` and a `monitor_uptime_s` matching the process-start delta within ±2s. Test: harness runs the two configurations in sequence, probes between each, asserts each ack's `responder_state` reflects the actual local process state. Verifies §2.5 detection rules at the daemon layer; does NOT verify peer truthfulness (which is operator-side disbelief per §2.5 threat-model). Owner: v0.15 implementer.
 
 ## Kill criterion
 
