@@ -8,8 +8,9 @@
 //!      before serialization (they are computed *over* the canonical bytes,
 //!      so they cannot be inside them).
 //!   5. The top-level field `event_id` is stripped iff `strict = true` —
-//!      `compute_event_id` uses strict-mode bytes; `verify_message_v31`
-//!      uses non-strict because the wire copy carries `event_id` already.
+//!      `compute_event_id` uses strict-mode bytes both when signing and when
+//!      `verify_message_v31` recomputes the signed event's id. The wire copy
+//!      carries `event_id`, but the id must not recursively hash itself.
 //!
 //! Implementation note — `serde_json::Map` uses `BTreeMap` internally when
 //! the `preserve_order` cargo feature is OFF (which is the default). This
