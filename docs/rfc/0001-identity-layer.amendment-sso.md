@@ -40,9 +40,15 @@ The org publishes:
 _wire-org.<org-domain> TXT "did=did:wire:org:<32hex>; sso_iss=https://login.acme.com/realms/wire; sso_tenant=acme-prod; v=1"
 ```
 
-- `did=` — wire `org_did` (Ed25519 anchor; matches RFC-001 v2 §1).
-- `sso_iss=` — OIDC issuer URL. Receiver fetches `<iss>/.well-known/openid-configuration` exactly once per org-onboarding, caches the JWKS URI + alg list.
-- `sso_tenant=` — IdP tenant/realm identifier. Required because most IdPs serve multiple tenants from one issuer.
+A personal-tier operator (`0003-per-company-relays.amendment-deployment-tiers.md` — single human across N sessions, wire-rooted signing-key-first identity) publishes the SAME record name with their `op_did` instead. SSO and tenant fields are optional for personal-tier:
+
+```
+_wire-org.<personal-domain> TXT "did=did:wire:op:operator-<32hex>; v=1"
+```
+
+- `did=` — wire DID anchor (Ed25519). Accepts both `did:wire:org:<32hex>` (organizational anchor, RFC-001 v2 §1) and `did:wire:op:operator-<32hex>` (personal-tier operator anchor, deployment-tiers amendment). **Parsers MUST dispatch on the `did:wire:op:` vs `did:wire:org:` prefix** to select the verification path: `org_did` resolves against the receiver's per-org membership-cert chain (`identity::verify_member_cert`); `op_did` resolves directly against the inline `op_pubkey` on the peer's card (`identity::verify_op_cert`). Both paths verify fully offline against pinned material — no resolver, no registry on the pairing hot path. **Record name `_wire-org.<domain>` is used for both DID kinds** (no per-DID record-name split); the org-vs-op semantic lives entirely in the `did=` field value.
+- `sso_iss=` — OIDC issuer URL. Receiver fetches `<iss>/.well-known/openid-configuration` exactly once per onboarding, caches the JWKS URI + alg list. **Optional for personal-tier** (SSO is additive convenience, never the identity root — see deployment-tiers amendment §"Identity — most-secure default").
+- `sso_tenant=` — IdP tenant/realm identifier. Required when `sso_iss=` is present because most IdPs serve multiple tenants from one issuer. Omit both `sso_iss=` and `sso_tenant=` for non-SSO operators / orgs.
 - `v=` — version tag; receivers MUST reject unknown `v` (value-level rule).
 
 **Field-additive evolution clarification (back-ported from RFC-003 §2, #130-comment-by-dthoma1).** Parsers MUST ignore fields they don't understand at a known `v` (field-level rule, distinct from the value-level rule above). `v` bumps ONLY when an existing field's semantics change OR a field is dropped. Adding a new field (e.g. RFC-003's `relay=` for per-company-relay binding; hypothetical future `sso_iss_kid=` for IdP key pinning) does NOT require a `v` bump. This makes `v=1` field-additive evolvable — receivers tolerate forward-compatible field additions; senders MAY use a higher `v` only when receivers would mis-verify under v=1 rules.
