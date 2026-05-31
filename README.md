@@ -513,6 +513,22 @@ If those make sense, we probably do too.
 
 ## Install
 
+### As a Claude Code plugin (recommended for Claude users — v0.14.1)
+
+```bash
+# 1. install the wire binary on PATH (one of the three paths below)
+cargo install slancha-wire
+
+# 2. install the Claude plugin pointing at the binary
+/plugin install @SlanchaAi/wire
+```
+
+After install, six slash commands are live (`/wire:wire-init`, `wire-pair`, `wire-monitor`, `wire-send`, `wire-enroll`, `wire-quiet`), the wire MCP server auto-starts on session start, and a `SessionStart` hook emits a one-line probe confirming wire is reachable. Wire is the first Rust-binary-backed Claude plugin in the marketplace; signing-key sovereignty is preserved (no plugin sandbox on stdio MCP servers — `wire mcp` accesses `~/.config/wire/op.key` exactly as before).
+
+See [`docs/PLUGIN.md`](docs/PLUGIN.md) for the full plugin shape, publishing channels, and version-lockstep with the wire crate.
+
+### As a standalone CLI / daemon
+
 **v0.6.1 — shipped.** Three paths:
 
 ```bash

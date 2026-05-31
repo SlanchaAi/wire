@@ -69,6 +69,29 @@ The three channels coexist. Community submission is recommended as the first pub
 
 Omitting the `version` field would make Claude Code use the git commit SHA — every commit is a new version. Slancha pins explicit semver for predictable rollouts.
 
+## Plugin install vs `wire setup` — pick one
+
+The plugin's `.mcp.json` declares the wire MCP server entry. If you previously ran `wire setup --apply` (which writes the same entry into `~/.claude.json`), you'll end up with two `mcpServers.wire` entries — global + plugin-scoped. Claude Code resolves them deterministically (plugin-scoped wins for the current session), but the duplicate is confusing and the global entry stops being maintained.
+
+**Recommended after plugin install:**
+
+```bash
+# Remove the global entry the older `wire setup` wrote, since the plugin owns it now.
+python3 - <<'EOF'
+import json, os
+p = os.path.expanduser("~/.claude.json")
+with open(p) as f: d = json.load(f)
+if "wire" in d.get("mcpServers", {}):
+    del d["mcpServers"]["wire"]
+    with open(p, "w") as f: json.dump(d, f, indent=2)
+    print("removed global mcpServers.wire (plugin now provides it)")
+else:
+    print("no global mcpServers.wire to remove")
+EOF
+```
+
+A future `wire setup --apply` will detect a plugin install and skip writing the global entry; pre-v0.14.2 `wire setup` doesn't yet know about the plugin path. Tracking in v0.14.2 backlog.
+
 ## Plugin development
 
 To work on the plugin scaffold without affecting end-user sessions:
