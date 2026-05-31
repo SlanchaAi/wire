@@ -7,6 +7,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 
 #[derive(Clone)]
 pub struct RelayClient {
@@ -24,6 +25,122 @@ pub struct AllocateResponse {
 pub struct PostEventResponse {
     pub event_id: Option<String>,
     pub status: String,
+}
+
+/// RFC-003 §2 DNS-TXT binding anchor. `_wire-org.<domain>` records use the
+/// same field grammar for org-tier (`did:wire:org:*`) and personal-tier
+/// (`did:wire:op:*`) deployments; receivers dispatch on the DID prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WireOrgTxtDid {
+    Org(String),
+    Op(String),
+}
+
+impl WireOrgTxtDid {
+    pub fn as_str(&self) -> &str {
+        match self {
+            WireOrgTxtDid::Org(did) | WireOrgTxtDid::Op(did) => did,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireOrgTxtRecord {
+    pub did: WireOrgTxtDid,
+    pub relay: Option<String>,
+    pub sso_iss: Option<String>,
+    pub sso_tenant: Option<String>,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum WireOrgTxtParseError {
+    #[error("DNS-TXT record missing required `did=` field")]
+    MissingDid,
+    #[error("DNS-TXT record missing required `v=` field")]
+    MissingVersion,
+    #[error("unsupported DNS-TXT record version `{0}`")]
+    UnsupportedVersion(String),
+    #[error("`did=` must be did:wire:org:* or did:wire:op:* with a long fingerprint suffix")]
+    InvalidDid(String),
+    #[error("duplicate DNS-TXT field `{0}`")]
+    DuplicateField(&'static str),
+    #[error("malformed DNS-TXT field `{0}`")]
+    MalformedField(String),
+}
+
+/// Parse the field grammar used by RFC-003 §2:
+///
+/// `_wire-org.<domain> TXT "did=<wire-DID>; relay=<url>; sso_iss=<iss>; sso_tenant=<tenant>; v=1"`
+///
+/// Field-additive evolution rule: at known `v=1`, unknown fields are ignored
+/// so future records remain forward-compatible. Unknown `v` values are rejected
+/// at parse time because they may change existing-field semantics.
+pub fn parse_wire_org_txt_record(record: &str) -> Result<WireOrgTxtRecord, WireOrgTxtParseError> {
+    let trimmed = record.trim();
+    let body = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(trimmed);
+
+    let mut did: Option<String> = None;
+    let mut version: Option<String> = None;
+    let mut relay: Option<String> = None;
+    let mut sso_iss: Option<String> = None;
+    let mut sso_tenant: Option<String> = None;
+
+    fn set_once(
+        slot: &mut Option<String>,
+        field: &'static str,
+        value: &str,
+    ) -> Result<(), WireOrgTxtParseError> {
+        if slot.is_some() {
+            return Err(WireOrgTxtParseError::DuplicateField(field));
+        }
+        *slot = Some(value.trim().to_string());
+        Ok(())
+    }
+
+    for raw in body.split(';') {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = raw.split_once('=') else {
+            return Err(WireOrgTxtParseError::MalformedField(raw.to_string()));
+        };
+        match key.trim() {
+            "did" => set_once(&mut did, "did", value)?,
+            "v" => set_once(&mut version, "v", value)?,
+            "relay" => set_once(&mut relay, "relay", value)?,
+            "sso_iss" => set_once(&mut sso_iss, "sso_iss", value)?,
+            "sso_tenant" => set_once(&mut sso_tenant, "sso_tenant", value)?,
+            _ => {
+                // RFC-003 §2 / RFC-001 §A: field-additive evolution at a
+                // known version. Unknown fields are opaque, not fatal.
+            }
+        }
+    }
+
+    let version = version.ok_or(WireOrgTxtParseError::MissingVersion)?;
+    if version != "1" {
+        return Err(WireOrgTxtParseError::UnsupportedVersion(version));
+    }
+
+    let did = did.ok_or(WireOrgTxtParseError::MissingDid)?;
+    let did = if crate::agent_card::is_org_did(&did) {
+        WireOrgTxtDid::Org(did)
+    } else if crate::agent_card::is_op_did(&did) {
+        WireOrgTxtDid::Op(did)
+    } else {
+        return Err(WireOrgTxtParseError::InvalidDid(did));
+    };
+
+    Ok(WireOrgTxtRecord {
+        did,
+        relay,
+        sso_iss,
+        sso_tenant,
+    })
 }
 
 /// Env var: when set to a truthy value (`1`, `true`, `yes`), every TLS
@@ -784,6 +901,7 @@ mod uds_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn url_normalization_trims_trailing_slash() {
@@ -876,6 +994,88 @@ mod tests {
         }
         unsafe {
             std::env::remove_var(INSECURE_SKIP_TLS_ENV);
+        }
+    }
+
+    fn org_did() -> &'static str {
+        "did:wire:org:example-0123456789abcdef0123456789abcdef"
+    }
+
+    fn op_did() -> &'static str {
+        "did:wire:op:operator-abcdef0123456789abcdef0123456789"
+    }
+
+    #[test]
+    fn parse_wire_org_txt_record_dispatches_org_and_op_dids() {
+        let org = parse_wire_org_txt_record(&format!(
+            "did={}; relay=https://relay.example; sso_iss=https://issuer.example; sso_tenant=tenant; v=1",
+            org_did()
+        ))
+        .unwrap();
+        assert_eq!(org.did, WireOrgTxtDid::Org(org_did().to_string()));
+        assert_eq!(org.relay.as_deref(), Some("https://relay.example"));
+        assert_eq!(org.sso_iss.as_deref(), Some("https://issuer.example"));
+        assert_eq!(org.sso_tenant.as_deref(), Some("tenant"));
+
+        let op = parse_wire_org_txt_record(&format!("did={}; v=1", op_did())).unwrap();
+        assert_eq!(op.did, WireOrgTxtDid::Op(op_did().to_string()));
+        assert_eq!(op.relay, None);
+    }
+
+    #[test]
+    fn parse_wire_org_txt_record_rejects_unknown_version_and_session_did() {
+        let unknown_v = parse_wire_org_txt_record(&format!("did={}; v=2", org_did())).unwrap_err();
+        assert_eq!(
+            unknown_v,
+            WireOrgTxtParseError::UnsupportedVersion("2".into())
+        );
+
+        let session_did =
+            parse_wire_org_txt_record("did=did:wire:session-01234567; v=1").unwrap_err();
+        assert!(matches!(session_did, WireOrgTxtParseError::InvalidDid(_)));
+    }
+
+    #[test]
+    fn parse_wire_org_txt_record_rejects_duplicate_known_fields() {
+        let err = parse_wire_org_txt_record(&format!("did={}; v=1; v=1", org_did())).unwrap_err();
+        assert_eq!(err, WireOrgTxtParseError::DuplicateField("v"));
+    }
+
+    proptest! {
+        #[test]
+        fn parse_wire_org_txt_record_ignores_unknown_fields_at_v1(
+            unknown_fields in prop::collection::vec(
+                (
+                    "[a-z_][a-z0-9_]{0,16}",
+                    "[A-Za-z0-9._:/-]{0,64}"
+                ),
+                0..32
+            )
+        ) {
+            let mut record = format!("did={}; v=1", org_did());
+            for (key, value) in unknown_fields {
+                prop_assume!(!matches!(
+                    key.as_str(),
+                    "did" | "v" | "relay" | "sso_iss" | "sso_tenant"
+                ));
+                record.push_str("; ");
+                record.push_str(&key);
+                record.push('=');
+                record.push_str(&value);
+            }
+
+            let parsed = parse_wire_org_txt_record(&record).unwrap();
+            prop_assert_eq!(parsed.did, WireOrgTxtDid::Org(org_did().to_string()));
+        }
+
+        #[test]
+        fn parse_wire_org_txt_record_rejects_every_unknown_version(
+            version in "[A-Za-z0-9._-]{1,16}"
+        ) {
+            prop_assume!(version != "1");
+            let record = format!("did={}; v={version}; future=opaque", org_did());
+            let err = parse_wire_org_txt_record(&record).unwrap_err();
+            prop_assert_eq!(err, WireOrgTxtParseError::UnsupportedVersion(version));
         }
     }
 }
