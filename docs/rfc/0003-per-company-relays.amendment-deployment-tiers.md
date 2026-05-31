@@ -61,10 +61,18 @@ The matrix is intentionally binary at the operator-count axis. Edge cases:
 
 **Relay:** `wireup.net` (default).
 
-**Identity:**
-- `wire enroll op --handle <yourname>` → op_did binds N sessions/devices under one anchor.
-- Optional: `wire enroll op --sso github` (v0.15) → op_did carries an attestation envelope provable to peers (no IdP infra required; consumer OAuth flow).
+**Identity — most-secure default = wire-rooted signing key, ALWAYS.**
+
+Personal-tier identity is **always anchored at the wire-native Ed25519 signing key (`op_did`)**, regardless of whether the operator opts into any third-party IdP. The op_did + op_cert chain verifying against the inline `op_pubkey` on the card IS the cryptographic identity; this is the offline-self-certifying invariant from RFC-001 §"Implementation status (as-built, v0.14)" applied to the personal case. Third-party SSO (Google / Okta / Workspace / Auth0 / Authentik / GitHub-OAuth) is **purely additive attestation** that proves "this op_did is also `github.com/<user>`" for peer-side recognition; it never replaces or substitutes for the wire-rooted signing key.
+
+Why most-secure by default: a personal-tier user whose ONLY identity was third-party-rooted (SSO-only) would inherit that third party's trust + recovery semantics + outage surface (Google account suspended → wire identity gone; Okta tenant rotated → wire identity unverifiable). Wire-rooting the signing key by default keeps the operator sovereign over their own identity. SSO becomes a recognition + bootstrap convenience, never the trust root. **An operator who uses no IdP at all still has a fully-functional, peer-verifiable, cryptographically-anchored personal-tier identity.**
+
+Concretely:
+- `wire enroll op --handle <yourname>` → op_did + Ed25519 keypair minted, key saved 0600 under `config/wire/op.key`. **This step is required, not optional.** The keypair IS the personal-tier identity anchor.
+- Optional: `wire enroll op --sso github` (v0.15) → op_did carries an attestation envelope (`sso_attest` per RFC-001-amendment-sso §B) provable to peers. Consumer OAuth flow; no IdP infra required. **Additive on top of the signing key; the op_cert chain still verifies offline.**
 - No `wire enroll org-create` unless the operator wants to express a self-claimed `personal-fleet` org for filtering (legitimate use: `org_policies.json` row `willard-fleet → auto` lets willard's own sessions auto-ORG_VERIFIED at each other without per-session SAS).
+
+**Failure-mode framing:** if the consumer-OAuth IdP rotates / suspends / deprecates (e.g., GitHub's OAuth surface changes), the SSO attestation drops but the op_did's signing key + op_cert chain remain verifiable against the inline `op_pubkey` on every peer's pinned card. Identity continuity is preserved; only the third-party recognition layer degrades. This is the security property that demands signing-key-first as the default, not optional-SSO-first.
 
 **DNS-TXT pin:** Optional. Only needed if the operator wants `nick@personaldomain.com` discovery (e.g. `willard@willardk.com`). Shape:
 
