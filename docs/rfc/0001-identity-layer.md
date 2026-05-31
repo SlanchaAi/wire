@@ -51,7 +51,7 @@ Three new optional fields on `agent-card.json` (current schema `v3.1`, see `src/
   "schema_version": "v3.2",
   "did":         "did:wire:swift-harbor-4092b577",
   "handle":      "swift-harbor",
-  "capabilities": ["wire/v3.2", "org/v1"],
+  "capabilities": ["wire/v3.2"],                       // NORMATIVE: schema_version + inline fields signal identity-layer (see §1a)
   "op_did":      "did:wire:op:darby-<32hex>",          // NEW: operator anchor
   "op_cert":     "<base64 ed25519 sig: op_did over session did>",
   "op_pubkey":   "<base64 op root pubkey>",            // v0.14: carried INLINE — commits to op_did
@@ -78,6 +78,8 @@ Semantics:
 `op_did` and `org_did` use a new DID-method prefix `did:wire:op:` and `did:wire:org:` so they cannot be confused with session DIDs. The `<32hex>` tail is the first 32 hex digits of `sha256(pubkey)` — same construction as the session DID but with the tail length quadrupled (8 hex → 32 hex) to make collision search 2^128 instead of 2^32.
 
 **Critical invariant (closes Q-Reuse).** New claims are **orthogonal axes**. They do not introduce a free-choice display name diverging from the DID-derived session handle — v0.13.1's one-name invariant (see `src/cli.rs:13131`) still holds. The agent-card's `handle` field continues to come deterministically from the DID; `op_did` / `org_did` add context but not aliasing.
+
+**Normative identity-layer signal.** Peers detect identity-layer cards by `schema_version >= "v3.2"` **and** the presence of inline `op_did` / `op_cert` / `op_pubkey` / `org_memberships[]` fields — not by `capabilities[]` contents. `capabilities[]` is an unordered string set of transport / protocol capabilities (`wire/v3.2` is the current floor); identity-layer status is a card-shape property, not a capability advertisement. This avoids a stealth interop split where senders gating on a non-existent capability string (e.g. `org/v1`) skip otherwise valid v3.2 cards while senders gating on schema_version do not. Custom capability strings (`tool-use/v1`, dialect tags) MAY be present; the identity-layer reader MUST NOT depend on them.
 
 ### 2. Org-claim attestation (non-FCFS)
 
