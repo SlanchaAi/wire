@@ -84,7 +84,7 @@ When a wire peer wants to assert `ORG_VERIFIED` to another peer via the SSO chan
 2. `receiver_did` equals receiver's own session DID. (Closes O5 splice — a hostile receiver who forwards the envelope to a third org-mate fails this check.)
 3. `nonce` not seen before for this sender (small bounded cache, e.g. 1k entries with LRU); `iat` within ±60s of receiver's clock.
 4. JWT signature valid under JWKS pinned at §A onboarding (or via §C refresh).
-5. JWT `iss` matches the `sso_iss` from the §A DNS-TXT record for the sender's claimed `org_did`.
+5. JWT `iss` matches the `sso_iss` from the §A DNS-TXT record for the sender's claimed `org_did`. **Comparison is byte-equal against the pinned `sso_iss` value (case-sensitive, no trailing-slash normalization, no URL-canonicalization).** Prefix-match (e.g. accepting `https://login.acme.com/realms/wire/sub-realm` because `https://login.acme.com/realms/wire` is pinned) is non-conformant and MUST fail this check. Case-insensitive comparison is non-conformant. Trailing-slash normalization is non-conformant. The IdP-adapter trait surface in v0.15 (`Verifier::verify_iss(&JwtClaims, &PinnedSsoIss)` or equivalent named method per the adapter shape settled in #92) MUST implement byte-equal comparison; any normalization happens at *pin* time (when `sso_iss=` is written into the §A DNS-TXT record), never at *verify* time. (AC-SSO-strict-iss per #137 + paul directive on #92.)
 6. JWT tenant claim matches `sso_tenant` from §A.
 7. JWT `exp` > now; `iat` not in future.
 
