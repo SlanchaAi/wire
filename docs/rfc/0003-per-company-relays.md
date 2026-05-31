@@ -58,20 +58,25 @@ Three pure shapes, then the chosen hybrid:
 
 ### 2. Org-to-relay binding: DNS-TXT (RFC-001 §A shape)
 
-Same `_wire-org.<domain>` TXT record shape as the SSO amendment, EXTENDED with a `relay=` field:
+Same `_wire-org.<domain>` TXT record shape as the SSO amendment, EXTENDED with one new field (`relay=`):
 
 ```
-_wire-org.slancha.ai. IN TXT "did=did:wire:org:slancha-fleet-88a3042ebdeab5960ffc1f4cd5b529a0; relay=https://relay.slancha.ai; sso_iss=https://accounts.google.com; sso_iss_pubkey=<base64>; v=1"
+_wire-org.slancha.ai. IN TXT "did=did:wire:org:slancha-fleet-88a3042ebdeab5960ffc1f4cd5b529a0; relay=https://relay.slancha.ai; sso_iss=https://accounts.google.com; sso_tenant=slancha-prod; v=1"
 ```
 
 Semantics:
 
 - `did=<org_did>` — the org_did this domain anchors. **Truth.** A relay claiming to host `slancha-fleet` is verified by the receiver dialing `_wire-org.slancha.ai` and checking the TXT record's `did` matches.
 - `relay=<url>` — the HTTP relay endpoint where this org's members publish/pull. **Cached pointer.** If unreachable, peers fall back to wireup.net's federated path (`/v1/handle/intro/:nick` at the WebFinger-resolved relay-of-record).
-- `sso_iss=<...>` / `sso_iss_pubkey=<base64>` — RFC-001 §A SSO amendment fields. Optional for per-company-relay (omit when no SSO connector binds); required when v0.15 SSO ships.
-- `v=1` — schema version, monotonic. v2 will signal future extensions; readers default to v=1 semantics if absent.
+- `sso_iss=<...>` — RFC-001 §A SSO amendment field. The OIDC issuer URL. IdP key material is resolved via standard JWKS-from-discovery (`<iss>/.well-known/openid-configuration` → `jwks_uri`), per RFC-001 §A point 4 + §C JWKS-refresh dynamics. **NOT pinned in TXT** — that would break IdP key rotation (S1 resolution per #130-comment-by-dthoma1).
+- `sso_tenant=<tenant>` — RFC-001 §A multi-tenant isolation field. JWT verification requires the token's tenant claim to match (§A point 6). One org_did binds to one `(sso_iss, sso_tenant)` pair, NOT to all tenants under an issuer. Required when `sso_iss=` is present; omit both for non-SSO orgs.
+- `v=1` — schema version, monotonic. v2 will signal an incompatible-change (existing-field semantics or field removal).
 
-Read cadence: bind/refresh time, default 6h (per SSO amendment AC3), minimum 1h, maximum 24h. **NEVER on the pairing hot path.** Receivers cache the TXT pin under `<config_dir>/dns_org_pins/<domain>.json` keyed by `domain → (did, relay, fetched_at, ttl_until)`.
+**Field-additive evolution rule (resolves S3 from #130-comment-by-dthoma1).** Parsers MUST ignore fields they don't understand at a known `v`. `v` bumps ONLY when an existing field's semantics change OR a field is dropped. Adding a new field (e.g. `relay=` here at v=1; `sso_iss_kid=` hypothetically in the future) does NOT require a `v` bump. Receivers tolerate forward-compatible field additions; senders MAY use a higher `v` only when receivers would mis-verify under v=1 rules. **Back-ported to RFC-001 §A as a clarification** — see the amendment edit in this PR.
+
+**TXT record size budget.** Single TXT character-string is 255 bytes per RFC 1035; multiple strings concatenate per RFC 7208 (SPF) for parsers. Records SHOULD stay ≤ 255 bytes for single-chunk delivery; multi-chunk records MUST be supported by parsers. Worst-case `v=1` with all fields populated (`did`, `relay`, `sso_iss` Keycloak-shape, `sso_tenant`, `v`) ≈ 180-200 bytes — fits one chunk. Hypothetical future field additions should target the same budget.
+
+Read cadence: bind/refresh time, default 6h (per SSO amendment AC3), minimum 1h, maximum 24h. **NEVER on the pairing hot path.** Receivers cache the TXT pin under `<config_dir>/dns_org_pins/<domain>.json` keyed by `domain → (did, relay, sso_iss, sso_tenant, fetched_at, ttl_until)`.
 
 Failure modes:
 
@@ -113,7 +118,7 @@ Wire is A2A v1.0-compatible per #91 (Wire-as-A2A-Citizen extension). The matrix 
 | Discovery | `.well-known/agent-card.json` per domain | `.well-known/agent-card.json` (shipped #91) + `.well-known/wire/agent?handle=<nick>` (wire-native WebFinger style) | **Compatible.** Wire serves A2A AgentCard alongside its handle-directory endpoint. |
 | Identity binding | TLS as sole trust root | TLS + inline `op_pubkey` + `org_pubkey` + (v0.15) DNS-TXT issuer pin | **Wire strictly stronger.** A2A clients see wire as a valid A2A agent; wire clients get extra commitments. |
 | Trust delegation | None (each agent TLS-anchored only) | `org_membership` cert chain inline; receivers verify offline against pinned `org_pubkey` | **Wire extends.** A2A has no equivalent; wire adds a layer A2A doesn't contradict. |
-| Pairing UX | Implicit at first AgentCard fetch | Bilateral SAS (SPAKE2) for VERIFIED OR org_membership-auto-pin for ORG_VERIFIED | **Wire extends.** A2A clients dialing wire get the AgentCard immediately (no SAS — they're A2A-tier); wire-to-wire dialers get the SAS gesture for VERIFIED, org auto-pair for ORG_VERIFIED. |
+| Pairing UX | Implicit at first AgentCard fetch | Bilateral SAS (SPAKE2) for VERIFIED OR org_membership-auto-pin for ORG_VERIFIED | **Wire extends.** A2A clients dialing wire get the public AgentCard immediately (no trust state — they're external dialers hitting the public WebFinger surface, mapped to `UNTRUSTED` until they present a wire card per #91, at which point the standard wire `pair_invite` gate runs). Wire-to-wire dialers get the SAS gesture for VERIFIED, org auto-pair for ORG_VERIFIED. (M2 resolution per #130-comment-by-dthoma1 — there is no "A2A-tier" in `trust::tier_order`; A2A dialers without a wire card are `UNTRUSTED`.) |
 | Per-company hosting | Native (each org at its domain) | Hybrid (wireup default + optional per-company) | **Wire matches when bound.** Per-company-relay is the per-domain shape A2A assumes. |
 
 **Verdict: no fork.** Per-company-relay extends A2A's per-domain hosting model with wire's inline trust commitments. A v0.15-conformant wire relay IS a v1.0-conformant A2A agent surface, plus extras.
@@ -133,9 +138,9 @@ Consequence: cross-relay trust = aggregation of pinned-org_pubkeys + pinned-DNS-
 
 ### 6. Phasing
 
-- **v0.14.x (now, no code):** wireup.net stays canonical. Operators with sovereign-fleet ambitions can spin up `wire relay-server` at their own domain TODAY and bind peers via `wire bind-relay`. Documented in section 9 of `docs/PROMPT_per_company_relay_planning.md`.
-- **v0.15 (SSO connectors land):** RFC-001 §A DNS-TXT issuer binding ships as part of the SSO connector PR foundation. The same DNS-TXT shape carries `relay=` for per-company-relay binding. Auto-pair lane verifies the org_did ↔ relay binding offline at bind time, NOT on the pairing hot path.
-- **v0.16 (cross-relay discovery):** Operator-side fan-out — `wire whois <nick>@<unknown-domain>` reads `_wire-org.<domain>` to find the relay, then dials `.well-known/wire/agent` there. CLI verb additive; no relay-side aggregation (would create SPOF).
+- **v0.14.x (now, no code):** wireup.net stays canonical. Operators with sovereign-fleet ambitions can spin up `wire relay-server` at their own domain TODAY and bind peers via `wire bind-relay`. Documented in section 9 of `docs/PROMPT_per_company_relay_planning.md`. **Org_did migration sub-case (a) supported here**: same `org_did` + new HTTP relay endpoint (sovereign-fleet re-hosts) is a TXT-update at `_wire-org.<apex>`; receivers pick up on next bind refresh (≤ 24h).
+- **v0.15 (SSO connectors land):** RFC-001 §A DNS-TXT issuer binding ships as part of the SSO connector PR foundation. The same DNS-TXT shape carries `relay=` for per-company-relay binding (per §2's field-additive evolution rule). Auto-pair lane verifies the org_did ↔ relay binding offline at bind time, NOT on the pairing hot path. **Company-scoped relay endpoint subset is the default** (Q1 resolution per #130-comment-by-dthoma1): `/v1/handle/intro/:nick` + `/.well-known/wire/agent` + `/.well-known/agent-card.json` (A2A, per §4 no-fork verdict) + `/healthz`. The public `/v1/handles` directory is OMITTED by default — it's the wireup public-good surface and doesn't compose with sovereign-fleet operators who treat their roster as private. Operators MAY opt in to publishing it explicitly.
+- **v0.16 (cross-relay discovery + DNSSEC hardening):** Operator-side fan-out — `wire whois <nick>@<unknown-domain>` reads `_wire-org.<domain>` to find the relay, then dials `.well-known/wire/agent` there. CLI verb additive; no relay-side aggregation (would create SPOF). **Operational federation membership** (Q2 resolution per #130-comment-by-dthoma1): a peering-style relay-to-relay agreement layer LANDS HERE as ops-layer concern (DDoS budget, abuse handling, SLA), NOT as trust delegation. Prior art for the policy/blocklist shape: Matrix `m.policy.rule.server`, SPF/DKIM reputation, ActivityPub instance block-lists. The cryptographic floor stays DNS-TXT + offline cert-chain verification per §5. **Org_did migration sub-case (b)** (same `org_did`, new apex) is spec'd here as a CNAME-style "moved-to" record: `_wire-org-moved-to.<old-apex> TXT "apex=<new-apex>; v=1"`; receivers honor for a sunset window (90d), then fail closed. **Sub-case (c)** (new `org_did` entirely — key rotation, lost-key recovery) is the same problem as session-key rotation, **deferred to v0.16+** and NOT scoped here.
 - **v0.17 (apex-path routing primitive, optional):** First-class support for `<nick>@<apex-domain>` where the operator explicitly mounts wire at `/.well-known/wire/*` + `/v1/wire/*` on the apex. Reverse-proxy + Cloudflare-Worker reference configs. Opt-in only; subdomain-split remains the default.
 
 ## Security
@@ -173,10 +178,12 @@ Threat model deltas vs the v0.14 single-relay-anchor world are positive on net (
 
 ## Open questions
 
-- **Q1: Should slancha.ai relay run a SUBSET of wireup.net's endpoints?** A "company-scoped relay" might serve only `/v1/handle/intro/:nick` + `/.well-known/wire/agent` + `/healthz`, omitting the public `/v1/handles` directory. Decision needed before v0.15. Owner: coral-weasel + operator. Decision point: spec lands in `docs/research/per-company-relays.md` per the planning prompt.
-- **Q2: Does cross-relay trust REQUIRE bilateral acknowledgement?** Or is "I bind my org to this relay via DNS-TXT" sufficient? Today the answer is the latter (DNS-TXT is the truth). But a paired relay-to-relay handshake (e.g., wireup.net pre-validates slancha.ai before federating) might raise the SLA bar. Decision needed before v0.16. Owner: systems-designer persona in the planning-prompt's spec.
-- **Q3: org_did MIGRATION between relays.** If slancha-fleet moves from slancha.ai to a different apex (`slanchaai.io`?), how do existing peers re-resolve? DNS-TXT update at old apex pointing to new (`relay=https://...`)? Cert chain? Open. Decision needed before v0.17. Owner: coral-weasel.
-- **Q4: Cross-relay rate-limit / abuse model.** A misbehaving relay floods another's intro endpoint. Existing per-relay limits suffice short-term; longer-term, an inter-relay abuse quota / federation block-list? Open. Owner: SRE persona in the planning-prompt's spec.
+All four resolved in §6 phasing per #130-comment-by-dthoma1 (RFC-001 author + SSO amendment author review). Recorded here for traceability:
+
+- **Q1: company-scoped relay endpoint subset?** **RESOLVED — subset, default.** v0.15 ships with `/v1/handles` directory OMITTED by default; operators opt in if they want their roster public. Reflects sovereign-fleet privacy posture. See §6 v0.15 entry.
+- **Q2: bilateral relay handshake vs DNS-TXT only?** **RESOLVED — DNS-TXT only for TRUST, peering-shaped for OPERATIONS.** Cryptographic floor remains offline DNS-TXT + cert-chain verification per §5. Relay-to-relay handshakes land at v0.16 as **operational federation membership** (peering agreement layer for DDoS budget / abuse / SLA), not as trust delegation. See §6 v0.16 entry.
+- **Q3: `org_did` migration between relays.** **RESOLVED — split into three sub-cases.** (a) same `org_did` + new relay endpoint: TXT update at v0.14.x, supported now. (b) same `org_did` + new apex: `_wire-org-moved-to.<old-apex>` CNAME-style record with 90d sunset, spec'd in v0.16. (c) new `org_did` entirely (key rotation / lost-key recovery): out of scope, deferred to v0.16+ general key-rotation work. See §6 v0.14.x + v0.16 entries.
+- **Q4: cross-relay rate-limit / abuse model.** **RESOLVED — defer to v0.16 operational-federation layer.** Prior art: Matrix `m.policy.rule.server` (closest fit — signed relay block-lists, subscribable), SPF/DKIM per-domain reputation, ActivityPub instance block-lists. Not a trust-layer concern. See §6 v0.16 entry + §References.
 
 ## Alternatives considered
 
@@ -189,11 +196,17 @@ Threat model deltas vs the v0.14 single-relay-anchor world are positive on net (
 ## References
 
 - `docs/rfc/0001-identity-layer.md` — RFC-001 identity layer (ratified, implemented v0.14).
-- `docs/rfc/0001-identity-layer.amendment-sso.md` — §A DNS-TXT issuer binding (amendment, v0.15 target).
+- `docs/rfc/0001-identity-layer.amendment-sso.md` — §A DNS-TXT issuer binding + §B JWT verification + §C JWKS-refresh dynamics (amendment, v0.15 target). This RFC-003's §2 is field-additive on §A per the evolution rule.
 - `docs/A2A_EXTENSION.md` (per #91) — Wire-as-A2A-Citizen extension spec.
-- `docs/PROMPT_per_company_relay_planning.md` (this PR) — the planning prompt that produces the implementation spec.
+- `docs/PROMPT_per_company_relay_planning.md` — the planning prompt that produces the implementation spec.
 - A2A v1.0 spec (Google Agent2Agent, public).
 - Global CLAUDE.md "Public uplink — laulpogan.com via Cloudflare" — the Cloudflare-Tunnel-to-Spark pattern referenced for slancha.ai relay provisioning.
+- **v0.16 operational-federation prior art** (Q4 resolution per #130-comment-by-dthoma1):
+  - Matrix `m.policy.rule.server` — signed relay block-lists, subscribable; the closest structural fit for what wire's v0.16 peering layer wants.
+  - SPF / DKIM / DMARC per-domain reputation — DNS-rooted, additive-evolution-tolerant precedent.
+  - ActivityPub instance block-lists — operator-curated federation policy.
+- RFC 1035 (DNS) + RFC 7208 (SPF, for multi-string TXT concatenation) — TXT-record budget rules cited in §2.
+- #130 — RFC-003 discussion thread (this RFC's substantive review history; iteration commits cite #130 comments).
 
 ---
 

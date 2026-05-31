@@ -43,7 +43,9 @@ _wire-org.<org-domain> TXT "did=did:wire:org:<32hex>; sso_iss=https://login.acme
 - `did=` — wire `org_did` (Ed25519 anchor; matches RFC-001 v2 §1).
 - `sso_iss=` — OIDC issuer URL. Receiver fetches `<iss>/.well-known/openid-configuration` exactly once per org-onboarding, caches the JWKS URI + alg list.
 - `sso_tenant=` — IdP tenant/realm identifier. Required because most IdPs serve multiple tenants from one issuer.
-- `v=` — version tag; receivers MUST reject unknown `v`.
+- `v=` — version tag; receivers MUST reject unknown `v` (value-level rule).
+
+**Field-additive evolution clarification (back-ported from RFC-003 §2, #130-comment-by-dthoma1).** Parsers MUST ignore fields they don't understand at a known `v` (field-level rule, distinct from the value-level rule above). `v` bumps ONLY when an existing field's semantics change OR a field is dropped. Adding a new field (e.g. RFC-003's `relay=` for per-company-relay binding; hypothetical future `sso_iss_kid=` for IdP key pinning) does NOT require a `v` bump. This makes `v=1` field-additive evolvable — receivers tolerate forward-compatible field additions; senders MAY use a higher `v` only when receivers would mis-verify under v=1 rules.
 
 **Why DNS-TXT under the operator's domain (not Anthropic's discovery doc, not a wire registry):** the DNS record is the operator's *unilateral declaration* of "I own this domain, and the SSO IdP at `sso_iss` speaks for this org on wire". It's the same trust root operators already use for DKIM, DMARC, SPF. No third party (including wireup.net) gains the ability to silently rebind an org's SSO.
 
