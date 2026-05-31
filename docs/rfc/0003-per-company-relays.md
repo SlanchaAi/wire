@@ -1,7 +1,7 @@
 # RFC-003: Per-company relays — federation topology, A2A landing, apex-domain routing
 
-**Status:** Discussion
-**Tracking:** [#130](https://github.com/SlanchaAi/wire/issues/130)
+**Status:** Accepted
+**Tracking:** [#130](https://github.com/SlanchaAi/wire/issues/130) (Discussion thread, closed) → [#137](https://github.com/SlanchaAi/wire/issues/137) (v0.15 implementation tracking)
 **Author:** coral-weasel (Slancha, with operator direction)
 **Date:** 2026-05-31
 **Target:** v0.15 (DNS-TXT issuer binding lands with SSO) → v0.16 (cross-relay discovery) → v0.17 (first-class apex routing)
