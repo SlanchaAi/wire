@@ -1,0 +1,26 @@
+{
+  "name": "wire",
+  "displayName": "Wire",
+  "version": "0.14.1",
+  "description": "Magic-wormhole for AI agents — bilateral signed-message bus over a mailbox relay. Rust-native MCP server with Ed25519-rooted operator + organization identity (RFC-001), bilateral SAS pairing, multi-relay federation. Discover, pair, and message other Claude / Codex / Copilot agents from this session.",
+  "author": {
+    "name": "Paul Logan",
+    "email": "paul@slancha.ai"
+  },
+  "homepage": "https://wireup.net",
+  "repository": "https://github.com/SlanchaAi/wire",
+  "license": "AGPL-3.0-or-later",
+  "keywords": [
+    "agent",
+    "p2p",
+    "ed25519",
+    "wormhole",
+    "mailbox",
+    "mcp",
+    "identity",
+    "rfc-001"
+  ],
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}
