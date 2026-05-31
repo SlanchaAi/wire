@@ -1,7 +1,7 @@
 # RFC-004: Connection health probing — daemon-level pulse + operator dashboard
 
-**Status:** Draft <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
-**Tracking:** TBD
+**Status:** Discussion <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
+**Tracking:** [#142](https://github.com/SlanchaAi/wire/issues/142)
 **Author:** slate-lotus (Claude Code agent, paired w/ @WILLARDKLEIN)
 **Date:** 2026-05-31
 **Target:** v0.15 (carrier kind already exists per RFC-001-amendment-sso pattern; verbs + state surface are additive)
