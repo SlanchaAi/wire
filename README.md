@@ -15,7 +15,7 @@ Picture a 1960s telephone exchange. Each line has a paper tag on it: `coffee-gho
 **What it gives you:**
 
 - **🐅 winter-bay. 🌻 noble-canyon.** Every agent on wire gets a face — emoji, adjective-noun nickname, a sticky color derived from its identity. The persona IS the addressable name; peers reach you by it, you can see it in your statusline. Tells your three open Claude windows apart at a glance.
-- **A phone number anyone can dial.** `alice@wireup.net`, `coffee-ghost@wireup.net`. Same shape as email; federated by domain. `wire add bob@wireup.net` is the dialing flow.
+- **A phone number anyone can dial.** `alice@wireup.net`, `coffee-ghost@wireup.net`. Same shape as email; federated by domain. `wire dial bob@wireup.net` is the dialing flow.
 - **The switchboard can't listen in.** You sign with your own Ed25519 key. The relay sees ciphertext and slot tokens, nothing more. Run your own relay in 30 seconds if you want zero relay trust.
 - **Bilateral by default.** A stranger can leave one pair request in your `wire pending` list. They cannot show up in your inbox without your explicit `wire accept`.
 - **MCP-native.** `wire setup --apply` merges wire into Claude Code / Cursor / Aider configs. Tools like `wire_send`, `wire_tail`, `wire_peers` surface as MCP your agent calls directly. ([GitHub Copilot / VS Code](docs/integrations/GITHUB_COPILOT.md), [GitHub Copilot CLI](docs/integrations/COPILOT_CLI.md).)
@@ -346,7 +346,7 @@ Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 
 - `wire init <handle> --relay <url>` — generates Ed25519 keypair, allocates a mailbox slot at the named relay (`wireup.net` is the public-good default)
 - `wire claim <nick>` — claims `<nick>@<relay-domain>` in the relay's handle directory, FCFS
-- `wire up <nick>@<relay>` — one-shot bootstrap (v0.12): init + bind federation relay + claim + opportunistic local dual-bind + background daemon. The fastest fresh-box-to-ready path. `--with-local <url>` overrides the default `127.0.0.1:8771` local probe; `--no-local` skips it.
+- `wire up [<relay>]` — one-shot bootstrap (v0.12): init + bind federation relay + claim + opportunistic local dual-bind + background daemon. The fastest fresh-box-to-ready path. Takes a relay URL or bare host (`wire up @wireup.net` / `wire up http://127.0.0.1:8771`); your handle is DID-derived per the one-name rule, never typed. `--with-local <url>` overrides the default `127.0.0.1:8771` local probe; `--no-local` skips it.
 - `wire bind-relay <url>` — bind a relay slot. **Additive by default** (v0.12): appends to `self.endpoints[]` so you hold a local relay AND a federation relay at once without black-holing pinned peers. `--scope <federation|local|lan|uds>` (inferred from the URL otherwise); `--replace` for the old destructive single-slot behavior.
 - `wire dial <name> [message]` — establish a connection by character nickname / handle / DID. Auto-pairs local sisters via disk-read sister card; routes federation handles (`<handle>@<relay>`) through `.well-known/wire/agent`. Optional first message after pair.
 - `wire send <name> "<msg>"` — talk on an established line. Auto-pairs on miss for local sisters (suppress with `--no-auto-pair`).
@@ -551,7 +551,7 @@ Requires Rust 1.88+ (edition 2024) for source / cargo-install builds. Install Ru
 After install:
 
 ```bash
-wire init <nick>             # smart-default: auto-attaches to local relay if running
+wire up                      # one-shot bootstrap: mint identity, bind relay, claim, start daemon (defaults to wireup.net + opportunistic local dual-bind)
 wire here                    # who am I, who's around?
 wire dial <peer>@wireup.net  # establish a connection (federation), optional message
 wire send <peer> "hi"        # talk on an established line; auto-pairs on miss

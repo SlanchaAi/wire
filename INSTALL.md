@@ -7,7 +7,7 @@ Pick the path that matches your situation.
 Once a release tag is published:
 
 ```bash
-curl -fsSL https://wire.slancha.ai/install.sh | sh
+curl -fsSL https://wireup.net/install.sh | sh
 ```
 
 What the script does:
@@ -22,7 +22,7 @@ Override defaults via env or flags:
 WIRE_REPO_URL=https://github.com/your-fork/wire \
 WIRE_DIST_URL=https://your-host/dist \
 PREFIX=~/bin \
-curl -fsSL https://wire.slancha.ai/install.sh | sh
+curl -fsSL https://wireup.net/install.sh | sh
 ```
 
 ## 2. From source (cargo)
@@ -57,7 +57,7 @@ Tracking in [BACKLOG.md](BACKLOG.md) under "Distribution + tooling."
 
 ```bash
 $ wire --version
-wire 0.2.0
+wire 0.14.1
 
 $ wire --help
 Magic-wormhole for AI agents — bilateral signed-message bus
@@ -67,35 +67,34 @@ Magic-wormhole for AI agents — bilateral signed-message bus
 ## 5. First-run setup
 
 ```bash
-# Generate keypair (offline, no network)
-$ wire init paul
-
-# Optional: combine with relay-slot allocation in one step
-$ wire init paul --relay https://relay.slancha.ai
-
-# Or bind a relay later
-$ wire bind-relay https://relay.slancha.ai
+# One-shot bootstrap: mint identity, bind relay, claim handle, start daemon.
+# Handle is DID-derived per the one-name rule — never typed.
+$ wire up                          # defaults to wireup.net + opportunistic local dual-bind
+$ wire up @wireup.net              # explicit federation relay
+$ wire up http://127.0.0.1:8771    # local-only (no federation)
+$ wire up --no-local               # federation-only (skip local dual-bind probe)
 ```
 
-Public-good test relay: `https://relay.laulpogan.com`. Production relay (when migrated): `https://relay.slancha.ai`. Or self-host with `wire relay-server` (see below).
+Public-good federation relay: `https://wireup.net`. Or self-host with `wire relay-server` (see below).
 
 ## 6. Pair with a peer
 
 ```bash
 # Operator A (you):
-$ wire pair-host --relay <url>
-share this code phrase with your peer:
-    73-2QXC4P
-# read aloud over voice / signal / phone
+$ wire here
+🌻 noble-canyon · did:wire:noble-canyon-a1b2c3d4 · bound at wireup.net
 
-# Operator B (peer, different machine):
-$ wire pair-join 73-2QXC4P --relay <url>
-SAS digits: 384-217
-[y/N]: y
-paired with did:wire:paul
+# Operator B (peer, anywhere):
+$ wire dial noble-canyon@wireup.net "hello"   # dials A by federation handle
+# A sees the pair request in `wire pending`; explicit consent required.
+
+# Operator A (back on terminal A):
+$ wire pending
+inbound pair request from sapphire-meadow@wireup.net (1m ago) — "hello"
+$ wire accept sapphire-meadow                  # bilateral consent; tier → VERIFIED
 ```
 
-Both terminals show the same 6-digit SAS — they read aloud, both type `y`, agent-cards exchange under AEAD-encryption, trust auto-pinned at VERIFIED.
+Bilateral pairing is the default — `wire dial` queues the request in the peer's `wire pending`; the peer's `wire accept` is the consent gate. Trust auto-pins at `VERIFIED` after the bilateral lane completes. For the legacy SAS-typed-back flow on a different machine (`wire pair-host` / `wire pair-join`, v0.3+ hidden from `--help`), see `wire pair-host --help`.
 
 ## 7. Optional — long-running daemon
 
