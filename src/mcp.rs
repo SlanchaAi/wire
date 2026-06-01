@@ -1301,6 +1301,42 @@ fn tool_status() -> Result<Value, String> {
         .map(|v| v.get("total_events").and_then(Value::as_u64).unwrap_or(0))
         .unwrap_or(0);
 
+    // v0.14.2 (#162 fix #2): compute total events still queued but
+    // not yet pushed. Walks each per-peer outbox file, counts
+    // event_ids missing from the per-peer pushed log. Cheap (one
+    // disk read per peer) and bounded by trust.agents shape.
+    // `pending_push_count > 0` + `stale_sync == true` = the
+    // silent-send class — events queued, daemon not pushing.
+    let pending_push_count = config::read_trust()
+        .ok()
+        .and_then(|t| t.get("agents").and_then(Value::as_object).cloned())
+        .map(|agents| {
+            let mut total: u64 = 0;
+            for (peer_handle, _) in agents.iter() {
+                let pushed_ids = config::read_pushed_event_ids(peer_handle);
+                let outbox_path = match config::outbox_dir() {
+                    Ok(d) => d.join(format!("{peer_handle}.jsonl")),
+                    Err(_) => continue,
+                };
+                let body = match std::fs::read_to_string(&outbox_path) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                for line in body.lines() {
+                    if let Some(eid) = serde_json::from_str::<Value>(line).ok().and_then(|v| {
+                        v.get("event_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    }) && !pushed_ids.contains(&eid)
+                    {
+                        total += 1;
+                    }
+                }
+            }
+            total
+        })
+        .unwrap_or(0);
+
     Ok(json!({
         "initialized": true,
         "daemon": daemon,
@@ -1316,6 +1352,7 @@ fn tool_status() -> Result<Value, String> {
         },
         "outbox_count": outbox_count,
         "inbox_count": inbox_count,
+        "pending_push_count": pending_push_count,
     }))
 }
 

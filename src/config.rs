@@ -106,6 +106,67 @@ fn outbox_lock(path: &Path) -> Arc<Mutex<()>> {
 /// form (issue #2 — 25-minute message-loss incident, surface fix in
 /// v0.5.13). This defense-in-depth makes the on-disk contract self-
 /// enforcing instead of caller-policed.
+/// v0.14.2 (#162 fix #2): append a "pushed" record to the per-peer
+/// lifecycle log when `run_sync_push` confirms a relay POST landed
+/// (either as `ok` or as the idempotent `duplicate` — the relay has the
+/// event either way). The log sits next to the outbox JSONL at
+/// `<outbox_dir>/<peer>.pushed.jsonl` and carries one
+/// `{"ts":"...","event_id":"..."}` line per push.
+///
+/// Readers (`tool_status`, `wire_status` CLI, `wire_tail` lifecycle
+/// surface) join outbox events to this log by `event_id` to expose the
+/// `queued → pushed` lifecycle that fix #2 surfaces.
+///
+/// NOT pruned in v0.14.2. The log grows monotonically; for high-volume
+/// operators a v0.15+ pruner (entries older than `<config_dir>/lifecycle_retention_days`)
+/// is tracked at the issue. Best-effort: errors log but don't abort
+/// the daemon push loop — a wedged disk shouldn't kill sync.
+pub fn append_pushed_log(peer: &str, event_id: &str, ts: &str) -> Result<PathBuf> {
+    ensure_dirs()?;
+    let normalized = crate::agent_card::bare_handle(peer);
+    let path = outbox_dir()?.join(format!("{normalized}.pushed.jsonl"));
+    let lock = outbox_lock(&path);
+    let _g = lock.lock().expect("pushed-log per-path mutex poisoned");
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening pushed-log {path:?}"))?;
+    let line = serde_json::to_string(&serde_json::json!({
+        "ts": ts,
+        "event_id": event_id,
+    }))?;
+    f.write_all(line.as_bytes())
+        .with_context(|| format!("appending to {path:?}"))?;
+    f.write_all(b"\n")?;
+    Ok(path)
+}
+
+/// Read the set of event_ids already recorded as pushed for `peer`.
+/// Cheap (single file read + parse); callers that need bulk lifecycle
+/// data should read the file directly. Returns an empty set on
+/// missing/unreadable file.
+pub fn read_pushed_event_ids(peer: &str) -> std::collections::HashSet<String> {
+    let normalized = crate::agent_card::bare_handle(peer);
+    let path = match outbox_dir() {
+        Ok(d) => d.join(format!("{normalized}.pushed.jsonl")),
+        Err(_) => return std::collections::HashSet::new(),
+    };
+    let body = match fs::read_to_string(&path) {
+        Ok(b) => b,
+        Err(_) => return std::collections::HashSet::new(),
+    };
+    body.lines()
+        .filter_map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()?
+                .get("event_id")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 pub fn append_outbox_record(peer: &str, record_bytes: &[u8]) -> Result<PathBuf> {
     ensure_dirs()?;
     let normalized = crate::agent_card::bare_handle(peer);
