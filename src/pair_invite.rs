@@ -943,6 +943,20 @@ pub fn maybe_consume_pair_drop_ack(event: &Value) -> Result<bool> {
             });
     }
     config::write_relay_state(&relay_state)?;
+    // v0.14.2 (#162 follow-on, honey-pine cosmetic find 2026-06-01):
+    // when bilateral completes via this path (we received the peer's
+    // pair_drop_ack, meaning they already had our pair_drop_ack), any
+    // pending-inbound record from an EARLIER inbound pair_drop is now
+    // stale — the pair is bilaterally pinned, the operator no longer
+    // needs to consent. Clear it idempotently so `wire status` /
+    // `wire_pending` stop showing a "waiting on consent" entry for a
+    // peer that's already VERIFIED. honey saw sunlit-aurora linger in
+    // `pending_pairs.inbound_handles` even after the tier promoted.
+    if let Err(e) = crate::pending_inbound_pair::consume_pending_inbound(&peer_handle) {
+        // Non-fatal — pending-inbound clear is hygiene, not correctness.
+        // Log but don't fail the bilateral-completion path.
+        eprintln!("pair_drop_ack: failed to clear stale pending_inbound for {peer_handle}: {e:#}");
+    }
     crate::os_notify::toast(
         &format!("wire — pair complete with {peer_handle}"),
         "Both sides bound. Ready to send + receive.",
@@ -1097,6 +1111,82 @@ mod tests {
             assert_eq!(parsed["code"], "pair_drop_ack_send_failed");
             assert_eq!(parsed["detail"], "POST returned 502");
             assert!(parsed["ts"].as_u64().unwrap_or(0) > 0);
+        });
+    }
+
+    #[test]
+    fn maybe_consume_pair_drop_ack_clears_stale_pending_inbound() {
+        // honey-pine cosmetic find 2026-06-01 (#162 follow-on): a peer
+        // whose pair completed bilaterally lingered in
+        // `pending_pairs.inbound_handles`. Repro: write a pending-inbound
+        // record (as if peer sent us a pair_drop first), then feed a
+        // valid kind=1101 `pair_drop_ack` for that peer through
+        // maybe_consume_pair_drop_ack — the pending record should be
+        // gone afterwards.
+        config::test_support::with_temp_home(|| {
+            let peer_handle = "test-peer";
+            let peer_did = format!("did:wire:{peer_handle}-abcdef12");
+            let pending = crate::pending_inbound_pair::PendingInboundPair {
+                peer_handle: peer_handle.to_string(),
+                peer_did: peer_did.clone(),
+                peer_card: serde_json::json!({"did": peer_did.clone()}),
+                peer_relay_url: "https://example.test".into(),
+                peer_slot_id: "slot-aaaa".into(),
+                peer_slot_token: "token-bbbb".into(),
+                peer_endpoints: vec![],
+                event_id: "evt-0001".into(),
+                event_timestamp: "2026-06-01T20:00:00Z".into(),
+                received_at: "2026-06-01T20:00:01Z".into(),
+            };
+            crate::pending_inbound_pair::write_pending_inbound(&pending).unwrap();
+            assert!(
+                crate::pending_inbound_pair::read_pending_inbound(peer_handle)
+                    .unwrap()
+                    .is_some(),
+                "precondition: pending record exists"
+            );
+            let ack_event = serde_json::json!({
+                "kind": 1101,
+                "type": "pair_drop_ack",
+                "from": peer_did,
+                "body": {
+                    "relay_url": "https://example.test",
+                    "slot_id": "slot-cccc",
+                    "slot_token": "token-dddd",
+                },
+            });
+            let consumed = super::maybe_consume_pair_drop_ack(&ack_event).unwrap();
+            assert!(consumed, "pair_drop_ack should be consumed");
+            assert!(
+                crate::pending_inbound_pair::read_pending_inbound(peer_handle)
+                    .unwrap()
+                    .is_none(),
+                "stale pending-inbound record must be cleared on bilateral completion"
+            );
+        });
+    }
+
+    #[test]
+    fn maybe_consume_pair_drop_ack_no_op_when_no_pending_inbound_exists() {
+        // Idempotence: the consume_pending_inbound call must NOT fail or
+        // surface an error when there's no pending record (the common
+        // case for peers we dialed via `wire add`, where no inbound
+        // pair_drop was ever stashed).
+        config::test_support::with_temp_home(|| {
+            let peer_handle = "fresh-peer";
+            let peer_did = format!("did:wire:{peer_handle}-12345678");
+            let ack_event = serde_json::json!({
+                "kind": 1101,
+                "type": "pair_drop_ack",
+                "from": peer_did,
+                "body": {
+                    "relay_url": "https://example.test",
+                    "slot_id": "slot-eeee",
+                    "slot_token": "token-ffff",
+                },
+            });
+            let consumed = super::maybe_consume_pair_drop_ack(&ack_event).unwrap();
+            assert!(consumed, "ack must still be consumed (the pinning path)");
         });
     }
 
