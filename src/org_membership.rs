@@ -61,7 +61,11 @@ fn key32(v: Option<&serde_json::Value>) -> Option<[u8; 32]> {
 /// True iff `did` ends with the long-fingerprint commitment of `pubkey` —
 /// i.e. `did` is the DID derived from `pubkey`. This is what makes an inline
 /// key self-certifying against a `did:wire:op:`/`did:wire:org:` identifier.
-fn commits_to(did: &str, pubkey: &[u8; 32]) -> bool {
+///
+/// Exposed to the crate so `wire enroll org-import-member-cert` (AC-F-INGEST)
+/// can run the same commitment check at import-time and refuse to persist a
+/// bundle whose `org_did` does not commit to its claimed `org_pubkey`.
+pub(crate) fn commits_to(did: &str, pubkey: &[u8; 32]) -> bool {
     did.ends_with(&format!("-{}", agent_card::long_fingerprint(pubkey)))
 }
 

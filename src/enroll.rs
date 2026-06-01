@@ -33,6 +33,92 @@ pub fn issue_member_cert(org_sk: &[u8], op_did: &str) -> Result<String, CertErro
     sign_did_cert(org_sk, op_did)
 }
 
+/// Import an externally-issued `{org_did, org_pubkey, member_cert}` bundle into
+/// this operator's local memberships, validating every claim before persisting.
+///
+/// AC-F-INGEST entry point (issue #127). The operator-side counterpart to
+/// `org-add-member`: org owners run `wire enroll org-add-member` to mint the
+/// bundle; non-owner operators run `wire enroll org-import-member-cert` to
+/// ingest it. Closes the v0.14.1 audit DX hole where joining an existing org
+/// required hand-editing `config/wire/memberships.json`.
+///
+/// Validation order (each fails closed; file is **never** mutated on any
+/// rejection — the success-shaped-failure mode dthoma1 flagged in #127 is the
+/// thing we are designing against here):
+///
+/// 1. `org_did` is well-formed `did:wire:org:*` (rejects `did:wire:op:*`, bare
+///    session DIDs, and arbitrary strings).
+/// 2. `org_pubkey` base64-decodes to exactly 32 bytes (Ed25519 public-key size).
+/// 3. `org_did` commits to `org_pubkey` via the long-fingerprint construction
+///    (`org_membership::commits_to`). Anti-spoof: a hostile bundle cannot
+///    substitute a different pubkey under a known `org_did`.
+/// 4. A local operator is enrolled (`op.key` + handle present). Without it the
+///    member cert has no payload subject to verify against.
+/// 5. `identity::verify_member_cert(&org_pubkey, &member_cert, &local_op_did)`
+///    succeeds — the cert actually signs THIS operator under THIS org pubkey.
+///
+/// Only after all five pass does the function call `config::add_membership` to
+/// persist. Idempotent over `org_did`: re-importing the same `org_did` replaces
+/// the prior entry, matching `add_membership`'s existing semantics.
+pub fn import_member_cert(
+    org_did: &str,
+    org_pubkey_b64: &str,
+    member_cert_b64: &str,
+) -> anyhow::Result<String> {
+    use anyhow::{Context, bail};
+
+    // Check 1: org_did well-formed.
+    if !crate::agent_card::is_org_did(org_did) {
+        bail!(
+            "rejecting import: org_did must be a `did:wire:org:<handle>-<32hex>` (got `{org_did}`)"
+        );
+    }
+
+    // Check 2: org_pubkey decodes to 32 bytes.
+    let org_pubkey_bytes = crate::signing::b64decode(org_pubkey_b64)
+        .with_context(|| format!("rejecting import: org_pubkey is not valid base64 ({org_pubkey_b64})"))?;
+    if org_pubkey_bytes.len() != 32 {
+        bail!(
+            "rejecting import: org_pubkey decodes to {} bytes (Ed25519 public keys are 32 bytes)",
+            org_pubkey_bytes.len()
+        );
+    }
+    let mut org_pubkey = [0u8; 32];
+    org_pubkey.copy_from_slice(&org_pubkey_bytes);
+
+    // Check 3: org_did commits to org_pubkey (anti-spoof).
+    if !crate::org_membership::commits_to(org_did, &org_pubkey) {
+        bail!(
+            "rejecting import: org_did `{org_did}` does NOT commit to the supplied org_pubkey \
+             (the DID's hex suffix must equal `long_fingerprint(org_pubkey)` — see RFC-001 §1)"
+        );
+    }
+
+    // Check 4: this operator is enrolled.
+    let op_sk = crate::config::read_op_key()
+        .context("rejecting import: no local operator enrolled — run `wire enroll op` first")?;
+    let op_handle = crate::config::read_op_handle()
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "operator".to_string());
+    let op_pk = ed25519_dalek::SigningKey::from_bytes(&op_sk)
+        .verifying_key()
+        .to_bytes();
+    let local_op_did = crate::agent_card::did_for_op(&op_handle, &op_pk);
+
+    // Check 5: member_cert verifies under (org_pubkey, local_op_did).
+    crate::identity::verify_member_cert(&org_pubkey, member_cert_b64, &local_op_did)
+        .with_context(|| {
+            "rejecting import: member_cert does not verify under (org_pubkey, local op_did) — \
+             either the cert was issued to a different operator or it was tampered with"
+        })?;
+
+    // All checks pass. Persist.
+    crate::config::add_membership(org_did, org_pubkey_b64, member_cert_b64)?;
+
+    Ok(local_op_did)
+}
+
 /// Assemble the v3.2 [`IdentityClaims`] a session presents.
 ///
 /// Given the operator's handle + keypair, the session DID this card belongs to,
@@ -422,6 +508,172 @@ mod tests {
                 msg.contains("agent card") || msg.contains("init"),
                 "got: {msg}"
             );
+        });
+    }
+
+    // ---------- AC-F-INGEST: import_member_cert (issue #127) ----------
+    //
+    // Five validation checks before the bundle is allowed to land in
+    // memberships.json. Each negative case asserts the file is NEVER
+    // mutated on rejection — the "success-shaped failure that republishes
+    // forever" mode dthoma1 flagged is the thing we're designing against.
+
+    /// Helper: mint a valid {org_did, org_pubkey, member_cert} bundle for a
+    /// local op_did + handle. Used as the happy-path baseline + as a source
+    /// for the negative cases to mutate.
+    fn mint_valid_bundle(
+        op_did: &str,
+    ) -> (String, [u8; 32], String) {
+        let (org_sk, org_pk) = generate_keypair();
+        let org_did = did_for_org("test-fleet", &org_pk);
+        let member_cert = issue_member_cert(&org_sk, op_did).unwrap();
+        (org_did, org_pk, member_cert)
+    }
+
+    fn enroll_local_op(handle: &str) -> String {
+        let (op_sk, op_pk) = generate_keypair();
+        crate::config::write_op_key(&op_sk).unwrap();
+        crate::config::write_op_handle(handle).unwrap();
+        did_for_op(handle, &op_pk)
+    }
+
+    #[test]
+    fn import_member_cert_happy_path() {
+        crate::config::test_support::with_temp_home(|| {
+            let local_op_did = enroll_local_op("darby");
+            let (org_did, org_pk, member_cert) = mint_valid_bundle(&local_op_did);
+            let org_pubkey_b64 = crate::signing::b64encode(&org_pk);
+
+            let returned = import_member_cert(&org_did, &org_pubkey_b64, &member_cert).unwrap();
+            assert_eq!(returned, local_op_did);
+
+            // Persisted exactly once with the expected fields.
+            let stored = crate::config::read_memberships().unwrap();
+            assert_eq!(stored.len(), 1);
+            assert_eq!(
+                stored[0].get("org_did").and_then(|v| v.as_str()),
+                Some(org_did.as_str())
+            );
+
+            // Sanity: republish attaches → evaluate_card_membership verifies.
+            let (_sess_sk, sess_pk) = generate_keypair();
+            let base = build_agent_card("vesper-valley", &sess_pk, None, None, None);
+            let with = with_op_claims_if_enrolled(base).unwrap();
+            assert_eq!(crate::agent_card::card_org_memberships(&with).len(), 1);
+        });
+    }
+
+    #[test]
+    fn import_rejects_op_did_for_org_did_slot() {
+        // Check 1: org_did must be did:wire:org:* — a did:wire:op:* should
+        // be refused before any cert verification runs.
+        crate::config::test_support::with_temp_home(|| {
+            let local_op_did = enroll_local_op("darby");
+            let (_org_did, org_pk, member_cert) = mint_valid_bundle(&local_op_did);
+            let org_pubkey_b64 = crate::signing::b64encode(&org_pk);
+            // Cram a did:wire:op:* into the org_did slot.
+            let bad_org_did = local_op_did.clone();
+
+            let err = import_member_cert(&bad_org_did, &org_pubkey_b64, &member_cert).unwrap_err();
+            let msg = format!("{err:?}");
+            assert!(msg.contains("did:wire:org"), "got: {msg}");
+            assert_eq!(crate::config::read_memberships().unwrap().len(), 0);
+        });
+    }
+
+    #[test]
+    fn import_rejects_wrong_org_pubkey_for_org_did() {
+        // Check 3: anti-spoof. A bundle whose org_pubkey doesn't commit to
+        // the claimed org_did must fail at the commitment check before any
+        // cert verification runs.
+        crate::config::test_support::with_temp_home(|| {
+            let local_op_did = enroll_local_op("darby");
+            let (org_did, _org_pk, member_cert) = mint_valid_bundle(&local_op_did);
+            // Generate a DIFFERENT keypair and try to claim it under the
+            // original org_did. The DID still parses as did:wire:org:*
+            // (check 1 passes) and the 32-byte length check passes (check
+            // 2 passes) but commits_to fails (check 3).
+            let (_other_sk, other_pk) = generate_keypair();
+            let wrong_pubkey_b64 = crate::signing::b64encode(&other_pk);
+
+            let err = import_member_cert(&org_did, &wrong_pubkey_b64, &member_cert).unwrap_err();
+            let msg = format!("{err:?}");
+            assert!(msg.contains("commit") || msg.contains("fingerprint"), "got: {msg}");
+            assert_eq!(crate::config::read_memberships().unwrap().len(), 0);
+        });
+    }
+
+    #[test]
+    fn import_rejects_cert_for_different_op_did() {
+        // Check 5: cert must sign THIS operator's op_did. A cert issued to
+        // a DIFFERENT op_did must be rejected even though it verifies fine
+        // against the supplied org_pubkey under its actual subject.
+        crate::config::test_support::with_temp_home(|| {
+            let _local_op_did = enroll_local_op("darby");
+
+            // Mint an org keypair + cert binding org → SOMEONE ELSE'S op_did
+            // (not the locally-enrolled darby).
+            let (_other_op_sk, other_op_pk) = generate_keypair();
+            let other_op_did = did_for_op("not-darby", &other_op_pk);
+            let (org_sk, org_pk) = generate_keypair();
+            let org_did = did_for_org("test-fleet", &org_pk);
+            let cert_for_other = issue_member_cert(&org_sk, &other_op_did).unwrap();
+            let org_pubkey_b64 = crate::signing::b64encode(&org_pk);
+
+            // Import-time we look up the local op_did from on-disk state;
+            // the cert was signed for other_op_did, so verification fails.
+            let err =
+                import_member_cert(&org_did, &org_pubkey_b64, &cert_for_other).unwrap_err();
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains("verify") || msg.contains("member_cert"),
+                "got: {msg}"
+            );
+            assert_eq!(crate::config::read_memberships().unwrap().len(), 0);
+        });
+    }
+
+    #[test]
+    fn import_rejects_malformed_org_pubkey_b64() {
+        // Check 2: 32-byte length. Catches both bad-base64 and wrong-length
+        // payloads via the decode + length check.
+        crate::config::test_support::with_temp_home(|| {
+            let local_op_did = enroll_local_op("darby");
+            let (org_did, _org_pk, member_cert) = mint_valid_bundle(&local_op_did);
+
+            // Garbage base64.
+            let err = import_member_cert(&org_did, "not!valid!b64!@#", &member_cert).unwrap_err();
+            let msg = format!("{err:?}");
+            assert!(msg.contains("base64") || msg.contains("decode"), "got: {msg}");
+            assert_eq!(crate::config::read_memberships().unwrap().len(), 0);
+
+            // Valid base64, but wrong length (16 bytes instead of 32).
+            let too_short = crate::signing::b64encode(&[0u8; 16]);
+            let err = import_member_cert(&org_did, &too_short, &member_cert).unwrap_err();
+            let msg = format!("{err:?}");
+            assert!(msg.contains("32 bytes"), "got: {msg}");
+            assert_eq!(crate::config::read_memberships().unwrap().len(), 0);
+        });
+    }
+
+    #[test]
+    fn import_bails_without_local_op_enrollment() {
+        // Check 4: a local op_did must be enrolled before any cert can be
+        // checked against it. No op.key → clean error, no file mutation.
+        crate::config::test_support::with_temp_home(|| {
+            // No enroll_local_op() call here.
+            let (_throwaway_sk, throwaway_pk) = generate_keypair();
+            let throwaway_did = did_for_op("nobody", &throwaway_pk);
+            let (org_did, org_pk, member_cert) = mint_valid_bundle(&throwaway_did);
+            let org_pubkey_b64 = crate::signing::b64encode(&org_pk);
+
+            let err = import_member_cert(&org_did, &org_pubkey_b64, &member_cert).unwrap_err();
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains("operator") || msg.contains("op") || msg.contains("enroll"),
+                "got: {msg}"
+            );
+            assert_eq!(crate::config::read_memberships().unwrap().len(), 0);
         });
     }
 }

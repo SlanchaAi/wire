@@ -994,6 +994,37 @@ pub enum EnrollCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Import an externally-issued `{org_did, org_pubkey, member_cert}` bundle
+    /// into this operator's local memberships (AC-F-INGEST, issue #127). The
+    /// operator-side counterpart to `org-add-member`: org owners mint the
+    /// bundle; non-owner operators run this to ingest it.
+    ///
+    /// Validates every claim before persisting: `org_did` is well-formed,
+    /// `org_pubkey` is 32 bytes, the DID commits to the pubkey, this operator
+    /// is enrolled locally, and the cert verifies under (org_pubkey, local
+    /// op_did). Any failure leaves `memberships.json` unchanged.
+    ///
+    /// Bundle can be supplied as explicit `--org-did/--org-pubkey/--member-cert`
+    /// flags, OR as a single `--bundle <json>` (or `@file` / `-` for stdin)
+    /// matching the shape printed by `org-add-member`.
+    OrgImportMemberCert {
+        /// Org DID (`did:wire:org:<handle>-<32hex>`). Required unless `--bundle`.
+        #[arg(long, conflicts_with = "bundle")]
+        org_did: Option<String>,
+        /// Org pubkey (base64, 32-byte Ed25519). Required unless `--bundle`.
+        #[arg(long, conflicts_with = "bundle")]
+        org_pubkey: Option<String>,
+        /// Member cert (base64). Required unless `--bundle`.
+        #[arg(long, conflicts_with = "bundle")]
+        member_cert: Option<String>,
+        /// `{"org_did":"…","org_pubkey":"…","member_cert":"…"}` (verbatim
+        /// `org-add-member` output). Pass JSON inline, `@<path>` to read a
+        /// file, or `-` to read stdin.
+        #[arg(long)]
+        bundle: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Rebuild the agent card with the **current** enrollment state and
     /// republish to the phonebook. Closes the enroll-after-`init` DX gap:
     /// claims are normally attached at card-build time, but an operator who
@@ -2914,6 +2945,39 @@ fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
 
 // ---------- identity (v0.7.0-alpha.3) ----------
 
+/// Resolve a `--bundle` argument into raw JSON bytes. Accepts:
+/// - `-` → read from stdin (single newline-terminated payload acceptable)
+/// - `@<path>` → read from a file at `<path>`
+/// - anything else → treat as an inline JSON literal
+///
+/// Used by `wire enroll org-import-member-cert` to accept the exact shape
+/// `org-add-member` prints, so the operator UX is paste-or-pipe-or-file.
+fn read_bundle_source(src: &str) -> Result<String> {
+    if src == "-" {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("--bundle - failed reading from stdin")?;
+        Ok(buf)
+    } else if let Some(path) = src.strip_prefix('@') {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("--bundle @{path}: cannot read file"))
+    } else {
+        Ok(src.to_string())
+    }
+}
+
+/// Clamp a possibly-huge string to a debug-friendly length for error context.
+fn truncate_for_error(s: &str) -> String {
+    const MAX: usize = 200;
+    if s.len() <= MAX {
+        s.to_string()
+    } else {
+        format!("{}… ({} bytes total)", &s[..MAX], s.len())
+    }
+}
+
 fn cmd_enroll(cmd: EnrollCommand) -> Result<()> {
     match cmd {
         EnrollCommand::Op { handle, json } => {
@@ -2978,6 +3042,64 @@ fn cmd_enroll(cmd: EnrollCommand) -> Result<()> {
             } else {
                 println!(
                     "→ membership issued for {op_did}\n  add to the operator's card org_memberships[]:\n  {{\"org_did\": \"{org}\", \"org_pubkey\": \"{org_pubkey}\", \"member_cert\": \"{member_cert}\"}}"
+                );
+            }
+            Ok(())
+        }
+        EnrollCommand::OrgImportMemberCert {
+            org_did,
+            org_pubkey,
+            member_cert,
+            bundle,
+            json,
+        } => {
+            // Resolve the {org_did, org_pubkey, member_cert} triple from either
+            // explicit flags or a --bundle JSON. Explicit flags conflict with
+            // --bundle at the clap layer (above); here we accept whichever
+            // shape was actually supplied.
+            let (org_did, org_pubkey, member_cert) = if let Some(src) = bundle {
+                let raw = read_bundle_source(&src)?;
+                let parsed: serde_json::Value = serde_json::from_str(&raw).with_context(|| {
+                    format!("--bundle is not valid JSON: {}", truncate_for_error(&raw))
+                })?;
+                let take = |k: &str| -> Result<String> {
+                    parsed
+                        .get(k)
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .ok_or_else(|| anyhow!("--bundle missing string field `{k}`"))
+                };
+                (take("org_did")?, take("org_pubkey")?, take("member_cert")?)
+            } else {
+                (
+                    org_did.ok_or_else(|| {
+                        anyhow!("--org-did is required (or pass --bundle <json>)")
+                    })?,
+                    org_pubkey.ok_or_else(|| {
+                        anyhow!("--org-pubkey is required (or pass --bundle <json>)")
+                    })?,
+                    member_cert.ok_or_else(|| {
+                        anyhow!("--member-cert is required (or pass --bundle <json>)")
+                    })?,
+                )
+            };
+            let local_op_did =
+                crate::enroll::import_member_cert(&org_did, &org_pubkey, &member_cert)?;
+            let n_memberships = crate::config::read_memberships()
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "org_did": org_did,
+                        "local_op_did": local_op_did,
+                        "memberships_total": n_memberships,
+                    }))?
+                );
+            } else {
+                println!(
+                    "→ membership imported\n  org_did:           {org_did}\n  for local op_did:  {local_op_did}\n  memberships total: {n_memberships}\n  next: `wire enroll republish` to attach this claim to your card."
                 );
             }
             Ok(())
