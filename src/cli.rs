@@ -2345,9 +2345,10 @@ fn cmd_status(as_json: bool) -> Result<()> {
         // pidfile_alive + a fresh last_sync are both required for "healthy
         // sync"; pidfile_alive + no recent last_sync = the daemon is up but
         // wedged. last_sync_age_seconds = null = no record (never ran here).
+        let last_sync_age = crate::ensure_up::last_sync_age_seconds();
         if let Some(rec) = crate::ensure_up::read_last_sync_record() {
             daemon["last_sync_at"] = json!(rec.ts);
-            daemon["last_sync_age_seconds"] = json!(crate::ensure_up::last_sync_age_seconds());
+            daemon["last_sync_age_seconds"] = json!(last_sync_age);
             daemon["last_sync_push_n"] = json!(rec.push_n);
             daemon["last_sync_pull_n"] = json!(rec.pull_n);
             daemon["last_sync_rejected_n"] = json!(rec.rejected_n);
@@ -2355,6 +2356,14 @@ fn cmd_status(as_json: bool) -> Result<()> {
             daemon["last_sync_at"] = Value::Null;
             daemon["last_sync_age_seconds"] = Value::Null;
         }
+        // v0.14.2 (#162 fix #2 + #7 surface gap, post-merge of #167/#168):
+        // honey-pine round-trip dogfood (2026-06-01) confirmed pending_push_count
+        // + stale_sync + stream_state surface in MCP wire_status but not in CLI
+        // `wire status`. Shared helpers in config.rs keep both surfaces in lock
+        // so future doctor/web checks pick up the same numbers.
+        daemon["pending_push_count"] = json!(config::compute_pending_push_count());
+        daemon["stale_sync"] = json!(config::stale_sync(last_sync_age));
+        daemon["stream_state"] = config::read_stream_state();
         summary["daemon"] = daemon;
 
         // Pending pair sessions — counts by status.
@@ -2458,6 +2467,65 @@ fn cmd_status(as_json: bool) -> Result<()> {
                  prior install. Multiple daemons race the relay cursor.",
                 pids.join(", ")
             );
+        }
+        // v0.14.2 (#162 #2/#7 surface): three lines that catch the
+        // silent-send class operators kept missing on 0.14.1. Order matters
+        // — last_sync first (is the loop running?), then pending_push_count
+        // (am I leaking sends?), then stream_state (will live-monitor see
+        // anything?).
+        let last_sync_age = summary["daemon"]["last_sync_age_seconds"].as_u64();
+        let last_sync_at = summary["daemon"]["last_sync_at"].as_str();
+        match (last_sync_at, last_sync_age) {
+            (Some(ts), Some(age)) => {
+                let stale = summary["daemon"]["stale_sync"].as_bool().unwrap_or(false);
+                let stale_tag = if stale { "  !! STALE (>60s)" } else { "" };
+                let p = summary["daemon"]["last_sync_push_n"].as_u64().unwrap_or(0);
+                let pl = summary["daemon"]["last_sync_pull_n"].as_u64().unwrap_or(0);
+                let r = summary["daemon"]["last_sync_rejected_n"]
+                    .as_u64()
+                    .unwrap_or(0);
+                println!(
+                    "last sync:     {ts} ({age}s ago) push={p} pull={pl} rejected={r}{stale_tag}"
+                );
+            }
+            _ => {
+                println!(
+                    "last sync:     (none recorded) — daemon hasn't completed a cycle in this WIRE_HOME"
+                );
+            }
+        }
+        let pending_push = summary["daemon"]["pending_push_count"]
+            .as_u64()
+            .unwrap_or(0);
+        if pending_push > 0 {
+            println!(
+                "pending push:  {pending_push} event(s) queued but not yet pushed to relay — \
+                 if stale_sync, this is the silent-send class (#162 fix #2)"
+            );
+        } else {
+            println!("pending push:  0");
+        }
+        match summary["daemon"]["stream_state"]
+            .get("state")
+            .and_then(Value::as_str)
+        {
+            Some(s) => {
+                let last_evt = summary["daemon"]["stream_state"]
+                    .get("last_event_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or("never");
+                let reconnects = summary["daemon"]["stream_state"]
+                    .get("reconnect_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                println!("stream:        {s} (last event {last_evt}, reconnects {reconnects})");
+            }
+            None => {
+                println!(
+                    "stream:        (no stream_state.json) — daemon predates #168 or hasn't \
+                     subscribed yet; live monitor will fall back to polling cadence"
+                );
+            }
         }
         let pending_total = summary["pending_pairs"]["total"].as_u64().unwrap_or(0);
         let inbound_count = summary["pending_pairs"]["inbound_count"]

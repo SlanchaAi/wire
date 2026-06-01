@@ -142,6 +142,75 @@ pub fn append_pushed_log(peer: &str, event_id: &str, ts: &str) -> Result<PathBuf
     Ok(path)
 }
 
+/// Total queued-but-not-yet-pushed events across all peers. Walks
+/// each per-peer outbox file, counts event_ids missing from the
+/// per-peer pushed log. Cheap (one disk read per peer) and bounded by
+/// `trust.agents`.
+///
+/// v0.14.2 (#162 fix #2): the diagnostic for the "silent send" class —
+/// `pending_push_count > 0` + `stale_sync` = events queued, daemon not
+/// pushing. Was originally inline in `tool_status`; extracted so the
+/// CLI `wire status` surface and any future doctor/web check stay in
+/// agreement by construction.
+pub fn compute_pending_push_count() -> u64 {
+    let trust = match read_trust() {
+        Ok(t) => t,
+        Err(_) => return 0,
+    };
+    let agents = match trust.get("agents").and_then(serde_json::Value::as_object) {
+        Some(a) => a.clone(),
+        None => return 0,
+    };
+    let mut total: u64 = 0;
+    for (peer_handle, _) in agents.iter() {
+        let pushed_ids = read_pushed_event_ids(peer_handle);
+        let outbox_path = match outbox_dir() {
+            Ok(d) => d.join(format!("{peer_handle}.jsonl")),
+            Err(_) => continue,
+        };
+        let body = match fs::read_to_string(&outbox_path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        for line in body.lines() {
+            if let Some(eid) = serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|v| {
+                    v.get("event_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                && !pushed_ids.contains(&eid)
+            {
+                total += 1;
+            }
+        }
+    }
+    total
+}
+
+/// Read `$WIRE_HOME/state/wire/stream_state.json` written by the
+/// daemon's SSE subscriber. `Value::Null` when the file is absent or
+/// unreadable — callers should treat that as "stream subscriber
+/// hasn't reported in yet" (cold start, or daemon predates #168).
+pub fn read_stream_state() -> serde_json::Value {
+    state_dir()
+        .ok()
+        .and_then(|d| fs::read_to_string(d.join("stream_state.json")).ok())
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// True when no sync has happened within the freshness window. None
+/// (= never synced here) is treated as stale. Shared between MCP +
+/// CLI so the boolean flips at the same moment in both surfaces.
+pub fn stale_sync(last_sync_age_seconds: Option<u64>) -> bool {
+    match last_sync_age_seconds {
+        Some(age) => age > 60,
+        None => true,
+    }
+}
+
 /// Read the set of event_ids already recorded as pushed for `peer`.
 /// Cheap (single file read + parse); callers that need bulk lifecycle
 /// data should read the file directly. Returns an empty set on
