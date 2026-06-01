@@ -55,7 +55,7 @@ tokio-stream = "0.1"
 futures = "0.3"
 tower = "0.5"
 tower_governor = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "blocking", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots", "blocking", "stream"] }
 spake2 = "0.4"
 hkdf = "0.12"
 hmac = "0.12"
