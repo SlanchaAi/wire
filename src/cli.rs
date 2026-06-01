@@ -383,6 +383,19 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// v0.14.2 (#170): multi-session topology view — supervisor
+    /// liveness + per-session daemon liveness + unmanaged `wire daemon`
+    /// pids. `wire status` answers "is THIS session syncing?";
+    /// `wire supervisor` answers "what is the supervisor (and every
+    /// session's daemon) doing across the box?". Replaces the manual
+    /// `pgrep -fl 'wire daemon' | cross-ref each per-session pidfile`
+    /// dance honey-pine ran during her launchd diagnosis.
+    Supervisor {
+        /// Emit JSON instead of human-readable text. The shape matches
+        /// the `SupervisorState` struct in `daemon_supervisor.rs`.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run a long-lived sync loop: every <interval> seconds, push outbox to
     /// peers' relay slots and pull inbox from our own slot. Foreground process;
     /// background it with systemd / `&` / tmux as you prefer.
@@ -1746,6 +1759,7 @@ pub fn run() -> Result<()> {
             purge,
             json,
         } => cmd_forget_peer(&handle, purge, json),
+        Command::Supervisor { json } => cmd_supervisor(json),
         Command::Daemon {
             interval,
             once,
@@ -2710,6 +2724,96 @@ fn relay_slot_for(peer: Option<&str>) -> Result<(String, String, String, String)
         .ok_or_else(|| anyhow!("{label} slot_token missing"))?
         .to_string();
     Ok((label, relay_url, slot_id, slot_token))
+}
+
+/// v0.14.2 (#170 / honey-pine BUG 3): `wire supervisor` — operator-
+/// facing multi-session topology view. Reads `SupervisorState` and
+/// renders it as JSON or pretty text. `wire status` covers the
+/// "is THIS session syncing?" question; `wire supervisor` covers
+/// "what is the supervisor and every session's daemon doing across
+/// the box?". No mutation.
+fn cmd_supervisor(as_json: bool) -> Result<()> {
+    let state = crate::daemon_supervisor::read_supervisor_state()?;
+    if as_json {
+        println!("{}", serde_json::to_string(&state)?);
+        return Ok(());
+    }
+    let pid_label = state
+        .supervisor_pid
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "—".to_string());
+    println!(
+        "supervisor:    {} (pid {pid_label})",
+        if state.supervisor_alive {
+            "running"
+        } else {
+            "DOWN"
+        },
+    );
+    let sessions_total = state.sessions.len();
+    let sessions_with_daemon = state.sessions.iter().filter(|s| s.daemon_alive).count();
+    println!(
+        "sessions:      {sessions_total} initialized, {sessions_with_daemon} with live daemon"
+    );
+    // Per-session table — only show sessions whose daemon state is
+    // "interesting" (alive OR has a stale pidfile pointing at a dead
+    // process) to keep the output bounded on a 100+-session box. Pure
+    // healthy sessions get a single summary line above.
+    let mut shown = 0usize;
+    for s in &state.sessions {
+        // Skip sessions with no pidfile at all — they've never had a
+        // daemon, nothing to report.
+        if s.daemon_pid.is_none() {
+            continue;
+        }
+        // Skip a "boringly healthy" session: alive daemon + recent
+        // sync. Only worth showing when something's off.
+        let recent = matches!(s.last_sync_age_seconds, Some(age) if age <= 60);
+        if s.daemon_alive && recent {
+            continue;
+        }
+        shown += 1;
+        let age = s
+            .last_sync_age_seconds
+            .map(|a| format!("{a}s"))
+            .unwrap_or_else(|| "?".to_string());
+        let pid = s
+            .daemon_pid
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let liveness = if s.daemon_alive { "running" } else { "DOWN" };
+        println!(
+            "  {:<24} pid {:<7} {} last_sync {}",
+            s.name, pid, liveness, age
+        );
+    }
+    if shown == 0 && sessions_with_daemon > 0 {
+        println!(
+            "  (every session with a daemon is alive + synced within 60s — pass --json for full per-session detail)"
+        );
+    }
+    if !state.unmanaged_pids.is_empty() {
+        let pids: Vec<String> = state.unmanaged_pids.iter().map(u32::to_string).collect();
+        println!(
+            "unmanaged:     {} pid(s) — {} — `wire daemon` processes not mapped to any session's pidfile.",
+            state.unmanaged_pids.len(),
+            pids.join(", ")
+        );
+        // Annotate each unmanaged pid the same way `wire status` does
+        // for orphans: cmdline + parsed --session arg.
+        for pid in &state.unmanaged_pids {
+            let cmdline = crate::platform::pid_cmdline(*pid);
+            let session = cmdline
+                .as_deref()
+                .and_then(crate::platform::parse_session_arg);
+            match (session, cmdline.as_deref()) {
+                (Some(s), _) => println!("  pid {pid}: --session '{s}'"),
+                (None, Some(c)) if !c.is_empty() => println!("  pid {pid}: cmdline={c}"),
+                _ => println!("  pid {pid}: cmdline unavailable"),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn cmd_responder_set(status: &str, reason: Option<&str>, as_json: bool) -> Result<()> {

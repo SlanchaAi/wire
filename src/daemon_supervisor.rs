@@ -321,6 +321,132 @@ fn existing_daemon_for_session(home_dir: &std::path::Path) -> Result<bool> {
         .unwrap_or(false))
 }
 
+/// Read-only snapshot of the supervisor's current topology — supervisor
+/// liveness + per-session daemon liveness + orphan pids the supervisor
+/// is not currently managing. Used by `wire supervisor` (the CLI
+/// counterpart to single-session `wire status`) so operators can ask
+/// "what is the multi-session supervisor doing?" in one command
+/// instead of cross-referencing `pgrep` against per-session pidfiles
+/// by hand.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SupervisorState {
+    /// Pid the `supervisor.pid` file names; None if file missing.
+    pub supervisor_pid: Option<u32>,
+    /// True iff that pid is currently a live process.
+    pub supervisor_alive: bool,
+    /// Per-session liveness across every initialized session, in
+    /// `list_sessions()` order.
+    pub sessions: Vec<SupervisedSession>,
+    /// `wire daemon` pids found via cmdline-scan that are NOT mapped
+    /// to any session's pidfile AND are not the supervisor itself.
+    /// Could be legacy operator-spawned daemons, leftover children
+    /// from a crashed prior supervisor, or daemons serving the
+    /// default WIRE_HOME (no `--all-sessions`). Operators see them
+    /// here so they can decide whether to kill.
+    pub unmanaged_pids: Vec<u32>,
+}
+
+/// One session as seen by the supervisor.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SupervisedSession {
+    /// Session name (`info.name` from `session::list_sessions`).
+    pub name: String,
+    /// `home_dir` filesystem path.
+    pub home_dir: String,
+    /// Pid the session's `daemon.pid` records; None if file missing.
+    pub daemon_pid: Option<u32>,
+    /// True iff that pid is currently a live process.
+    pub daemon_alive: bool,
+    /// Seconds since the session's daemon last completed a sync
+    /// cycle (read from `last_sync.json`); None if never recorded.
+    pub last_sync_age_seconds: Option<u64>,
+}
+
+/// Build a `SupervisorState` snapshot. Pure read; no fork / no
+/// pidfile mutation. Best-effort on every component (filesystem
+/// errors yield None / empty rather than failing the whole call).
+pub fn read_supervisor_state() -> Result<SupervisorState> {
+    let pid_path = supervisor_pid_path()?;
+    let supervisor_pid = read_supervisor_pid(&pid_path);
+    let supervisor_alive = supervisor_pid
+        .map(crate::ensure_up::pid_is_alive)
+        .unwrap_or(false);
+
+    // Per-session liveness — walk list_sessions, read each home's
+    // pidfile + last_sync.
+    let sessions: Vec<SupervisedSession> = crate::session::list_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|info| {
+            let daemon_pid = crate::session::session_daemon_pid(&info.home_dir);
+            let daemon_alive = daemon_pid
+                .map(crate::ensure_up::pid_is_alive)
+                .unwrap_or(false);
+            // last_sync.json lives under <home>/state/wire/last_sync.json.
+            let last_sync_age_seconds = read_session_last_sync_age(&info.home_dir);
+            SupervisedSession {
+                name: info.name,
+                home_dir: info.home_dir.to_string_lossy().into_owned(),
+                daemon_pid,
+                daemon_alive,
+                last_sync_age_seconds,
+            }
+        })
+        .collect();
+
+    // Unmanaged pids: every `wire daemon` cmdline scan hit that isn't
+    // (a) the supervisor itself, (b) any session's pidfile pid.
+    let all_daemon_pids: std::collections::HashSet<u32> =
+        crate::platform::find_processes_by_cmdline("wire daemon")
+            .into_iter()
+            .collect();
+    let known_session_pids: std::collections::HashSet<u32> = sessions
+        .iter()
+        .filter_map(|s| if s.daemon_alive { s.daemon_pid } else { None })
+        .collect();
+    let mut unmanaged_pids: Vec<u32> = all_daemon_pids
+        .into_iter()
+        .filter(|p| Some(*p) != supervisor_pid && !known_session_pids.contains(p))
+        .collect();
+    unmanaged_pids.sort_unstable();
+
+    Ok(SupervisorState {
+        supervisor_pid,
+        supervisor_alive,
+        sessions,
+        unmanaged_pids,
+    })
+}
+
+/// Read `supervisor.pid` without the liveness check (the snapshot
+/// builder runs the check itself, separated so an absent file is
+/// just `None` rather than an Err).
+fn read_supervisor_pid(path: &std::path::Path) -> Option<u32> {
+    if !path.exists() {
+        return None;
+    }
+    let body = std::fs::read_to_string(path).ok()?;
+    body.trim().parse::<u32>().ok()
+}
+
+/// Read `<home>/state/wire/last_sync.json`'s timestamp and return
+/// "seconds since now". None on absent / unreadable / unparseable.
+fn read_session_last_sync_age(home_dir: &std::path::Path) -> Option<u64> {
+    let path = home_dir.join("state").join("wire").join("last_sync.json");
+    let body = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let ts = v.get("ts").and_then(serde_json::Value::as_str)?;
+    let parsed =
+        time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339).ok()?;
+    let age = (time::OffsetDateTime::now_utc() - parsed).whole_seconds();
+    if age < 0 {
+        // Clock skew: timestamp is in the future. Treat as fresh.
+        Some(0)
+    } else {
+        Some(age as u64)
+    }
+}
+
 fn supervisor_pid_path() -> Result<PathBuf> {
     let root = crate::session::sessions_root()
         .context("resolving sessions_root for supervisor pidfile")?;
