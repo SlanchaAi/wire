@@ -3625,11 +3625,19 @@ fn cmd_send(
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
 
+    // v0.14.2 (#162 fix #4): canonicalize `to:` against the pinned
+    // peer's full DID. Bare-handle `to:did:wire:<handle>` misses the
+    // long-fingerprint suffix (`did:wire:sunlit-aurora-ec6f890d`) that
+    // pinned peers actually publish; mismatch risks receiver rejection
+    // at canonical/cursor verification. resolve_peer_did falls back to
+    // the bare form for unknown peers (pre-pair queue best-effort).
+    let trust_for_did = config::read_trust().unwrap_or_else(|_| json!({"agents": {}}));
+    let to_did = crate::trust::resolve_peer_did(&trust_for_did, peer);
     let mut event = json!({
         "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
         "timestamp": now,
         "from": did,
-        "to": format!("did:wire:{peer}"),
+        "to": to_did,
         "type": kind,
         "kind": kind_id,
         "body": body_value,

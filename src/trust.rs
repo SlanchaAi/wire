@@ -83,6 +83,28 @@ pub fn get_tier(trust: &Trust, peer_handle: &str) -> String {
         .to_string()
 }
 
+/// Resolve a bare peer handle to the full DID stored in trust. Falls back
+/// to `did:wire:<peer_handle>` (the bare-handle form) when the peer isn't
+/// pinned — preserves pre-pair best-effort routing for unknown peers.
+///
+/// v0.14.2 (#162 fix #4): without this, send paths (`cmd_send` /
+/// `tool_send`) built `to: did:wire:sunlit-aurora`, but pinned peers'
+/// real DIDs carry the long fingerprint suffix
+/// (`did:wire:sunlit-aurora-ec6f890d`). A bare-handle `to:` mismatches
+/// the receiver's self-DID and risks rejection at canonical / cursor
+/// check time (honey-pine's report observed this on the first queued
+/// event). Use this helper at every send-build site to canonicalize
+/// against the pinned peer's actual DID.
+pub fn resolve_peer_did(trust: &Value, peer_handle: &str) -> String {
+    trust
+        .get("agents")
+        .and_then(|a| a.get(peer_handle))
+        .and_then(|p| p.get("did"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("did:wire:{peer_handle}"))
+}
+
 /// Pin a peer's card into our trust at the given tier (default UNTRUSTED).
 ///
 /// The caller must independently run SAS confirmation (via `compute_sas`)
@@ -252,6 +274,45 @@ mod tests {
     #[test]
     fn get_tier_unknown_returns_untrusted() {
         assert_eq!(get_tier(&empty_trust(), "ghost"), "UNTRUSTED");
+    }
+
+    #[test]
+    fn resolve_peer_did_returns_pinned_did_with_full_suffix() {
+        // v0.14.2 (#162 fix #4): a pinned peer's full DID includes the
+        // long-fingerprint suffix; a bare-handle DID would mismatch the
+        // receiver's self-DID and risk rejection at canonical/cursor
+        // verification.
+        let (sk, pk) = generate_keypair();
+        let card = sign_agent_card(
+            &build_agent_card("sunlit-aurora", &pk, None, None, None),
+            &sk,
+        );
+        let pinned_did = card.get("did").and_then(Value::as_str).unwrap();
+        assert!(
+            pinned_did.starts_with("did:wire:sunlit-aurora-"),
+            "test setup: card DID should carry long-hex suffix"
+        );
+        let mut t = empty_trust();
+        add_agent_card_pin(&mut t, &card, Some("VERIFIED"));
+
+        let resolved = resolve_peer_did(&t, "sunlit-aurora");
+        assert_eq!(
+            resolved, pinned_did,
+            "pinned peer must resolve to its full DID, not the bare handle"
+        );
+    }
+
+    #[test]
+    fn resolve_peer_did_falls_back_to_bare_for_unknown_peer() {
+        // Pre-pair best-effort: an unknown peer canonicalizes to the
+        // bare-handle DID. cmd_send / tool_send keep working pre-pair;
+        // post-pair the resolve path takes over.
+        let t = empty_trust();
+        assert_eq!(
+            resolve_peer_did(&t, "ghost-peer"),
+            "did:wire:ghost-peer",
+            "unknown peer falls back to bare-handle DID"
+        );
     }
 
     #[test]
