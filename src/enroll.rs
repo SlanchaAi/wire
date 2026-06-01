@@ -75,8 +75,9 @@ pub fn import_member_cert(
     }
 
     // Check 2: org_pubkey decodes to 32 bytes.
-    let org_pubkey_bytes = crate::signing::b64decode(org_pubkey_b64)
-        .with_context(|| format!("rejecting import: org_pubkey is not valid base64 ({org_pubkey_b64})"))?;
+    let org_pubkey_bytes = crate::signing::b64decode(org_pubkey_b64).with_context(|| {
+        format!("rejecting import: org_pubkey is not valid base64 ({org_pubkey_b64})")
+    })?;
     if org_pubkey_bytes.len() != 32 {
         bail!(
             "rejecting import: org_pubkey decodes to {} bytes (Ed25519 public keys are 32 bytes)",
@@ -107,11 +108,12 @@ pub fn import_member_cert(
     let local_op_did = crate::agent_card::did_for_op(&op_handle, &op_pk);
 
     // Check 5: member_cert verifies under (org_pubkey, local_op_did).
-    crate::identity::verify_member_cert(&org_pubkey, member_cert_b64, &local_op_did)
-        .with_context(|| {
+    crate::identity::verify_member_cert(&org_pubkey, member_cert_b64, &local_op_did).with_context(
+        || {
             "rejecting import: member_cert does not verify under (org_pubkey, local op_did) — \
              either the cert was issued to a different operator or it was tampered with"
-        })?;
+        },
+    )?;
 
     // All checks pass. Persist.
     crate::config::add_membership(org_did, org_pubkey_b64, member_cert_b64)?;
@@ -521,9 +523,7 @@ mod tests {
     /// Helper: mint a valid {org_did, org_pubkey, member_cert} bundle for a
     /// local op_did + handle. Used as the happy-path baseline + as a source
     /// for the negative cases to mutate.
-    fn mint_valid_bundle(
-        op_did: &str,
-    ) -> (String, [u8; 32], String) {
+    fn mint_valid_bundle(op_did: &str) -> (String, [u8; 32], String) {
         let (org_sk, org_pk) = generate_keypair();
         let org_did = did_for_org("test-fleet", &org_pk);
         let member_cert = issue_member_cert(&org_sk, op_did).unwrap();
@@ -598,7 +598,10 @@ mod tests {
 
             let err = import_member_cert(&org_did, &wrong_pubkey_b64, &member_cert).unwrap_err();
             let msg = format!("{err:?}");
-            assert!(msg.contains("commit") || msg.contains("fingerprint"), "got: {msg}");
+            assert!(
+                msg.contains("commit") || msg.contains("fingerprint"),
+                "got: {msg}"
+            );
             assert_eq!(crate::config::read_memberships().unwrap().len(), 0);
         });
     }
@@ -622,8 +625,7 @@ mod tests {
 
             // Import-time we look up the local op_did from on-disk state;
             // the cert was signed for other_op_did, so verification fails.
-            let err =
-                import_member_cert(&org_did, &org_pubkey_b64, &cert_for_other).unwrap_err();
+            let err = import_member_cert(&org_did, &org_pubkey_b64, &cert_for_other).unwrap_err();
             let msg = format!("{err:?}");
             assert!(
                 msg.contains("verify") || msg.contains("member_cert"),
@@ -644,7 +646,10 @@ mod tests {
             // Garbage base64.
             let err = import_member_cert(&org_did, "not!valid!b64!@#", &member_cert).unwrap_err();
             let msg = format!("{err:?}");
-            assert!(msg.contains("base64") || msg.contains("decode"), "got: {msg}");
+            assert!(
+                msg.contains("base64") || msg.contains("decode"),
+                "got: {msg}"
+            );
             assert_eq!(crate::config::read_memberships().unwrap().len(), 0);
 
             // Valid base64, but wrong length (16 bytes instead of 32).

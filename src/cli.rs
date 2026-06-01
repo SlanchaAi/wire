@@ -2961,8 +2961,7 @@ fn read_bundle_source(src: &str) -> Result<String> {
             .context("--bundle - failed reading from stdin")?;
         Ok(buf)
     } else if let Some(path) = src.strip_prefix('@') {
-        std::fs::read_to_string(path)
-            .with_context(|| format!("--bundle @{path}: cannot read file"))
+        std::fs::read_to_string(path).with_context(|| format!("--bundle @{path}: cannot read file"))
     } else {
         Ok(src.to_string())
     }
