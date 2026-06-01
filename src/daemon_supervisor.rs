@@ -246,10 +246,24 @@ pub fn run_supervisor(interval_secs: u64, as_json: bool) -> Result<()> {
     }
 }
 
-/// Spawn `wire daemon --session <name> --interval <i>` as a child.
-/// Strips inherited WIRE_* env so the operator's shell config (which
-/// may carry test overrides like `WIRE_DAEMON_NO_SINGLETON=1`) can't
-/// leak into the child.
+/// Spawn `wire daemon --interval <i>` as a child with `WIRE_HOME`
+/// pinned via env. Strips inherited WIRE_* env so the operator's
+/// shell config (test overrides like `WIRE_DAEMON_NO_SINGLETON=1`)
+/// can't leak in.
+///
+/// v0.14.2 #170 hotfix: the original implementation also passed
+/// `--session <character-name>` as a belt-and-suspenders check.
+/// That broke 127 of 133 sessions on a real multi-session box —
+/// `cmd_daemon`'s `--session` handler calls
+/// `session::session_dir(name)` which resolves
+/// `sessions_root/<name>`, correct for v0.6 top-level layout but
+/// WRONG for v0.13's `by-key/<hash>` layout where the character
+/// name is *derived* from the card DID, not the directory name.
+/// Children bailed → supervisor fork-bombed (10s poll × 60s
+/// backoff × 127 failing sessions). WIRE_HOME env alone is the
+/// correct contract: every daemon code path flows through
+/// `state_dir()` / `config_dir()` which honor it. No second
+/// source of truth.
 fn spawn_child_for_session(
     name: &str,
     home_dir: &std::path::Path,
@@ -257,13 +271,7 @@ fn spawn_child_for_session(
 ) -> Result<Child> {
     let exe = std::env::current_exe().context("resolving current exe for child fork")?;
     let mut cmd = Command::new(&exe);
-    cmd.args([
-        "daemon",
-        "--session",
-        name,
-        "--interval",
-        &interval_secs.to_string(),
-    ]);
+    cmd.args(["daemon", "--interval", &interval_secs.to_string()]);
     // Strip WIRE_* env so operator shell-vars don't leak into the
     // child. Then pin WIRE_HOME exactly.
     let leaks: Vec<String> = std::env::vars()
@@ -279,8 +287,9 @@ fn spawn_child_for_session(
     // spawned ..." lines interleaved with each session's daemon log.
     cmd.spawn().with_context(|| {
         format!(
-            "fork-exec `wire daemon --session {name}` (binary {})",
-            exe.display()
+            "fork-exec `wire daemon` for session '{name}' (binary {} WIRE_HOME={})",
+            exe.display(),
+            home_dir.display()
         )
     })
 }
