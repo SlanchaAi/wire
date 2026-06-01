@@ -2778,6 +2778,39 @@ pub(crate) fn op_claims_from_card(card: &Value) -> serde_json::Map<String, Value
 
 fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
     if !config::is_initialized()? {
+        // v0.14.x: with per-session WIRE_HOME (`sessions/by-key/<hash>`), a
+        // freshly-spawned session's home starts EMPTY until `wire up`. The
+        // machine-readable consumers that poll whoami every render — statusline
+        // scripts, the `.wire-name` cache refreshers — hit that uninitialized
+        // state constantly. Bailing (exit 1, no stdout) made them crash on
+        // empty stdin or freeze on a stale name. Degrade gracefully here,
+        // matching `wire here --json`, so a missing identity is a parseable
+        // signal rather than a hard failure. The bare interactive (tty, no
+        // JSON) path keeps its actionable hint + exit 1.
+        // Precedence mirrors the initialized path below: an explicit --short
+        // / --colored beats the piped-stdout JSON default (`json_default`),
+        // and bare interactive `wire whoami` still gets the actionable hint.
+        if short {
+            println!("(uninitialized) · {}", current_cwd_display());
+            return Ok(());
+        }
+        if colored {
+            println!(
+                "\x1b[2m(uninitialized)\x1b[0m \x1b[2m·\x1b[0m {}",
+                current_cwd_display()
+            );
+            return Ok(());
+        }
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "initialized": false,
+                    "cwd": current_cwd_display(),
+                }))?
+            );
+            return Ok(());
+        }
         bail!("not initialized — run `wire init <handle>` first");
     }
     let card = config::read_agent_card()?;
@@ -2835,6 +2868,9 @@ fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
         // JSON consumers that key off it.
         let has_override = false;
         let mut payload = serde_json::Map::new();
+        // Symmetric with the uninitialized branch above so consumers can
+        // branch on a single key instead of probing for `did`.
+        payload.insert("initialized".into(), json!(true));
         payload.insert("did".into(), json!(did));
         payload.insert("handle".into(), json!(handle));
         payload.insert("fingerprint".into(), json!(fp));

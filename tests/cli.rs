@@ -61,12 +61,61 @@ fn help_flag_lists_subcommands() {
 }
 
 #[test]
-fn whoami_before_init_errors() {
+fn whoami_before_init_degrades_when_piped() {
+    // Contract change (v0.14.x): `wire whoami` with stdout piped auto-selects
+    // JSON via `json_default`. Pre-fix this bailed (exit 1, no stdout), which
+    // crashed statusline / `.wire-name` refresher pollers reading a fresh
+    // per-session WIRE_HOME. It now degrades to a parseable `initialized:false`
+    // signal + exit 0. The interactive-tty human path still bails with the
+    // "run `wire init`" hint, but that path isn't reachable from this piped
+    // harness.
     let home = fresh_home();
     let out = run(&home, &["whoami"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("not initialized"), "stderr: {stderr}");
+    assert!(
+        out.status.success(),
+        "piped whoami before init should degrade, not bail: {out:?}"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("piped whoami must emit JSON");
+    assert_eq!(parsed["initialized"], serde_json::json!(false));
+}
+
+#[test]
+fn whoami_json_before_init_degrades_gracefully() {
+    // v0.14.x: per-session WIRE_HOME starts uninitialized. Machine-readable
+    // whoami must emit a parseable `initialized:false` signal + exit 0 so
+    // statusline / cache-refresher pollers don't crash on empty stdin.
+    let home = fresh_home();
+    let out = run(&home, &["whoami", "--json"]);
+    assert!(out.status.success(), "whoami --json should exit 0: {out:?}");
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .expect("whoami --json must emit JSON when uninitialized");
+    assert_eq!(parsed["initialized"], serde_json::json!(false));
+}
+
+#[test]
+fn whoami_short_before_init_degrades_gracefully() {
+    let home = fresh_home();
+    let out = run(&home, &["whoami", "--short"]);
+    assert!(
+        out.status.success(),
+        "whoami --short should exit 0: {out:?}"
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("uninitialized"),
+        "expected a stable uninitialized sentinel, got: {stdout}"
+    );
+}
+
+#[test]
+fn whoami_json_after_init_marks_initialized_true() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul", "--offline"]);
+    let out = run(&home, &["whoami", "--json"]);
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(parsed["initialized"], serde_json::json!(true));
 }
 
 #[test]
