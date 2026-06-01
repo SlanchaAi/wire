@@ -236,6 +236,85 @@ fn write_pid_record(name: &str, record: &DaemonPid) -> Result<()> {
     Ok(())
 }
 
+/// Schema string written into every JSON last-sync file. Bumped if the
+/// shape ever changes incompatibly. Readers tolerate any schema string +
+/// fall back to "unknown last_sync" when they don't recognize it.
+pub const LAST_SYNC_FILE_SCHEMA: &str = "wire-daemon-last-sync-v1";
+
+/// Versioned record written by `wire daemon` after each successful sync
+/// cycle. Readers (`wire status`, `mcp__wire__wire_status`,
+/// `mcp__wire__wire_send` annotations) inspect it to surface
+/// "is the sync loop alive RIGHT NOW?" — distinct from "is there a
+/// process with `wire daemon` in its cmdline?" (the existing pidfile-
+/// alive check), which can be true while the loop has been wedged for
+/// minutes. v0.14.2 (#162): closes the silent-send class where the MCP
+/// surface reports `status:"queued"` while no one is actually pushing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LastSyncRecord {
+    /// Schema discriminator. `wire-daemon-last-sync-v1`.
+    pub schema: String,
+    /// RFC3339 UTC timestamp of the most recently completed cycle.
+    pub ts: String,
+    /// Number of outbox events pushed in this cycle.
+    pub push_n: usize,
+    /// Number of inbox events pulled (verified + written) in this cycle.
+    pub pull_n: usize,
+    /// Number of inbox events rejected by signature/cursor checks.
+    pub rejected_n: usize,
+}
+
+fn last_sync_file() -> Result<PathBuf> {
+    Ok(crate::config::state_dir()?.join("last_sync.json"))
+}
+
+/// Write the last-sync record. Called by `cmd_daemon` after each cycle
+/// (including --once). Best-effort: any error logs to stderr but does NOT
+/// abort the daemon loop — a wedged pidfile path shouldn't take the sync
+/// loop down with it.
+pub fn write_last_sync_record(push_n: usize, pull_n: usize, rejected_n: usize) {
+    let record = LastSyncRecord {
+        schema: LAST_SYNC_FILE_SCHEMA.to_string(),
+        ts: time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default(),
+        push_n,
+        pull_n,
+        rejected_n,
+    };
+    let _ = (|| -> Result<()> {
+        let path = last_sync_file()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = serde_json::to_vec_pretty(&record)?;
+        std::fs::write(&path, body)?;
+        Ok(())
+    })()
+    .map_err(|e| eprintln!("daemon: last-sync persist error (non-fatal): {e:#}"));
+}
+
+/// Read the last-sync record. Returns `None` if missing/corrupt — every
+/// caller should treat that as "unknown sync state, daemon may never
+/// have run" and surface it accordingly.
+pub fn read_last_sync_record() -> Option<LastSyncRecord> {
+    let path = last_sync_file().ok()?;
+    let body = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&body).ok()
+}
+
+/// Convenience: the wall-clock age (in whole seconds) of the most recent
+/// sync, or `None` if no record exists / the timestamp can't be parsed.
+/// Negative ages (clock skew between daemon + reader) are clamped to 0.
+pub fn last_sync_age_seconds() -> Option<u64> {
+    let rec = read_last_sync_record()?;
+    let parsed =
+        time::OffsetDateTime::parse(&rec.ts, &time::format_description::well_known::Rfc3339)
+            .ok()?;
+    let delta = time::OffsetDateTime::now_utc() - parsed;
+    let secs = delta.whole_seconds();
+    Some(secs.max(0) as u64)
+}
+
 /// Inspect the daemon singleton state. Returns `Some(pid)` iff the
 /// pidfile names a live `wire daemon` process — i.e., a singleton is
 /// currently held by another in-flight daemon. Returns `None` if the
