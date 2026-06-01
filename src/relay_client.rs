@@ -178,11 +178,29 @@ fn maybe_emit_insecure_banner() {
     }
 }
 
-/// Centralized builder for blocking HTTPS clients across wire. Loads
-/// the OS native trust store (rustls-tls-native-roots) so corporate
-/// proxies, AV cert-resign products, and on-prem CAs validate. Honors
-/// the [`INSECURE_SKIP_TLS_ENV`] escape hatch for the corporate-proxy
+/// Centralized builder for blocking HTTPS clients across wire. Uses
+/// rustls + Mozilla webpki-roots bundled CA set
+/// (`rustls-tls-webpki-roots` reqwest feature). Honors the
+/// [`INSECURE_SKIP_TLS_ENV`] escape hatch for the corporate-proxy
 /// emergency case.
+///
+/// v0.14.2: previously this used `rustls-tls-native-roots` (native OS
+/// trust store via `rustls-native-certs`) so corp CAs / AV-resign
+/// products validated transparently. That broke catastrophically when
+/// #170's `--all-sessions` supervisor moved wire daemons into launchd:
+/// launchd-spawned processes don't inherit the user's Aqua session
+/// keychain context on macOS, so `rustls-native-certs` returned zero
+/// roots → every wireup.net request failed with "UnknownIssuer" and
+/// the daemon silently no-op'd push/pull (84 events queued, 0 pushed,
+/// SSE stream errored on every reconnect). Same binary worked fine
+/// from a shell because the operator's Aqua session had keychain
+/// access.
+///
+/// Switching to bundled webpki-roots removes the OS dependency at the
+/// cost of corp CA support; operators behind a corporate proxy that
+/// resigns certs should set `WIRE_INSECURE_SKIP_TLS_VERIFY=1`. A
+/// proper dual-roots verifier (native + webpki via
+/// `rustls-platform-verifier`) is filed for follow-up.
 pub fn build_blocking_client(
     timeout: Option<std::time::Duration>,
 ) -> Result<reqwest::blocking::Client> {
