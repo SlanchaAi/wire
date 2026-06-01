@@ -305,7 +305,32 @@ pub fn pin_peer_endpoints(
         .ok_or_else(|| anyhow::anyhow!("relay_state.json root is not an object"))?
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("relay_state.peers is not an object"))?;
-    let mut entry = serde_json::Map::new();
+    // v0.14.2 (#162 fix #5): preserve durable peer state across re-pin
+    // events. honey-pine observed `wire_peers` tier flapping
+    // VERIFIED → PENDING_ACK; root cause is this `peers.insert(.., entry)`
+    // wholesale-replacement losing any previously-set field. The fields
+    // we explicitly retain here represent monotonic state — once
+    // bilateral-pair is complete or the peer's published persona/profile
+    // is known, those facts must NOT be wiped just because a fresh
+    // pair_drop_ack carrying only endpoint data lands. Other fields
+    // (`relay_url`, `slot_id`, `slot_token`, `endpoints`) are always
+    // current-state and intentionally re-derived from the input below.
+    let preserved: serde_json::Map<String, Value> = peers
+        .get(peer_handle)
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter(|(k, _)| {
+                    matches!(
+                        k.as_str(),
+                        "bilateral_completed_at" | "persona" | "profile" | "first_seen_at"
+                    )
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut entry = preserved;
     if let Some(f) = fed {
         entry.insert("relay_url".into(), Value::String(f.relay_url.clone()));
         entry.insert("slot_id".into(), Value::String(f.slot_id.clone()));
