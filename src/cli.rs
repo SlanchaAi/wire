@@ -2340,6 +2340,21 @@ fn cmd_status(as_json: bool) -> Result<()> {
                 "cli": env!("CARGO_PKG_VERSION"),
             });
         }
+        // v0.14.2 (#162): surface "is the sync loop actually running RIGHT NOW?"
+        // distinct from "is there a process named `wire daemon` somewhere?".
+        // pidfile_alive + a fresh last_sync are both required for "healthy
+        // sync"; pidfile_alive + no recent last_sync = the daemon is up but
+        // wedged. last_sync_age_seconds = null = no record (never ran here).
+        if let Some(rec) = crate::ensure_up::read_last_sync_record() {
+            daemon["last_sync_at"] = json!(rec.ts);
+            daemon["last_sync_age_seconds"] = json!(crate::ensure_up::last_sync_age_seconds());
+            daemon["last_sync_push_n"] = json!(rec.push_n);
+            daemon["last_sync_pull_n"] = json!(rec.pull_n);
+            daemon["last_sync_rejected_n"] = json!(rec.rejected_n);
+        } else {
+            daemon["last_sync_at"] = Value::Null;
+            daemon["last_sync_age_seconds"] = Value::Null;
+        }
         summary["daemon"] = daemon;
 
         // Pending pair sessions — counts by status.
@@ -2484,7 +2499,7 @@ fn cmd_status(as_json: bool) -> Result<()> {
     Ok(())
 }
 
-fn scan_jsonl_dir(dir: &std::path::Path) -> Result<Value> {
+pub(crate) fn scan_jsonl_dir(dir: &std::path::Path) -> Result<Value> {
     if !dir.exists() {
         return Ok(json!({"files": 0, "events": 0}));
     }
@@ -5815,6 +5830,17 @@ fn cmd_daemon(interval_secs: u64, once: bool, as_json: bool) -> Result<()> {
             json!({"transitions": []})
         });
 
+        // v0.14.2 (#162): persist a `last_sync.json` record after every
+        // cycle (including --once + cycles that pushed/pulled zero events
+        // — the "idle daemon is alive" signal is exactly what the
+        // detection layers need). Readers: `wire status`,
+        // `mcp__wire__wire_status`, `mcp__wire__wire_send` annotations.
+        // Best-effort: errors log + don't abort the loop.
+        let cycle_push_n = pushed["pushed"].as_array().map(|a| a.len()).unwrap_or(0);
+        let cycle_pull_n = pulled["written"].as_array().map(|a| a.len()).unwrap_or(0);
+        let cycle_rejected_n = pulled["rejected"].as_array().map(|a| a.len()).unwrap_or(0);
+        crate::ensure_up::write_last_sync_record(cycle_push_n, cycle_pull_n, cycle_rejected_n);
+
         if as_json {
             println!(
                 "{}",
@@ -5828,16 +5854,14 @@ fn cmd_daemon(interval_secs: u64, once: bool, as_json: bool) -> Result<()> {
                 }))?
             );
         } else {
-            let pushed_n = pushed["pushed"].as_array().map(|a| a.len()).unwrap_or(0);
-            let written_n = pulled["written"].as_array().map(|a| a.len()).unwrap_or(0);
-            let rejected_n = pulled["rejected"].as_array().map(|a| a.len()).unwrap_or(0);
             let pair_transitions = pairs["transitions"]
                 .as_array()
                 .map(|a| a.len())
                 .unwrap_or(0);
-            if pushed_n > 0 || written_n > 0 || rejected_n > 0 || pair_transitions > 0 {
+            if cycle_push_n > 0 || cycle_pull_n > 0 || cycle_rejected_n > 0 || pair_transitions > 0
+            {
                 eprintln!(
-                    "daemon: pushed={pushed_n} pulled={written_n} rejected={rejected_n} pair-transitions={pair_transitions}"
+                    "daemon: pushed={cycle_push_n} pulled={cycle_pull_n} rejected={cycle_rejected_n} pair-transitions={pair_transitions}"
                 );
             }
             // Loud per-transition logging so operator sees pair progress live.

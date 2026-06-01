@@ -545,7 +545,7 @@ fn handle_initialize(id: &Value) -> Value {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION,
             },
-            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). ON SESSION START, DO THIS IMMEDIATELY (every wire session): arm a PERSISTENT stream-watcher on `wire monitor --json` — in Claude Code, the Monitor tool with persistent:true — so peer messages surface live mid-session instead of on next manual poll. WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you; this is how paired agents collaborate immediately. (Default filter strips pair_drop/pair_drop_ack/heartbeat noise.) Legacy MCP tools (wire_pair_accept / wire_pair_reject / wire_pair_list_inbound, wire_pair_initiate/join/confirm) still callable but DEPRECATED — prefer canonical. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
+            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity), wire_status (daemon + sync health). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). ON SESSION START, DO THIS IMMEDIATELY (every wire session): (1) call wire_status to confirm the `wire daemon` sync loop is running — `daemon_running:true` + `last_sync_age_seconds < 60`; if not, the session won't push outbound or pull inbound and the operator must start a daemon (`wire daemon --interval 5` in a background shell, or systemd/launchd). (2) arm a PERSISTENT stream-watcher on `wire monitor --json` — in Claude Code, the Monitor tool with persistent:true — so peer messages surface live mid-session. The monitor does NOT sync the relay; it only tails the inbox the daemon writes. Both are required. WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you; this is how paired agents collaborate immediately. (Default filter strips pair_drop/pair_drop_ack/heartbeat noise.) wire_send returns `status:\"queued\"` even if no daemon is running — check `daemon_seen` + `stale_sync` in the response (added v0.14.2 per #162) to detect silent-send. Legacy MCP tools (wire_pair_accept / wire_pair_reject / wire_pair_list_inbound, wire_pair_initiate/join/confirm) still callable but DEPRECATED — prefer canonical. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
         }
     })
 }
@@ -570,6 +570,11 @@ fn tool_defs() -> Vec<Value> {
         json!({
             "name": "wire_peers",
             "description": "List pinned peers with their tier (UNTRUSTED/VERIFIED/ATTESTED) and advertised capabilities. Read-only.",
+            "inputSchema": {"type": "object", "properties": {}, "required": []}
+        }),
+        json!({
+            "name": "wire_status",
+            "description": "v0.14.2 — daemon + sync-loop health check. Returns: daemon_running (pidfile pid alive), all_running_pids (pgrep for `wire daemon`), last_sync_age_seconds (age of the most recent successful daemon cycle; null if no cycle ever recorded), outbox_count, inbox_count, peer count. **Call this BEFORE assuming wire_send actually delivered** — `wire_send` returns `status:\"queued\"` even if no daemon is running to push the queued event. A nonzero `outbox_count` with no recent `last_sync` means events are queued into the void. Read-only.",
             "inputSchema": {"type": "object", "properties": {}, "required": []}
         }),
         json!({
@@ -956,6 +961,7 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
 
     let result = match name {
         "wire_whoami" => tool_whoami(),
+        "wire_status" => tool_status(),
         "wire_peers" => tool_peers(),
         "wire_send" => tool_send(&args),
         "wire_tail" => tool_tail(&args),
@@ -1236,6 +1242,83 @@ fn tool_group_join(args: &Value) -> Result<Value, String> {
     group_cli_json(&["join", code])
 }
 
+/// v0.14.2 (#162): daemon + sync-loop health check, MCP-side mirror of
+/// `wire status`. Specifically engineered to answer the silent-send
+/// question — "if I call wire_send right now, will the daemon actually
+/// push it?". Returns the daemon-liveness section + last-sync metadata +
+/// outbox/inbox depth so callers can branch on a stale or absent sync.
+///
+/// Read-only. No initialization gate — runs against an empty home
+/// (returns `initialized:false` shape mirroring wire_whoami's
+/// degraded-uninit path from #152).
+fn tool_status() -> Result<Value, String> {
+    use crate::config;
+
+    let initialized = config::is_initialized().unwrap_or(false);
+    if !initialized {
+        return Ok(json!({
+            "initialized": false,
+            "daemon_running": false,
+            "last_sync_age_seconds": Value::Null,
+        }));
+    }
+
+    let snap = crate::ensure_up::daemon_liveness();
+    let last_sync_age = crate::ensure_up::last_sync_age_seconds();
+    let last_sync_record = crate::ensure_up::read_last_sync_record();
+
+    let mut daemon = json!({
+        "running": snap.pidfile_alive,
+        "pid": snap.pidfile_pid,
+        "all_running_pids": snap.pgrep_pids,
+        "orphans": snap.orphan_pids,
+    });
+    if let crate::ensure_up::PidRecord::Json(d) = &snap.record {
+        daemon["version"] = json!(d.version);
+        daemon["bin_path"] = json!(d.bin_path);
+        daemon["did"] = json!(d.did);
+        daemon["relay_url"] = json!(d.relay_url);
+        daemon["started_at"] = json!(d.started_at);
+    }
+
+    let (last_sync_at, last_sync_push_n, last_sync_pull_n, last_sync_rejected_n) =
+        match last_sync_record {
+            Some(rec) => (
+                Some(rec.ts),
+                Some(rec.push_n),
+                Some(rec.pull_n),
+                Some(rec.rejected_n),
+            ),
+            None => (None, None, None, None),
+        };
+
+    let outbox_count = config::outbox_dir()
+        .and_then(|p| crate::cli::scan_jsonl_dir(&p))
+        .map(|v| v.get("total_events").and_then(Value::as_u64).unwrap_or(0))
+        .unwrap_or(0);
+    let inbox_count = config::inbox_dir()
+        .and_then(|p| crate::cli::scan_jsonl_dir(&p))
+        .map(|v| v.get("total_events").and_then(Value::as_u64).unwrap_or(0))
+        .unwrap_or(0);
+
+    Ok(json!({
+        "initialized": true,
+        "daemon": daemon,
+        "daemon_running": snap.pidfile_alive,
+        "last_sync_at": last_sync_at,
+        "last_sync_age_seconds": last_sync_age,
+        "last_sync_push_n": last_sync_push_n,
+        "last_sync_pull_n": last_sync_pull_n,
+        "last_sync_rejected_n": last_sync_rejected_n,
+        "stale_sync": match last_sync_age {
+            Some(age) => age > 60,
+            None => true,
+        },
+        "outbox_count": outbox_count,
+        "inbox_count": inbox_count,
+    }))
+}
+
 fn tool_send(args: &Value) -> Result<Value, String> {
     use crate::config;
     use crate::signing::{b64decode, sign_message_v31};
@@ -1303,11 +1386,27 @@ fn tool_send(args: &Value) -> Result<Value, String> {
     let line = serde_json::to_vec(&signed).map_err(|e| e.to_string())?;
     let outbox = config::append_outbox_record(peer, &line).map_err(|e| e.to_string())?;
 
+    // v0.14.2 (#162): annotate the queued event with daemon-liveness
+    // signals so callers can detect the silent-send class — a write to
+    // the outbox file isn't a delivery; the daemon push loop is. If
+    // `daemon_seen: false` or `last_sync_age_seconds` is high/null, the
+    // caller's intended recipient hasn't received anything yet. The
+    // `status: "queued"` carries unchanged for back-compat; consumers
+    // that don't know about the new fields keep working.
+    let snap = crate::ensure_up::daemon_liveness();
+    let last_sync_age = crate::ensure_up::last_sync_age_seconds();
+
     Ok(json!({
         "event_id": event_id,
         "status": "queued",
         "peer": peer,
         "outbox": outbox.to_string_lossy(),
+        "daemon_seen": snap.pidfile_alive,
+        "last_sync_age_seconds": last_sync_age,
+        "stale_sync": match last_sync_age {
+            Some(age) => age > 60,
+            None => true,
+        },
     }))
 }
 
