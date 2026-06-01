@@ -1301,51 +1301,17 @@ fn tool_status() -> Result<Value, String> {
         .map(|v| v.get("total_events").and_then(Value::as_u64).unwrap_or(0))
         .unwrap_or(0);
 
-    // v0.14.2 (#162 fix #2): compute total events still queued but
-    // not yet pushed. Walks each per-peer outbox file, counts
-    // event_ids missing from the per-peer pushed log. Cheap (one
-    // disk read per peer) and bounded by trust.agents shape.
+    // v0.14.2 (#162 fix #2): total events queued but not yet pushed.
     // `pending_push_count > 0` + `stale_sync == true` = the
     // silent-send class — events queued, daemon not pushing.
-    let pending_push_count = config::read_trust()
-        .ok()
-        .and_then(|t| t.get("agents").and_then(Value::as_object).cloned())
-        .map(|agents| {
-            let mut total: u64 = 0;
-            for (peer_handle, _) in agents.iter() {
-                let pushed_ids = config::read_pushed_event_ids(peer_handle);
-                let outbox_path = match config::outbox_dir() {
-                    Ok(d) => d.join(format!("{peer_handle}.jsonl")),
-                    Err(_) => continue,
-                };
-                let body = match std::fs::read_to_string(&outbox_path) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                for line in body.lines() {
-                    if let Some(eid) = serde_json::from_str::<Value>(line).ok().and_then(|v| {
-                        v.get("event_id")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    }) && !pushed_ids.contains(&eid)
-                    {
-                        total += 1;
-                    }
-                }
-            }
-            total
-        })
-        .unwrap_or(0);
+    let pending_push_count = config::compute_pending_push_count();
 
-    // v0.14.2 (#162 fix #7): surface SSE stream-subscriber state so
-    // callers can distinguish "stream alive (live monitor will fire on
-    // inbound)" from "polling-only (daemon up, monitor will wait until
-    // next poll cycle)". Best-effort read; missing file is "unknown".
-    let stream_state = config::state_dir()
-        .ok()
-        .and_then(|d| std::fs::read_to_string(d.join("stream_state.json")).ok())
-        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
-        .unwrap_or(Value::Null);
+    // v0.14.2 (#162 fix #7): SSE stream-subscriber state so callers
+    // can distinguish "stream alive (live monitor will fire on
+    // inbound)" from "polling-only (daemon up, monitor will wait
+    // until next poll cycle)". Best-effort read; missing file is
+    // Value::Null (unknown).
+    let stream_state = config::read_stream_state();
 
     Ok(json!({
         "initialized": true,
@@ -1356,10 +1322,7 @@ fn tool_status() -> Result<Value, String> {
         "last_sync_push_n": last_sync_push_n,
         "last_sync_pull_n": last_sync_pull_n,
         "last_sync_rejected_n": last_sync_rejected_n,
-        "stale_sync": match last_sync_age {
-            Some(age) => age > 60,
-            None => true,
-        },
+        "stale_sync": config::stale_sync(last_sync_age),
         "outbox_count": outbox_count,
         "inbox_count": inbox_count,
         "pending_push_count": pending_push_count,
@@ -1460,10 +1423,7 @@ fn tool_send(args: &Value) -> Result<Value, String> {
         "outbox": outbox.to_string_lossy(),
         "daemon_seen": snap.pidfile_alive,
         "last_sync_age_seconds": last_sync_age,
-        "stale_sync": match last_sync_age {
-            Some(age) => age > 60,
-            None => true,
-        },
+        "stale_sync": config::stale_sync(last_sync_age),
     }))
 }
 
