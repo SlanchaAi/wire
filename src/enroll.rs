@@ -104,6 +104,30 @@ pub fn rebuild_card_with_current_claims() -> anyhow::Result<crate::agent_card::A
         obj.remove("op_pubkey");
         obj.remove("org_memberships");
         obj.remove("signature");
+
+        // v0.14.2 (#126): refresh the wire/* entry in `capabilities[]` so
+        // the republished card advertises the binary's current
+        // CARD_SCHEMA_VERSION. Pre-fix: an operator who init'd at
+        // v0.13.5 (capabilities=["wire/v3.1"]) and republished at
+        // v0.14.1 kept the old "wire/v3.1" entry even though
+        // schema_version bumped to v3.2 — peers gating on the
+        // capabilities set silently bypassed upgraded sessions. Only
+        // wire/* entries are binary-derived; operator-defined caps
+        // (e.g. custom task tags, future feature flags) are preserved.
+        let current_wire_cap = format!("wire/{}", crate::agent_card::CARD_SCHEMA_VERSION);
+        let preserved_caps: Vec<serde_json::Value> = obj
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter(|c| c.as_str().map(|s| !s.starts_with("wire/")).unwrap_or(false))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut new_caps = vec![serde_json::Value::String(current_wire_cap)];
+        new_caps.extend(preserved_caps);
+        obj.insert("capabilities".into(), serde_json::Value::Array(new_caps));
     }
     let card = with_op_claims_if_enrolled_inner(card)?;
     let sk = crate::config::read_private_key()
@@ -409,6 +433,90 @@ mod tests {
             verify_agent_card(&signed).unwrap();
             assert_eq!(crate::agent_card::card_op_did(&signed), None);
             assert_eq!(crate::agent_card::card_org_memberships(&signed).len(), 0);
+        });
+    }
+
+    /// #126 fix: a v0.13.5-era stored card has `capabilities=["wire/v3.1"]`.
+    /// Republish on v0.14.x must refresh the wire/* entry to match the
+    /// binary's current CARD_SCHEMA_VERSION; otherwise peers gating on
+    /// `capabilities` silently bypass upgraded sessions even as
+    /// `schema_version` bumps to v3.2.
+    #[test]
+    fn rebuild_refreshes_wire_capability_to_current() {
+        crate::config::test_support::with_temp_home(|| {
+            std::fs::create_dir_all(crate::config::config_dir().unwrap()).unwrap();
+            let (sess_sk, sess_pk) = generate_keypair();
+            crate::config::write_private_key(&sess_sk).unwrap();
+            // Manufacture a stored card with the legacy "wire/v3.1" capability.
+            let legacy = build_agent_card(
+                "slate-lotus",
+                &sess_pk,
+                None,
+                Some(vec!["wire/v3.1".to_string()]),
+                None,
+            );
+            crate::config::write_agent_card(&sign_agent_card(&legacy, &sess_sk)).unwrap();
+            // Sanity: precondition matches the bug honey/slate-lotus reported.
+            let before = crate::config::read_agent_card().unwrap();
+            assert_eq!(
+                before["capabilities"],
+                serde_json::json!(["wire/v3.1"]),
+                "precondition: stored card has legacy capability"
+            );
+
+            // Republish (no claims) — must refresh capabilities[].
+            let signed = rebuild_card_with_current_claims().unwrap();
+            verify_agent_card(&signed).unwrap();
+            assert_eq!(
+                signed["capabilities"],
+                serde_json::json!([format!("wire/{}", crate::agent_card::CARD_SCHEMA_VERSION)]),
+                "republish must refresh wire/* to current CARD_SCHEMA_VERSION"
+            );
+        });
+    }
+
+    /// #126 fix invariant: non-wire/* capabilities are operator-defined and
+    /// MUST survive the republish refresh. Only the wire/* slot is
+    /// binary-derived; custom task tags, feature flags, etc. persist.
+    #[test]
+    fn rebuild_preserves_non_wire_capabilities_through_refresh() {
+        crate::config::test_support::with_temp_home(|| {
+            std::fs::create_dir_all(crate::config::config_dir().unwrap()).unwrap();
+            let (sess_sk, sess_pk) = generate_keypair();
+            crate::config::write_private_key(&sess_sk).unwrap();
+            // Mixed caps: legacy wire/* + two operator-defined entries.
+            let mixed = build_agent_card(
+                "slate-lotus",
+                &sess_pk,
+                None,
+                Some(vec![
+                    "wire/v3.1".to_string(),
+                    "custom-tag".to_string(),
+                    "org/v1".to_string(),
+                ]),
+                None,
+            );
+            crate::config::write_agent_card(&sign_agent_card(&mixed, &sess_sk)).unwrap();
+
+            let signed = rebuild_card_with_current_claims().unwrap();
+            verify_agent_card(&signed).unwrap();
+            let caps: Vec<String> = signed["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            // Current wire/* prepended, legacy wire/* dropped, others preserved
+            // in their original order.
+            assert_eq!(
+                caps,
+                vec![
+                    format!("wire/{}", crate::agent_card::CARD_SCHEMA_VERSION),
+                    "custom-tag".to_string(),
+                    "org/v1".to_string(),
+                ],
+                "non-wire/* caps must survive the refresh; only wire/* is replaced"
+            );
         });
     }
 
