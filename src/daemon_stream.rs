@@ -25,6 +25,41 @@ use std::io::{BufRead, BufReader};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
+/// Stream-state file written by `run_subscriber` on every state
+/// transition. Surfaced via `tool_status` so an operator can tell
+/// "stream alive" (live monitor will fire on inbound) from
+/// "polling-only" (daemon up, monitor will wait until next poll). The
+/// file is best-effort; missing/unreadable counts as "unknown" and the
+/// reader degrades gracefully.
+fn stream_state_path() -> Option<std::path::PathBuf> {
+    crate::config::state_dir()
+        .ok()
+        .map(|d| d.join("stream_state.json"))
+}
+
+/// Write the current stream-state snapshot. Best-effort; an unwritable
+/// state-dir does not block the subscriber loop. Schema-versioned so
+/// future fields (per-event count, reconnect attempt index) can land
+/// additively without breaking older readers.
+fn write_stream_state(state: &str, last_event_at: Option<&str>, reconnects: u64) {
+    if let Some(path) = stream_state_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let ts = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        let body = serde_json::json!({
+            "schema": "wire-daemon-stream-state-v1",
+            "ts": ts,
+            "state": state,
+            "last_event_at": last_event_at,
+            "reconnect_count": reconnects,
+        });
+        let _ = std::fs::write(&path, serde_json::to_vec_pretty(&body).unwrap_or_default());
+    }
+}
+
 /// Spawn the stream-subscriber thread. Returns immediately; the thread
 /// runs until process exit. `wake_tx` is signaled on every received SSE
 /// `data:` line (any event, no parsing of body). Errors during connect or
@@ -38,15 +73,31 @@ pub fn spawn_stream_subscriber(wake_tx: Sender<()>) {
 
 fn run_subscriber(wake_tx: Sender<()>) {
     let mut backoff_secs = 1u64;
+    let mut reconnects: u64 = 0;
+    let mut last_event_at: Option<String> = None;
+    write_stream_state("connecting", last_event_at.as_deref(), reconnects);
     loop {
-        match connect_and_read(&wake_tx) {
+        // We wrap a closure so the connect-and-read inner can stamp
+        // last_event_at into our outer scope on every wake without
+        // restructuring the existing signature. The Vec<String> carries
+        // at most one timestamp (latest); polled by reference below.
+        let mut latest_event_ts: Vec<String> = Vec::new();
+        let outcome = connect_and_read(&wake_tx, &mut latest_event_ts);
+        if let Some(ts) = latest_event_ts.into_iter().last() {
+            last_event_at = Some(ts);
+        }
+        match outcome {
             Ok(()) => {
                 // Stream closed cleanly (e.g., server reload). Quick reconnect.
                 backoff_secs = 1;
+                reconnects += 1;
                 eprintln!("daemon-stream: connection closed cleanly, reconnecting");
+                write_stream_state("reconnecting", last_event_at.as_deref(), reconnects);
             }
             Err(e) => {
+                reconnects += 1;
                 eprintln!("daemon-stream: error {e:#}; reconnecting in {backoff_secs}s");
+                write_stream_state("error", last_event_at.as_deref(), reconnects);
                 std::thread::sleep(Duration::from_secs(backoff_secs));
                 backoff_secs = (backoff_secs * 2).min(30);
             }
@@ -54,7 +105,7 @@ fn run_subscriber(wake_tx: Sender<()>) {
     }
 }
 
-fn connect_and_read(wake_tx: &Sender<()>) -> Result<()> {
+fn connect_and_read(wake_tx: &Sender<()>, last_event_ts: &mut Vec<String>) -> Result<()> {
     // Re-read relay-state on each reconnect so a fresh slot allocation /
     // rotation picks up automatically without daemon restart.
     let state = crate::config::read_relay_state()?;
@@ -89,7 +140,20 @@ fn connect_and_read(wake_tx: &Sender<()>) -> Result<()> {
             // TCP keepalive catches a hung connection (server crashed, network
             // black hole) — the BufReader::lines loop returns Err and the
             // outer reconnect-with-backoff kicks in.
-            .tcp_keepalive(Some(Duration::from_secs(60)));
+            // v0.14.2 (#162 fix #7): tightened TCP keepalive from 60s to
+            // 30s so the kernel-level dead-connection check kicks in sooner
+            // when the SSE upstream goes silent. reqwest's blocking client
+            // doesn't expose a per-read body timeout (the obvious shape for
+            // this) — `Client::timeout` is a total-request timeout, the
+            // wrong primitive for a long-lived stream. A more surgical
+            // per-read timeout via the underlying socket needs a custom
+            // reader and is deferred to v0.15; tightening keepalive is the
+            // observable improvement we can ship today. Honey-pine field
+            // guide failure-mode #2 ("daemon alive but stream wedged") is
+            // also surfaced via the new `stream_state.json` so callers can
+            // detect the polling-only degradation without waiting for the
+            // wedge to clear.
+            .tcp_keepalive(Some(Duration::from_secs(30)));
         if std::env::var(crate::relay_client::INSECURE_SKIP_TLS_ENV)
             .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false)
@@ -112,6 +176,12 @@ fn connect_and_read(wake_tx: &Sender<()>) -> Result<()> {
         ));
     }
 
+    // v0.14.2 (#162 fix #7): mark the stream "connected" once the
+    // server has accepted the slot_token + the body read starts. The
+    // outer loop transitions to "reconnecting" on clean close or
+    // "error" on failure; this is the only place we can confidently
+    // claim "stream is live and pulling events for monitor".
+    write_stream_state("connected", None, 0);
     let reader = BufReader::new(resp);
     for line in reader.lines() {
         let line = line?;
@@ -125,6 +195,16 @@ fn connect_and_read(wake_tx: &Sender<()>) -> Result<()> {
             // backs up to a small buffer; we don't block — drop on full
             // since multiple wakes coalesce into a single pull anyway.
             let _ = wake_tx.send(());
+            // v0.14.2 (#162 fix #7): stamp the most-recent event-arrival
+            // timestamp for `stream_state.json`. Push, don't replace;
+            // outer loop reads .last() so we only keep the latest. Best-
+            // effort format; failure here = no stamp this cycle.
+            let now = time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default();
+            if !now.is_empty() {
+                last_event_ts.push(now);
+            }
         }
     }
     Ok(())
