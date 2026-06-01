@@ -2384,6 +2384,32 @@ fn cmd_status(as_json: bool) -> Result<()> {
         daemon["pending_push_count"] = json!(config::compute_pending_push_count());
         daemon["stale_sync"] = json!(config::stale_sync(last_sync_age));
         daemon["stream_state"] = config::read_stream_state();
+        // v0.14.2 (#162 diagnostic, post-#170): annotate orphan pids
+        // with their cmdline + the `--session <name>` arg the
+        // supervisor (or operator) tagged them with. honey-pine spent
+        // multiple sessions diagnosing "wire status reports DOWN
+        // while comms work" — turned out the orphan was a launchd-
+        // spawned daemon serving a different WIRE_HOME. Surfacing
+        // "(serving session 'X')" on each orphan collapses the
+        // diagnostic time. Best-effort: cmdline read can race exit
+        // → fields just stay absent rather than failing the status
+        // call.
+        let orphans_detail: Vec<Value> = snap
+            .orphan_pids
+            .iter()
+            .map(|pid| {
+                let cmdline = crate::platform::pid_cmdline(*pid);
+                let session = cmdline
+                    .as_deref()
+                    .and_then(crate::platform::parse_session_arg);
+                json!({
+                    "pid": pid,
+                    "cmdline": cmdline,
+                    "session": session,
+                })
+            })
+            .collect();
+        daemon["orphans_detail"] = json!(orphans_detail);
         summary["daemon"] = daemon;
 
         // Pending pair sessions — counts by status.
@@ -2487,6 +2513,30 @@ fn cmd_status(as_json: bool) -> Result<()> {
                  prior install. Multiple daemons race the relay cursor.",
                 pids.join(", ")
             );
+            // v0.14.2 (#162 diagnostic): per-orphan annotation so
+            // operators don't have to grep ps themselves. Each orphan
+            // shows its --session arg (or "(no --session)" for legacy
+            // launchd daemons + operator-spawned `wire daemon` without
+            // the flag — those default to dirs::state_dir() WIRE_HOME,
+            // which often diverges from the shell's cwd-mapped session).
+            if let Some(details) = summary["daemon"]["orphans_detail"].as_array() {
+                for d in details {
+                    let pid = d["pid"].as_u64().unwrap_or(0);
+                    let session = d["session"].as_str();
+                    let cmdline = d["cmdline"].as_str();
+                    match (session, cmdline) {
+                        (Some(s), _) => {
+                            println!("                  pid {pid}: serving session '{s}'")
+                        }
+                        (None, Some(c)) if !c.is_empty() => println!(
+                            "                  pid {pid}: (no --session — serving default WIRE_HOME) cmdline={c}"
+                        ),
+                        _ => println!(
+                            "                  pid {pid}: (cmdline unavailable — pid may have just exited)"
+                        ),
+                    }
+                }
+            }
         }
         // v0.14.2 (#162 #2/#7 surface): three lines that catch the
         // silent-send class operators kept missing on 0.14.1. Order matters

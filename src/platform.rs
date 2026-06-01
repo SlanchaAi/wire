@@ -149,6 +149,88 @@ pub fn find_processes_by_cmdline(pattern: &str) -> Vec<u32> {
     }
 }
 
+/// Return the command line of a specific pid, or `None` if the pid
+/// is missing / unreadable / exited between query and answer.
+///
+/// v0.14.2 (#162 diagnostic, post-supervisor #170): when `wire status`
+/// surfaces orphan pids, the operator wants to know "which session
+/// is that daemon serving?" without grepping `ps` themselves —
+/// closes the launchd-vs-session-isolation diagnostic gap honey-pine
+/// burned multiple sessions on.
+///
+/// - Linux: read `/proc/<pid>/cmdline` (NUL-separated, replace with spaces).
+/// - macOS / BSD: `ps -p <pid> -o command=` (no header, single column).
+/// - Windows: PowerShell CIM `Get-CimInstance Win32_Process | Where
+///   {$_.ProcessId -eq <pid>} | Select CommandLine`.
+///
+/// Conservative on failure: returns `None` rather than synthesizing a
+/// placeholder. Callers should treat None as "annotation unavailable",
+/// not "process is dead" — `process_alive` is the liveness oracle.
+pub fn pid_cmdline(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = format!("/proc/{pid}/cmdline");
+        let bytes = std::fs::read(&path).ok()?;
+        // `/proc/<pid>/cmdline` is NUL-separated argv. Convert NULs to
+        // spaces for human-readable output; trim trailing NUL.
+        let s: String = bytes
+            .into_iter()
+            .map(|b| if b == 0 { b' ' } else { b })
+            .map(|b| b as char)
+            .collect();
+        let trimmed = s.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let out = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "command="])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    }
+    #[cfg(windows)]
+    {
+        let ps = format!(
+            "Get-CimInstance Win32_Process | \
+             Where-Object {{ $_.ProcessId -eq {pid} }} | \
+             Select-Object -ExpandProperty CommandLine"
+        );
+        let out = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Parse `--session <name>` from a wire daemon command line. Returns
+/// `None` if not present. v0.14.2 (#170 supervisor pairs a `--session
+/// <name>` arg with the WIRE_HOME the daemon serves; this extracts it
+/// for orphan-pid diagnostic display).
+pub fn parse_session_arg(cmdline: &str) -> Option<&str> {
+    let parts: Vec<&str> = cmdline.split_whitespace().collect();
+    let i = parts.iter().position(|p| *p == "--session")?;
+    parts.get(i + 1).copied()
+}
+
 /// Signal a pid to exit. Returns true on successful dispatch (NOT on
 /// confirmed exit — poll [`process_alive`] for that). `force=true` is
 /// SIGKILL / `taskkill /F`; `force=false` is SIGTERM / `taskkill`
@@ -230,6 +312,69 @@ mod tests {
         assert!(
             !process_alive(dead),
             "process_alive should return false for synthetic dead pid {dead}"
+        );
+    }
+
+    #[test]
+    fn parse_session_arg_extracts_following_value() {
+        assert_eq!(
+            parse_session_arg("wire daemon --session slancha-mesh --interval 5"),
+            Some("slancha-mesh")
+        );
+        assert_eq!(
+            parse_session_arg("wire daemon --interval 5 --session wire-dev"),
+            Some("wire-dev")
+        );
+        // Mid-cmdline + extra whitespace is fine — split_whitespace handles it.
+        assert_eq!(
+            parse_session_arg("/path/to/wire   daemon   --session   foo"),
+            Some("foo")
+        );
+    }
+
+    #[test]
+    fn parse_session_arg_returns_none_without_flag() {
+        assert_eq!(parse_session_arg("wire daemon --interval 5"), None);
+        // Bare `wire daemon --all-sessions` is the supervisor itself —
+        // it doesn't carry a single `--session`. Operators reading the
+        // supervisor's cmdline should see no annotation, not a
+        // misleading session attribution.
+        assert_eq!(
+            parse_session_arg("wire daemon --all-sessions --interval 5"),
+            None
+        );
+        // Empty input is safe.
+        assert_eq!(parse_session_arg(""), None);
+    }
+
+    #[test]
+    fn parse_session_arg_returns_none_when_flag_is_last_token() {
+        // `--session` at end with no value following → None, not a panic.
+        assert_eq!(parse_session_arg("wire daemon --session"), None);
+    }
+
+    #[test]
+    fn pid_cmdline_returns_something_for_self() {
+        // Cross-platform sanity: our own process must have a cmdline.
+        // We can't assert exact content (test runner cmdlines vary) —
+        // just that it returns Some and is non-empty.
+        let me = std::process::id();
+        let cmd = pid_cmdline(me);
+        assert!(
+            cmd.is_some() && !cmd.as_ref().unwrap().is_empty(),
+            "pid_cmdline(self) should return a non-empty cmdline, got {cmd:?}"
+        );
+    }
+
+    #[test]
+    fn pid_cmdline_returns_none_for_dead_pid() {
+        // Use the same astronomically-unlikely pid pattern as
+        // process_alive_returns_false_for_clearly_dead_pid above.
+        let dead = 4_000_000_003;
+        assert_eq!(
+            pid_cmdline(dead),
+            None,
+            "pid_cmdline should return None for synthetic dead pid"
         );
     }
 
