@@ -5736,6 +5736,37 @@ fn cmd_daemon(interval_secs: u64, once: bool, as_json: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
     }
+    // v0.14.2 (#162): pidfile singleton on the persistent daemon. If
+    // another live `wire daemon` already owns the pidfile, exit 0 with a
+    // human/JSON message instead of starting a second polling loop —
+    // honey-pine's report observed 3 concurrent daemons polling the same
+    // slot, wasteful and a possible source of duplicate-pull races.
+    // `--once` is a single sync cycle and doesn't own the cursor; the
+    // singleton check is skipped for it (matches the existing collision
+    // warning's `--once` carve-out). Test escape hatch:
+    // `WIRE_DAEMON_NO_SINGLETON=1`.
+    let _pid_guard = if !once && std::env::var("WIRE_DAEMON_NO_SINGLETON").is_err() {
+        if let Some(holder_pid) = crate::ensure_up::daemon_singleton_holder() {
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "status": "skipped",
+                        "reason": "daemon already running",
+                        "holder_pid": holder_pid,
+                    }))?
+                );
+            } else {
+                eprintln!(
+                    "wire daemon: another daemon is already running (pid {holder_pid}); not starting a second polling loop. Set WIRE_DAEMON_NO_SINGLETON=1 to override."
+                );
+            }
+            return Ok(());
+        }
+        Some(crate::ensure_up::claim_daemon_singleton()?)
+    } else {
+        None
+    };
     // v0.13.x identity work: a long-running daemon racing another wire
     // process for the same inbox cursor silently loses messages. Surface
     // the collision the same way `wire mcp` does. Skipped under `--once`:

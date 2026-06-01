@@ -236,6 +236,74 @@ fn write_pid_record(name: &str, record: &DaemonPid) -> Result<()> {
     Ok(())
 }
 
+/// Inspect the daemon singleton state. Returns `Some(pid)` iff the
+/// pidfile names a live `wire daemon` process — i.e., a singleton is
+/// currently held by another in-flight daemon. Returns `None` if the
+/// pidfile is missing, corrupt, or names a dead process.
+///
+/// v0.14.2 (#162): foreground `wire daemon` (the operator-typed kind,
+/// not the `ensure_background` spawn path) didn't write its own
+/// pidfile, so subsequent `ensure_daemon_running()` calls couldn't
+/// see it and would spawn duplicates. The duplicate-pull race is
+/// safe — per-path outbox locks prevent corruption — but it wastes
+/// relay polls and confuses operator diagnosis ("why are there 3
+/// daemons?"). The singleton helpers below let `cmd_daemon` claim
+/// the slot at startup + write its own pidfile, closing the gap.
+pub fn daemon_singleton_holder() -> Option<u32> {
+    match read_pid_record("daemon").pid() {
+        Some(pid) if pid_is_alive(pid) => Some(pid),
+        _ => None,
+    }
+}
+
+/// Claim the daemon-pid singleton by writing this process's pid +
+/// metadata to the pidfile. Callers should first check
+/// `daemon_singleton_holder()` — if Some, bail rather than overwrite.
+///
+/// Returns a `DaemonPidGuard` that removes the pidfile when dropped,
+/// so a graceful exit (SIGINT → normal Drop chain) cleans up.
+pub fn claim_daemon_singleton() -> Result<DaemonPidGuard> {
+    crate::config::ensure_dirs()?;
+    let pid = std::process::id();
+    let record = build_pid_record(pid);
+    write_pid_record("daemon", &record)?;
+    let path = pid_file("daemon")?;
+    Ok(DaemonPidGuard {
+        path,
+        owned_pid: pid,
+    })
+}
+
+/// Drop guard for a claimed daemon-pid singleton. On drop, removes
+/// the pidfile only if it still names the pid we wrote — protects
+/// against the case where another daemon raced in after we exited
+/// the singleton check but before we wrote, and we don't want to
+/// wipe their record on our exit.
+pub struct DaemonPidGuard {
+    path: PathBuf,
+    owned_pid: u32,
+}
+
+impl Drop for DaemonPidGuard {
+    fn drop(&mut self) {
+        // Only remove if the file still names US. If another wire
+        // daemon raced in and overwrote, leave their record alone.
+        if let Ok(body) = std::fs::read_to_string(&self.path) {
+            let still_ours = serde_json::from_str::<DaemonPid>(body.trim())
+                .map(|d| d.pid == self.owned_pid)
+                .unwrap_or_else(|_| {
+                    body.trim()
+                        .parse::<u32>()
+                        .map(|p| p == self.owned_pid)
+                        .unwrap_or(false)
+                });
+            if still_ours {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+}
+
 /// Build a `DaemonPid` for a freshly-spawned child. Reads bin_path,
 /// current binary version, identity DID, and bound relay URL.
 fn build_pid_record(pid: u32) -> DaemonPid {
