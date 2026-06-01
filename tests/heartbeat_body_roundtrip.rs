@@ -29,8 +29,8 @@ use proptest::collection::vec;
 use proptest::prelude::*;
 use serde_json::{Value, json};
 use wire::signing::{
-    KindClass, b64encode, fingerprint, generate_keypair, kind_class, make_key_id,
-    sign_message_v31, verify_message_v31,
+    KindClass, b64encode, fingerprint, generate_keypair, kind_class, make_key_id, sign_message_v31,
+    verify_message_v31,
 };
 
 /// Build a `trust` dict that accepts the given (handle, pubkey) pair so
@@ -91,10 +91,7 @@ fn arb_heartbeat_body() -> impl Strategy<Value = Value> {
     (
         arb_t_intent(),
         vec(
-            (
-                "[a-z][a-z0-9_]{0,16}".prop_map(String::from),
-                arb_scalar(),
-            ),
+            ("[a-z][a-z0-9_]{0,16}".prop_map(String::from), arb_scalar()),
             0..6,
         ),
     )
