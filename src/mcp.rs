@@ -1337,6 +1337,16 @@ fn tool_status() -> Result<Value, String> {
         })
         .unwrap_or(0);
 
+    // v0.14.2 (#162 fix #7): surface SSE stream-subscriber state so
+    // callers can distinguish "stream alive (live monitor will fire on
+    // inbound)" from "polling-only (daemon up, monitor will wait until
+    // next poll cycle)". Best-effort read; missing file is "unknown".
+    let stream_state = config::state_dir()
+        .ok()
+        .and_then(|d| std::fs::read_to_string(d.join("stream_state.json")).ok())
+        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+        .unwrap_or(Value::Null);
+
     Ok(json!({
         "initialized": true,
         "daemon": daemon,
@@ -1353,6 +1363,7 @@ fn tool_status() -> Result<Value, String> {
         "outbox_count": outbox_count,
         "inbox_count": inbox_count,
         "pending_push_count": pending_push_count,
+        "stream_state": stream_state,
     }))
 }
 
