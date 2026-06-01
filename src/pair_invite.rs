@@ -918,6 +918,30 @@ pub fn maybe_consume_pair_drop_ack(event: &Value) -> Result<bool> {
         });
     let mut relay_state = config::read_relay_state()?;
     crate::endpoints::pin_peer_endpoints(&mut relay_state, &peer_handle, &peer_endpoints)?;
+    // v0.14.2 (#162 fix #5): stamp the durable bilateral-completed marker
+    // on receipt of pair_drop_ack — this is the moment the bilateral
+    // handshake actually completes (we already have their slot_token
+    // pinned from their pair_drop; they sent the ack carrying ours).
+    // Monotonic: once set, NEVER cleared. `effective_peer_tier` reads
+    // this instead of slot_token presence so a transient endpoint
+    // re-pin can't flap the visible tier from VERIFIED → PENDING_ACK.
+    // `pin_peer_endpoints` preserves the field across re-pin events.
+    if let Some(peer_entry) = relay_state
+        .get_mut("peers")
+        .and_then(Value::as_object_mut)
+        .and_then(|m| m.get_mut(&peer_handle))
+        .and_then(Value::as_object_mut)
+    {
+        peer_entry
+            .entry("bilateral_completed_at".to_string())
+            .or_insert_with(|| {
+                Value::String(
+                    time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default(),
+                )
+            });
+    }
     config::write_relay_state(&relay_state)?;
     crate::os_notify::toast(
         &format!("wire — pair complete with {peer_handle}"),
