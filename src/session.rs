@@ -516,18 +516,49 @@ fn read_card_identity(card_path: &Path) -> (Option<String>, Option<String>) {
 pub fn session_daemon_pid(session_home: &Path) -> Option<u32> {
     let pidfile = session_home.join("state").join("wire").join("daemon.pid");
     let bytes = std::fs::read(&pidfile).ok()?;
-    // Structured form first, then legacy integer.
-    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-        v.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32)
-    } else {
-        String::from_utf8_lossy(&bytes).trim().parse::<u32>().ok()
-    }
+    // Pidfile is either JSON `{"pid": <n>, ...}` (v0.5.11+) or a bare
+    // integer (legacy). Try JSON-with-pid-field first; if that yields
+    // None (parse failed OR JSON parsed successfully as a bare Number
+    // with no `.pid` field), fall through to the bare-int path.
+    // Pre-fix: a legacy bare-integer pidfile silently returned None
+    // here because `serde_json::from_slice("67890")` succeeds as
+    // Value::Number, then `v.get("pid")` is None, and the else
+    // branch never ran. Caused legitimate pre-v0.5.11 sessions to
+    // read as "no daemon" in list-local and orphan-detection paths.
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|v| v.get("pid").and_then(|p| p.as_u64()))
+        .or_else(|| String::from_utf8_lossy(&bytes).trim().parse::<u64>().ok())
+        .map(|p| p as u32)
 }
 
 fn check_daemon_live(session_home: &Path) -> bool {
     session_daemon_pid(session_home)
         .map(is_process_live)
         .unwrap_or(false)
+}
+
+/// Walk every initialized session and read its `daemon.pid`; return a
+/// map from `pid → session_name`. Used by `wire status`'s orphan-pid
+/// annotation (#173 follow-up) so a supervisor child's pid — which
+/// no longer carries `--session <name>` in its cmdline post-#174 — is
+/// still correctly attributed to the session whose home it serves.
+///
+/// Cost: one filesystem read per session per status invocation. On a
+/// 133-session box that's 133 small reads (a few ms total) — bounded
+/// + acceptable. The map is fresh per call; no caching, no staleness.
+pub fn pid_to_session_map() -> HashMap<u32, String> {
+    let mut out = HashMap::new();
+    let sessions = match list_sessions() {
+        Ok(v) => v,
+        Err(_) => return out,
+    };
+    for info in sessions {
+        if let Some(pid) = session_daemon_pid(&info.home_dir) {
+            out.insert(pid, info.name);
+        }
+    }
+    out
 }
 
 fn is_process_live(pid: u32) -> bool {
@@ -1549,6 +1580,75 @@ mod tests {
             found,
             "by-key home must be enumerated: {:?}",
             sessions.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pid_to_session_map_builds_from_session_pidfiles() {
+        // #173 follow-up (#174 hotfix removed --session arg from
+        // supervisor children): wire status orphan annotation now
+        // maps pid → session via per-session pidfiles. Walk should
+        // find each session whose `<home>/state/wire/daemon.pid`
+        // contains a valid pid, and IGNORE sessions whose pidfile
+        // is absent or unreadable.
+        let _guard = crate::config::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!("wire-p2s-{}", rand::random::<u32>()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("sessions");
+        // Three by-key sessions. Two have pidfiles, one doesn't.
+        let mk_session = |key: &str, handle: &str| -> PathBuf {
+            let home = root.join("by-key").join(key);
+            let cfg = home.join("config").join("wire");
+            std::fs::create_dir_all(&cfg).unwrap();
+            std::fs::write(
+                cfg.join("agent-card.json"),
+                format!(
+                    r#"{{"did":"did:wire:{handle}-6e301ab1","handle":"{handle}","verify_keys":{{}}}}"#
+                ),
+            )
+            .unwrap();
+            home
+        };
+        let h1 = mk_session("abc123def4567890", "alpha-aurora");
+        let h2 = mk_session("def456abc7890123", "beta-blossom");
+        let _h3 = mk_session("0000aaaabbbbcccc", "gamma-gorge");
+        // h1 / h2 get pidfiles (JSON form + legacy-int form for coverage);
+        // h3 gets none.
+        let state1 = h1.join("state").join("wire");
+        let state2 = h2.join("state").join("wire");
+        std::fs::create_dir_all(&state1).unwrap();
+        std::fs::create_dir_all(&state2).unwrap();
+        std::fs::write(state1.join("daemon.pid"), r#"{"pid": 12345}"#).unwrap();
+        std::fs::write(state2.join("daemon.pid"), "67890").unwrap();
+
+        // SAFETY: ENV_LOCK is held, serializing all env access.
+        unsafe { std::env::set_var("WIRE_HOME", &h1) };
+        let map = super::pid_to_session_map();
+        unsafe { std::env::remove_var("WIRE_HOME") };
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // h1 / h2 present, h3 absent. SessionInfo.name is the handle
+        // derived from the card when the home is initialized
+        // (list_sessions's mk helper overrides name = handle in that
+        // case; by-key hash is only the fallback for uninitialized
+        // homes). That's exactly the production label `wire status`
+        // already prints for sessions.
+        assert_eq!(
+            map.get(&12345).map(String::as_str),
+            Some("alpha-aurora"),
+            "pid 12345 should map to the handle for h1"
+        );
+        assert_eq!(
+            map.get(&67890).map(String::as_str),
+            Some("beta-blossom"),
+            "pid 67890 should map (legacy-int pidfile form, handle for h2)"
+        );
+        // Sanity: no entry for an unrelated pid.
+        assert!(
+            !map.contains_key(&99999),
+            "synthetic missing pid should not appear in the map"
         );
     }
 
