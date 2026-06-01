@@ -393,6 +393,24 @@ pub enum Command {
         /// Run a single sync cycle and exit (useful for cron-driven setups).
         #[arg(long)]
         once: bool,
+        /// v0.14.2 (#162): supervisor mode — read the session registry +
+        /// fork-exec one child `wire daemon` per initialized session,
+        /// each with its own WIRE_HOME pinned. Closes the launchd-blind
+        /// session-isolation gap honey-pine reported: with no cwd
+        /// context, a single launchd-spawned daemon resolves the
+        /// default WIRE_HOME and silently skips every other session.
+        /// Operator-facing: install this mode via `wire service install`
+        /// — the plist now uses `--all-sessions` so every session syncs
+        /// at login without the operator running N tmux panes.
+        #[arg(long)]
+        all_sessions: bool,
+        /// v0.14.2 (#162): run the daemon loop pinned to a specific
+        /// named session by setting WIRE_HOME for the process. The
+        /// supervisor (`--all-sessions`) spawns children with this
+        /// flag; operators can also use it directly for a one-session
+        /// foreground daemon outside the supervisor.
+        #[arg(long)]
+        session: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -1731,8 +1749,10 @@ pub fn run() -> Result<()> {
         Command::Daemon {
             interval,
             once,
+            all_sessions,
+            session,
             json,
-        } => cmd_daemon(interval, once, json),
+        } => cmd_daemon(interval, once, all_sessions, session, json),
         Command::PairHost {
             relay,
             yes,
@@ -5779,7 +5799,52 @@ fn cmd_forget_peer(handle: &str, purge: bool, as_json: bool) -> Result<()> {
 
 // ---------- daemon (long-lived push+pull sync) ----------
 
-fn cmd_daemon(interval_secs: u64, once: bool, as_json: bool) -> Result<()> {
+fn cmd_daemon(
+    interval_secs: u64,
+    once: bool,
+    all_sessions: bool,
+    session: Option<String>,
+    as_json: bool,
+) -> Result<()> {
+    // v0.14.2 (#162): supervisor mode is mutually exclusive with --once and
+    // --session — the supervisor IS the multi-session orchestrator, and
+    // --once is a single-cycle exit (no supervision). Surface loudly
+    // rather than silently picking one branch.
+    if all_sessions {
+        if once {
+            bail!("--all-sessions and --once are mutually exclusive (supervisor runs forever)");
+        }
+        if session.is_some() {
+            bail!(
+                "--all-sessions and --session are mutually exclusive (supervisor manages every session, not a single named one)"
+            );
+        }
+        return crate::daemon_supervisor::run_supervisor(interval_secs, as_json);
+    }
+    // v0.14.2 (#162): pin this process's WIRE_HOME to the named session's
+    // home dir BEFORE any config read. Used by the supervisor when it
+    // fork-execs children, and operator-facing when running a one-session
+    // foreground daemon outside launchd.
+    if let Some(ref name) = session {
+        let home = crate::session::session_dir(name)
+            .with_context(|| format!("resolving session home for --session {name}"))?;
+        if !home.exists() {
+            bail!(
+                "session '{name}' not found — run `wire session list` to see initialized sessions"
+            );
+        }
+        // SAFETY: cmd_daemon is the one process-lifetime entrypoint that
+        // chooses a session. No other thread reads WIRE_HOME yet.
+        unsafe {
+            std::env::set_var("WIRE_HOME", &home);
+        }
+        if !as_json {
+            eprintln!(
+                "wire daemon: pinned to session '{name}' (WIRE_HOME={})",
+                home.display()
+            );
+        }
+    }
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
     }

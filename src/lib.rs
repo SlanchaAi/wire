@@ -15,6 +15,7 @@ pub mod character;
 pub mod cli;
 pub mod config;
 pub mod daemon_stream;
+pub mod daemon_supervisor;
 pub mod diag;
 pub mod endpoints;
 pub mod enroll;
