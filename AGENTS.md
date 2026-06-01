@@ -37,7 +37,7 @@ wire tail [<name>]              # listen
 ### Zero-config bootstrap (v0.12)
 
 ```bash
-wire up <nick>@wireup.net        # identity + relay bind + claim + local dual-bind + daemon, one shot
+wire up @wireup.net              # identity + relay bind + claim + local dual-bind + daemon, one shot (handle is DID-derived per the one-name rule)
 ```
 
 `wire up` additively binds a local relay (`127.0.0.1:8771`) alongside the federation slot for sub-millisecond same-box sister routing. `--with-local <url>` overrides the probe; `--no-local` skips it. `wire bind-relay <url>` is additive too — you can hold a local relay AND a federation relay at once (`--scope`, `--replace`).
@@ -191,7 +191,7 @@ This path is rarely needed in practice — federation dial via `.well-known/wire
 ## After pairing
 
 ```bash
-wire daemon start                                # background sync of inbox/outbox vs relay
+wire daemon                                      # background sync of inbox/outbox vs relay (started by `wire up`; run manually if needed)
 wire send <peer> claim "hello from $(whoami)"
 wire tail <peer>                                 # stream verified events
 ```

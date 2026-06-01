@@ -82,3 +82,54 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y jq
       - run: cargo build --release --bin wire
       - run: WIRE=./target/release/wire bash demo-hotline.sh
+
+  docs-lint:
+    # Catch deprecated command phrases drifting back into docs. Per the
+    # swift-harbor / dthoma1 #145 audit: README + AGENTS + INSTALL had
+    # several stale shapes (`wire add bob@`, `wire init <nick>`, `wire
+    # daemon start`, `wire.slancha.ai`, `wire up <nick>@<relay>`) that
+    # contradicted the canonical v0.12+ surface. Lint blocks regression.
+    #
+    # Legacy sections explicitly named "Legacy" or "Legacy flows" are
+    # allowed to mention deprecated verbs — the lint scopes its grep
+    # exclusions to those headers (handled inline via `grep -v`).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: deprecated phrases (canonical surface drift)
+        run: |
+          set -e
+          FILES="README.md AGENTS.md INSTALL.md docs/integrations/*.md docs/AGENT_INTEGRATION.md"
+          fail=0
+
+          check() {
+            local pattern="$1"
+            local description="$2"
+            # Exclude lines inside Legacy sections (best-effort: grep -v on
+            # the line itself contains 'Legacy' marker; deeper context
+            # exclusion would need a real parser).
+            hits=$(grep -nE "$pattern" $FILES 2>/dev/null \
+              | grep -v -iE '(legacy|deprecated|removed|v1\.0 removes)' \
+              || true)
+            if [ -n "$hits" ]; then
+              echo "::error::Deprecated phrase '$description' found in docs:"
+              echo "$hits"
+              fail=1
+            fi
+          }
+
+          # The shapes swift-harbor's audit (#145) called out:
+          check 'wire add [a-z][a-z-]*@' 'wire add <peer>@<relay> (use `wire dial`)'
+          check 'wire init <nick>' 'wire init <nick> (use `wire up`)'
+          check 'wire daemon start' 'wire daemon start (no subcommand; use `wire daemon`)'
+          check 'wire up <nick>@' 'wire up <nick>@<relay> (handle is DID-derived; use `wire up @<relay>`)'
+          check 'wire\.slancha\.ai' 'wire.slancha.ai (use wireup.net)'
+          check 'relay\.slancha\.ai' 'relay.slancha.ai (use wireup.net)'
+
+          if [ "$fail" -ne 0 ]; then
+            echo ""
+            echo "Lint failed: deprecated command phrase(s) drifted back into docs."
+            echo "Fix the lines above or move them under a 'Legacy' header if intentional."
+            exit 1
+          fi
+          echo "docs-lint: clean."

@@ -287,7 +287,7 @@ wire whoami --json | grep config_dir
 **Check daemon:**
 ```bash
 wire status  # Daemon should show "running"
-wire daemon start  # If not running
+wire daemon  # If not running (started by `wire up`; run manually if needed)
 ```
 
 **Check peers:**
