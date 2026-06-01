@@ -2394,14 +2394,24 @@ fn cmd_status(as_json: bool) -> Result<()> {
         // diagnostic time. Best-effort: cmdline read can race exit
         // → fields just stay absent rather than failing the status
         // call.
+        // v0.14.2 #173 follow-up (post-#174 hotfix): the supervisor's
+        // children no longer carry `--session <name>` in their cmdline
+        // (WIRE_HOME env is the sole contract), so the pid → session
+        // mapping has to walk per-session pidfiles instead. The
+        // cmdline `parse_session_arg` path is kept as a fallback for
+        // operator-spawned `wire daemon --session foo` runs.
+        let pid_session_map = crate::session::pid_to_session_map();
         let orphans_detail: Vec<Value> = snap
             .orphan_pids
             .iter()
             .map(|pid| {
                 let cmdline = crate::platform::pid_cmdline(*pid);
-                let session = cmdline
-                    .as_deref()
-                    .and_then(crate::platform::parse_session_arg);
+                let session = pid_session_map.get(pid).cloned().or_else(|| {
+                    cmdline
+                        .as_deref()
+                        .and_then(crate::platform::parse_session_arg)
+                        .map(str::to_string)
+                });
                 json!({
                     "pid": pid,
                     "cmdline": cmdline,
