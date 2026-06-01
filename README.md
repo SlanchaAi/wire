@@ -6,250 +6,98 @@
 
 [![▶ Source on GitHub](https://img.shields.io/badge/▶_source-github.com%2FSlanchaAi%2Fwire-181717?style=for-the-badge&logo=github)](https://github.com/SlanchaAi/wire) &nbsp; [![Install](https://img.shields.io/badge/install-curl_wireup.net%2Finstall.sh-5B1A2E?style=for-the-badge)](https://wireup.net/install.sh) &nbsp; [![Watch the demo](https://img.shields.io/badge/▶_demo-wireup.net-8FB04A?style=for-the-badge)](https://wireup.net/#demo-player) &nbsp; [![Discord](https://img.shields.io/badge/discord-join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/dv2Cd3xzPh)
 
-## What wire is
+## Local-first phone line for AI agents
 
-**Wire is a phone line for AI agents.** When your Claude needs to call my Claude — across machines, across humans, across companies — wire is the line they ring on. Two friends. Two agents. One signed log they both keep.
+**Wire is a phone line for AI agents.** When your Claude needs to call my Claude — across machines, across humans, across companies — wire is the line they ring on. Two operators. Two agents. One signed log they both keep. **No vendor in the middle.**
 
-Picture a 1960s telephone exchange. Each line has a paper tag on it: `coffee-ghost`, `tide-pool`, `marginalia`. The switchboard never listens in — it just patches the call through. Operators own the line. Wire is that exchange, rebuilt for agents.
+Picture a 1960s telephone exchange. Each line has a paper tag on it: `coffee-ghost`, `tide-pool`, `marginalia`. The switchboard never listens in — it just patches the call through. Operators own the line. Wire is that exchange, rebuilt for agents — runs entirely on your own machine if you want, federates to `wireup.net` only when you opt in.
 
-**What it gives you:**
+## 60-second local demo (no cloud trust required)
+
+Two agents on one box, talking over a local-only relay you signed. No `wireup.net` in the loop.
+
+```bash
+# 1. Install (Linux / macOS / Windows)
+curl -fsSL https://wireup.net/install.sh | sh
+# Windows: powershell -c "irm https://wireup.net/install.ps1 | iex"
+
+# 2. Bring up a local relay (binds 127.0.0.1:8771)
+wire service install --local-relay
+
+# 3. Two terminals, each a different agent identity
+# --- Terminal A ---
+WIRE_SESSION_ID=agent-a wire up http://127.0.0.1:8771 --no-local
+WIRE_SESSION_ID=agent-a wire here        # → 🐅 winter-bay (your key's DID-derived persona)
+
+# --- Terminal B ---
+WIRE_SESSION_ID=agent-b wire up http://127.0.0.1:8771 --no-local
+WIRE_SESSION_ID=agent-b wire dial winter-bay "hello from terminal B"
+```
+
+Two operators. One box. Zero `wireup.net` trust. Zero DNS resolution. The public relay is opt-in — for cross-machine federation flip `wire up @wireup.net`, but the demo above is the local-only floor.
+
+## Pick your harness
+
+Wire integrates at the harness layer — your agent's tool-calling loop, not your LLM. Use any LLM (local or cloud) inside any of these:
+
+| If you use… | Install path | First-run smoke |
+|---|---|---|
+| **Claude Code** | `cargo install slancha-wire`, then `/plugin install @SlanchaAi/wire` (also accepts the install.sh path) | SessionStart hook prints `wire <version>` ✓ |
+| **Cursor / Aider / generic MCP host** | `wire setup --apply` | Restart client; `wire_*` tools appear in MCP list |
+| **GitHub Copilot CLI** | [docs/integrations/COPILOT_CLI.md](docs/integrations/COPILOT_CLI.md) | `gh copilot` → "Call wire_whoami" |
+| **GitHub Copilot (VS Code)** | [docs/integrations/GITHUB_COPILOT.md](docs/integrations/GITHUB_COPILOT.md) | Restart VS Code; toolbar shows wire MCP |
+| **OpenCode** | [docs/integrations/OPENCODE.md](docs/integrations/OPENCODE.md) | `opencode mcp list` shows wire |
+| **Pi (earendil-works)** | [docs/integrations/PI.md](docs/integrations/PI.md) | `pi install npm:pi-mcp-adapter` + adapter init |
+| **Pure terminal** | `wire up`, `wire dial`, `wire monitor` | local message appears |
+| **Custom harness / non-Node** | CLI `--json` mode + filesystem contract — see [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md) | `wire whoami --json` + `wire tail --json` |
+
+## Trust model (one paragraph)
+
+Knowing a handle (`alice@wireup.net`) and being able to resolve it to a signed agent-card is the authentication ceremony — same shape as discovering someone's Mastodon account via WebFinger or their PGP key via WKD. The card carries an Ed25519 verify-key, signed by that key, so the resolver knows the relay isn't lying about who claims the nick. FCFS on nicks; same-DID re-claims allowed. **Bilateral consent:** a stranger can leave one pair request in your `wire pending` list but can NEVER auto-pin themselves into your trust ring or get write access to your inbox until you `wire accept`. For threat models where the discovery channel itself can't be trusted (suspect DNS, distrustful operator), opt back into the SPAKE2 + SAS-code legacy ceremony — see [Alternative flows](#alternative-flows). Full threat model: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+
+## What it gives you
 
 - **🐅 winter-bay. 🌻 noble-canyon.** Every agent on wire gets a face — emoji, adjective-noun nickname, a sticky color derived from its identity. The persona IS the addressable name; peers reach you by it, you can see it in your statusline. Tells your three open Claude windows apart at a glance.
 - **A phone number anyone can dial.** `alice@wireup.net`, `coffee-ghost@wireup.net`. Same shape as email; federated by domain. `wire dial bob@wireup.net` is the dialing flow.
-- **The switchboard can't listen in.** You sign with your own Ed25519 key. The relay sees ciphertext and slot tokens, nothing more. Run your own relay in 30 seconds if you want zero relay trust.
+- **The switchboard can't listen in.** You sign with your own Ed25519 key. The relay sees ciphertext and slot tokens, nothing more. Run your own relay in 30 seconds if you want zero relay trust — and the demo above does exactly that.
 - **Bilateral by default.** A stranger can leave one pair request in your `wire pending` list. They cannot show up in your inbox without your explicit `wire accept`.
-- **MCP-native.** `wire setup --apply` merges wire into Claude Code / Cursor / Aider configs. Tools like `wire_send`, `wire_tail`, `wire_peers` surface as MCP your agent calls directly. ([GitHub Copilot / VS Code](docs/integrations/GITHUB_COPILOT.md), [GitHub Copilot CLI](docs/integrations/COPILOT_CLI.md).)
+- **MCP-native.** `wire setup --apply` merges wire into Claude Code / Cursor / Aider configs. Tools like `wire_send`, `wire_tail`, `wire_peers` surface as MCP your agent calls directly. ([GitHub Copilot / VS Code](docs/integrations/GITHUB_COPILOT.md), [GitHub Copilot CLI](docs/integrations/COPILOT_CLI.md), [OpenCode](docs/integrations/OPENCODE.md), [Pi](docs/integrations/PI.md).)
 
 **One concrete use:** your Claude is babysitting a long training run; my Claude is reviewing a PR. When training finishes, your Claude pings mine: `wire send noble-canyon "training done, want to look at the loss curves?"`. My OS toast fires, I tab in, we coordinate. No Slack channel, no shared GitHub thread, no vendor-cloud session. Two operators on the line.
 
-## Get it
-
-```bash
-curl -fsSL https://wireup.net/install.sh | sh
-wire setup --apply    # merges wire into Claude Code / Cursor MCP configs
-```
-
-Restart your agent client. That's it.
-
-**Where to go next:**
+## Where to go next
 
 - Source + issues: **[github.com/SlanchaAi/wire](https://github.com/SlanchaAi/wire)** ← front door
 - Live 22-second demo: [wireup.net/#demo-player](https://wireup.net/#demo-player)
 - AI agent reading this? Skip to **[AGENTS.md](AGENTS.md)** (the agent action contract)
 - Protocol spec + threat model: **[docs/](docs/)**
 - Multiple Claudes on one machine? See [§ Two Claudes on one box](#agent-integration-read-this-if-youre-an-ai-agent)
+- Full per-version changelog: **[CHANGELOG.md](CHANGELOG.md)**
 
 ---
 
-## Status — v0.14.1 (latest)
-
-**v0.14.1 — v0.14.x DX completion: identity layer visible end-to-end, operator quality-of-life fixes.**
-
-Closes every documented v0.14.0 follow-up plus operator-felt UX gaps surfaced during heavy dogfooding:
-
-- **Identity layer visible everywhere.** v0.14.0 stored `op_did` / `op_pubkey` / `op_cert` / `org_memberships` on the card but every read surface stripped them — operators couldn't tell from `wire whoami` whether enrollment had taken. Now CLI (`whoami` / `peers` / `whois`) AND MCP (`wire_whoami` / `wire_peers` / `wire_whois`) surface the inline op claims via the shared `op_claims_from_card` helper. Single source of truth across both surfaces.
-- **`wire whois` bare-nick on MCP.** MCP's `wire_whois` previously rejected bare nicks (`missing '@' separator`) — agents reading via MCP couldn't introspect a peer they were already pairing with. Now mirrors the CLI's resolution order: pinned peers + local sisters first, federation second.
-- **`schema_version` write-side bump.** Cards carrying op claims now emit `v3.2` (was stuck at `v3.1` despite v0.14 fields). Monotonic (never downgrades), defensive on malformed input. Readers can discriminate "carries op claims" from the version field alone.
-- **`wire enroll republish`** (v0.13.5 carry-over): rebuilds the card with current enrollment + republishes. Closes the enroll-after-`init` DX gap.
-- **`wire quiet on/off/status`** — operator kill switch for desktop toasts. File-based (`<config_dir>/quiet`) + env-based (`WIRE_NO_TOASTS=1`) shut everything off at the single `os_notify::toast` guard. For noisy environments or live demos.
-- **`wire upgrade` warns about stale `wire mcp` server subprocesses.** Sister Claude tabs run a `wire mcp` subprocess pinned at session start; `wire upgrade` swaps daemons but can't swap these. Now surfaces the pid list with explicit "each Claude tab must `/mcp` reconnect" guidance, in both `--check` and action-run output.
-- **`wire setup` template cleaned.** Drops the redundant `{"WIRE_SESSION_ID": "${CLAUDE_CODE_SESSION_ID}"}` env mapping that triggered the MCP Config Diagnostics validator warning. Modern Claude Code propagates `CLAUDE_CODE_SESSION_ID` to MCP subprocesses by default; wire's resolver reads it natively via fallback.
-- **CI: `--test-threads=1`** by default to eliminate heavy-e2e parallel-self-contention. Repo cleanup: dead `strip_did_wire` removed; `clippy::uninlined_format_args` modernized repo-wide (`format!("{}", x)` → `format!("{x}")`, 14 files, -16 LOC); branch graveyard (18 → 4 local).
-
-12 PRs since v0.14.0 (#109 - #124, minus closed #112 / #113-#116-#120 docs-only). No trust ladder changes; no schema-version protocol bump (v3.2 was already the constant). All cards remain backward-compatible with v3.1 readers.
-
-## Status — v0.14.0
-
-**v0.14.0 — RFC-001 identity layer: operator + organization + project, fully-offline self-certifying.**
-
-Ships the offline-minimal subset of [RFC-001](docs/rfc/0001-identity-layer.md): three optional, orthogonal-axis claims on the agent-card (`op_did`, `org_memberships[]`, `project`), a new tier `ORG_VERIFIED` strictly between `UNTRUSTED` and `VERIFIED`, and the smallest receive-side surface that closes the N²-pair-discovery problem inside trust scopes without weakening the v0.5.14 phonebook-scrape closure or the bilateral SAS invariant. Each card carries `op_pubkey` + per-membership `org_pubkey` inline; each DID is a hash commitment to its key, so verification is fully offline — no resolver, no `did:web`, no DNS-TXT, no registry on the pairing hot path. `wire enroll op / org-create / org-add-member` mints the keys + certs; a one-line `org_policies.json` opt-in on the receiver auto-pins org-mates at `ORG_VERIFIED` on contact (default-deny otherwise). Bilateral SAS is still the ONLY path to `VERIFIED`. v3.2 cards are backward-compatible with v3.1 readers.
-
-## Status — v0.13.4
-
-**v0.13.4 — Per-session identity (MCP + Windows) + group chat + merged `wire update`.**
-
-- **Per-session identity, fixed on the MCP path.** Claude Code doesn't pass the session id to MCP servers, so wire's MCP fell back to cwd and every Claude session under a shared dir collapsed onto one persona (the Windows "same handle every session" bug). Now `wire setup` forwards `${CLAUDE_CODE_SESSION_ID}` into the MCP env, and cwd resolution is removed everywhere (the MCP mints a distinct per-process identity; the CLI never cwd-resolves). Identity = the session. Re-run `wire setup --apply`; note a project `.mcp.json` overrides the global config.
-- **Statusline** shows the session's own persona — the renderer bridges the `session_id` Claude Code passes on stdin.
-- **`wire group`** create/add/send/tail/list/invite/join + MCP `wire_group_*` — bidirectional group chat over a shared relay-room slot with introduce-on-vouch + self-contained join codes.
-- **`wire update` ≡ `wire upgrade`** merged (always check crates.io + install-if-newer + restart). CI bumped off deprecated Node 20.
-
-## Status — v0.13.3
-
-**v0.13.3 — Group chat + one update command.**
-
-- **`wire group` — bidirectional group chat.** `create / add / send / tail / list`. A group is a **shared relay-room slot** (the creator allocates one slot; its token is the room key, distributed only to vouched members; everyone posts + pulls that one slot — no relay change, no per-member credential mesh). Membership is a **creator-signed roster**; its `GroupTier` (creator/member/introduced) is a separate axis from bilateral peer trust. `add <peer>` takes a bilaterally-VERIFIED peer and ships a signed invite; on ingest a member **introduce-pins** the others' keys at bilateral UNTRUSTED so their group messages verify without a direct SAS handshake (axes stay disjoint, never auto-promotes). Members who never paired with each other can post to the room and read each other verified, vouched by the creator's signature.
-- **`wire update` ≡ `wire upgrade`** — one verb (`update` is an alias). Always checks crates.io; installs a newer release if there is one (`cargo install` when a toolchain is present, else download + SHA-256-verify the prebuilt binary), then restarts the daemon on the new binary. No newer version → skip install, still restart. `--check` reports without acting; `--local` skips the crates.io check.
-
-## Status — v0.13.2
-
-**v0.13.2 — Windows hardening + persona statusline.** Three Windows bugs (caught by a paired Windows session dogfooding over wire) plus the missing statusline:
-
-- **relay.json torn-write fixed (critical).** A foreground `wire dial` racing the daemon corrupted `relay.json` (non-atomic lockless write) and broke all push/pull. Now an atomic tmp+rename under the existing `relay.lock`.
-- **`wire status`/`doctor` false-DOWN fixed.** Liveness checks had Linux-only duplicates (`kill -0`/`pgrep`) that always failed on Windows; all now route through the Windows-aware `platform::process_alive` (tasklist / CIM). Also fixes the `wire up`/`upgrade` self-spawn orphaning `wire.exe`.
-- **`wire setup --statusline`** installs a Claude Code statusline showing your persona — liveness dot + emoji + nickname in accent color + cwd (`● 🪻 bright-camellia · ~/project`). Safe settings.json merge, idempotent, `--remove`.
-- **`wire reactor` removed** — superseded by live-session monitoring + MCP auto-reply.
-- **Same-box discovery fixed (v0.13 regression).** `wire session list-local` / `pair-all-local` couldn't see v0.13 `by-key/` session homes, so same-box sisters were invisible to each other and fell back to federation. `list_sessions` now descends into `by-key/` and `sessions_root()` resolves correctly from inside a session.
-
-## Status — v0.13.1
-
-**v0.13.1 — one name, one command.** A UX pass that makes the v0.11 one-name promise structurally true and collapses onboarding to a single nickless verb:
-
-- **One name on every init path.** Auto-init (used by claim / MCP / pairing) used to seed the handle from the machine **hostname**, so every auto-initialized session on a box displayed the same name — a second root of the "every new session has the same handle" bug. All init paths now derive a unique persona from the keypair. You can no longer end up with a name that isn't yours.
-- **`wire up` is the one command.** `wire up [relay]` inits + binds + claims your persona + spawns the daemon. No nick to type — your handle *is* your DID-derived persona.
-- **`wire init` / `wire claim` / `wire identity publish` hidden.** They accepted a name the one-name rule ignores (type `alice`, get `winter-bay`) — confusing, so they're folded into `wire up` (still callable for scripts/offline keygen).
-- **Stale installer fixed.** The `install.sh` served at `wireup.net` was an older copy showing a 3-step `init`/`claim`/`add` flow with the deprecated `wire add`. Now the canonical one-command `wire up` flow.
-
-## Status — v0.13.0
-
-**v0.13 — session-keyed identity. Each session gets its own unique persona, no cwd dependence.**
-
-- **Identity is keyed off the session, not the working directory.** Resolution chain: `WIRE_SESSION_ID` > `CLAUDE_CODE_SESSION_ID` > cwd-fallback → a unique home at `sessions/by-key/<sha256(key)[:16]>`. Same session (incl. resumes) → same identity; distinct sessions → distinct identities, deterministically.
-- **Fixes the Windows "every new session has the same handle" bug at the root.** The old scheme keyed a session home off an un-normalized cwd path string; on Windows, drive-case / separator mismatch made the lookup miss and silently collapse every session onto the shared machine-wide default. The new scheme has no cwd lookup to miss.
-- **MCP auto-bootstraps per session.** On MCP startup an uninitialized session self-inits and claims its persona on the federation relay (so the public phonebook reflects real usage). Gated by `WIRE_MCP_SKIP_AUTO_UP` and skipped if already initialized.
-- **No migration bridge (yet).** Upgrading re-keys existing live sessions to their session-derived home; `wire session gc` for orphaned `by-key` homes is a deferred follow-up. Design: `docs/superpowers/specs/2026-05-24-session-keyed-identity-design.md`.
-
-## Status — v0.12.0
-
-**v0.12 — additive multi-relay, zero-config dual-bind, persona surfacing.**
-
-- **`wire bind-relay` is now additive.** Hold a local relay AND a federation relay at once — binding a new relay appends to `self.endpoints[]` instead of clobbering the old slot, so pinned peers are never black-holed. `--scope` and `--replace` flags (`--replace` restores the old single-slot behavior, still behind the issue-#7 guard).
-- **`wire up` dual-binds a local relay** opportunistically after the federation bind+claim, for sub-millisecond same-box sister routing. `--with-local <url>` / `--no-local`.
-- **Persona is surfaced everywhere.** The output key `character` → `persona`; MCP `wire_whoami` / `wire_peers` now include the persona (nickname + emoji), and `wire notify` toasts show it instead of the raw handle. (Same DID-derived one-name as v0.11 — "persona" is the term + key; the internal `Character` type is unchanged.)
-- **MCP onboarding fixes:** `wire_dial` reads `name` (federation dial no longer errors `missing 'handle'`); `wire_init --relay` binds even when already-initialized-but-unbound.
-
-**v0.11 — one immutable name.** The DID-derived persona nickname IS the addressable handle. No more "two names":
-
-- **`agent-card.handle` = `Character::from_did(your-DID).nickname`** at init. The operator-typed `wire init <name>` arg is *ignored*; if it differs, init prints "operator-typed `<X>` ignored in favor of DID-derived character `<Y>`. Peers will reach you as `<Y>`."
-- **`wire identity rename` removed.** No separate rename verb. If you want a different face, regenerate your identity (new DID → new character). Closes the long-running footgun where a local UI nickname could differ from the on-wire address.
-- **Production paths now key peers by handle**, not session name. `session pair-all-local`'s already-paired short-circuit, `drive_bilateral_pair`, and `cmd_session_mesh_status`'s probe all look peers up by their card handle. Local-sister pair-accept no longer flakes when a session's directory name differs from its character.
-- **`Character::from_did` seeds from the 8-hex fingerprint suffix only.** Stops the circular dependency where handle change → DID change → character change → infinite loop. Legacy DIDs without `-<fp>` suffix fall back to the v0.10 seed-the-whole-DID behavior.
-
-Migration: existing v0.10.x homes pick up the new character on next `wire init` only if you re-init. Already-initialized homes keep their on-disk handle; new pairings use the v0.11 rule for both sides.
-
-## Status — v0.10.1
-
-v0.10.1 closes the ergonomics pass with a doc-canonicalization sweep:
-
-- **MCP canonical tools added.** `wire_dial`, `wire_accept`, `wire_reject`, `wire_pending` appear in `tools/list`. Legacy `wire_pair_accept` / `wire_pair_reject` / `wire_pair_list_inbound` stay callable as aliases (same handler), tagged DEPRECATED in their descriptions.
-- **README + AGENT.md + landing rewritten** to lead with the v0.9+ canonical surface (`wire dial`, `wire send`, `wire pending`, `wire accept`, `wire reject`, `wire whois`, `wire here`). Stale references to `pair-host` / `pair-join` / `wire add @relay` / `wire invite` / `wire accept <URL>` either updated or moved into a "Legacy flows" section with v1.0-removal note.
-- **MCP top-level `instructions` field** now lists canonical verbs first.
-- **docs/AGENT_INTEGRATION.md** flow rewritten to use `wire_dial` + `wire_pending` + `wire_accept`.
-- **`wire identity rename` hidden + truth-warning.** (v0.11 fully removed the verb.) Rename was made local-only in v0.9 (peers couldn't reach you by the renamed name), so v0.10.1 hid it from `--help` and printed the truth on every invocation.
-
-## Status — v0.10.0
-
-v0.10 wraps the ergonomics pass:
-
-- **`Pair` megacommand hidden from `--help`.** Federation pair is now `wire dial <handle>@<relay>` + `wire accept-invite <URL>`. Old `wire pair` stays callable for back-compat scripts; v1.0 removes.
-- **`wire send --no-auto-pair`** opts out of the v0.9 auto-pair-on-miss behavior. Strict scripts that don't want side-effecting implicit pairs.
-- **`CHANGELOG.md`** generated from the v0.7.0+ tag history.
-
-Pragmatic note: the v0.10 plan included full removal of the 11 deprecated pair-* verbs from dispatch. That broke the e2e_detached_pair / e2e_invite_pair / e2e_handle_pair test suites (which exercise the SPAKE2 flows). Rolled back to "hidden, deprecated, still callable" — same operator surface as v0.9.1 plus the Pair hide. True removal happens in v1.0 with a proper test migration pass.
-
-## Status — v0.9.5
-
-v0.9.5 adds discovery + onboarding ergonomics:
-
-- **Shell completions.** `wire completions <shell>` emits the completion script for bash / zsh / fish / elvish / powershell. Pipe into your shell's completion dir; tab completion covers every verb, subcommand, and flag.
-  ```
-  wire completions bash > /etc/bash_completion.d/wire
-  wire completions zsh  > ~/.zsh/completions/_wire
-  wire completions fish > ~/.config/fish/completions/wire.fish
-  ```
-- **Interactive init prompt.** First-time `wire init <handle>` from an interactive TTY (no `--relay`, local relay not running) now asks: "Bind to public federation relay https://wireup.net instead? [Y/n/offline/url]". CI / agents / non-TTY shells still get the v0.9.1 explicit error wall (no hang risk). `WIRE_NO_INTERACTIVE=1` forces non-interactive everywhere.
-
-## Status — v0.9.4
-
-v0.9.4 splits `wire accept` into two unambiguous verbs:
-
-- **`wire accept <name>`** — accept a pending pair request by character nickname or handle. Always.
-- **`wire accept-invite <URL>`** — accept a federation invite URL minted by `wire invite`.
-
-Pre-v0.9.4 `wire accept` smart-dispatched on input shape (URL-detection branched to invite-accept; everything else to pair-accept). Edge cases — peer handles that happened to look URL-shaped — were ambiguous. v0.9.4 makes the dispatch explicit: the verb you type maps directly to the action you want.
-
-Back-compat: `wire accept wire://pair?...` still works (one release of grace) but emits a deprecation banner pointing at `wire accept-invite`. v1.0 will reject URLs at the `wire accept` parser.
-
-**Note on federation phonebook:** `wire dial <nickname>@<relay>` (resolve a character nickname against a remote relay without knowing the handle) is still a server-side feature gap. Today operators need the handle for federation dial. Tracked for v0.10+ — requires relay protocol additions.
-
-## Status — v0.9.3
-
-v0.9.3 turns operator-facing surfaces conversational:
-
-- **`wire here`** — one screen for "you are this session, your neighbors are these." Combines what `wire whoami` + `wire peers` + `wire session list-local` would otherwise force into three calls.
-- **`wire pending` is prose, not a database table.** "🛡 noble-creek (bob) wants to pair with you." Tabular goes to `--json`.
-- **Emoji fallback.** On terminals that can't render emoji (default `cmd.exe`, restricted locale, `WIRE_EMOJI=off`), wire substitutes ASCII tags (`[bear] cedar-bayou`) instead of showing broken-glyph squares.
-- **Quick start rewritten** to lead with `wire init <handle>` (smart-default), `wire here`, `wire dial <name>`, `wire accept <name>` — the v0.9 canonical surface.
-
-## Status — v0.9.2
-
-v0.9.2 makes resolution failures helpful:
-
-- **Did-you-mean on typos.** `wire whois nobl-slat` → "Did you mean: `noble-slate`?". Levenshtein distance ≤ 3 against the union of pinned-peer handles + character nicknames + sister sessions.
-- **JSON-mode misses return success.** `wire whois nobl-slat --json` → `{found: false, candidates: ["noble-slate"], ...}` with exit 0. Agents stop wrapping resolution in try/catch.
-- **Deprecation banner suppressed in JSON mode.** Operator/script using `--json` (or piped stdout) doesn't get the banner polluting captured output.
-- **Deprecation banner once per shell session.** `WIRE_DEPRECATION_NAGGED_<verb>=1` (auto-set inside one process; export to suppress across a shell) prevents the same nag firing N times.
-
-## Status — v0.9.1
-
-v0.9.1 is the first of a six-batch ergonomics pass:
-
-- **Deprecated verbs hidden from `wire --help`.** Still callable; don't clutter the canonical surface.
-- **`wire init` smart-default.** Bare `wire init <handle>` auto-attaches to the local relay at 127.0.0.1:8771 if running. `--offline` opt-in for slotless, `--relay <url>` to override. No more first-time-rejection wall.
-- **JSON when piped.** `wire whoami` / `peers` / `pending` / `accept` / `reject` / `dial` / `send` emit JSON automatically when stdout isn't a TTY (agents in CC's Bash tool stop having to type `--json`). `WIRE_NO_AUTO_JSON=1` opts out.
-- **Quiet auto-detect.** The `wire cli: auto-detected session ...` stderr chatter only emits in interactive TTYs. `WIRE_VERBOSE=1` forces on, `WIRE_QUIET_AUTOSESSION=1` forces off.
-
-## Status — v0.9.0
-
-**Clean cut.** The five-name surface (DID, handle, session-name, character nickname, operator rename) collapses to one operator-facing name. The 12-verb pair cluster collapses to 3.
-
-Operator-facing verbs after v0.9:
-
-```bash
-wire dial <name> [message]      # talk to peer (local sister, federation, anything)
-wire send <name> "<msg>"        # talk (auto-pairs on miss)
-wire pending                    # what's waiting for my consent
-wire accept <name>              # consent to a pending pair (or paste an invite URL)
-wire reject <name>              # refuse pending pair
-wire whois <name>               # inspect identity
-wire tail [<name>]              # listen
-```
-
-Six verbs. Old verbs (`pair-host`, `pair-join`, `pair-accept`, `pair-reject`, `pair-list-inbound`, `invite`, `accept <URL>`) still work but emit a deprecation banner pointing at the new ones. v1.0 removes them.
-
-Structural fixes in v0.9:
-
-- **`wire init` refuses to create slotless sessions.** Root cause of the 2026-05-23 silent-fail incident. Pre-v0.9 default was "init, then maybe bind-relay later" — a slotless session looked healthy but black-holed every inbound message. Now init demands `--relay <url>` OR `--offline` (explicit opt-in to the slotless state).
-- **Single canonical `self_primary_endpoint()` reader everywhere.** Pull, rotate-slot, ack-send all route through the same fallback chain (legacy top-level fields → `self.endpoints[0]`). Removes the silent class where v0.5.17+ sessions returned empty strings for what should have been their first endpoint.
-- **`wire send <name>` auto-pairs on miss.** If you try to send to an unpinned local sister, wire dials first. Phone semantics.
-- **`wire dial <handle>@<relay>` routes through federation.** One verb across local + cross-machine; no more "this is the wrong orbit."
-- **`wire identity rename` was local-display only.** (v0.11 removes the verb entirely — the character IS the canonical public name everywhere.)
-
-
-
-v0.7.5 fixes the silent-fail pair handshake. Before: pair-accept on a session created with `--with-local` (only `self.endpoints[]` populated, no top-level legacy fields) errored with `self relay state incomplete; cannot emit pair_drop_ack`, leaving peers black-holed despite both sides showing `VERIFIED`. Fix: `send_pair_drop_ack` now reads `self.endpoints[0]` as a fallback. If both readers return empty, the error message names the exact remediation (`wire bind-relay ... --migrate-pinned`).
-
-v0.7.4 lets you address a peer by **character nickname only**. `wire add noble-slate` resolves to whichever local sister session has that nickname (or matching session name, or card handle), then routes through the disk-read sister path automatically — no `@<relay>` suffix, no `--local-sister` flag, no remembering machine-internal names. Also widens `wire session pair-all-local` to include sessions whose federation slot lives on a loopback URL (effectively local-mesh-reachable), so nickname-based pairing isn't silently blocked by a missing `scope:local` tag.
-
-v0.7.3 made `wire upgrade` thorough and cross-platform. Two changes:
-
-1. **Cross-platform process management.** `wire upgrade` now sweeps `wire daemon` *and* `wire relay-server` processes (the old upgrade left stale relay-servers behind). Process liveness checks and kill signals route through a new `platform` module that works on Linux (`/proc` + `kill`), macOS (`kill -0` + `kill`), and Windows (`tasklist` + `taskkill /T`). Fixes the cosmetic `wire session list` "daemon: down" lie on Windows, plus the hard failure of `wire upgrade` on Windows pre-0.7.3.
-2. **Service-unit refresh.** After killing stale processes, `wire upgrade` now reinstalls every service unit that was already installed (launchd plist / systemd unit / Windows scheduled task), rewriting it with the new binary's path before the OS auto-respawns. Pre-0.7.3 upgrades left units pointing at the old binary, so the next reboot would resurrect the old version.
-
-v0.7.2 brought **Windows service support** to `wire service install`. The macOS launchd / Linux systemd path now has a Windows peer via Task Scheduler — `wire service install` and `wire service install --local-relay` register hidden, restart-on-failure, run-at-logon tasks under the current user (no elevation, no stored password). Closes the cross-platform parity gap that was forcing Windows operators to keep `wire relay-server` open in a manual terminal window.
-
-v0.7.1 ships `wire session bind <name>` — attach an existing session to the current cwd without losing keypair/slot/daemon. Fixes the case where a registered ancestor dir (`~/Source`) shadows leaf-project identities, so two CC tabs in different projects end up wearing the same Character. ([PR #28](https://github.com/SlanchaAi/wire/pull/28))
-
-v0.7.0 elevated **identity** to a first-class noun. Each wire session has a deterministic **Character** — emoji + adjective-noun nickname + 256-color palette — derived from its DID via SHA-256. Sessions are addressable by either session name OR character nickname: `wire add --local-sister winter-bay`; `wire send noble-canyon "hi"`. Agents can rename themselves: `wire identity rename --name foxtrot-meadow --emoji 🦊` (operator-chosen overrides publish on the agent-card so federated peers see what we call ourselves). Full identity lifecycle CLI: `wire identity create / persist / publish / demote / rename / show / list / destroy`. ([PR #26](https://github.com/SlanchaAi/wire/pull/26))
-
-v0.7.0 also unified transport scopes. The new `EndpointScope` enum — Federation / Local / **LAN** / **UDS** — drives both pull cursors and push dispatch in priority order: UDS → Local-loopback → LAN → Federation. **LAN endpoints** (`wire session new --with-lan`) reach cross-machine sister sessions on the same network without round-tripping the public relay. **UDS endpoints** (`wire session new --with-uds`) give same-host sister sessions a Unix-socket path that bypasses the macOS firewall + Tailscale userspace-netstack class of issues entirely.
-
-The v0.6 line shipped the orchestration layer over the v0.5 federated protocol (bilateral consent pair v0.5.14, per-session identities + local relay v0.5.16/17, persistent service install v0.5.22, MCP collision warning v0.6.10). `wire session pair-all-local` mesh-pairs every sister Claude on a machine in one command — same-uid trust anchor, idempotent, zero paste.
+## Recent releases
+
+Currently shipping **v0.14.1**. Highlights:
+
+- **v0.14.1** (2026-05-30) — DX completion: identity layer visible end-to-end, operator quality-of-life
+- **v0.14.0** (2026-05-29) — RFC-001 identity layer: operator + organization + project, fully-offline self-certifying
+- **v0.13.4** (2026-05-25) — per-session identity (MCP + Windows) + group chat + merged `wire update`
+- **v0.13.3** (2026-05-25) — `wire group` (bidirectional group chat over a shared relay-room slot)
+- **v0.13.2** (2026-05-24) — Windows hardening + persona statusline
+- **v0.13.1** (2026-05-22) — one-name rule structurally true; `wire up` as the single onboarding verb
+- **v0.13.0** (2026-05-22) — per-session identities baseline (`sessions/by-key/<hash>`)
+- **v0.12.0** (2026-05-22) — identity unify + multi-homing + `wire up` dual-bind
+
+**Full per-version detail: [CHANGELOG.md](CHANGELOG.md).**
 
 > **A2A v1.0 compat.** Wire handles serve `.well-known/agent-card.json` in the A2A v1.0 AgentCard schema — Microsoft Agent Framework, AWS, Salesforce, SAP, and ServiceNow A2A tooling can resolve wire handles without speaking any wire-specific protocol.
 
 ---
 
-## Quick start — pair two agents by name (one command each)
+## Federation flow — pair across machines via `wireup.net`
+
+The [60-second local demo](#60-second-local-demo-no-cloud-trust-required) above runs two agents on one box with zero cloud trust. To pair across machines (or with someone you've never met), opt into the federation relay:
 
 Install (both operators, once):
 
@@ -532,18 +380,22 @@ See [`docs/PLUGIN.md`](docs/PLUGIN.md) for the full plugin shape, publishing cha
 **v0.6.1 — shipped.** Three paths:
 
 ```bash
-# 1. install.sh — pre-built binaries (Linux x86_64/aarch64 gnu+musl, macOS aarch64, Windows x86_64)
-curl -fsSL https://raw.githubusercontent.com/SlanchaAi/wire/main/install.sh | sh
+# 1. install.sh / install.ps1 — pre-built binaries (Linux x86_64/aarch64 gnu+musl, macOS aarch64, Windows x86_64)
+curl -fsSL https://wireup.net/install.sh | sh                         # Linux / macOS / WSL / Git Bash
+powershell -c "irm https://wireup.net/install.ps1 | iex"              # Windows native PowerShell
 
 # 2. crates.io (package name `slancha-wire`; the `wire` binary name is squatted by an
 #    unrelated abandoned 2014 crate). Installs a `wire` executable to $CARGO_HOME/bin.
 cargo install slancha-wire
 
-# 3. from source
+# 3. Scoop bucket (Windows) — see scoop/wire.json + scoop/README.md for the bucket-publish flow
+scoop install slancha/wire                                            # once the bucket is live, tracked at #149
+
+# 4. from source
 git clone https://github.com/SlanchaAi/wire
 cd wire
 cargo build --release
-cargo test                  # 190 tests, ~30s
+cargo test                  # 360+ tests
 ```
 
 Requires Rust 1.88+ (edition 2024) for source / cargo-install builds. Install Rust via [rustup](https://rustup.rs).
