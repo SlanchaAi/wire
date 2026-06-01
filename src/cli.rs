@@ -753,6 +753,13 @@ pub enum Command {
         /// current binary (offline / local dev build).
         #[arg(long)]
         local: bool,
+        /// Also kill `wire mcp` server subprocesses after the daemon swap so
+        /// their MCP host (Claude Code / Claude.app / Copilot CLI) respawns
+        /// them on the new binary. Without this, sister sessions keep
+        /// running pre-upgrade MCP code until each one explicitly `/mcp`
+        /// reconnects. Cross-session impact: kills every `wire mcp` found.
+        #[arg(long = "restart-mcp")]
+        restart_mcp: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1877,7 +1884,12 @@ pub fn run() -> Result<()> {
             json,
             recent_rejections,
         } => cmd_doctor(json, recent_rejections),
-        Command::Upgrade { check, local, json } => cmd_upgrade(check, local, json),
+        Command::Upgrade {
+            check,
+            local,
+            restart_mcp,
+            json,
+        } => cmd_upgrade(check, local, restart_mcp, json),
         Command::Service { action } => cmd_service(action),
         Command::Diag { action } => cmd_diag(action),
         Command::Claim {
@@ -11795,7 +11807,7 @@ mod upgrade_tests {
     }
 }
 
-fn cmd_upgrade(check_only: bool, local: bool, as_json: bool) -> Result<()> {
+fn cmd_upgrade(check_only: bool, local: bool, restart_mcp: bool, as_json: bool) -> Result<()> {
     // 0. (v0.13.3 — merged `update`) ALWAYS check crates.io first and, unless
     // this is a --check or --local run, self-install a newer release BEFORE the
     // daemon swap below — the respawn then picks up the new on-disk binary. A
@@ -11932,10 +11944,14 @@ fn cmd_upgrade(check_only: bool, local: bool, as_json: bool) -> Result<()> {
             "running_relay_servers": relay_pids,
             // v0.14.x: surface stale `wire mcp` host-pinned server count
             // so JSON consumers can drive their own /mcp-reconnect UX.
-            // `would_warn_stale_mcp_servers` is true iff there ARE any —
-            // distinct from `would_kill` because we never kill them.
+            // `would_warn_stale_mcp_servers` is true iff there ARE any
+            // AND --restart-mcp was NOT passed. `would_restart_mcp_servers`
+            // is true iff --restart-mcp WAS passed (v0.14.2) — kills the
+            // MCP procs so the host respawns them on the new binary.
             "running_mcp_servers": mcp_pids,
-            "would_warn_stale_mcp_servers": !mcp_pids.is_empty(),
+            "would_warn_stale_mcp_servers": !mcp_pids.is_empty() && !restart_mcp,
+            "would_restart_mcp_servers": restart_mcp && !mcp_pids.is_empty(),
+            "restart_mcp_requested": restart_mcp,
             "pidfile_version": recorded_version,
             "cli_version": cli_version,
             "latest_published": update_latest,
@@ -11982,15 +11998,21 @@ fn cmd_upgrade(check_only: bool, local: bool, as_json: bool) -> Result<()> {
             }
             // v0.14.x: surface the MCP-server pin gotcha in `--check` too
             // so an operator probing "what will this do?" sees the full
-            // story BEFORE running the actual upgrade. The `wire mcp`
-            // procs are NEVER killed by `wire upgrade`; their Claude tab
-            // must `/mcp` reconnect after the swap.
+            // story BEFORE running the actual upgrade. v0.14.2: line
+            // adapts to --restart-mcp.
             if !mcp_pids.is_empty() {
                 let p: Vec<String> = mcp_pids.iter().map(|p| p.to_string()).collect();
-                println!(
-                    "  wire mcp servers: pids {} (NOT killed; each Claude tab must `/mcp` reconnect to load new binary)",
-                    p.join(", ")
-                );
+                if restart_mcp {
+                    println!(
+                        "  wire mcp servers: pids {} (would be killed via --restart-mcp; host respawns on new binary)",
+                        p.join(", ")
+                    );
+                } else {
+                    println!(
+                        "  wire mcp servers: pids {} (NOT killed; each Claude tab must `/mcp` reconnect, or re-run with --restart-mcp to signal them now)",
+                        p.join(", ")
+                    );
+                }
             }
             if !installed_service_kinds.is_empty() {
                 println!(
@@ -12151,6 +12173,45 @@ fn cmd_upgrade(check_only: bool, local: bool, as_json: bool) -> Result<()> {
         None
     };
 
+    // 5c. v0.14.2: --restart-mcp also signals host-pinned `wire mcp` server
+    // subprocesses to restart on the new binary. Per
+    // `feedback_wire_upgrade_skips_mcp_servers`: macOS mmap + harness-pinned
+    // MCP subprocesses mean sister Claude / Copilot CLI sessions stay on
+    // pre-upgrade MCP code until each session explicitly `/mcp` reconnects.
+    // Killing the MCP child closes its stdio; the MCP host (Claude Code /
+    // Claude.app / Copilot CLI) auto-respawns it via its own restart
+    // logic — picking up the new on-disk binary.
+    //
+    // Cross-session impact: kills EVERY `wire mcp` subprocess found, not
+    // just this session's. There is no per-session MCP pidfile registry
+    // (these procs are host-spawned). Operators opting in via the flag
+    // accept the brief MCP-tool-unavailable window while hosts respawn.
+    //
+    // Same graceful-then-force-kill pattern as the daemon kill loop above —
+    // taskkill /F is load-bearing on Windows for windowless subprocs.
+    let killed_mcp: Vec<u32> = if restart_mcp && !mcp_pids.is_empty() {
+        for pid in &mcp_pids {
+            let _ = crate::platform::kill_process(*pid, false);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+        while std::time::Instant::now() < deadline && mcp_pids.iter().any(|p| process_alive_pid(*p))
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        for pid in &mcp_pids {
+            if process_alive_pid(*pid) {
+                let _ = crate::platform::kill_process(*pid, true);
+            }
+        }
+        mcp_pids
+            .iter()
+            .copied()
+            .filter(|p| !process_alive_pid(*p))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     if as_json {
         println!(
             "{}",
@@ -12160,17 +12221,21 @@ fn cmd_upgrade(check_only: bool, local: bool, as_json: bool) -> Result<()> {
                 "spared_relay_servers": relay_pids,
                 // v0.14.x: same surface as `--check` — JSON consumers
                 // get the stale-MCP-server pid list so they can drive
-                // operator UX (e.g., a tab-restart prompt). The MCP
-                // procs were NEVER candidates for the kill set; this
-                // is purely informational. `stale_mcp_warning` is the
-                // human-readable line, present iff there are stale
-                // MCP procs.
+                // operator UX (e.g., a tab-restart prompt). With
+                // --restart-mcp (v0.14.2), `killed_mcp_server_pids`
+                // carries what the upgrade itself signaled; the host
+                // (Claude Code / Claude.app / Copilot CLI) respawns
+                // them on the new binary. Without the flag, the procs
+                // were NEVER candidates for the kill set and the
+                // `stale_mcp_warning` is the human-readable nudge.
                 "stale_mcp_server_pids": mcp_pids,
-                "stale_mcp_warning": if mcp_pids.is_empty() {
+                "killed_mcp_server_pids": killed_mcp,
+                "restart_mcp_requested": restart_mcp,
+                "stale_mcp_warning": if mcp_pids.is_empty() || restart_mcp {
                     Value::Null
                 } else {
                     json!(format!(
-                        "{} `wire mcp` server subprocess(es) still on pre-upgrade code; each Claude tab must `/mcp` reconnect to pick up the new binary",
+                        "{} `wire mcp` server subprocess(es) still on pre-upgrade code; each Claude tab must `/mcp` reconnect to pick up the new binary (or re-run with `wire upgrade --restart-mcp` to signal them now)",
                         mcp_pids.len()
                     ))
                 },
@@ -12263,18 +12328,44 @@ fn cmd_upgrade(check_only: bool, local: bool, as_json: bool) -> Result<()> {
         if let Some(msg) = &path_warning {
             eprintln!("wire upgrade: {msg}");
         }
-        // v0.14.x: warn the operator about MCP-server subprocesses we
-        // can't swap. Without this line, sister Claude tabs silently
+        // v0.14.x: surface MCP-server subprocess status. Without
+        // --restart-mcp, warn the operator that sister Claude tabs
         // keep running pre-upgrade code until each one explicitly
-        // `/mcp` reconnects — leading to "fix shipped but my sister
-        // session still shows the old behavior" support pings (the
-        // very pattern that surfaced this gap, fixed by #117 toast
-        // kill switch and now visible because of #114/#115 read-path
-        // landings).
-        if !mcp_pids.is_empty() {
+        // `/mcp` reconnects — the "fix shipped but my sister session
+        // still shows the old behavior" support-ping pattern that
+        // surfaced this gap. With --restart-mcp (v0.14.2), report
+        // what we signaled so the operator sees the brief
+        // MCP-tool-unavailable window is by design.
+        if restart_mcp {
+            if !killed_mcp.is_empty() {
+                let p: Vec<String> = killed_mcp.iter().map(|p| p.to_string()).collect();
+                println!(
+                    "wire upgrade: killed {} `wire mcp` server subprocess(es) [{}]; host (Claude Code / Claude.app / Copilot CLI) will respawn on the new binary.",
+                    killed_mcp.len(),
+                    p.join(", ")
+                );
+            } else if mcp_pids.is_empty() {
+                // --restart-mcp was set but no MCP servers were running.
+                // Common when the operator runs `wire upgrade` from a
+                // shell with no Claude / Copilot session attached.
+                println!(
+                    "wire upgrade: --restart-mcp set, but no `wire mcp` server subprocesses were running."
+                );
+            } else {
+                // Asked to restart but none of them actually died — the
+                // operator should investigate (likely a permission
+                // issue or a sibling-user pid that wire can't signal).
+                let p: Vec<String> = mcp_pids.iter().map(|p| p.to_string()).collect();
+                eprintln!(
+                    "wire upgrade: WARNING — --restart-mcp requested but {} `wire mcp` subprocess(es) [{}] survived signaling. Check process ownership / OS permissions.",
+                    mcp_pids.len(),
+                    p.join(", ")
+                );
+            }
+        } else if !mcp_pids.is_empty() {
             let p: Vec<String> = mcp_pids.iter().map(|p| p.to_string()).collect();
             eprintln!(
-                "wire upgrade: NOTE — {} `wire mcp` server subprocess(es) [{}] still on pre-upgrade code (Claude Code / Claude.app pin these at session start). Each Claude tab must `/mcp` reconnect (or restart the host app) to pick up the new binary.",
+                "wire upgrade: NOTE — {} `wire mcp` server subprocess(es) [{}] still on pre-upgrade code (Claude Code / Claude.app pin these at session start). Each Claude tab must `/mcp` reconnect (or restart the host app) to pick up the new binary. Run `wire upgrade --restart-mcp` to signal them now.",
                 mcp_pids.len(),
                 p.join(", ")
             );
