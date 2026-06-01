@@ -9,7 +9,7 @@ What it does:
   1. Detects platform (Windows x86_64 / ARM64).
   2. Downloads the matching pre-built `wire.exe` binary from $WIRE_DIST_URL
      (default: GitHub Releases — $WIRE_REPO_URL/releases/latest/download/wire-<triple>.exe).
-  3. Verifies SHA-256 if a sibling .sha256 file exists at the dist URL.
+  3. Verifies SHA-256 against the sibling .sha256 at the dist URL.
   4. Installs to $Prefix\wire.exe (default: $env:LOCALAPPDATA\Programs\wire\wire.exe,
      XDG-style user-local; no admin elevation required).
   5. Adds the install dir to the User PATH if not already present.
@@ -68,12 +68,93 @@ if (-not (Test-Path $Prefix)) {
 }
 $target = Join-Path $Prefix 'wire.exe'
 
-$binaryUrl = "$DistUrl/wire-$triple.exe"
+$assetName = "wire-$triple.exe"
+$binaryUrl = "$DistUrl/$assetName"
 Write-Host "fetching $binaryUrl ..."
 
 $tmp = [System.IO.Path]::GetTempFileName()
 $tmpExe = "$tmp.exe"
 $tmpSha = "$tmp.sha256"
+
+function Normalize-PathForCompare {
+    param([string]$Path)
+    try {
+        return ([System.IO.Path]::GetFullPath($Path)).TrimEnd('\')
+    } catch {
+        return $Path.TrimEnd('\')
+    }
+}
+
+function Move-WireBinaryIntoPlace {
+    param(
+        [string]$Source,
+        [string]$Destination
+    )
+    try {
+        Move-Item -Path $Source -Destination $Destination -Force
+    } catch {
+        if (-not (Test-Path $Destination)) {
+            throw
+        }
+        $aside = "$Destination.old-$(Get-Random)"
+        Write-Warning "$Destination is in use; renaming to $aside and moving the new binary into place."
+        Move-Item -Path $Destination -Destination $aside -Force
+        Move-Item -Path $Source -Destination $Destination
+    }
+}
+
+function Find-WireOnPathValue {
+    param([string]$PathValue)
+    if (-not $PathValue) {
+        return $null
+    }
+    foreach ($seg in $PathValue.Split(';')) {
+        if (-not $seg) {
+            continue
+        }
+        $candidate = Join-Path $seg 'wire.exe'
+        if (Test-Path $candidate) {
+            return (Normalize-PathForCompare $candidate)
+        }
+    }
+    return $null
+}
+
+function Resolve-ExpectedHash {
+    param(
+        [string]$ShaFile,
+        [string]$ExpectedAssetName
+    )
+
+    $lines = @(Get-Content $ShaFile | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($lines.Count -eq 0) {
+        throw "SHA-256 file is empty: $ShaFile"
+    }
+
+    $matches = @()
+    foreach ($line in $lines) {
+        $parts = @($line -split '\s+', 2)
+        if ($parts.Count -eq 1) {
+            if ($lines.Count -eq 1) {
+                $matches += $parts[0]
+            }
+            continue
+        }
+        $name = (Split-Path -Leaf ($parts[1].TrimStart('*'))).Trim()
+        if ($name -eq $ExpectedAssetName) {
+            $matches += $parts[0]
+        }
+    }
+
+    if ($matches.Count -ne 1) {
+        throw "SHA-256 file must contain exactly one hash for $ExpectedAssetName (found $($matches.Count))"
+    }
+    $hash = $matches[0].ToLower()
+    if ($hash -notmatch '^[0-9a-f]{64}$') {
+        throw "SHA-256 entry for $ExpectedAssetName is not a 64-hex digest: $hash"
+    }
+    return $hash
+}
 
 $downloaded = $false
 try {
@@ -84,40 +165,51 @@ try {
 }
 
 if ($downloaded) {
-    # 3. Optional SHA-256 sibling.
+    # 3. Required SHA-256 sibling. `irm | iex` installs MUST NOT silently
+    # accept an unverified binary; operators using custom mirrors should serve
+    # the same per-asset `.sha256` shape as GitHub Releases.
     try {
         Invoke-WebRequest -UseBasicParsing -Uri "$binaryUrl.sha256" -OutFile $tmpSha
-        $expected = (Get-Content $tmpSha -Raw).Trim().Split()[0]
-        $actual = (Get-FileHash -Path $tmpExe -Algorithm SHA256).Hash.ToLower()
-        if ($expected.ToLower() -ne $actual) {
-            throw "SHA-256 mismatch — expected $expected, got $actual"
-        }
-    } catch [System.Net.WebException] {
-        Write-Warning "no .sha256 sibling at $binaryUrl.sha256 — skipping integrity check"
+    } catch {
+        throw "missing SHA-256 sibling at $binaryUrl.sha256; refusing to install unverified binary"
+    }
+    $expected = Resolve-ExpectedHash -ShaFile $tmpSha -ExpectedAssetName $assetName
+    $actual = (Get-FileHash -Path $tmpExe -Algorithm SHA256).Hash.ToLower()
+    if ($expected -ne $actual) {
+        throw "SHA-256 mismatch for $assetName — expected $expected, got $actual"
     }
 
     # 4. Move into place. If target is currently running (the running-exe
     # rename-aside trick `wire update` uses), we fall back to renaming the
     # existing target so the move can land.
-    try {
-        Move-Item -Path $tmpExe -Destination $target -Force
-    } catch {
-        $aside = "$target.old-$(Get-Random)"
-        Write-Warning "$target is in use; renaming to $aside and moving the new binary into place."
-        Move-Item -Path $target -Destination $aside -Force
-        Move-Item -Path $tmpExe -Destination $target
-    }
+    Move-WireBinaryIntoPlace -Source $tmpExe -Destination $target
 } else {
     # 5. Cargo fallback.
     $cargo = Get-Command cargo -ErrorAction SilentlyContinue
     if ($cargo) {
         Write-Host 'pre-built binary unavailable — building from source via cargo install slancha-wire (~2 min)'
-        $parentPrefix = Split-Path -Parent $Prefix
+        $cargoRoot = Join-Path ([System.IO.Path]::GetTempPath()) "wire-cargo-install-$([System.Guid]::NewGuid())"
+        New-Item -ItemType Directory -Path $cargoRoot -Force | Out-Null
         try {
-            & cargo install slancha-wire --root $parentPrefix
+            & cargo install slancha-wire --root $cargoRoot
+            if ($LASTEXITCODE -ne 0) {
+                throw "cargo install slancha-wire exited with $LASTEXITCODE"
+            }
         } catch {
             Write-Warning 'crates.io install failed — falling back to git source build'
-            & cargo install --git $RepoUrl --root $parentPrefix --bin wire
+            & cargo install --git $RepoUrl --root $cargoRoot --bin wire
+            if ($LASTEXITCODE -ne 0) {
+                throw "cargo install --git $RepoUrl exited with $LASTEXITCODE"
+            }
+        }
+        $built = Join-Path $cargoRoot 'bin\wire.exe'
+        if (-not (Test-Path $built)) {
+            throw "cargo fallback succeeded but did not produce expected binary at $built"
+        }
+        try {
+            Move-WireBinaryIntoPlace -Source $built -Destination $target
+        } finally {
+            Remove-Item -Path $cargoRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
     } else {
         Write-Error @"
@@ -155,6 +247,18 @@ if (Test-Path $target) {
         $env:Path = "$Prefix;$env:Path"
         Write-Host "PATH updated. Open a new terminal to inherit the change."
         Write-Host ''
+    }
+    $targetCmp = Normalize-PathForCompare $target
+    $sessionWire = Find-WireOnPathValue $env:Path
+    if ($sessionWire -and -not [string]::Equals($sessionWire, $targetCmp, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Warning "wire.exe on current PATH resolves to $sessionWire, not newly installed $target. Move $Prefix earlier in PATH or remove the shadowing binary."
+    }
+    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $newUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $newShellPath = if ($machinePath) { "$machinePath;$newUserPath" } else { $newUserPath }
+    $newShellWire = Find-WireOnPathValue $newShellPath
+    if ($newShellWire -and -not [string]::Equals($newShellWire, $targetCmp, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Warning "wire.exe in a new terminal may resolve to $newShellWire before $target (machine PATH precedes user PATH). Move $Prefix earlier in PATH or remove the shadowing binary."
     }
 
     # 7. Stale-cleanup pass (best-effort; silently skipped on older binaries
