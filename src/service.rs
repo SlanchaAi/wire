@@ -9,9 +9,11 @@
 //!
 //! ## Service kinds (v0.5.22)
 //!
-//! - **Daemon** (`wire service install`) — runs `wire daemon --interval 5`.
-//!   Pulls/pushes the operator's own inbox/outbox. ONE per identity.
-//!   Label: `sh.slancha.wire.daemon`.
+//! - **Daemon** (`wire service install`) — runs `wire daemon
+//!   --all-sessions --interval 5` (v0.14.2+). Supervisor process forks
+//!   one child daemon per initialized session so every session syncs at
+//!   login, not just whichever one launchd's cwd happens to resolve.
+//!   ONE per identity-mesh. Label: `sh.slancha.wire.daemon`.
 //!
 //! - **LocalRelay** (`wire service install --local-relay`) — runs
 //!   `wire relay-server --bind 127.0.0.1:8771 --local-only`. The
@@ -36,7 +38,8 @@ use anyhow::{Context, Result, anyhow, bail};
 /// on the same machine without colliding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceKind {
-    /// `wire daemon --interval 5`. One per identity. The default.
+    /// `wire daemon --all-sessions --interval 5`. One per
+    /// identity-mesh. The default.
     Daemon,
     /// `wire relay-server --bind 127.0.0.1:8771 --local-only`. One
     /// per machine — provides the loopback transport that sister
@@ -72,9 +75,17 @@ impl ServiceKind {
     /// Arguments to pass to the `wire` binary in the ProgramArguments
     /// / ExecStart line. The first element of the wider arg vector is
     /// the binary itself, supplied separately by callers.
+    ///
+    /// v0.14.2 (#162): `Daemon` uses `--all-sessions` so the OS-managed
+    /// daemon covers every initialized session, not just the
+    /// "default" one whatever the launchd / systemd / Task Scheduler
+    /// cwd happens to resolve. Closes honey-pine's launchd-vs-session
+    /// isolation gap. Operators upgrading from a pre-0.14.2 install
+    /// must re-run `wire service install` (or `wire upgrade
+    /// --restart-service`) to pick up the new ProgramArguments line.
     fn binary_args(self) -> &'static [&'static str] {
         match self {
-            ServiceKind::Daemon => &["daemon", "--interval", "5"],
+            ServiceKind::Daemon => &["daemon", "--all-sessions", "--interval", "5"],
             ServiceKind::LocalRelay => {
                 &["relay-server", "--bind", "127.0.0.1:8771", "--local-only"]
             }
@@ -723,6 +734,7 @@ mod tests {
         assert!(xml.contains(ServiceKind::Daemon.label()));
         assert!(xml.contains("/usr/local/bin/wire"));
         assert!(xml.contains("<string>daemon</string>"));
+        assert!(xml.contains("<string>--all-sessions</string>"));
         assert!(xml.contains("<string>--interval</string>"));
         assert!(xml.contains("<key>KeepAlive</key>"));
         assert!(xml.contains("<key>RunAtLoad</key>"));
@@ -754,7 +766,7 @@ mod tests {
         assert!(unit.contains("[Unit]"));
         assert!(unit.contains("[Service]"));
         assert!(unit.contains("[Install]"));
-        assert!(unit.contains("/usr/local/bin/wire daemon --interval 5"));
+        assert!(unit.contains("/usr/local/bin/wire daemon --all-sessions --interval 5"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
     }
@@ -812,7 +824,7 @@ mod tests {
         // Actual exec line uses XML-escaped exe path + correct daemon
         // args.
         assert!(xml.contains(r"C:\Program Files\wire\wire.exe"));
-        assert!(xml.contains("<Arguments>daemon --interval 5</Arguments>"));
+        assert!(xml.contains("<Arguments>daemon --all-sessions --interval 5</Arguments>"));
     }
 
     #[test]
