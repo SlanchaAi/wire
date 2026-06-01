@@ -4,17 +4,23 @@ Pick the path that matches your situation.
 
 ## 1. Pre-built binary (one-liner, recommended)
 
-Once a release tag is published:
+Once a release tag is published, pick the line for your platform:
 
 ```bash
+# macOS / Linux / WSL — POSIX shell
 curl -fsSL https://wireup.net/install.sh | sh
+
+# Windows — native PowerShell (no Git Bash needed)
+powershell -c "irm https://wireup.net/install.ps1 | iex"
 ```
 
 What the script does:
-- Detects your OS + arch (Linux / macOS, x86_64 / arm64)
+- Detects your OS + arch (Linux / macOS / Windows, x86_64 / arm64)
 - Downloads the matching pre-built binary from GitHub Releases
 - Verifies SHA-256 against the sibling `.sha256` file
-- Installs to `~/.local/bin/wire` (preferred if on `$PATH`) or `/usr/local/bin/wire` with sudo
+- Installs to:
+  - **Linux / macOS:** `~/.local/bin/wire` (preferred if on `$PATH`) or `/usr/local/bin/wire` with sudo
+  - **Windows:** `$env:LOCALAPPDATA\Programs\wire\wire.exe` (no admin required); adds to user PATH
 
 Override defaults via env or flags:
 
@@ -41,15 +47,16 @@ cargo install --path . --bin wire
 
 Requires Rust 1.88+ (edition 2024). [rustup.rs](https://rustup.rs) installs Rust in 60 seconds.
 
-## 3. Package managers (planned)
+## 3. Package managers
 
-| Manager | Status | When |
+| Manager | Status | Command |
 |---|---|---|
 | Homebrew (`brew install wire`) | planned | post-public-launch |
 | AUR (`pacman -S wire-bin`) | planned | post-public-launch |
 | Nix flake | planned | post-public-launch |
-| Scoop / winget | planned | post-public-launch |
-| crates.io (`cargo install wire`) | planned | post-public-launch |
+| **Scoop (Windows)** | manifest in `scoop/wire.json` — bucket TBD per [#149](https://github.com/SlanchaAi/wire/issues/149) | `scoop install <bucket>/wire` |
+| **winget (Windows)** | submission deferred per [#149](https://github.com/SlanchaAi/wire/issues/149) | `winget install SlanchaAi.wire` (eventual) |
+| **crates.io** | live | `cargo install slancha-wire` |
 
 Tracking in [BACKLOG.md](BACKLOG.md) under "Distribution + tooling."
 

@@ -1,0 +1,37 @@
+{
+    "$schema": "https://raw.githubusercontent.com/ScoopInstaller/Scoop/master/schema.json",
+    "version": "0.14.1",
+    "description": "Magic-wormhole for AI agents — bilateral signed-message bus between Claude / Codex / Copilot sessions over a mailbox relay.",
+    "homepage": "https://wireup.net",
+    "license": "AGPL-3.0-or-later",
+    "notes": [
+        "wire is now installed.",
+        "",
+        "Get started:",
+        "  wire up                              # one-shot: identity + relay + claim your persona + daemon",
+        "  wire here                            # see your persona + who's around",
+        "  wire dial <peer>@wireup.net          # pair a peer",
+        "",
+        "See 'wire --help' or https://github.com/SlanchaAi/wire for more."
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/SlanchaAi/wire/releases/latest/download/wire-x86_64-pc-windows-msvc.exe#/wire.exe",
+            "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        }
+    },
+    "bin": "wire.exe",
+    "checkver": {
+        "github": "https://github.com/SlanchaAi/wire"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/SlanchaAi/wire/releases/download/v$version/wire-x86_64-pc-windows-msvc.exe#/wire.exe",
+                "hash": {
+                    "url": "$url.sha256"
+                }
+            }
+        }
+    }
+}
