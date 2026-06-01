@@ -5983,6 +5983,22 @@ fn run_sync_push() -> Result<Value> {
                 .to_string();
             match client.post_event(slot_id, slot_token, &event) {
                 Ok(resp) => {
+                    // v0.14.2 (#162 fix #2): record the queued → pushed
+                    // transition in the per-peer lifecycle log. Both
+                    // `ok` and `duplicate` count as pushed — the relay
+                    // has the event either way, and an operator who
+                    // hits the dedup path didn't lose the event. Failure
+                    // here is non-fatal: the sync loop must keep
+                    // running even if the lifecycle log can't be
+                    // appended.
+                    let now = time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default();
+                    if let Err(e) = config::append_pushed_log(peer_handle, &event_id, &now) {
+                        eprintln!(
+                            "daemon: pushed-log append for {peer_handle}/{event_id} failed (non-fatal): {e:#}"
+                        );
+                    }
                     if resp.status == "duplicate" {
                         skipped.push(json!({"peer": peer_handle, "event_id": event_id, "reason": "duplicate"}));
                     } else {
