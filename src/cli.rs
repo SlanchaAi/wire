@@ -14949,147 +14949,30 @@ fn print_profile_publish_result(published: &[String]) {
 // ---------- setup — one-shot MCP host registration ----------
 
 fn cmd_setup(apply: bool) -> Result<()> {
+    use crate::adapters::harness::HARNESS_ADAPTERS;
     use std::path::PathBuf;
 
     // v0.14.x: no `env` mapping. Per-session identity for Claude Code is
     // resolved by `crate::session::resolve_session_key`, which reads
     // `WIRE_SESSION_ID` then falls back to `CLAUDE_CODE_SESSION_ID`. Current
     // Claude Code (verified 2026-05) propagates `CLAUDE_CODE_SESSION_ID`
-    // into every MCP subprocess by default (`ps eww` on a running
-    // `wire mcp` PID shows it in the inherited env), so the historical
-    // `{"WIRE_SESSION_ID": "${CLAUDE_CODE_SESSION_ID}"}` mapping was
-    // redundant. Worse, it triggered the MCP Config Diagnostics validator
-    // warning `Missing environment variables: CLAUDE_CODE_SESSION_ID`
-    // when the validator runs in a context without that env var set,
-    // even though the runtime invocation works fine. Dropping the env
-    // block silences the diagnostic AND keeps per-session identity intact
-    // via the documented fallback chain. If a future Claude Code release
-    // stops propagating `CLAUDE_CODE_SESSION_ID`, the comment + emit
-    // here is the one place to restore the explicit mapping.
+    // into every MCP subprocess by default, so the historical mapping was
+    // redundant and triggered a misleading MCP Config Diagnostics warning.
     let entry = json!({
         "command": "wire",
         "args": ["mcp"]
     });
     let entry_pretty = serde_json::to_string_pretty(&json!({"wire": &entry}))?;
 
-    // Detect probable MCP host config locations. Cross-platform — we only
-    // touch the file if it already exists OR --apply was passed.
+    // v0.14.2 (#92 category 1): per-host detection + upsert logic lives
+    // in `adapters::harness::HARNESS_ADAPTERS`. Adding a new harness is
+    // one struct entry there + one test. This loop is the only consumer.
     let mut targets: Vec<(&str, PathBuf)> = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        // Claude Code (CLI) — real config path is ~/.claude.json on all platforms (Linux/macOS/Windows).
-        // The mcpServers map lives at the top level of that file.
-        targets.push(("Claude Code", home.join(".claude.json")));
-        // Legacy / alternate Claude Code XDG path — still try, harmless if absent.
-        targets.push(("Claude Code (alt)", home.join(".config/claude/mcp.json")));
-        // Claude Desktop macOS
-        #[cfg(target_os = "macos")]
-        targets.push((
-            "Claude Desktop (macOS)",
-            home.join("Library/Application Support/Claude/claude_desktop_config.json"),
-        ));
-        // Claude Desktop Windows
-        #[cfg(target_os = "windows")]
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            targets.push((
-                "Claude Desktop (Windows)",
-                PathBuf::from(appdata).join("Claude/claude_desktop_config.json"),
-            ));
+    for adapter in HARNESS_ADAPTERS {
+        for path in (adapter.paths_fn)() {
+            targets.push((adapter.name, path));
         }
-        // Cursor
-        targets.push(("Cursor", home.join(".cursor/mcp.json")));
-
-        // GitHub Copilot (VS Code) — User settings
-        #[cfg(target_os = "macos")]
-        targets.push((
-            "VS Code (GitHub Copilot)",
-            home.join("Library/Application Support/Code/User/settings.json"),
-        ));
-        #[cfg(target_os = "linux")]
-        targets.push((
-            "VS Code (GitHub Copilot)",
-            home.join(".config/Code/User/settings.json"),
-        ));
-        #[cfg(target_os = "windows")]
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            targets.push((
-                "VS Code (GitHub Copilot)",
-                PathBuf::from(appdata).join("Code/User/settings.json"),
-            ));
-        }
-
-        // VS Code Insiders variant
-        #[cfg(target_os = "macos")]
-        targets.push((
-            "VS Code Insiders",
-            home.join("Library/Application Support/Code - Insiders/User/settings.json"),
-        ));
-        #[cfg(target_os = "linux")]
-        targets.push((
-            "VS Code Insiders",
-            home.join(".config/Code - Insiders/User/settings.json"),
-        ));
-        #[cfg(target_os = "windows")]
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            targets.push((
-                "VS Code Insiders",
-                PathBuf::from(appdata).join("Code - Insiders/User/settings.json"),
-            ));
-        }
-
-        // GitHub Copilot CLI (`gh copilot` / `copilot`). v0.13.6: standard
-        // MCP shape (`mcpServers` root key, same as Claude Code), lives at
-        // `~/.copilot/mcp-config.json` on all platforms — XDG-overridable
-        // on Unix via `$XDG_CONFIG_HOME/copilot/mcp-config.json`.
-        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-            targets.push((
-                "GitHub Copilot CLI (XDG)",
-                PathBuf::from(xdg).join("copilot/mcp-config.json"),
-            ));
-        }
-        targets.push(("GitHub Copilot CLI", home.join(".copilot/mcp-config.json")));
-
-        // v0.14.2: Pi (https://pi.dev / earendil-works/pi). Standard
-        // `mcpServers` shape — same as Claude Code. Default config
-        // path is `~/.pi/agent/mcp.json`; `$PI_CODING_AGENT_DIR` env
-        // var overrides the directory (`<dir>/mcp.json`). The
-        // `pi-mcp-adapter` package handles the runtime bridge; this
-        // only emits the config file Pi reads at agent startup.
-        if let Ok(pi_dir) = std::env::var("PI_CODING_AGENT_DIR") {
-            targets.push((
-                "Pi (PI_CODING_AGENT_DIR)",
-                PathBuf::from(pi_dir).join("mcp.json"),
-            ));
-        }
-        targets.push(("Pi", home.join(".pi/agent/mcp.json")));
-
-        // v0.14.2: OpenCode (https://opencode.ai). Custom shape:
-        // `{"mcp": {"<name>": {"type": "local", "command":
-        // ["wire","mcp"], "enabled": true}}}`. Project-local config
-        // takes precedence over the global path; both are honored.
-        // Path resolution mirrors OpenCode's own docs: XDG-first on
-        // Unix, then `~/.config/opencode/opencode.json` as the
-        // fallback.
-        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-            targets.push((
-                "OpenCode (XDG)",
-                PathBuf::from(xdg).join("opencode/opencode.json"),
-            ));
-        }
-        targets.push((
-            "OpenCode (global)",
-            home.join(".config/opencode/opencode.json"),
-        ));
     }
-    // Workspace-local VS Code settings (GitHub Copilot workspace config)
-    targets.push((
-        "VS Code (workspace)",
-        PathBuf::from(".vscode/settings.json"),
-    ));
-    // Project-local — works for several MCP-aware tools
-    targets.push(("project-local (.mcp.json)", PathBuf::from(".mcp.json")));
-    // v0.14.2: OpenCode project-local config. Takes precedence over the
-    // global one when the project is opened from this cwd.
-    targets.push(("OpenCode (project-local)", PathBuf::from("opencode.json")));
 
     println!("wire setup\n");
     println!("MCP server snippet (add this to your client's mcpServers):");
@@ -15117,11 +15000,19 @@ fn cmd_setup(apply: bool) -> Result<()> {
 
     let mut modified: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
-    for (name, path) in &targets {
-        match upsert_mcp_entry(path, "wire", &entry) {
-            Ok(true) => modified.push(format!("✓ {name} ({})", path.display())),
-            Ok(false) => skipped.push(format!("  {name} ({}): already configured", path.display())),
-            Err(e) => skipped.push(format!("✗ {name} ({}): {e}", path.display())),
+    for adapter in HARNESS_ADAPTERS {
+        for path in (adapter.paths_fn)() {
+            match (adapter.upsert_fn)(&path, "wire", &entry) {
+                Ok(true) => {
+                    modified.push(format!("✓ {} ({})", adapter.name, path.display()));
+                }
+                Ok(false) => skipped.push(format!(
+                    "  {} ({}): already configured",
+                    adapter.name,
+                    path.display()
+                )),
+                Err(e) => skipped.push(format!("✗ {} ({}): {e}", adapter.name, path.display())),
+            }
         }
     }
     if !modified.is_empty() {
@@ -15142,124 +15033,11 @@ fn cmd_setup(apply: bool) -> Result<()> {
     Ok(())
 }
 
-/// Idempotent merge of an `mcpServers.<name>` entry into a JSON config file.
-/// Returns Ok(true) if file was changed, Ok(false) if entry already matched.
-///
-/// Supports two config formats:
-/// - Standard MCP: `{"mcpServers": {"wire": {...}}}`
-/// - VS Code: `{"mcp": {"servers": {"wire": {...}}}}`
-fn upsert_mcp_entry(path: &std::path::Path, server_name: &str, entry: &Value) -> Result<bool> {
-    let mut cfg: Value = if path.exists() {
-        let body = std::fs::read_to_string(path).context("reading config")?;
-        if body.trim().is_empty() {
-            json!({})
-        } else {
-            // Refuse to default a non-empty-but-unparseable file to `{}` —
-            // doing so would overwrite the whole file with just our entry.
-            // VS Code's settings.json is JSONC (// comments, trailing commas)
-            // which serde_json can't parse; surface it so the caller lists
-            // this target under "Skipped" and the user adds wire manually.
-            serde_json::from_str(&body).with_context(|| {
-                format!(
-                    "{} is not strict JSON (comments / trailing commas?); \
-                     add the wire MCP entry manually to avoid overwriting it",
-                    path.display()
-                )
-            })?
-        }
-    } else {
-        json!({})
-    };
-    if !cfg.is_object() {
-        cfg = json!({});
-    }
-
-    // Detect VS Code settings.json (contains "mcp.servers" instead of "mcpServers")
-    let path_str = path.to_string_lossy();
-    let is_vscode = path_str.contains("Code/User/settings.json")
-        || path_str.contains(".vscode/settings.json")
-        || path_str.contains("Code - Insiders");
-    // v0.14.2: OpenCode config uses a third shape — `mcp.<name>` directly
-    // (no `servers` intermediate), and each entry carries
-    // `type: "local"`, `command: ["wire", "mcp"]` (an ARRAY combining the
-    // binary + args), and `enabled: true`. See docs/integrations/OPENCODE.md.
-    let is_opencode =
-        path_str.ends_with("opencode.json") || path_str.contains("opencode/opencode.json");
-
-    let root = cfg.as_object_mut().unwrap();
-
-    if is_opencode {
-        // OpenCode format: {"mcp": {"wire": {"type": "local", "command":
-        // ["wire", "mcp"], "enabled": true}}}. We map the standard
-        // {command, args} entry into OpenCode's combined `command`
-        // array — first element is the binary, the remaining are args.
-        let cmd_str = entry
-            .get("command")
-            .and_then(Value::as_str)
-            .unwrap_or("wire");
-        let args_arr: Vec<Value> = entry
-            .get("args")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let mut combined: Vec<Value> = vec![Value::String(cmd_str.to_string())];
-        combined.extend(args_arr);
-        let opencode_entry = json!({
-            "type": "local",
-            "command": combined,
-            "enabled": true,
-        });
-        let mcp = root.entry("mcp".to_string()).or_insert_with(|| json!({}));
-        if !mcp.is_object() {
-            *mcp = json!({});
-        }
-        let map = mcp.as_object_mut().unwrap();
-        if map.get(server_name) == Some(&opencode_entry) {
-            return Ok(false);
-        }
-        map.insert(server_name.to_string(), opencode_entry);
-    } else if is_vscode {
-        // VS Code format: {"mcp": {"servers": {"wire": {...}}}}
-        let mcp = root.entry("mcp".to_string()).or_insert_with(|| json!({}));
-        if !mcp.is_object() {
-            *mcp = json!({});
-        }
-        let mcp_obj = mcp.as_object_mut().unwrap();
-        let servers = mcp_obj
-            .entry("servers".to_string())
-            .or_insert_with(|| json!({}));
-        if !servers.is_object() {
-            *servers = json!({});
-        }
-        let map = servers.as_object_mut().unwrap();
-        if map.get(server_name) == Some(entry) {
-            return Ok(false);
-        }
-        map.insert(server_name.to_string(), entry.clone());
-    } else {
-        // Standard MCP format: {"mcpServers": {"wire": {...}}}
-        let servers = root
-            .entry("mcpServers".to_string())
-            .or_insert_with(|| json!({}));
-        if !servers.is_object() {
-            *servers = json!({});
-        }
-        let map = servers.as_object_mut().unwrap();
-        if map.get(server_name) == Some(entry) {
-            return Ok(false);
-        }
-        map.insert(server_name.to_string(), entry.clone());
-    }
-
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).context("creating parent dir")?;
-    }
-    let out = serde_json::to_string_pretty(&cfg)? + "\n";
-    std::fs::write(path, out).context("writing config")?;
-    Ok(true)
-}
+// v0.14.2 (#92 cat 1): `fn upsert_mcp_entry` retired. Its three
+// shape-dispatching branches (standard / vscode / opencode) moved into
+// per-shape `upsert_*` fns in `adapters::harness`. Adding a new shape
+// = one new upsert fn + one registry entry, instead of editing this
+// switch statement.
 
 // ---------- setup --statusline ----------
 
@@ -15532,87 +15310,9 @@ mod scan_jsonl_dir_tests {
     }
 }
 
-#[cfg(test)]
-mod setup_tests {
-    use super::*;
-
-    fn standard_entry() -> Value {
-        json!({"command": "wire", "args": ["mcp"]})
-    }
-
-    #[test]
-    fn upsert_writes_standard_mcpservers_for_pi_path() {
-        // Pi uses the standard `mcpServers` shape — same as Claude Code.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".pi").join("agent").join("mcp.json");
-        let entry = standard_entry();
-        assert!(upsert_mcp_entry(&path, "wire", &entry).unwrap());
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v["mcpServers"]["wire"]["command"], "wire");
-        assert_eq!(v["mcpServers"]["wire"]["args"][0], "mcp");
-        // Idempotent.
-        assert!(!upsert_mcp_entry(&path, "wire", &entry).unwrap());
-    }
-
-    #[test]
-    fn upsert_writes_opencode_shape_with_combined_command_array() {
-        // OpenCode uses `mcp.<name>` (no `servers`) with
-        // {type:'local', command:[binary, ...args], enabled:true}.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("opencode.json");
-        let entry = standard_entry();
-        assert!(upsert_mcp_entry(&path, "wire", &entry).unwrap());
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        // No mcpServers root, no mcp.servers intermediate — direct `mcp.wire`.
-        assert!(
-            v.get("mcpServers").is_none(),
-            "OpenCode must not use mcpServers"
-        );
-        let wire = &v["mcp"]["wire"];
-        assert_eq!(wire["type"], "local");
-        assert_eq!(wire["enabled"], true);
-        // Combined command: [binary, ...args].
-        assert_eq!(wire["command"][0], "wire");
-        assert_eq!(wire["command"][1], "mcp");
-        assert_eq!(wire["command"].as_array().map(Vec::len), Some(2));
-        // Idempotent.
-        assert!(!upsert_mcp_entry(&path, "wire", &entry).unwrap());
-    }
-
-    #[test]
-    fn upsert_opencode_under_xdg_config_path_also_uses_opencode_shape() {
-        // Path detection covers `<dir>/opencode/opencode.json` (the
-        // XDG path), not just literal `opencode.json`.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("opencode").join("opencode.json");
-        let entry = standard_entry();
-        assert!(upsert_mcp_entry(&path, "wire", &entry).unwrap());
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(v["mcp"]["wire"]["enabled"].as_bool().unwrap_or(false));
-        assert_eq!(v["mcp"]["wire"]["type"], "local");
-    }
-
-    #[test]
-    fn upsert_preserves_existing_opencode_config_keys() {
-        // OpenCode users have other config in opencode.json — wire
-        // must merge under `mcp.wire` without touching sibling keys.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("opencode.json");
-        std::fs::write(
-            &path,
-            r#"{"theme":"dark","providers":{"openai":{"apiKey":"sk-test"}}}"#,
-        )
-        .unwrap();
-        let entry = standard_entry();
-        assert!(upsert_mcp_entry(&path, "wire", &entry).unwrap());
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        // Sibling keys preserved.
-        assert_eq!(v["theme"], "dark");
-        assert_eq!(v["providers"]["openai"]["apiKey"], "sk-test");
-        // wire added under mcp.
-        assert_eq!(v["mcp"]["wire"]["type"], "local");
-    }
-}
+// v0.14.2 (#92 cat 1): setup_tests module retired. Coverage migrated
+// to `adapters::harness::tests` — each shape gets its own dedicated
+// test alongside the upsert fn that implements it.
 
 #[cfg(test)]
 mod statusline_tests {
