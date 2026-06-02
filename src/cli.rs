@@ -2454,8 +2454,46 @@ fn cmd_status(as_json: bool) -> Result<()> {
             *counts.entry(p.status.clone()).or_default() += 1;
         }
         // v0.5.14: pending-inbound zero-paste pair_drops awaiting accept.
-        let pending_inbound =
+        // v0.14.2: filter out records whose peer is already pinned at
+        // VERIFIED+ tier (i.e., bilateral completed via some other
+        // path). Pre-#171 `maybe_consume_pair_drop_ack` didn't clear
+        // pending_inbound on receipt of the peer's ack; operators
+        // with pre-#171 data on disk see their VERIFIED peers show
+        // up in `inbound pair requests`, prompting a misleading
+        // `wire pair-accept` suggestion. The stale records still
+        // exist on disk (operator can clear via `wire reject` if
+        // they care); the status surface just stops showing them.
+        // Records for genuinely-not-pinned peers — or peers at
+        // UNTRUSTED/PENDING_ACK — surface normally.
+        let pinned_verified_handles: std::collections::HashSet<String> =
+            crate::config::read_trust()
+                .ok()
+                .and_then(|t| t.get("agents").and_then(Value::as_object).cloned())
+                .map(|agents| {
+                    agents
+                        .into_iter()
+                        .filter_map(|(handle, agent)| {
+                            let tier = agent.get("tier").and_then(Value::as_str).unwrap_or("");
+                            if matches!(tier, "VERIFIED" | "ORG_VERIFIED") {
+                                Some(handle)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        let raw_pending_inbound =
             crate::pending_inbound_pair::list_pending_inbound().unwrap_or_default();
+        let stale_inbound_handles: Vec<&str> = raw_pending_inbound
+            .iter()
+            .filter(|p| pinned_verified_handles.contains(&p.peer_handle))
+            .map(|p| p.peer_handle.as_str())
+            .collect();
+        let pending_inbound: Vec<_> = raw_pending_inbound
+            .iter()
+            .filter(|p| !pinned_verified_handles.contains(&p.peer_handle))
+            .collect();
         let inbound_handles: Vec<&str> = pending_inbound
             .iter()
             .map(|p| p.peer_handle.as_str())
@@ -2465,6 +2503,11 @@ fn cmd_status(as_json: bool) -> Result<()> {
             "by_status": counts,
             "inbound_count": pending_inbound.len(),
             "inbound_handles": inbound_handles,
+            // Surface the filtered-as-stale set so operators with
+            // pre-#171 leftover records can find + clean them via
+            // `wire reject <handle>` if they care.
+            "stale_inbound_count": stale_inbound_handles.len(),
+            "stale_inbound_handles": stale_inbound_handles,
         });
     }
 
