@@ -3723,46 +3723,12 @@ fn cmd_identity_demote(name: &str, as_json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Thin wrapper — kept as a function for tests + back-compat with
+/// the small handful of callsites that already use this name.
+/// Implementation moved to `crate::trust::effective_tier` so the
+/// canonical derivation is shared with `compute_pending_push_breakdown`.
 fn effective_peer_tier(trust: &Value, relay_state: &Value, handle: &str) -> String {
-    let raw = crate::trust::get_tier(trust, handle);
-    if raw != "VERIFIED" {
-        return raw.to_string();
-    }
-    // v0.14.2 (#162 fix #5): tier flap fix. The pre-v0.14.2 check used
-    // `slot_token` presence to discriminate VERIFIED from PENDING_ACK —
-    // but `slot_token` is current-state (gets overwritten by
-    // `pin_peer_endpoints` on every re-pin), so a transient pair_drop_ack
-    // body with a missing/empty endpoint set could flap a previously
-    // bilateral-complete peer back to PENDING_ACK. honey-pine's report
-    // observed exactly this VERIFIED → PENDING_ACK flap mid-handshake.
-    //
-    // The replacement signal: `bilateral_completed_at` — written ONCE
-    // by `maybe_consume_pair_drop_ack` at the moment bilateral pairing
-    // is durable, preserved by `pin_peer_endpoints` across re-pin
-    // events. Monotonic: once VERIFIED with bilateral_completed_at set,
-    // visible tier stays VERIFIED for the lifetime of the pinning.
-    //
-    // Back-compat: peers pinned BEFORE v0.14.2 have no
-    // bilateral_completed_at field. For those, fall back to the legacy
-    // slot_token-presence check so existing pinnings continue to report
-    // VERIFIED (they were already bilateral-complete; we just didn't
-    // record when).
-    let peer_obj = relay_state.get("peers").and_then(|p| p.get(handle));
-    let bilateral_at = peer_obj
-        .and_then(|p| p.get("bilateral_completed_at"))
-        .and_then(Value::as_str);
-    if bilateral_at.is_some() {
-        return raw.to_string();
-    }
-    let token = peer_obj
-        .and_then(|p| p.get("slot_token"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if token.is_empty() {
-        "PENDING_ACK".to_string()
-    } else {
-        raw.to_string()
-    }
+    crate::trust::effective_tier(trust, relay_state, handle)
 }
 
 fn cmd_peers(as_json: bool) -> Result<()> {

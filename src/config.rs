@@ -188,8 +188,12 @@ pub fn compute_pending_push_breakdown() -> Vec<PendingPushPerPeer> {
         Some(a) => a.clone(),
         None => return Vec::new(),
     };
+    // Read relay_state once so the effective-tier lookup doesn't
+    // hammer the disk per peer. Missing file → empty peers map; the
+    // effective_tier helper handles that case fine.
+    let relay_state = read_relay_state().unwrap_or_else(|_| serde_json::json!({"peers": {}}));
     let mut out: Vec<PendingPushPerPeer> = Vec::new();
-    for (peer_handle, agent) in agents.iter() {
+    for (peer_handle, _agent) in agents.iter() {
         let pushed_ids = read_pushed_event_ids(peer_handle);
         let outbox_path = match outbox_dir() {
             Ok(d) => d.join(format!("{peer_handle}.jsonl")),
@@ -214,11 +218,11 @@ pub fn compute_pending_push_breakdown() -> Vec<PendingPushPerPeer> {
             }
         }
         if count > 0 {
-            let tier = agent
-                .get("tier")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("UNKNOWN")
-                .to_string();
+            // Use effective tier (relay_state-aware) — daemon
+            // can't push to a peer with no slot_token even if
+            // trust.json says VERIFIED, and the PENDING_ACK hint
+            // is the actionable answer for that case.
+            let tier = crate::trust::effective_tier(&trust, &relay_state, peer_handle);
             out.push(PendingPushPerPeer {
                 peer: peer_handle.clone(),
                 tier,
@@ -938,7 +942,7 @@ mod tests {
     fn pending_push_breakdown_attributes_per_peer_with_tier() {
         with_temp_home(|| {
             ensure_dirs().unwrap();
-            // Seed trust.json with two peers at different tiers.
+            // Seed trust.json with three peers at different tiers.
             let trust = json!({
                 "agents": {
                     "alpha-fox":   {"tier": "VERIFIED"},
@@ -947,6 +951,20 @@ mod tests {
                 }
             });
             write_trust(&trust).unwrap();
+            // Seed relay.json so alpha (VERIFIED) has
+            // bilateral_completed_at set → effective tier stays
+            // VERIFIED. Without this, effective_tier would
+            // demote alpha to PENDING_ACK (no slot_token) and the
+            // fixture would mislead about what's tested.
+            let relay = json!({
+                "self": null,
+                "peers": {
+                    "alpha-fox": {
+                        "bilateral_completed_at": "2026-06-01T00:00:00Z"
+                    }
+                }
+            });
+            write_relay_state(&relay).unwrap();
             // Seed per-peer outboxes: alpha has 2 events, 1 pushed
             // (1 unpushed). beta has 3 events, 0 pushed. gamma has
             // 0 events. The breakdown should:
