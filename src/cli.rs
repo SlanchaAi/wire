@@ -2680,7 +2680,22 @@ pub(crate) fn scan_jsonl_dir(dir: &std::path::Path) -> Result<Value> {
     let mut events = 0usize;
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
-        if path.extension().map(|x| x == "jsonl").unwrap_or(false) {
+        // v0.14.2: skip pushed-log audit files (`<peer>.pushed.jsonl`)
+        // when scanning the outbox dir. Those are append-only audit
+        // logs of "queued → pushed" lifecycle events (#162 fix #2);
+        // counting them as outbox events inflates `outbox.events` in
+        // `wire status` by orders of magnitude. Pre-fix, an operator
+        // with 8328 events delivered across a peer's lifetime saw
+        // "outbox: 71811 events queued" when actual unpushed work was
+        // 11 events. Inbox scans are unaffected because the inbox dir
+        // contains only `<peer>.jsonl`, never `.pushed.jsonl`.
+        if path.extension().map(|x| x == "jsonl").unwrap_or(false)
+            && !path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|n| n.ends_with(".pushed.jsonl"))
+                .unwrap_or(false)
+        {
             files += 1;
             if let Ok(body) = std::fs::read_to_string(&path) {
                 events += body.lines().filter(|l| !l.trim().is_empty()).count();
@@ -15400,6 +15415,65 @@ fn resolve_git_bash() -> Option<String> {
         .into_iter()
         .flatten()
         .find(|c| PathBuf::from(c).exists())
+}
+
+#[cfg(test)]
+mod scan_jsonl_dir_tests {
+    use super::*;
+
+    #[test]
+    fn scan_jsonl_dir_excludes_pushed_audit_files() {
+        // Pre-fix `wire status` reported `outbox.events` as the sum of
+        // both the live outbox files AND the audit-only `*.pushed.jsonl`
+        // lifecycle logs. On a long-running operator's box that turned
+        // "11 events queued" into "71811 events queued" — confusing
+        // and load-bearing-wrong for the silent-send detection class.
+        let dir = tempfile::tempdir().unwrap();
+        // Live outbox: one peer, 2 events.
+        std::fs::write(
+            dir.path().join("alice.jsonl"),
+            "{\"event_id\":\"a\"}\n{\"event_id\":\"b\"}\n",
+        )
+        .unwrap();
+        // Audit log: one peer, 100 events. Must NOT count.
+        let many: String = (0..100)
+            .map(|i| format!("{{\"event_id\":\"x{i}\",\"ts\":\"...\"}}\n"))
+            .collect();
+        std::fs::write(dir.path().join("alice.pushed.jsonl"), many).unwrap();
+        let result = scan_jsonl_dir(dir.path()).unwrap();
+        assert_eq!(
+            result["events"], 2,
+            "events count must include only live outbox lines, not pushed-log audit lines"
+        );
+        assert_eq!(
+            result["files"], 1,
+            "files count must reflect 1 live outbox file (the .pushed.jsonl audit log doesn't count as a queued-events surface)"
+        );
+    }
+
+    #[test]
+    fn scan_jsonl_dir_zero_when_only_pushed_log_present() {
+        // Edge case: a peer who's drained their queue still has an
+        // append-only `<peer>.pushed.jsonl` file but no `<peer>.jsonl`.
+        // Should report zero events, zero files — there's no pending
+        // outbox work.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("alice.pushed.jsonl"),
+            "{\"event_id\":\"a\"}\n",
+        )
+        .unwrap();
+        let result = scan_jsonl_dir(dir.path()).unwrap();
+        assert_eq!(result["events"], 0);
+        assert_eq!(result["files"], 0);
+    }
+
+    #[test]
+    fn scan_jsonl_dir_returns_zero_for_missing_dir() {
+        let result = scan_jsonl_dir(std::path::Path::new("/nonexistent")).unwrap();
+        assert_eq!(result["events"], 0);
+        assert_eq!(result["files"], 0);
+    }
 }
 
 #[cfg(test)]
