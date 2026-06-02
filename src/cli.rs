@@ -154,6 +154,15 @@ pub enum Command {
         /// performing a side-effecting pair as a fallback.
         #[arg(long)]
         no_auto_pair: bool,
+        /// v0.14.2: opt back into the legacy outbox→daemon-push pipeline.
+        /// By default `wire send` POSTs to the peer's relay slot
+        /// synchronously and returns a real `delivered` / `duplicate` /
+        /// `failed` verdict. With `--queue` the event is appended to
+        /// `<outbox_dir>/<peer>.jsonl` and the daemon's push loop
+        /// drains it later (pre-v0.14.2 behavior). Use for offline
+        /// buffering, batch sends, or pre-pair queueing.
+        #[arg(long)]
+        queue: bool,
         /// Emit JSON.
         #[arg(long)]
         json: bool,
@@ -1680,6 +1689,7 @@ pub fn run() -> Result<()> {
             body,
             deadline,
             no_auto_pair,
+            queue,
             json,
         } => {
             // P0.S: smart-positional API. `wire send peer body` =
@@ -1694,6 +1704,7 @@ pub fn run() -> Result<()> {
                 &body,
                 deadline.as_deref(),
                 no_auto_pair,
+                queue,
                 json_default(json),
             )
         }
@@ -3804,6 +3815,10 @@ fn cmd_send(
     // scripts can branch on the error instead of accepting an implicit
     // side effect.
     no_auto_pair: bool,
+    // v0.14.2: opt back into the legacy outbox→daemon-push path. When
+    // false (default), we POST synchronously and return a real
+    // `delivered` / `duplicate` / `failed` verdict.
+    queue: bool,
     as_json: bool,
 ) -> Result<()> {
     if !config::is_initialized()? {
@@ -3930,13 +3945,62 @@ fn cmd_send(
     // Never blocks the send — the event still queues to outbox.
     maybe_warn_peer_attentiveness(peer);
 
-    // For now we append to outbox JSONL and rely on a future daemon to push
-    // to the relay. That's the file-system contract from AGENT_INTEGRATION.md.
-    // Append goes through `config::append_outbox_record` which holds a per-
-    // path mutex so concurrent senders cannot interleave bytes mid-line.
+    // v0.14.2 (paul, 2026-06-01): collapse the legacy 3-step
+    // (outbox-write → daemon push → relay) into a single synchronous
+    // POST when `--queue` is NOT set. The old path silently dropped
+    // events in three distinct classes (daemon-down,
+    // wrong-WIRE_HOME, stale-slot); the new path returns the real
+    // verdict inline.
+    if !queue {
+        let outcome = crate::send::attempt_deliver(peer, &signed)?;
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string(&crate::send::delivery_json(&outcome, peer))?
+            );
+        } else {
+            use crate::send::SyncDelivery;
+            match &outcome {
+                SyncDelivery::Delivered {
+                    event_id,
+                    relay_url,
+                    slot_id,
+                } => println!("delivered {event_id} → {peer} (relay {relay_url} slot {slot_id})"),
+                SyncDelivery::Duplicate {
+                    event_id,
+                    relay_url,
+                    slot_id,
+                } => println!(
+                    "duplicate {event_id} → {peer} (already on relay {relay_url} slot {slot_id} — change the body to send a distinct event)"
+                ),
+                SyncDelivery::PeerUnknown { event_id } => println!(
+                    "FAILED {event_id} → {peer}: peer not pinned. Run `wire dial {peer}` to pair, or `wire send --queue {peer} ...` to write to outbox for the daemon to retry later."
+                ),
+                SyncDelivery::SlotStale {
+                    event_id, detail, ..
+                } => println!(
+                    "FAILED {event_id} → {peer}: relay says slot is stale ({detail}). Run `wire dial {peer}` to re-pair."
+                ),
+                SyncDelivery::TransportError {
+                    event_id, detail, ..
+                } => println!(
+                    "FAILED {event_id} → {peer}: transport error ({detail}). Retry, or pass --queue to outbox the event for daemon retry."
+                ),
+            }
+        }
+        // Non-zero exit for non-delivered states so scripts can
+        // branch. Delivered + Duplicate both count as success (both
+        // mean the peer can pull).
+        if !outcome.reached_relay() {
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+
+    // Legacy --queue path: append to per-peer outbox JSONL, daemon
+    // push loop drains. Same code shape as pre-v0.14.2.
     let line = serde_json::to_vec(&signed)?;
     let outbox = config::append_outbox_record(peer, &line)?;
-
     if as_json {
         println!(
             "{}",
@@ -3949,7 +4013,7 @@ fn cmd_send(
         );
     } else {
         println!(
-            "queued event {event_id} → {peer} (outbox: {})",
+            "queued event {event_id} → {peer} (outbox: {}; daemon will push)",
             outbox.display()
         );
     }
@@ -4167,7 +4231,7 @@ fn cmd_dial(name: &str, message: Option<&str>, as_json: bool) -> Result<()> {
         if let Some(msg) = message {
             // Peer handle for send = the nick part before the `@`.
             let bare = name.split('@').next().unwrap_or(name);
-            cmd_send(bare, "claim", msg, None, false, as_json)?;
+            cmd_send(bare, "claim", msg, None, false, false, as_json)?;
         }
         return Ok(());
     }
@@ -4231,7 +4295,7 @@ fn cmd_dial(name: &str, message: Option<&str>, as_json: bool) -> Result<()> {
     };
 
     let send_result = if let Some(msg) = message {
-        let r = cmd_send(&send_handle, "claim", msg, None, false, true);
+        let r = cmd_send(&send_handle, "claim", msg, None, false, false, true);
         match &r {
             Ok(()) => steps.push(json!({"step": "sent", "to": send_handle, "kind": "claim"})),
             Err(e) => steps.push(json!({"step": "send_failed", "error": format!("{e:#}")})),
@@ -14309,7 +14373,7 @@ fn strip_proto(url: &str) -> String {
 ///
 /// And rejects the false-positive shapes documented in
 /// `error_smells_like_slot_4xx_tests` below.
-fn error_smells_like_slot_4xx(last_err: &str) -> bool {
+pub fn error_smells_like_slot_4xx(last_err: &str) -> bool {
     fn is_token_boundary(b: u8) -> bool {
         matches!(b, b' ' | b':' | b'\t' | b'\n' | b'\r')
     }

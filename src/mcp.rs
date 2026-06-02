@@ -545,7 +545,7 @@ fn handle_initialize(id: &Value) -> Value {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION,
             },
-            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity), wire_status (daemon + sync health). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). ON SESSION START, DO THIS IMMEDIATELY (every wire session): (1) call wire_status to confirm the `wire daemon` sync loop is running — `daemon_running:true` + `last_sync_age_seconds < 60`; if not, the session won't push outbound or pull inbound and the operator must start a daemon (`wire daemon --interval 5` in a background shell, or systemd/launchd). (2) arm a PERSISTENT stream-watcher on `wire monitor --json` — in Claude Code, the Monitor tool with persistent:true — so peer messages surface live mid-session. The monitor does NOT sync the relay; it only tails the inbox the daemon writes. Both are required. WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you; this is how paired agents collaborate immediately. (Default filter strips pair_drop/pair_drop_ack/heartbeat noise.) wire_send returns `status:\"queued\"` even if no daemon is running — check `daemon_seen` + `stale_sync` in the response (added v0.14.2 per #162) to detect silent-send. Legacy MCP tools (wire_pair_accept / wire_pair_reject / wire_pair_list_inbound, wire_pair_initiate/join/confirm) still callable but DEPRECATED — prefer canonical. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
+            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity), wire_status (daemon + sync health). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). ON SESSION START, DO THIS IMMEDIATELY (every wire session): (1) call wire_status to confirm the `wire daemon` sync loop is running — `daemon_running:true` + `last_sync_age_seconds < 60`; if not, the session won't push outbound or pull inbound and the operator must start a daemon (`wire daemon --interval 5` in a background shell, or systemd/launchd). (2) arm a PERSISTENT stream-watcher on `wire monitor --json` — in Claude Code, the Monitor tool with persistent:true — so peer messages surface live mid-session. The monitor does NOT sync the relay; it only tails the inbox the daemon writes. Both are required. WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you; this is how paired agents collaborate immediately. (Default filter strips pair_drop/pair_drop_ack/heartbeat noise.) v0.14.2: wire_send POSTs synchronously by default — response `status` is the actual relay verdict: `delivered` (event landed on peer's slot), `duplicate` (same event_id already on slot; peer can still pull), `peer_unknown` (peer not pinned — run wire_dial first), `slot_stale` (peer's slot rotated — run wire_dial to re-pair), or `transport_error` (TLS/DNS/relay-5xx; check `reason` field). Pass `queue:true` to opt back into the legacy outbox→daemon-push path for offline-buffer / pre-pair queueing. Legacy MCP tools (wire_pair_accept / wire_pair_reject / wire_pair_list_inbound, wire_pair_initiate/join/confirm) still callable but DEPRECATED — prefer canonical. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
         }
     })
 }
@@ -1348,6 +1348,11 @@ fn tool_send(args: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .ok_or("missing 'body'")?;
     let deadline = args.get("time_sensitive_until").and_then(Value::as_str);
+    // v0.14.2 (paul, 2026-06-01): opt back into the legacy outbox →
+    // daemon-push pipeline. Default is synchronous POST so callers get
+    // a real `delivered` / `duplicate` / `failed` verdict instead of
+    // a `queued` lie. `queue: true` writes to outbox like pre-v0.14.2.
+    let queue = args.get("queue").and_then(Value::as_bool).unwrap_or(false);
 
     if !config::is_initialized().map_err(|e| e.to_string())? {
         return Err("not initialized — operator must run `wire init <handle>` first".into());
@@ -1403,19 +1408,36 @@ fn tool_send(args: &Value) -> Result<Value, String> {
         sign_message_v31(&event, &sk_seed, &pk_bytes, &handle).map_err(|e| e.to_string())?;
     let event_id = signed["event_id"].as_str().unwrap_or("").to_string();
 
+    // v0.14.2 (paul, 2026-06-01): collapse send → outbox → push into
+    // a synchronous POST by default. `queue: true` opts back into the
+    // legacy outbox path for offline-buffer / batch / pre-pair queue
+    // use cases.
+    if !queue {
+        let outcome = crate::send::attempt_deliver(peer, &signed).map_err(|e| e.to_string())?;
+        let mut v = crate::send::delivery_json(&outcome, peer);
+        // Carry the same daemon-health annotations the caller used to
+        // get on the legacy `queued` response. With sync delivery
+        // these are diagnostic-only (the verdict in `status` is the
+        // authoritative answer), but they're cheap to compute and
+        // existing consumers may key on them.
+        let snap = crate::ensure_up::daemon_liveness();
+        let last_sync_age = crate::ensure_up::last_sync_age_seconds();
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("daemon_seen".into(), json!(snap.pidfile_alive));
+            obj.insert("last_sync_age_seconds".into(), json!(last_sync_age));
+            obj.insert(
+                "stale_sync".into(),
+                json!(config::stale_sync(last_sync_age)),
+            );
+        }
+        return Ok(v);
+    }
+
+    // Legacy --queue path. Outbox-write, daemon push loop drains.
     let line = serde_json::to_vec(&signed).map_err(|e| e.to_string())?;
     let outbox = config::append_outbox_record(peer, &line).map_err(|e| e.to_string())?;
-
-    // v0.14.2 (#162): annotate the queued event with daemon-liveness
-    // signals so callers can detect the silent-send class — a write to
-    // the outbox file isn't a delivery; the daemon push loop is. If
-    // `daemon_seen: false` or `last_sync_age_seconds` is high/null, the
-    // caller's intended recipient hasn't received anything yet. The
-    // `status: "queued"` carries unchanged for back-compat; consumers
-    // that don't know about the new fields keep working.
     let snap = crate::ensure_up::daemon_liveness();
     let last_sync_age = crate::ensure_up::last_sync_age_seconds();
-
     Ok(json!({
         "event_id": event_id,
         "status": "queued",
