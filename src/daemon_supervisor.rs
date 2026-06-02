@@ -344,6 +344,15 @@ pub struct SupervisorState {
     /// default WIRE_HOME (no `--all-sessions`). Operators see them
     /// here so they can decide whether to kill.
     pub unmanaged_pids: Vec<u32>,
+    /// v0.14.2: session names whose live daemon's recorded
+    /// `pidfile.version` is older than this CLI's own
+    /// `CARGO_PKG_VERSION`. The supervisor's existing-pidfile check
+    /// skips alive daemons regardless of their binary version, so
+    /// stale-binary daemons persist until they exit. Surfaced for
+    /// operator visibility — they can `pkill -TERM <pid>` or use a
+    /// future `wire upgrade --refresh-stale-children` to force the
+    /// supervisor to respawn them on the current binary.
+    pub stale_binary_sessions: Vec<String>,
 }
 
 /// One session as seen by the supervisor.
@@ -360,6 +369,16 @@ pub struct SupervisedSession {
     /// Seconds since the session's daemon last completed a sync
     /// cycle (read from `last_sync.json`); None if never recorded.
     pub last_sync_age_seconds: Option<u64>,
+    /// Version string the running daemon recorded when it wrote its
+    /// pidfile (`PidRecord::Json.version`). None for legacy-int
+    /// pidfiles. Surfaced so operators can spot version drift across
+    /// the supervisor fleet — the supervisor's pre-spawn
+    /// existing-pidfile check skips alive daemons regardless of
+    /// their binary version, so a daemon spawned on v0.13.x and
+    /// still running after the supervisor was bounced to v0.14.x
+    /// keeps the old binary in memory until it exits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_version: Option<String>,
 }
 
 /// Build a `SupervisorState` snapshot. Pure read; no fork / no
@@ -384,12 +403,17 @@ pub fn read_supervisor_state() -> Result<SupervisorState> {
                 .unwrap_or(false);
             // last_sync.json lives under <home>/state/wire/last_sync.json.
             let last_sync_age_seconds = read_session_last_sync_age(&info.home_dir);
+            // v0.14.2: read the daemon-recorded version from the JSON
+            // pidfile. Legacy bare-integer pidfiles return None
+            // (can't surface a version we don't have).
+            let daemon_version = read_session_pidfile_version(&info.home_dir);
             SupervisedSession {
                 name: info.name,
                 home_dir: info.home_dir.to_string_lossy().into_owned(),
                 daemon_pid,
                 daemon_alive,
                 last_sync_age_seconds,
+                daemon_version,
             }
         })
         .collect();
@@ -410,12 +434,70 @@ pub fn read_supervisor_state() -> Result<SupervisorState> {
         .collect();
     unmanaged_pids.sort_unstable();
 
+    // v0.14.2: derive the stale-binary set. Compare each live
+    // daemon's recorded version against the running CLI's version.
+    // "Stale" iff alive + has a recorded version + that version is
+    // strictly less than ours by dotted-integer compare (so 0.10.0 >
+    // 0.9.0). Unparseable strings are conservatively "not stale" — a
+    // pre-release suffix like 0.14.2-rc.1 stays unflagged rather than
+    // false-positive against 0.14.2.
+    let our_version = env!("CARGO_PKG_VERSION");
+    let stale_binary_sessions: Vec<String> = sessions
+        .iter()
+        .filter(|s| {
+            s.daemon_alive
+                && s.daemon_version
+                    .as_deref()
+                    .map(|v| version_lt(v, our_version))
+                    .unwrap_or(false)
+        })
+        .map(|s| s.name.clone())
+        .collect();
+
     Ok(SupervisorState {
         supervisor_pid,
         supervisor_alive,
         sessions,
         unmanaged_pids,
+        stale_binary_sessions,
     })
+}
+
+/// Compare two dotted-integer version strings: `a < b`?
+///
+/// Splits on `.`, parses each segment as `u32`, compares
+/// element-wise (left-pad shorter with 0 so `0.14` < `0.14.1` is
+/// `true`). Anything that fails to parse as `u32` makes the whole
+/// compare return `false` — we'd rather under-flag a pre-release
+/// suffix like `0.14.2-rc.1` than false-positive against a stable
+/// peer of the same major.minor.patch.
+fn version_lt(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> Option<Vec<u32>> { s.split('.').map(|p| p.parse().ok()).collect() };
+    let (Some(av), Some(bv)) = (parse(a), parse(b)) else {
+        return false;
+    };
+    let n = av.len().max(bv.len());
+    for i in 0..n {
+        let ai = av.get(i).copied().unwrap_or(0);
+        let bi = bv.get(i).copied().unwrap_or(0);
+        if ai != bi {
+            return ai < bi;
+        }
+    }
+    false
+}
+
+/// Read the daemon-recorded version string from a session's
+/// `<home>/state/wire/daemon.pid` JSON pidfile. Returns None for
+/// legacy bare-integer pidfiles (no version field) and for absent /
+/// unreadable files.
+fn read_session_pidfile_version(home_dir: &std::path::Path) -> Option<String> {
+    let pidfile = home_dir.join("state").join("wire").join("daemon.pid");
+    let body = std::fs::read_to_string(&pidfile).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    v.get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 /// Read `supervisor.pid` without the liveness check (the snapshot
@@ -494,6 +576,25 @@ impl Drop for SupervisorPidGuard {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn version_lt_dotted_integer_compare() {
+        // Lexical string-compare footgun cases — these must come out right.
+        assert!(version_lt("0.9.0", "0.10.0"));
+        assert!(version_lt("0.13.5", "0.14.1"));
+        assert!(version_lt("0.14.0", "0.14.1"));
+        // Equal / greater → not stale.
+        assert!(!version_lt("0.14.1", "0.14.1"));
+        assert!(!version_lt("0.14.2", "0.14.1"));
+        // Shorter version pads with zero.
+        assert!(version_lt("0.14", "0.14.1"));
+        assert!(!version_lt("0.14.1", "0.14"));
+        // Unparseable (pre-release suffix, garbage) is conservatively NOT-stale
+        // — under-flagging beats false-positive on `0.14.2-rc.1` vs `0.14.2`.
+        assert!(!version_lt("0.14.2-rc.1", "0.14.2"));
+        assert!(!version_lt("garbage", "0.14.1"));
+        assert!(!version_lt("0.14.1", "garbage"));
+    }
 
     #[test]
     fn read_alive_supervisor_pid_returns_none_when_missing() {
