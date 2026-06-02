@@ -9,6 +9,7 @@
 //! v0.2+ (NOT in this crate yet, see `BACKLOG.md`):
 //!   - relay client/server, SPAKE2 handshake, CLI, file_share/file_revoke kinds.
 
+pub mod adapters;
 pub mod agent_card;
 pub mod canonical;
 pub mod character;
