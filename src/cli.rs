@@ -802,6 +802,17 @@ pub enum Command {
         /// reconnects. Cross-session impact: kills every `wire mcp` found.
         #[arg(long = "restart-mcp")]
         restart_mcp: bool,
+        /// v0.14.3 (closes the #198 follow-up): kill the daemons reported in
+        /// `wire supervisor`'s `stale_binary_sessions` set — sister-session
+        /// children alive on an old binary that the supervisor's
+        /// existing-pidfile check intentionally protected from respawn. Once
+        /// each is killed, the `--all-sessions` supervisor respawns it on
+        /// the new binary on its next 10s registry poll. Cross-session
+        /// impact: only sessions flagged stale are touched; in-sync siblings
+        /// are spared. No-op (silent) when no supervisor is running OR no
+        /// stale daemons exist.
+        #[arg(long = "refresh-stale-children")]
+        refresh_stale_children: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1968,8 +1979,9 @@ pub fn run() -> Result<()> {
             check,
             local,
             restart_mcp,
+            refresh_stale_children,
             json,
-        } => cmd_upgrade(check, local, restart_mcp, json),
+        } => cmd_upgrade(check, local, restart_mcp, refresh_stale_children, json),
         Command::Service { action } => cmd_service(action),
         Command::Diag { action } => cmd_diag(action),
         Command::Claim {
@@ -12655,7 +12667,13 @@ mod upgrade_tests {
     }
 }
 
-fn cmd_upgrade(check_only: bool, local: bool, restart_mcp: bool, as_json: bool) -> Result<()> {
+fn cmd_upgrade(
+    check_only: bool,
+    local: bool,
+    restart_mcp: bool,
+    refresh_stale_children: bool,
+    as_json: bool,
+) -> Result<()> {
     // 0. (v0.13.3 — merged `update`) ALWAYS check crates.io first and, unless
     // this is a --check or --local run, self-install a newer release BEFORE the
     // daemon swap below — the respawn then picks up the new on-disk binary. A
@@ -12737,8 +12755,62 @@ fn cmd_upgrade(check_only: bool, local: bool, restart_mcp: bool, as_json: bool) 
         .iter()
         .filter_map(|s| crate::session::session_daemon_pid(&s.home_dir))
         .collect();
-    let kill_set = upgrade_kill_set(my_daemon_pid, &daemon_pids, &owned_session_pids);
+    let mut kill_set = upgrade_kill_set(my_daemon_pid, &daemon_pids, &owned_session_pids);
     // relay_pids are intentionally NOT killed — the local relay is shared.
+    //
+    // v0.14.3 (closes the #198 follow-up): when `--refresh-stale-children`
+    // is set, extend the kill set with the daemons of supervisor-reported
+    // `stale_binary_sessions` so the supervisor respawns them on the new
+    // binary on its next 10s poll. The supervisor's existing-pidfile check
+    // is what made those daemons stick around in the first place — only an
+    // explicit opt-in upgrade flag should override that policy, because
+    // killing a daemon interrupts any in-flight sync for that session.
+    // Errors reading supervisor state are non-fatal (no-op).
+    let stale_children_killed: Vec<serde_json::Value> = if refresh_stale_children {
+        match crate::daemon_supervisor::read_supervisor_state() {
+            Ok(sv) => {
+                let mut killed: Vec<serde_json::Value> = Vec::new();
+                let cli_v = env!("CARGO_PKG_VERSION");
+                for s in &sv.sessions {
+                    if !sv.stale_binary_sessions.contains(&s.name) {
+                        continue;
+                    }
+                    if let Some(pid) = s.daemon_pid {
+                        // Don't double-add if it's already in the kill
+                        // set (paranoia: shouldn't happen since stale
+                        // children are sister sessions by definition).
+                        if !kill_set.contains(&pid) {
+                            kill_set.push(pid);
+                        }
+                        killed.push(json!({
+                            "session": s.name,
+                            "pid": pid,
+                            "prev_version": s.daemon_version,
+                            "cli_version": cli_v,
+                        }));
+                    }
+                }
+                if !killed.is_empty() && !as_json {
+                    eprintln!(
+                        "wire upgrade: --refresh-stale-children will kill {} stale-binary session daemon(s); supervisor respawns each on next 10s poll.",
+                        killed.len()
+                    );
+                }
+                killed
+            }
+            Err(e) => {
+                if !as_json {
+                    eprintln!(
+                        "wire upgrade: --refresh-stale-children skipped — could not read supervisor state ({e:#}). \
+                         The flag is a no-op when no `wire daemon --all-sessions` supervisor is running."
+                    );
+                }
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
 
     if check_only {
         // v0.6.8: also surface session-level state + PATH dupes in --check.
@@ -12873,6 +12945,34 @@ fn cmd_upgrade(check_only: bool, local: bool, restart_mcp: bool, as_json: bool) 
                     "  session daemons:  {} (would respawn under new binary)",
                     sessions_with_daemons.join(", ")
                 );
+            }
+            // v0.14.3: preview the --refresh-stale-children effect in
+            // --check too so operators can dry-run "what would the
+            // flag do?" before committing.
+            if let Ok(sv) = crate::daemon_supervisor::read_supervisor_state()
+                && !sv.stale_binary_sessions.is_empty()
+            {
+                let cli_v = env!("CARGO_PKG_VERSION");
+                if refresh_stale_children {
+                    println!(
+                        "  stale children:   {} session(s) on old binary; --refresh-stale-children WOULD kill each so supervisor respawns on v{cli_v}",
+                        sv.stale_binary_sessions.len()
+                    );
+                } else {
+                    println!(
+                        "  stale children:   {} session(s) on old binary (v{cli_v} is current); rerun with --refresh-stale-children to refresh them",
+                        sv.stale_binary_sessions.len()
+                    );
+                }
+                for name in &sv.stale_binary_sessions {
+                    let ver = sv
+                        .sessions
+                        .iter()
+                        .find(|s| &s.name == name)
+                        .and_then(|s| s.daemon_version.clone())
+                        .unwrap_or_else(|| "?".to_string());
+                    println!("                    - {name} running v{ver}");
+                }
             }
             if let Some(w) = &path_warning_check {
                 println!("  PATH check:");
@@ -13131,6 +13231,7 @@ fn cmd_upgrade(check_only: bool, local: bool, restart_mcp: bool, as_json: bool) 
                 "new_version": new_version,
                 "cli_version": cli_version,
                 "session_respawns": session_respawns,
+                "stale_children_killed": stale_children_killed,
                 "path_binaries": path_dupes,
                 "path_binaries_detail": path_binaries_detail,
                 "path_warning": path_warning,
@@ -13165,6 +13266,22 @@ fn cmd_upgrade(check_only: bool, local: bool, restart_mcp: bool, as_json: bool) 
                     killed.len(),
                     relay_pids.len()
                 );
+            }
+        }
+        if !stale_children_killed.is_empty() {
+            let cli_v = env!("CARGO_PKG_VERSION");
+            println!(
+                "wire upgrade: refreshed {} stale-binary session daemon(s) (supervisor respawns on v{cli_v} on next 10s poll):",
+                stale_children_killed.len()
+            );
+            for entry in &stale_children_killed {
+                let name = entry.get("session").and_then(Value::as_str).unwrap_or("?");
+                let pid = entry.get("pid").and_then(Value::as_u64).unwrap_or(0);
+                let prev = entry
+                    .get("prev_version")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                println!("                    - {name} (pid {pid}, was v{prev})");
             }
         }
         if !service_refreshes.is_empty() {
