@@ -13257,6 +13257,7 @@ fn cmd_doctor(as_json: bool, recent_rejections: usize) -> Result<()> {
         check_cursor_progress(),
         check_peer_staleness(7),
         check_and_heal_self_userinfo_endpoints(),
+        check_stale_inbound_pairs(),
     ];
 
     let fails = checks.iter().filter(|c| c.status == "FAIL").count();
@@ -13819,6 +13820,60 @@ fn check_and_heal_self_userinfo_endpoints() -> DoctorCheck {
          clean endpoint: `wire claim <your-persona>` (find your persona with \
          `wire whoami`)."
             .to_string(),
+    )
+}
+
+/// v0.14.3: surface pre-#171 stale pending_inbound records for
+/// peers already at VERIFIED+ tier. The record itself is benign
+/// (operator can clear with `wire reject <handle>`) but until
+/// cleared it keeps surfacing in `wire status --json` as
+/// `stale_inbound_handles`, which leaks into automation. Doctor is
+/// the right place to surface low-priority hygiene — operators
+/// scan it intentionally instead of seeing it on every status
+/// call.
+fn check_stale_inbound_pairs() -> DoctorCheck {
+    let pinned_verified: std::collections::HashSet<String> = config::read_trust()
+        .ok()
+        .and_then(|t| t.get("agents").and_then(Value::as_object).cloned())
+        .map(|agents| {
+            agents
+                .into_iter()
+                .filter_map(|(h, a)| {
+                    let tier = a.get("tier").and_then(Value::as_str).unwrap_or("");
+                    if matches!(tier, "VERIFIED" | "ORG_VERIFIED" | "ATTESTED") {
+                        Some(h)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let stale: Vec<String> = crate::pending_inbound_pair::list_pending_inbound()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| pinned_verified.contains(&p.peer_handle))
+        .map(|p| p.peer_handle)
+        .collect();
+    if stale.is_empty() {
+        return DoctorCheck::pass(
+            "stale-inbound-pairs",
+            "no pre-#171 leftover pending_inbound records for VERIFIED peers",
+        );
+    }
+    let n = stale.len();
+    let list = stale.join(", ");
+    let fix_list = stale
+        .iter()
+        .map(|h| format!("wire reject {h}"))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    DoctorCheck::warn(
+        "stale-inbound-pairs",
+        format!(
+            "{n} VERIFIED peer(s) still carry a pre-#171 pending_inbound record: {list}. Benign but leaks into `wire status --json.pending_pairs.stale_inbound_handles`."
+        ),
+        format!("clear with `{fix_list}`"),
     )
 }
 
