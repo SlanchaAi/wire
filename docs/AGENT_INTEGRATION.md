@@ -198,7 +198,7 @@ $ wire peers --json
 [{"handle":"willard","did":"did:wire:willard","tier":"VERIFIED","capabilities":["wire/v3.1","markdown/v1"]}]
 
 $ wire send willard decision "ship the v0.1 demo" --json
-{"event_id":"a3c9...","status":"queued","peer":"willard"}
+{"event_id":"a3c9...","status":"delivered","peer":"willard","relay_url":"https://wireup.net","slot_id":"..."}
 
 $ wire tail willard --since=a3c9... --json --limit=10
 {"event_id":"b4d0...","kind":1,"from":"willard","body":{"content":"ack"},"verified":true}
@@ -262,7 +262,7 @@ Agents that can't spawn subprocesses or speak MCP (sandboxed evals, web-only mod
 
 ~/.local/state/wire/
   inbox/<peer>.jsonl     # signed events from <peer>; daemon appends
-  outbox/<peer>.jsonl    # queued events to <peer>; agent appends
+  outbox/<peer>.jsonl    # legacy `wire send --queue` buffer; daemon drains (sync send default skips this entirely)
   spool/                 # daemon-internal — do not touch
 ```
 
@@ -328,7 +328,7 @@ $ wire peers --json
 [{"handle":"willard","capabilities":["wire/v3.1","markdown/v1","tool-use/v1"]}]
 
 $ wire send willard tool_call '{"tool":"calc","args":{"x":1}}' --check-cap=tool-use/v1
-{"event_id":"...", "status":"queued"}
+{"event_id":"...", "status":"delivered", "relay_url":"https://wireup.net", "slot_id":"..."}
 
 $ wire send willard tool_call '...' --check-cap=tool-use/v1
 # if willard doesn't advertise tool-use/v1:
@@ -341,17 +341,19 @@ Default behavior is permissive (send anyway). `--check-cap` is opt-in for agents
 
 ## Idempotency + retry semantics
 
-All operations are content-addressed. `event_id = SHA-256(canonical_body)`. The daemon dedupes by event_id before append + before relay POST. Retrying `wire send` with identical body is a no-op:
+All operations are content-addressed. `event_id = SHA-256(canonical_body)`. Sync `wire send` (default, post-#187) POSTs directly to the peer's relay slot. The relay dedupes by event_id before accepting the event. Retrying `wire send` with identical body returns `status: "duplicate"` instead of `status: "delivered"` — the relay already has the event, the peer can pull it either way:
 
 ```bash
 $ wire send willard decision "ship" --json
-{"event_id":"a3c9...","status":"queued"}
+{"event_id":"a3c9...","status":"delivered","peer":"willard","relay_url":"https://wireup.net","slot_id":"..."}
 
 $ wire send willard decision "ship" --json   # exact retry
-{"event_id":"a3c9...","status":"already_queued","duplicate":true}
+{"event_id":"a3c9...","status":"duplicate","peer":"willard","relay_url":"https://wireup.net","slot_id":"..."}
 ```
 
-Agents can naively retry on any error without worrying about double-sending.
+Both `delivered` and `duplicate` count as success — the peer can pull the event either way. Agents can naively retry on any non-2xx exit code without worrying about double-sending.
+
+If sync delivery fails (`peer_unknown`, `slot_stale`, `transport_error` — the `wire send` exit code is 2), the `reason` field describes what to do. Operators or scripts can fall back to the legacy outbox+daemon-push path by passing `--queue` (CLI) / `queue: true` (MCP) — useful for offline buffering or batching.
 
 ---
 
