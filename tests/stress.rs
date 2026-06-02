@@ -286,7 +286,7 @@ async fn stress_outbox_flood_500_messages_single_peer() {
     let start = Instant::now();
     for i in 0..FLOOD_COUNT {
         let body = format!("flood msg {i}");
-        let out = wire(&alice, &["send", &bob_h, "claim", &body]);
+        let out = wire(&alice, &["send", "--queue", &bob_h, "claim", &body]);
         assert!(
             out.status.success(),
             "send {i} failed: {}",
@@ -380,7 +380,7 @@ async fn stress_concurrent_sends_no_torn_writes() {
             std::thread::spawn(move || {
                 for i in 0..CONCURRENT_PER_THREAD {
                     let body = format!("thread {tid} msg {i}");
-                    let out = wire(&alice, &["send", &bob_h, "claim", &body]);
+                    let out = wire(&alice, &["send", "--queue", &bob_h, "claim", &body]);
                     assert!(
                         out.status.success(),
                         "thread {tid} send {i} failed: {}",
@@ -549,7 +549,7 @@ async fn stress_send_to_nonexistent_slot_surfaces_error() {
 
     // Queue a message + push. Capture the push --json output.
     assert!(
-        wire(&alice, &["send", &bob_h, "claim", "to the void"])
+        wire(&alice, &["send", "--queue", &bob_h, "claim", "to the void"])
             .status
             .success()
     );

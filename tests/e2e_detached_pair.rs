@@ -232,7 +232,13 @@ async fn detached_pair_full_e2e_with_real_daemons() {
     assert!(
         wire(
             &paul,
-            &["send", &willard_h, "claim", "hello from detached e2e"]
+            &[
+                "send",
+                "--queue",
+                &willard_h,
+                "claim",
+                "hello from detached e2e"
+            ]
         )
         .status
         .success()

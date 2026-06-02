@@ -215,34 +215,34 @@ async fn three_party_mesh_of_bilateral_round_trips() {
     // ---- 5. criss-cross sends: each agent fires one event to each peer ----
     // paul -> willard, paul -> carol
     assert!(
-        wire(&paul, &["send", &willard_h, "decision", "P->W"])
+        wire(&paul, &["send", "--queue", &willard_h, "decision", "P->W"])
             .status
             .success()
     );
     assert!(
-        wire(&paul, &["send", &carol_h, "decision", "P->C"])
+        wire(&paul, &["send", "--queue", &carol_h, "decision", "P->C"])
             .status
             .success()
     );
     // willard -> paul, willard -> carol
     assert!(
-        wire(&willard, &["send", &paul_h, "decision", "W->P"])
+        wire(&willard, &["send", "--queue", &paul_h, "decision", "W->P"])
             .status
             .success()
     );
     assert!(
-        wire(&willard, &["send", &carol_h, "decision", "W->C"])
+        wire(&willard, &["send", "--queue", &carol_h, "decision", "W->C"])
             .status
             .success()
     );
     // carol -> paul, carol -> willard
     assert!(
-        wire(&carol, &["send", &paul_h, "decision", "C->P"])
+        wire(&carol, &["send", "--queue", &paul_h, "decision", "C->P"])
             .status
             .success()
     );
     assert!(
-        wire(&carol, &["send", &willard_h, "decision", "C->W"])
+        wire(&carol, &["send", "--queue", &willard_h, "decision", "C->W"])
             .status
             .success()
     );

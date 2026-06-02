@@ -130,9 +130,12 @@ async fn daemon_once_drives_full_sync_after_pairing() {
 
     // Send + run daemon --once on each side
     assert!(
-        wire(&paul, &["send", &willard_h, "decision", "via daemon"])
-            .status
-            .success()
+        wire(
+            &paul,
+            &["send", "--queue", &willard_h, "decision", "via daemon"]
+        )
+        .status
+        .success()
     );
     let paul_daemon = wire(&paul, &["daemon", "--once", "--json"]);
     assert!(paul_daemon.status.success());
@@ -425,6 +428,7 @@ async fn paul_pair_hosts_willard_joins_then_send_round_trips() {
         &paul_home,
         &[
             "send",
+            "--queue",
             &willard_h,
             "decision",
             "ship the v0.1 demo",

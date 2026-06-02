@@ -157,6 +157,7 @@ async fn paul_sends_to_willard_via_relay_and_willard_verifies() {
         &paul_home,
         &[
             "send",
+            "--queue",
             &willard_h,
             "decision",
             "ship the v0.1 demo",
@@ -278,7 +279,14 @@ async fn pull_rejects_event_with_unknown_signer() {
     assert!(
         wire(
             &paul_home,
-            &["send", &willard_h, "decision", "from a stranger", "--json"]
+            &[
+                "send",
+                "--queue",
+                &willard_h,
+                "decision",
+                "from a stranger",
+                "--json"
+            ]
         )
         .status
         .success()
