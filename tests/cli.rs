@@ -1224,11 +1224,25 @@ fn send_idempotent_under_identical_body() {
     let _ = run(&home, &["init", "paul", "--offline"]);
     let out1 = run(
         &home,
-        &["send", "--queue", "willard", "decision", "fixed-body", "--json"],
+        &[
+            "send",
+            "--queue",
+            "willard",
+            "decision",
+            "fixed-body",
+            "--json",
+        ],
     );
     let out2 = run(
         &home,
-        &["send", "--queue", "willard", "decision", "fixed-body", "--json"],
+        &[
+            "send",
+            "--queue",
+            "willard",
+            "decision",
+            "fixed-body",
+            "--json",
+        ],
     );
     let p1: serde_json::Value = serde_json::from_slice(&out1.stdout).unwrap();
     let p2: serde_json::Value = serde_json::from_slice(&out2.stdout).unwrap();
@@ -1245,7 +1259,10 @@ fn send_idempotent_under_identical_body() {
 fn verify_round_trips_a_send() {
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
-    let _ = run(&home, &["send", "--queue", "paul", "decision", "self-test", "--json"]);
+    let _ = run(
+        &home,
+        &["send", "--queue", "paul", "decision", "self-test", "--json"],
+    );
     // Drop the queued event into a temp file and verify it.
     let outbox = home.join("state/wire/outbox/paul.jsonl");
     let line = std::fs::read_to_string(&outbox).unwrap();
@@ -1266,7 +1283,10 @@ fn verify_round_trips_a_send() {
 fn verify_rejects_tampered_event() {
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
-    let _ = run(&home, &["send", "--queue", "paul", "decision", "original", "--json"]);
+    let _ = run(
+        &home,
+        &["send", "--queue", "paul", "decision", "original", "--json"],
+    );
     let outbox = home.join("state/wire/outbox/paul.jsonl");
     let line = std::fs::read_to_string(&outbox).unwrap();
     let mut event: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
