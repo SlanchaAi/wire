@@ -4107,6 +4107,54 @@ fn cmd_send(
 
     // Legacy --queue path: append to per-peer outbox JSONL, daemon
     // push loop drains. Same code shape as pre-v0.14.2.
+    //
+    // Honesty check: if the peer is BOTH not pinned in trust AND has
+    // no pending pair, the daemon has no relay endpoint to push to
+    // and never will until the operator pairs. The CLI shouldn't
+    // silently accept this — coral dogfood today (2026-06-01) found
+    // a year-old `no-such-peer.jsonl` outbox file from a typo'd send,
+    // still on disk because the daemon has nowhere to send it. Emit
+    // a one-line stderr warning so the operator knows what's going
+    // to happen (the write proceeds — `--queue` is the documented
+    // pre-pair best-effort path and we don't want to break the
+    // "queue → then dial → then push" workflow).
+    let peer_pinned_in_trust = trust_for_did
+        .get("agents")
+        .and_then(Value::as_object)
+        .map(|a| a.contains_key(peer))
+        .unwrap_or(false);
+    if !peer_pinned_in_trust && !peer_is_pinned {
+        // Check both directions: outbound (we dialed, daemon
+        // hasn't completed the pair yet — peer_did may be set if
+        // the relay returned it) and inbound (we received an
+        // invite drop awaiting accept — explicit peer_handle).
+        let pending_outbound = crate::pending_pair::list_pending()
+            .ok()
+            .map(|v| {
+                v.iter().any(|p| {
+                    p.peer_did
+                        .as_deref()
+                        .map(|d| {
+                            crate::agent_card::display_handle_from_did(d)
+                                .to_string()
+                                .eq(peer)
+                        })
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        let pending_inbound = crate::pending_inbound_pair::list_pending_inbound()
+            .ok()
+            .map(|v| v.iter().any(|p| p.peer_handle == peer))
+            .unwrap_or(false);
+        if !pending_outbound && !pending_inbound {
+            eprintln!(
+                "wire send: WARN — `{peer}` is not pinned and has no pending pair. \
+                 The event will sit in outbox forever unless you pair first \
+                 (`wire dial {peer}` or accept an inbound invite)."
+            );
+        }
+    }
     let line = serde_json::to_vec(&signed)?;
     let outbox = config::append_outbox_record(peer, &line)?;
     if as_json {

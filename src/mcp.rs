@@ -1450,7 +1450,44 @@ fn tool_send(args: &Value) -> Result<Value, String> {
     let outbox = config::append_outbox_record(peer, &line).map_err(|e| e.to_string())?;
     let snap = crate::ensure_up::daemon_liveness();
     let last_sync_age = crate::ensure_up::last_sync_age_seconds();
-    Ok(json!({
+    // Honesty check mirror of the CLI: if the peer is BOTH
+    // unpinned in trust AND has no pending pair (outbound or
+    // inbound), the queued event has nowhere to go and will sit
+    // in outbox forever. Surface the warning as a structured
+    // `warning` field so MCP-side agents can branch on it instead
+    // of treating `status:"queued"` as success.
+    let peer_pinned_in_trust = trust_for_did
+        .get("agents")
+        .and_then(Value::as_object)
+        .map(|a| a.contains_key(peer))
+        .unwrap_or(false);
+    let peer_in_relay_state = config::read_relay_state()
+        .ok()
+        .and_then(|s| s.get("peers").and_then(Value::as_object).cloned())
+        .map(|peers| peers.contains_key(peer))
+        .unwrap_or(false);
+    let pending_outbound = crate::pending_pair::list_pending()
+        .ok()
+        .map(|v| {
+            v.iter().any(|p| {
+                p.peer_did
+                    .as_deref()
+                    .map(|d| {
+                        crate::agent_card::display_handle_from_did(d)
+                            .to_string()
+                            .eq(peer)
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    let pending_inbound = crate::pending_inbound_pair::list_pending_inbound()
+        .ok()
+        .map(|v| v.iter().any(|p| p.peer_handle == peer))
+        .unwrap_or(false);
+    let unpushable =
+        !peer_pinned_in_trust && !peer_in_relay_state && !pending_outbound && !pending_inbound;
+    let mut out = json!({
         "event_id": event_id,
         "status": "queued",
         "peer": peer,
@@ -1458,7 +1495,13 @@ fn tool_send(args: &Value) -> Result<Value, String> {
         "daemon_seen": snap.pidfile_alive,
         "last_sync_age_seconds": last_sync_age,
         "stale_sync": config::stale_sync(last_sync_age),
-    }))
+    });
+    if unpushable {
+        out["warning"] = json!(format!(
+            "`{peer}` is not pinned and has no pending pair — the event will sit in outbox forever unless you pair first (wire_dial)."
+        ));
+    }
+    Ok(out)
 }
 
 /// v0.14.2 (paul, post-#187): symmetric receive primitive. `wire_send`
