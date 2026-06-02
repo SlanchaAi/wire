@@ -211,6 +211,13 @@ pub fn build_blocking_client(
     if insecure_skip_tls_verify() {
         maybe_emit_insecure_banner();
         b = b.danger_accept_invalid_certs(true);
+    } else {
+        // v0.14.2 #177: dual-roots TLS — webpki bundled + OS native
+        // when accessible (corp CAs / AV-resign / on-prem). Replaces
+        // #176's webpki-only emergency fallback. See `tls.rs` for
+        // the why.
+        let cfg = crate::tls::shared_client_config();
+        b = b.use_preconfigured_tls((*cfg).clone());
     }
     b.build()
         .with_context(|| "constructing reqwest blocking client")

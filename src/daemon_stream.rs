@@ -135,7 +135,14 @@ fn connect_and_read(wake_tx: &Sender<()>, last_event_ts: &mut Vec<String>) -> Re
     // v0.5.13: honor WIRE_INSECURE_SKIP_TLS_VERIFY on the stream sub too,
     // matching the rest of the wire HTTPS surface (issue #6).
     let client = {
+        let cfg = crate::tls::shared_client_config();
         let mut b = reqwest::blocking::Client::builder()
+            // v0.14.2 #177: same dual-roots config the rest of wire's
+            // HTTPS surface uses. SSE used to build its own bare
+            // client which inherited reqwest's default root source
+            // (webpki only under #176's feature flag); now both
+            // surfaces share `tls::shared_client_config`.
+            .use_preconfigured_tls((*cfg).clone())
             // No total timeout: stream is expected to stay open indefinitely.
             // TCP keepalive catches a hung connection (server crashed, network
             // black hole) — the BufReader::lines loop returns Err and the
