@@ -10,11 +10,11 @@ the PR description linked in each section.
 
 ## [v0.14.2] — 2026-06-01 (UNRELEASED)
 
-**v0.14.2 — the multi-session ops batch: silent-send class closed, `--all-sessions` supervisor architecture lands, three hotfixes caught by live dogfood.**
+**v0.14.2 — the multi-session ops batch: silent-send class closed, `--all-sessions` supervisor architecture lands, four hotfixes caught by live dogfood.**
 
 honey-pine's 2026-06-01 multi-system dogfood (#162) surfaced an interlocking set of bugs that broke wire's daemon layer on any operator with more than one session: silent send failures, daemon-up-but-not-syncing on launchd, false-negative `wire status`, tier flap, notification storms. This release closes all of them and the architectural rework needed to keep them closed.
 
-13 PRs since the v0.14.1 tag. No trust ladder change, no protocol bump (v3.2 still the constant). Operator action required after upgrade: re-run `wire service install` (idempotent) so the launchd plist / systemd unit picks up the new `wire daemon --all-sessions --interval 5` ProgramArguments. `wire upgrade` does this automatically when a service was previously installed.
+14 PRs since the v0.14.1 tag. No trust ladder change, no protocol bump (v3.2 still the constant). Operator action required after upgrade: re-run `wire service install` (idempotent) so the launchd plist / systemd unit picks up the new `wire daemon --all-sessions --interval 5` ProgramArguments. `wire upgrade` does this automatically when a service was previously installed.
 
 ### Silent-send class closed (honey-pine's #162 bug report)
 
@@ -32,7 +32,9 @@ honey-pine's 2026-06-01 multi-system dogfood (#162) surfaced an interlocking set
 
 - **🚨 Supervisor fork-bomb hotfix (#174).** Caught immediately via live dogfood of #170 on a 133-session box. Supervisor was passing `--session <character-name>` to each child as a belt-and-suspenders check, but `session_dir(name)` only resolves the legacy v0.6 top-level layout — v0.13 by-key sessions where `name` is the persona handle bailed. Fix: drop the redundant flag entirely; `WIRE_HOME` env is the sole contract.
 
-- **🚨 TLS hotfix: `rustls-tls-native-roots` → `rustls-tls-webpki-roots` (#176).** Also caught via the same dogfood pass. Once the supervisor put every daemon in launchd, every TLS handshake to wireup.net failed `UnknownIssuer`: launchd-spawned processes don't inherit Aqua-session keychain access on macOS, so `rustls-native-certs` returned an empty root set. Mozilla's bundled webpki-roots work in any process context. Trade-off: corporate CA / AV-resign transparency lost; operators use the existing `WIRE_INSECURE_SKIP_TLS_VERIFY=1` escape hatch. Proper dual-roots verifier filed as #177.
+- **🚨 TLS hotfix: `rustls-tls-native-roots` → `rustls-tls-webpki-roots` (#176).** Also caught via the same dogfood pass. Once the supervisor put every daemon in launchd, every TLS handshake to wireup.net failed `UnknownIssuer`: launchd-spawned processes don't inherit Aqua-session keychain access on macOS, so `rustls-native-certs` returned an empty root set. Mozilla's bundled webpki-roots work in any process context. Was a temporary trade-off: corporate CA / AV-resign transparency lost; superseded same-day by #183 below.
+
+- **Dual-roots TLS verifier (#183, closes #177).** The proper #176 replacement. New `tls::shared_client_config()` builds a single `Arc<rustls::ClientConfig>` consumed by every wire HTTPS surface via reqwest's `use_preconfigured_tls`. Webpki bundled roots ALWAYS loaded (the launchd-safe baseline). `rustls-native-certs` queried ADDITIVELY — contributes corp CAs / AV-resign roots / on-prem CAs when accessible, gracefully empty otherwise. Fail-soft on partial native-cert errors with a stderr breadcrumb (`wire tls: trust roots loaded — N webpki + M native = T total`). `WIRE_INSECURE_SKIP_TLS_VERIFY=1` still bypasses. Restores #176's corp-CA capability without re-breaking the launchd context #176 unblocked.
 
 - **`wire daemon --session <name>` resolves v0.13 by-key (#180).** Operator-facing counterpart to #174: `cmd_daemon`'s `--session` resolver now uses the new `session::find_session_home_by_name` which handles both v0.6 top-level and v0.13 by-key/persona-handle layouts.
 
