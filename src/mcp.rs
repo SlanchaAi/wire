@@ -1096,7 +1096,6 @@ fn tool_whoami() -> Result<Value, String> {
 
 fn tool_peers() -> Result<Value, String> {
     use crate::config;
-    use crate::trust::get_tier;
 
     let trust = config::read_trust().map_err(|e| e.to_string())?;
     let agents = trust
@@ -1104,6 +1103,15 @@ fn tool_peers() -> Result<Value, String> {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    // v0.14.3 (coral dogfood 2026-06-01): use effective tier so the
+    // MCP surface matches the CLI ones (wire status / wire peers /
+    // wire here all switched to effective_tier in #199 + #201).
+    // Pre-fix, agents calling wire_peers via MCP got raw
+    // trust-promoted VERIFIED even when the bilateral handshake
+    // never delivered the slot credentials → daemon can't push but
+    // agent thought it could.
+    let relay_state =
+        config::read_relay_state().unwrap_or_else(|_| json!({"self": null, "peers": {}}));
     let mut self_did: Option<String> = None;
     if let Ok(card) = config::read_agent_card() {
         self_did = card.get("did").and_then(Value::as_str).map(str::to_string);
@@ -1140,7 +1148,10 @@ fn tool_peers() -> Result<Value, String> {
             serde_json::to_value(&persona).unwrap_or(Value::Null),
         );
         row.insert("did".into(), json!(did));
-        row.insert("tier".into(), json!(get_tier(&trust, handle)));
+        row.insert(
+            "tier".into(),
+            json!(crate::trust::effective_tier(&trust, &relay_state, handle)),
+        );
         row.insert(
             "capabilities".into(),
             agent
