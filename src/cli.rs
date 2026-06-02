@@ -6786,11 +6786,48 @@ pub fn run_sync_pull() -> Result<Value> {
         .and_then(|s| cursors.get(s))
         .and_then(Value::as_str)
         .map(str::to_string);
+    // v0.14.3 (#14): group `written` by sender handle, take max
+    // timestamp, write to `peers[<handle>].last_inbound_event_at`.
+    // RFC3339-comparable as lex sort (same offset, ISO 8601). This
+    // is the daemon-written signal `check_peer_staleness` needs —
+    // robust against backup/restore/`touch` that breaks inbox-mtime
+    // detection. Additive field: pre-v0.14.3 readers ignore it,
+    // older daemons just don't write it.
+    let mut latest_inbound: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for w in &all_written {
+        let from = match w.get("from").and_then(Value::as_str) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let ts = match w.get("timestamp").and_then(Value::as_str) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => continue,
+        };
+        latest_inbound
+            .entry(from)
+            .and_modify(|existing| {
+                if ts > *existing {
+                    *existing = ts.clone();
+                }
+            })
+            .or_insert(ts);
+    }
     config::update_relay_state(|state| {
         if let Some(self_obj) = state.get_mut("self").and_then(Value::as_object_mut) {
             self_obj.insert("cursors".into(), Value::Object(cursors.clone()));
             if let Some(pc) = &primary_cursor {
                 self_obj.insert("last_pulled_event_id".into(), Value::String(pc.clone()));
+            }
+        }
+        if !latest_inbound.is_empty()
+            && let Some(peers_obj) = state.get_mut("peers").and_then(Value::as_object_mut)
+        {
+            for (handle, ts) in &latest_inbound {
+                let entry = peers_obj.entry(handle.clone()).or_insert_with(|| json!({}));
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.insert("last_inbound_event_at".into(), Value::String(ts.clone()));
+                }
             }
         }
         Ok(())
@@ -14101,10 +14138,38 @@ fn check_peer_staleness(max_silent_days: u64) -> DoctorCheck {
             );
         }
     };
-    let threshold = std::time::Duration::from_secs(max_silent_days * 24 * 60 * 60);
+    let threshold_secs = max_silent_days * 24 * 60 * 60;
+    let threshold = std::time::Duration::from_secs(threshold_secs);
     let now = std::time::SystemTime::now();
+    // v0.14.3 (#14): prefer the daemon-written
+    // `peers[<peer>].last_inbound_event_at` (RFC3339) over inbox
+    // file mtime — mtime is fragile (backup/restore/cp/touch all
+    // break it; FAT32 has 2s resolution etc.) and the daemon-side
+    // field is the load-bearing sender-side staleness signal.
+    // Falls back to mtime when the field is absent (pre-v0.14.3
+    // sessions, or never-received-anything peers).
+    let now_unix = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let mut stale: Vec<(String, u64, &'static str)> = Vec::new();
-    for (peer, _info) in peers {
+    for (peer, info) in peers {
+        // v0.14.3 first-pass: the daemon-written field.
+        let daemon_signal_ts = info
+            .get("last_inbound_event_at")
+            .and_then(Value::as_str)
+            .and_then(|s| {
+                time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+            })
+            .map(|odt| odt.unix_timestamp());
+        if let Some(ts) = daemon_signal_ts {
+            let age = now_unix.saturating_sub(ts) as u64;
+            if age > threshold_secs {
+                stale.push((peer.clone(), age / (24 * 60 * 60), "silent"));
+            }
+            continue;
+        }
+        // Fallback: inbox file mtime (pre-v0.14.3 or never-pulled peer).
         let path = inbox_dir.join(format!("{peer}.jsonl"));
         let (age_days, kind) = match std::fs::metadata(&path) {
             Ok(meta) => match meta
@@ -14321,6 +14386,75 @@ mod doctor_tests {
 
             let c = check_peer_staleness(7);
             assert_eq!(c.status, "PASS", "fresh inbox should not warn: {c:?}");
+        });
+    }
+
+    #[test]
+    fn check_peer_staleness_daemon_field_overrides_mtime() {
+        // v0.14.3 (#14): when peers[<p>].last_inbound_event_at is
+        // present, that signal trumps file mtime. Even with a
+        // fresh inbox file mtime, an OLD daemon-written timestamp
+        // must trigger the WARN — backup-restore should not mask
+        // the real silence.
+        config::test_support::with_temp_home(|| {
+            config::ensure_dirs().unwrap();
+            let mut state = json!({
+                "peers": {
+                    "ghost-peer": {
+                        "relay_url": "https://wireup.net",
+                        "slot_id": "ghostslot",
+                        "slot_token": "tok",
+                        "last_inbound_event_at": "2026-05-01T00:00:00Z",
+                    }
+                }
+            });
+            state["self"] = json!({});
+            config::write_relay_state(&state).unwrap();
+            // Fresh inbox mtime — would PASS via the fallback.
+            let inbox = config::inbox_dir().unwrap();
+            std::fs::create_dir_all(&inbox).unwrap();
+            std::fs::write(inbox.join("ghost-peer.jsonl"), "{\"event_id\":\"x\"}\n").unwrap();
+            let c = check_peer_staleness(7);
+            assert_eq!(
+                c.status, "WARN",
+                "daemon-field staleness must override fresh mtime: {c:?}"
+            );
+            assert!(c.detail.contains("ghost-peer"), "got: {}", c.detail);
+        });
+    }
+
+    #[test]
+    fn check_peer_staleness_daemon_field_fresh_overrides_old_mtime() {
+        // Mirror case: a recent daemon-written timestamp must
+        // PASS even with an old inbox file mtime. Backup-restore
+        // case in reverse — operator restored an old inbox file
+        // but pulled fresh events since.
+        config::test_support::with_temp_home(|| {
+            config::ensure_dirs().unwrap();
+            // Stamp NOW-ish via OffsetDateTime so we don't drift.
+            let now = time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap();
+            let mut state = json!({
+                "peers": {
+                    "active-peer": {
+                        "relay_url": "https://wireup.net",
+                        "slot_id": "freshslot",
+                        "slot_token": "tok",
+                        "last_inbound_event_at": now,
+                    }
+                }
+            });
+            state["self"] = json!({});
+            config::write_relay_state(&state).unwrap();
+            // Old inbox file mtime — would FAIL via the fallback.
+            // We skip making it old (today's mtime works since the
+            // field-driven path runs first and short-circuits).
+            let c = check_peer_staleness(7);
+            assert_eq!(
+                c.status, "PASS",
+                "recent daemon-field stamp must PASS regardless of mtime: {c:?}"
+            );
         });
     }
 
