@@ -14,7 +14,7 @@ the PR description linked in each section.
 
 honey-pine's 2026-06-01 multi-system dogfood (#162) surfaced an interlocking set of bugs that broke wire's daemon layer on any operator with more than one session: silent send failures, daemon-up-but-not-syncing on launchd, false-negative `wire status`, tier flap, notification storms. Paul (same day): *"why are we dealing with this whole outbox queued delivered thing it's a headache and always breaks can we streamline and collapse steps."* This release closes all of the dogfood bugs AND collapses the send/receive paths so the "queued ≠ delivered" silent-drop class can't reappear in the default surface.
 
-19 PRs since the v0.14.1 tag. No trust ladder change, no protocol bump (v3.2 still the constant). Operator action required after upgrade: re-run `wire service install` (idempotent) so the launchd plist / systemd unit picks up the new `wire daemon --all-sessions --interval 5` ProgramArguments. `wire upgrade` does this automatically when a service was previously installed.
+24 PRs since the v0.14.1 tag. No trust ladder change, no protocol bump (v3.2 still the constant). Operator action required after upgrade: re-run `wire service install` (idempotent) so the launchd plist / systemd unit picks up the new `wire daemon --all-sessions --interval 5` ProgramArguments. `wire upgrade` does this automatically when a service was previously installed.
 
 ### Silent-send class closed (honey-pine's #162 bug report)
 
@@ -48,6 +48,8 @@ honey-pine's 2026-06-01 multi-system dogfood (#162) surfaced an interlocking set
 
 - **`wire supervisor` CLI (#178).** New top-level command. `wire status` answers "is THIS session syncing?"; `wire supervisor` answers "what is the supervisor (and every session's daemon) doing across the box?". Pretty output collapses to one summary line when every session is healthy; JSON emits the full per-session topology. Closes honey-pine's BUG 3 ("wire daemon status CLI") ask.
 
+- **Supervisor surfaces stale-binary daemon sessions (#198).** Caught via coral's 2026-06-01 dogfood probe: 1 of 10 sampled session daemons was still running v0.13.5 while the CLI was v0.14.1. Supervisor's existing-pidfile check intentionally protects alive daemons from respawn (would interrupt in-flight syncs), so mid-upgrade fleets accumulate version-drifted children silently. `SupervisedSession.daemon_version` reads from the JSON pidfile; `SupervisorState.stale_binary_sessions` is the derived list (alive + recorded version `<` `CARGO_PKG_VERSION` via a hand-rolled dotted-integer compare so `0.9.0 < 0.10.0` comes out right). `wire supervisor` pretty + JSON both surface; operator can `kill <pid>` to let the supervisor respawn on the fresh binary. Auto kill-and-respawn deferred — keeps operator-controlled timing.
+
 - **🚨 Cross-process toast dedup (#179).** Caught via live operator complaint within minutes of #176 landing. The 134-daemon supervisor turned the existing in-process `Mutex<HashMap>` toast dedup into theater — every daemon polled its own inbox, every daemon fired its own toast, the operator saw the same notification 134 times within seconds. Fix: cross-process atomic claim via `O_CREAT|O_EXCL` on a sha256-named touch file under `<cache_dir>/wire/toast-dedup/`. Once a key is claimed, no wire process anywhere on the host re-emits — ever. Bare `toast()` now defers to `toast_dedup()` with a content-hash key so the 5 legacy bare-toast sites inherit the cross-process guarantee without per-site changes.
 
 ### The queue collapse (paul's "this is a headache" ask)
@@ -59,6 +61,18 @@ honey-pine's 2026-06-01 multi-system dogfood (#162) surfaced an interlocking set
 ### Adapter surface widens
 
 - **Pi + OpenCode adapters in `wire setup` (#185).** Pi (https://pi.dev) uses the standard `mcpServers` shape — targets `$PI_CODING_AGENT_DIR/mcp.json` or `~/.pi/agent/mcp.json`. OpenCode (https://opencode.ai) uses a custom shape: top-level `mcp.<name>` (no `mcpServers` root, no `mcp.servers` intermediate), with `type: "local"`, combined `command: ["wire", "mcp"]` array, and `enabled: true`. `upsert_mcp_entry` detects OpenCode by path (`opencode.json` / `opencode/opencode.json`) and re-shapes the entry on write. Targets: `$XDG_CONFIG_HOME/opencode/opencode.json`, `~/.config/opencode/opencode.json`, project-local `opencode.json`. Closes the docs→code gap from v0.14.1's PI.md + OPENCODE.md.
+
+### Surface honesty — same screen, same tier
+
+Coral's 2026-06-01 dogfood found three status surfaces (`wire status`, `wire peers`, `wire here`) reporting different tiers for the same wedged peer + a `wire send --queue` path that silently accepted writes to peers that could never receive them. Four PRs tighten the surface:
+
+- **Per-peer pending-push attribution (#199).** `pending push: 3 event(s)` was unactionable on its own — operator had to manually walk per-peer outbox files to learn which peer was wedged. New `config::compute_pending_push_breakdown()` returns one entry per peer with a tier and the unpushed event count, using `trust::effective_tier` so trust-promoted-but-handshake-incomplete peers show as `PENDING_ACK` not `VERIFIED`. CLI `wire status` expands the line with a tier-keyed hint (`pair never completed; daemon won't push until accept/reject`). MCP `wire_status` gains `daemon.pending_push_breakdown`. `effective_tier` moved from `cli.rs` to `trust.rs` so any future surface gets the canonical answer.
+
+- **`wire send --queue` warns on unpushable peer (#200).** Coral's outbox carried a year-old `no-such-peer.jsonl` from a typo'd send — CLI exited 0 with `queued ... daemon will push` but the daemon had nowhere to push. `--queue` is the documented pre-pair-best-effort path, so refusing isn't right, but silent-success is a lie. CLI emits a stderr WARN (JSON stdout untouched) when the peer is BOTH not pinned in trust AND has no pending pair (outbound `PendingPair.peer_did` match or inbound `PendingInboundPair.peer_handle` match). MCP `wire_send` adds a structured `warning` field on the queued response so agents can branch.
+
+- **`wire here` uses effective tier (#201).** Same surface drift caught the third status command: `wire here` was reading raw `agent.tier` from trust.json, so orchid-savanna showed `VERIFIED` here while `wire peers` and `wire status` showed `PENDING_ACK`. Route through `trust::effective_tier` so all three surfaces agree.
+
+- **`wire doctor` surfaces pre-#171 stale `pending_inbound` (#202).** `wire status --json` carried `pending_pairs.stale_inbound_handles: [...]` for VERIFIED peers with leftover records from before #171's bilateral-completion cleanup. The pretty status surface filtered them out (intentional) but operators had no command pointing at the cleanup. New `stale-inbound-pairs` doctor check (8th of 8) emits WARN with chained `wire reject <handle>` commands in the `fix` string.
 
 ### Operator UX polish
 
