@@ -2408,7 +2408,17 @@ fn cmd_status(as_json: bool) -> Result<()> {
         // + stale_sync + stream_state surface in MCP wire_status but not in CLI
         // `wire status`. Shared helpers in config.rs keep both surfaces in lock
         // so future doctor/web checks pick up the same numbers.
-        daemon["pending_push_count"] = json!(config::compute_pending_push_count());
+        // Per-peer breakdown introduced 2026-06-01 after coral
+        // dogfood found 3 events stuck on `orchid-savanna`
+        // (PENDING_ACK pair). Aggregate count was already
+        // surfaced; the missing piece was attribution — operator
+        // had to manually walk per-peer outbox files to learn
+        // which pair was wedged. Compute both from a single
+        // breakdown so total + per-peer detail can't diverge.
+        let pending_breakdown = config::compute_pending_push_breakdown();
+        let pending_total: u64 = pending_breakdown.iter().map(|p| p.count).sum();
+        daemon["pending_push_count"] = json!(pending_total);
+        daemon["pending_push_breakdown"] = json!(pending_breakdown);
         daemon["stale_sync"] = json!(config::stale_sync(last_sync_age));
         daemon["stream_state"] = config::read_stream_state();
         // v0.14.2 (#162 diagnostic, post-#170): annotate orphan pids
@@ -2665,6 +2675,36 @@ fn cmd_status(as_json: bool) -> Result<()> {
                 "pending push:  {pending_push} event(s) queued but not yet pushed to relay — \
                  if stale_sync, this is the silent-send class (#162 fix #2)"
             );
+            // v0.14.3: per-peer attribution. coral dogfood
+            // (2026-06-01) found 3 events stuck on a PENDING_ACK
+            // pair; the aggregate count gave no hint which pair.
+            // Expand into one line per peer with tier + a hint
+            // about the action the tier implies.
+            if let Some(breakdown) = summary["daemon"]["pending_push_breakdown"].as_array() {
+                for entry in breakdown {
+                    let peer = entry.get("peer").and_then(Value::as_str).unwrap_or("?");
+                    let tier = entry
+                        .get("tier")
+                        .and_then(Value::as_str)
+                        .unwrap_or("UNKNOWN");
+                    let count = entry.get("count").and_then(Value::as_u64).unwrap_or(0);
+                    // Tier-specific hint. PENDING_ACK = wedged
+                    // pair (operator action: `wire pair-accept`
+                    // or `wire reject`). UNTRUSTED = peer not yet
+                    // pinned (rare but possible if trust file
+                    // was hand-edited). VERIFIED + queued =
+                    // #162 silent-send class; daemon should push
+                    // imminently or `stale_sync` will flip.
+                    let hint = match tier {
+                        "PENDING_ACK" => {
+                            " — pair never completed; daemon won't push until accept/reject"
+                        }
+                        "UNTRUSTED" => " — peer not pinned; daemon won't push to UNTRUSTED",
+                        _ => "",
+                    };
+                    println!("  {count:>4} → {peer} ({tier}){hint}");
+                }
+            }
         } else {
             println!("pending push:  0");
         }

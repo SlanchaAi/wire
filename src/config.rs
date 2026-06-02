@@ -153,16 +153,43 @@ pub fn append_pushed_log(peer: &str, event_id: &str, ts: &str) -> Result<PathBuf
 /// CLI `wire status` surface and any future doctor/web check stay in
 /// agreement by construction.
 pub fn compute_pending_push_count() -> u64 {
+    compute_pending_push_breakdown()
+        .iter()
+        .map(|p| p.count)
+        .sum()
+}
+
+/// Per-peer breakdown of queued-but-not-pushed events. Populates
+/// the new `daemon.pending_push_breakdown` field in `wire status`
+/// and the human-readable expansion of the "pending push:" line.
+///
+/// Each entry carries the peer handle, the trust tier (so the
+/// surface can say "stuck on orchid-savanna (PENDING_ACK — pair
+/// never completed)"), and the unpushed event count.
+///
+/// **Why tier?** A peer at `PENDING_ACK` has events queued that
+/// won't push until pair-accept completes (a #166-class wedge).
+/// A peer at `VERIFIED` with events queued + `stale_sync` is the
+/// #162 silent-send class. Operators need the tier to know which
+/// path to fix.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingPushPerPeer {
+    pub peer: String,
+    pub tier: String,
+    pub count: u64,
+}
+
+pub fn compute_pending_push_breakdown() -> Vec<PendingPushPerPeer> {
     let trust = match read_trust() {
         Ok(t) => t,
-        Err(_) => return 0,
+        Err(_) => return Vec::new(),
     };
     let agents = match trust.get("agents").and_then(serde_json::Value::as_object) {
         Some(a) => a.clone(),
-        None => return 0,
+        None => return Vec::new(),
     };
-    let mut total: u64 = 0;
-    for (peer_handle, _) in agents.iter() {
+    let mut out: Vec<PendingPushPerPeer> = Vec::new();
+    for (peer_handle, agent) in agents.iter() {
         let pushed_ids = read_pushed_event_ids(peer_handle);
         let outbox_path = match outbox_dir() {
             Ok(d) => d.join(format!("{peer_handle}.jsonl")),
@@ -172,6 +199,7 @@ pub fn compute_pending_push_count() -> u64 {
             Ok(b) => b,
             Err(_) => continue,
         };
+        let mut count: u64 = 0;
         for line in body.lines() {
             if let Some(eid) = serde_json::from_str::<serde_json::Value>(line)
                 .ok()
@@ -182,11 +210,26 @@ pub fn compute_pending_push_count() -> u64 {
                 })
                 && !pushed_ids.contains(&eid)
             {
-                total += 1;
+                count += 1;
             }
         }
+        if count > 0 {
+            let tier = agent
+                .get("tier")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("UNKNOWN")
+                .to_string();
+            out.push(PendingPushPerPeer {
+                peer: peer_handle.clone(),
+                tier,
+                count,
+            });
+        }
     }
-    total
+    // Stable, deterministic order — largest backlog first, peer name
+    // as tiebreak. JSON consumers + the human line both rely on it.
+    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.peer.cmp(&b.peer)));
+    out
 }
 
 /// Read `$WIRE_HOME/state/wire/stream_state.json` written by the
@@ -888,6 +931,55 @@ mod tests {
             // The bare file should have BOTH writes.
             let body = std::fs::read_to_string(&path_bare).unwrap();
             assert_eq!(body.matches("kind").count(), 2, "got: {body}");
+        });
+    }
+
+    #[test]
+    fn pending_push_breakdown_attributes_per_peer_with_tier() {
+        with_temp_home(|| {
+            ensure_dirs().unwrap();
+            // Seed trust.json with two peers at different tiers.
+            let trust = json!({
+                "agents": {
+                    "alpha-fox":   {"tier": "VERIFIED"},
+                    "beta-newt":   {"tier": "PENDING_ACK"},
+                    "gamma-otter": {"tier": "UNTRUSTED"},
+                }
+            });
+            write_trust(&trust).unwrap();
+            // Seed per-peer outboxes: alpha has 2 events, 1 pushed
+            // (1 unpushed). beta has 3 events, 0 pushed. gamma has
+            // 0 events. The breakdown should:
+            // - include alpha with count=1 tier=VERIFIED
+            // - include beta with count=3 tier=PENDING_ACK
+            // - NOT include gamma (count=0)
+            // - sort largest backlog first → beta then alpha
+            let out = outbox_dir().unwrap();
+            std::fs::write(
+                out.join("alpha-fox.jsonl"),
+                "{\"event_id\":\"a1\"}\n{\"event_id\":\"a2\"}\n",
+            )
+            .unwrap();
+            std::fs::write(
+                out.join("alpha-fox.pushed.jsonl"),
+                "{\"event_id\":\"a1\"}\n",
+            )
+            .unwrap();
+            std::fs::write(
+                out.join("beta-newt.jsonl"),
+                "{\"event_id\":\"b1\"}\n{\"event_id\":\"b2\"}\n{\"event_id\":\"b3\"}\n",
+            )
+            .unwrap();
+            let bd = compute_pending_push_breakdown();
+            assert_eq!(bd.len(), 2, "got: {bd:?}");
+            assert_eq!(bd[0].peer, "beta-newt");
+            assert_eq!(bd[0].tier, "PENDING_ACK");
+            assert_eq!(bd[0].count, 3);
+            assert_eq!(bd[1].peer, "alpha-fox");
+            assert_eq!(bd[1].tier, "VERIFIED");
+            assert_eq!(bd[1].count, 1);
+            // Aggregate wrapper still matches.
+            assert_eq!(compute_pending_push_count(), 4);
         });
     }
 
