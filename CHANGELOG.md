@@ -14,7 +14,7 @@ the PR description linked in each section.
 
 honey-pine's 2026-06-01 multi-system dogfood (#162) surfaced an interlocking set of bugs that broke wire's daemon layer on any operator with more than one session: silent send failures, daemon-up-but-not-syncing on launchd, false-negative `wire status`, tier flap, notification storms. Paul (same day): *"why are we dealing with this whole outbox queued delivered thing it's a headache and always breaks can we streamline and collapse steps."* This release closes all of the dogfood bugs AND collapses the send/receive paths so the "queued ≠ delivered" silent-drop class can't reappear in the default surface.
 
-24 PRs since the v0.14.1 tag. No trust ladder change, no protocol bump (v3.2 still the constant). Operator action required after upgrade: re-run `wire service install` (idempotent) so the launchd plist / systemd unit picks up the new `wire daemon --all-sessions --interval 5` ProgramArguments. `wire upgrade` does this automatically when a service was previously installed.
+28 PRs since the v0.14.1 tag. No trust ladder change, no protocol bump (v3.2 still the constant). Operator action required after upgrade: re-run `wire service install` (idempotent) so the launchd plist / systemd unit picks up the new `wire daemon --all-sessions --interval 5` ProgramArguments. `wire upgrade` does this automatically when a service was previously installed.
 
 ### Silent-send class closed (honey-pine's #162 bug report)
 
@@ -74,6 +74,14 @@ Coral's 2026-06-01 dogfood found three status surfaces (`wire status`, `wire pee
 
 - **`wire doctor` surfaces pre-#171 stale `pending_inbound` (#202).** `wire status --json` carried `pending_pairs.stale_inbound_handles: [...]` for VERIFIED peers with leftover records from before #171's bilateral-completion cleanup. The pretty status surface filtered them out (intentional) but operators had no command pointing at the cleanup. New `stale-inbound-pairs` doctor check (8th of 8) emits WARN with chained `wire reject <handle>` commands in the `fix` string.
 
+- **MCP `tool_peers` uses effective tier (#205).** The CLI's three status surfaces (status/peers/here) all routed through `trust::effective_tier` after #199 + #201; `tool_peers` was the remaining holdout still emitting raw trust-promoted VERIFIED. Agents calling `wire_peers` via MCP got a different answer than the same operator running `wire peers` — automation built on the MCP shape would believe a wedged peer was healthy + try to send. Fixed.
+
+### Daemon resilience
+
+- **`daemon-stream` preserves `last_event_at` + `reconnect_count` across reconnect (#204).** Every successful SSE reconnect overwrote `stream_state.json` with `last_event_at:null, reconnect_count:0`. The "connected" writer inside `connect_and_read` had no access to the accumulated state in the outer `run_subscriber` scope, so the file always reset the moment a fresh connection landed. Operator surface always read `last event never` on long-running daemons even after events had arrived. Threaded `accumulated_last_event_at` + `accumulated_reconnects` through the inner so the "connected" write preserves both — same pattern the outer writers already use.
+
+- **Daemon-written sender-side staleness signal (#207, closes #14).** Extends `relay_state.peers[<handle>]` with `last_inbound_event_at` (RFC3339), stamped by the daemon on every successful pull where that peer was the sender. `check_peer_staleness` now prefers this field over inbox file mtime (which breaks on backup/restore, `cp -a`, `touch`, FAT32 resolution); falls back to mtime when the field is absent so upgrades are graceful. The asymmetric-stale-pin case #14 surfaced — push-to-dead-slot returns 200 OK + peer never sees us, both sides report green — now flips the doctor WARN with a daemon-side signal mtime can't corrupt.
+
 ### Operator UX polish
 
 - **`wire upgrade` no longer fork-execs a redundant transient daemon (#186).** Pre-fix, `wire upgrade --local` output included `wire upgrade: spawned fresh daemon (pid N v0.14.1)` even when launchd was about to (re)start the `--all-sessions` supervisor on the new binary. The transient daemon lived ~30s before the supervisor's singleton-guard no-op'd it; operators saw the wrong pid as "the long-lived owner". Now reads `wire upgrade: daemon refresh deferred to launchd supervisor (will spawn within 10s)` when the OS bootstrap succeeded. Safety net intact: foreground spawn still fires when no service is installed or bootstrap failed.
@@ -81,6 +89,8 @@ Coral's 2026-06-01 dogfood found three status surfaces (`wire status`, `wire pee
 ### Identity / enrollment
 
 - **`wire enroll republish` refreshes `capabilities[]` (#172, closes #126).** slate-lotus's v0.14.1 audit found that republish bumped `schema_version` v3.1 → v3.2 but left `capabilities=["wire/v3.1"]` stale, opening a stealth-skip vector for any future cap-gated feature. `rebuild_card_with_current_claims` now refreshes the wire/* entry to the binary's current `CARD_SCHEMA_VERSION` while preserving operator-defined non-wire caps (custom task tags, future feature flags) in their original order.
+
+- **`wire enroll add-membership` — ingest an org-issued cert (#206, closes #127).** slate-lotus's same audit also flagged a load-bearing DX hole: `wire enroll org-add-member` printed the `{org_did, org_pubkey, member_cert}` bundle but the receiver had no verb to store it. Joining an org required hand-editing `<config>/wire/memberships.json` — exactly the friction the offline-minimal RFC-001 subset was meant to remove. New verb accepts either `--bundle '<verbatim-json>'` or the three flags separately, **verifies the cert against `org_pubkey` + this op_did via `identity::verify_member_cert` BEFORE storing** (a wrong-key bundle now fails at ingest, not at next republish), refuses when this operator isn't enrolled, and is idempotent on the org_did key. 4 lib tests covering happy-path + the 3 distinct rejection branches.
 
 ### RFC-004 (Willard's contributions)
 
