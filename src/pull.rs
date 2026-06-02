@@ -262,7 +262,22 @@ pub fn process_events(
                 let mut line = serde_json::to_vec(event)?;
                 line.push(b'\n');
                 f.write_all(&line)?;
-                written.push(json!({"event_id": event_id, "from": from}));
+                // v0.14.3 (#14): also surface the event timestamp so the
+                // caller (run_sync_pull) can stamp
+                // `relay_state.peers[<from>].last_inbound_event_at`
+                // — sender-side staleness needs a daemon-written
+                // signal, not inbox-file mtime (mtime breaks on
+                // backup/restore/touch and has fs-specific resolution).
+                let ts = event
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                written.push(json!({
+                    "event_id": event_id,
+                    "from": from,
+                    "timestamp": ts,
+                }));
                 if first_block_idx.is_none() {
                     last_advanced = Some(event_id.clone());
                 }
