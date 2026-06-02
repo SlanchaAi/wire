@@ -10,11 +10,11 @@ the PR description linked in each section.
 
 ## [v0.14.2] — 2026-06-01 (UNRELEASED)
 
-**v0.14.2 — the multi-session ops batch: silent-send class closed, `--all-sessions` supervisor architecture lands, four hotfixes caught by live dogfood.**
+**v0.14.2 — the multi-session ops batch + the queue collapse: silent-send class closed, `--all-sessions` supervisor architecture lands, four hotfixes caught by live dogfood, send + pull both become synchronous verdict-on-demand verbs.**
 
-honey-pine's 2026-06-01 multi-system dogfood (#162) surfaced an interlocking set of bugs that broke wire's daemon layer on any operator with more than one session: silent send failures, daemon-up-but-not-syncing on launchd, false-negative `wire status`, tier flap, notification storms. This release closes all of them and the architectural rework needed to keep them closed.
+honey-pine's 2026-06-01 multi-system dogfood (#162) surfaced an interlocking set of bugs that broke wire's daemon layer on any operator with more than one session: silent send failures, daemon-up-but-not-syncing on launchd, false-negative `wire status`, tier flap, notification storms. Paul (same day): *"why are we dealing with this whole outbox queued delivered thing it's a headache and always breaks can we streamline and collapse steps."* This release closes all of the dogfood bugs AND collapses the send/receive paths so the "queued ≠ delivered" silent-drop class can't reappear in the default surface.
 
-14 PRs since the v0.14.1 tag. No trust ladder change, no protocol bump (v3.2 still the constant). Operator action required after upgrade: re-run `wire service install` (idempotent) so the launchd plist / systemd unit picks up the new `wire daemon --all-sessions --interval 5` ProgramArguments. `wire upgrade` does this automatically when a service was previously installed.
+19 PRs since the v0.14.1 tag. No trust ladder change, no protocol bump (v3.2 still the constant). Operator action required after upgrade: re-run `wire service install` (idempotent) so the launchd plist / systemd unit picks up the new `wire daemon --all-sessions --interval 5` ProgramArguments. `wire upgrade` does this automatically when a service was previously installed.
 
 ### Silent-send class closed (honey-pine's #162 bug report)
 
@@ -49,6 +49,20 @@ honey-pine's 2026-06-01 multi-system dogfood (#162) surfaced an interlocking set
 - **`wire supervisor` CLI (#178).** New top-level command. `wire status` answers "is THIS session syncing?"; `wire supervisor` answers "what is the supervisor (and every session's daemon) doing across the box?". Pretty output collapses to one summary line when every session is healthy; JSON emits the full per-session topology. Closes honey-pine's BUG 3 ("wire daemon status CLI") ask.
 
 - **🚨 Cross-process toast dedup (#179).** Caught via live operator complaint within minutes of #176 landing. The 134-daemon supervisor turned the existing in-process `Mutex<HashMap>` toast dedup into theater — every daemon polled its own inbox, every daemon fired its own toast, the operator saw the same notification 134 times within seconds. Fix: cross-process atomic claim via `O_CREAT|O_EXCL` on a sha256-named touch file under `<cache_dir>/wire/toast-dedup/`. Once a key is claimed, no wire process anywhere on the host re-emits — ever. Bare `toast()` now defers to `toast_dedup()` with a content-hash key so the 5 legacy bare-toast sites inherit the cross-process guarantee without per-site changes.
+
+### The queue collapse (paul's "this is a headache" ask)
+
+- **`wire send` returns the actual relay verdict synchronously (#187).** Pre-fix, every `wire send` (CLI and MCP) wrote to `<outbox_dir>/<peer>.jsonl` and returned `status: "queued"`. The daemon's 5s push loop later POSTed to the relay. Three distinct silent-drop classes hid in those steps: outbox-write-without-push (daemon dead, on wrong WIRE_HOME, TLS broken), stale-slot-token (peer rotated, half-paired), content-hash-dedup-blocks-retry. New default: `wire send` POSTs directly, returns `delivered` / `duplicate` / `peer_unknown` / `slot_stale` / `transport_error` inline, exits 2 on any non-delivered status. `--queue` CLI flag (and `queue: true` MCP arg) opts back into the legacy outbox→daemon-push path for offline-buffer / batch / pre-pair queueing. New `src/send.rs` module extracts the delivery primitive (`SyncDelivery` enum + `attempt_deliver`) shared by both CLI and MCP. Pushed-log append on the sync path keeps `pending_push_count` accurate across both paths.
+
+- **MCP `wire_pull` — symmetric receive primitive (#189).** Paul (post-#187): *"This is the same on pull as push now?"* CLI `wire pull` has always been a sync GET-from-relay that drains the slot, verifies signatures, writes inbox, returns counts inline. The MCP surface had no equivalent — agents calling tools through Claude Code / Pi / OpenCode could only wait for the daemon's 5s pull cycle. New `wire_pull` MCP tool calls `cli::run_sync_pull()` directly; same code path the daemon uses. Returns `written[]` / `rejected[]` / `total_seen` / `cursor_blocked` / `endpoints_pulled`. Agents in tight loops no longer sleep 5s between turns.
+
+### Adapter surface widens
+
+- **Pi + OpenCode adapters in `wire setup` (#185).** Pi (https://pi.dev) uses the standard `mcpServers` shape — targets `$PI_CODING_AGENT_DIR/mcp.json` or `~/.pi/agent/mcp.json`. OpenCode (https://opencode.ai) uses a custom shape: top-level `mcp.<name>` (no `mcpServers` root, no `mcp.servers` intermediate), with `type: "local"`, combined `command: ["wire", "mcp"]` array, and `enabled: true`. `upsert_mcp_entry` detects OpenCode by path (`opencode.json` / `opencode/opencode.json`) and re-shapes the entry on write. Targets: `$XDG_CONFIG_HOME/opencode/opencode.json`, `~/.config/opencode/opencode.json`, project-local `opencode.json`. Closes the docs→code gap from v0.14.1's PI.md + OPENCODE.md.
+
+### Operator UX polish
+
+- **`wire upgrade` no longer fork-execs a redundant transient daemon (#186).** Pre-fix, `wire upgrade --local` output included `wire upgrade: spawned fresh daemon (pid N v0.14.1)` even when launchd was about to (re)start the `--all-sessions` supervisor on the new binary. The transient daemon lived ~30s before the supervisor's singleton-guard no-op'd it; operators saw the wrong pid as "the long-lived owner". Now reads `wire upgrade: daemon refresh deferred to launchd supervisor (will spawn within 10s)` when the OS bootstrap succeeded. Safety net intact: foreground spawn still fires when no service is installed or bootstrap failed.
 
 ### Identity / enrollment
 
