@@ -2602,11 +2602,24 @@ fn cmd_status(as_json: bool) -> Result<()> {
                     let pid = d["pid"].as_u64().unwrap_or(0);
                     let session = d["session"].as_str();
                     let cmdline = d["cmdline"].as_str();
-                    match (session, cmdline) {
-                        (Some(s), _) => {
+                    // v0.14.2: distinguish the supervisor (orchestrator —
+                    // doesn't sync any single WIRE_HOME) from a legacy
+                    // single-session daemon (DOES sync a WIRE_HOME, just
+                    // not via --session). Pre-fix both were labelled "no
+                    // --session — serving default WIRE_HOME" which was
+                    // misleading for the supervisor case: it doesn't
+                    // serve any home, it spawns child daemons that do.
+                    let is_supervisor = cmdline
+                        .map(|c| c.contains("--all-sessions"))
+                        .unwrap_or(false);
+                    match (session, cmdline, is_supervisor) {
+                        (Some(s), _, _) => {
                             println!("                  pid {pid}: serving session '{s}'")
                         }
-                        (None, Some(c)) if !c.is_empty() => println!(
+                        (None, Some(c), true) if !c.is_empty() => println!(
+                            "                  pid {pid}: supervisor — orchestrates one daemon per session, doesn't sync directly (cmdline={c})"
+                        ),
+                        (None, Some(c), false) if !c.is_empty() => println!(
                             "                  pid {pid}: (no --session — serving default WIRE_HOME) cmdline={c}"
                         ),
                         _ => println!(

@@ -183,9 +183,27 @@ pub fn daemon_liveness() -> DaemonLiveness {
                 .collect()
         })
         .unwrap_or_default();
+    // v0.14.2 (#170 follow-up): also exclude the `wire daemon --all-sessions`
+    // supervisor. It's pgrep-matched by the "wire daemon" cmdline scan but
+    // ISN'T orphaned — it has its own pidfile at `sessions_root/supervisor.pid`
+    // and legitimately owns the orchestration role. Pre-fix the supervisor
+    // showed up under `!! orphan daemon process(es)` on every `wire status`
+    // even though it was the load-bearing process keeping every session
+    // daemon alive — confusing operators into thinking it was stale.
+    let supervisor_pid: Option<u32> = crate::session::sessions_root()
+        .ok()
+        .map(|root| root.join("supervisor.pid"))
+        .filter(|p| p.exists())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|p| pid_is_alive(*p));
     let orphan_pids: Vec<u32> = pgrep_pids
         .iter()
-        .filter(|p| Some(**p) != pidfile_pid && !known_session_pids.contains(*p))
+        .filter(|p| {
+            Some(**p) != pidfile_pid
+                && !known_session_pids.contains(*p)
+                && Some(**p) != supervisor_pid
+        })
         .copied()
         .collect();
     DaemonLiveness {
