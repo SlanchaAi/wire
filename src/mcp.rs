@@ -1310,7 +1310,12 @@ fn tool_status() -> Result<Value, String> {
     // v0.14.2 (#162 fix #2): total events queued but not yet pushed.
     // `pending_push_count > 0` + `stale_sync == true` = the
     // silent-send class — events queued, daemon not pushing.
-    let pending_push_count = config::compute_pending_push_count();
+    // v0.14.3 (coral dogfood 2026-06-01): also surface a per-peer
+    // breakdown so MCP-side agents (and the CLI both share the
+    // same derivation) can see which peer is wedged + at what
+    // trust tier without re-walking the outbox.
+    let pending_push_breakdown = config::compute_pending_push_breakdown();
+    let pending_push_count: u64 = pending_push_breakdown.iter().map(|p| p.count).sum();
 
     // v0.14.2 (#162 fix #7): SSE stream-subscriber state so callers
     // can distinguish "stream alive (live monitor will fire on
@@ -1332,6 +1337,7 @@ fn tool_status() -> Result<Value, String> {
         "outbox_count": outbox_count,
         "inbox_count": inbox_count,
         "pending_push_count": pending_push_count,
+        "pending_push_breakdown": pending_push_breakdown,
         "stream_state": stream_state,
     }))
 }

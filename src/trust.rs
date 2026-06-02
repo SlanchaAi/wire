@@ -83,6 +83,50 @@ pub fn get_tier(trust: &Trust, peer_handle: &str) -> String {
         .to_string()
 }
 
+/// Effective trust tier — what the daemon can ACT on, not just what
+/// trust.json was promoted to.
+///
+/// Surface-honest. trust.json may say VERIFIED, but if relay_state
+/// has no `bilateral_completed_at` AND no `slot_token`, the daemon
+/// literally cannot push to that peer. Showing the operator a
+/// VERIFIED tag in that case is a lie about capability — fall back
+/// to PENDING_ACK so the diagnosis line + pending-push attribution
+/// agree.
+///
+/// Originally lived in `cli.rs::effective_peer_tier`. Moved to
+/// `trust.rs` 2026-06-01 so `config::compute_pending_push_breakdown`
+/// can call it without a circular dep, and so any future surface
+/// (web doctor, MCP wire_status, etc.) gets the same canonical
+/// answer.
+///
+/// History: v0.14.2 (#162 fix #5) introduced the
+/// `bilateral_completed_at` durable signal — pre-#162 peers fall
+/// back to `slot_token` presence as a legacy probe so already-paired
+/// peers keep reporting VERIFIED instead of regressing the moment
+/// they're upgraded.
+pub fn effective_tier(trust: &Value, relay_state: &Value, handle: &str) -> String {
+    let raw = get_tier(trust, handle);
+    if raw != "VERIFIED" {
+        return raw;
+    }
+    let peer_obj = relay_state.get("peers").and_then(|p| p.get(handle));
+    let bilateral_at = peer_obj
+        .and_then(|p| p.get("bilateral_completed_at"))
+        .and_then(Value::as_str);
+    if bilateral_at.is_some() {
+        return raw;
+    }
+    let token = peer_obj
+        .and_then(|p| p.get("slot_token"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if token.is_empty() {
+        "PENDING_ACK".to_string()
+    } else {
+        raw
+    }
+}
+
 /// Resolve a bare peer handle to the full DID stored in trust. Falls back
 /// to `did:wire:<peer_handle>` (the bare-handle form) when the peer isn't
 /// pinned — preserves pre-pair best-effort routing for unknown peers.
@@ -458,6 +502,29 @@ mod tests {
         add_self_to_trust(&mut t, "self", &pk);
         let err = promote_to_verified(&mut t, "self").unwrap_err();
         assert!(err.contains("ATTESTED"), "got: {err}");
+    }
+
+    #[test]
+    fn effective_tier_matrix() {
+        use serde_json::json;
+        // VERIFIED in trust + bilateral_completed_at present → stays VERIFIED.
+        let trust = json!({"agents": {"a": {"tier": "VERIFIED"}}});
+        let relay = json!({"peers": {"a": {"bilateral_completed_at": "t"}}});
+        assert_eq!(effective_tier(&trust, &relay, "a"), "VERIFIED");
+        // VERIFIED in trust + slot_token non-empty (back-compat path) → VERIFIED.
+        let relay = json!({"peers": {"a": {"slot_token": "tok"}}});
+        assert_eq!(effective_tier(&trust, &relay, "a"), "VERIFIED");
+        // VERIFIED in trust + no bilateral_at + empty slot_token → PENDING_ACK.
+        let relay = json!({"peers": {"a": {"slot_token": ""}}});
+        assert_eq!(effective_tier(&trust, &relay, "a"), "PENDING_ACK");
+        // VERIFIED in trust + peer missing from relay.peers entirely → PENDING_ACK.
+        let relay = json!({"peers": {}});
+        assert_eq!(effective_tier(&trust, &relay, "a"), "PENDING_ACK");
+        // Non-VERIFIED trust tiers pass through unchanged.
+        let trust = json!({"agents": {"a": {"tier": "UNTRUSTED"}}});
+        assert_eq!(effective_tier(&trust, &relay, "a"), "UNTRUSTED");
+        let trust = json!({"agents": {"a": {"tier": "ORG_VERIFIED"}}});
+        assert_eq!(effective_tier(&trust, &relay, "a"), "ORG_VERIFIED");
     }
 
     #[test]
