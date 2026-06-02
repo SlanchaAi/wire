@@ -1047,6 +1047,39 @@ pub enum EnrollCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Ingest a membership cert handed to this operator by an org owner.
+    ///
+    /// Closes the DX gap surfaced in #127 (slate-lotus 2026-05-30 audit):
+    /// `wire enroll org-add-member` printed an `{org_did, org_pubkey,
+    /// member_cert}` bundle but the receiver had no verb to store it —
+    /// joining an org required hand-editing
+    /// `<config>/wire/memberships.json`. This verb wraps the existing
+    /// `config::add_membership` helper + verifies the cert against
+    /// `org_pubkey` and this operator's `op_did` before storing, so a
+    /// malformed / wrong-key bundle fails loudly instead of corrupting
+    /// the next `wire enroll republish`.
+    ///
+    /// Accepts either a single `--bundle '<json>'` (the verbatim
+    /// org-add-member output) or the three fields separately. Idempotent:
+    /// re-running with the same `org_did` replaces the prior entry.
+    AddMembership {
+        /// Verbatim `org-add-member` output (overrides individual flags
+        /// when set). Shape: `{"org_did":"…","org_pubkey":"…","member_cert":"…"}`.
+        #[arg(long)]
+        bundle: Option<String>,
+        /// Required when `--bundle` is not set.
+        #[arg(long)]
+        org: Option<String>,
+        /// Required when `--bundle` is not set. Base64.
+        #[arg(long = "org-pubkey")]
+        org_pubkey: Option<String>,
+        /// Required when `--bundle` is not set. Base64-encoded Ed25519
+        /// signature by `org_pubkey` over this operator's `op_did`.
+        #[arg(long = "member-cert")]
+        member_cert: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3400,6 +3433,13 @@ fn cmd_enroll(cmd: EnrollCommand) -> Result<()> {
             }
             Ok(())
         }
+        EnrollCommand::AddMembership {
+            bundle,
+            org,
+            org_pubkey,
+            member_cert,
+            json,
+        } => cmd_enroll_add_membership(bundle, org, org_pubkey, member_cert, json),
         EnrollCommand::Republish { json } => {
             // Rebuild the on-disk card with current enrollment, then republish
             // via the same path `profile set` uses. Closes the enroll-after-init
@@ -3438,6 +3478,100 @@ fn cmd_enroll(cmd: EnrollCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Implementation of `wire enroll add-membership` (closes #127).
+///
+/// Validates the bundle before storing — a malformed / wrong-key cert
+/// would corrupt the next `wire enroll republish` (the bundle is
+/// attached verbatim to the agent card; a bad bundle propagates to
+/// peers and gets rejected on `evaluate_card_membership`). Verifying
+/// up-front means the failure is at ingest time, not at publish time.
+fn cmd_enroll_add_membership(
+    bundle: Option<String>,
+    org: Option<String>,
+    org_pubkey: Option<String>,
+    member_cert: Option<String>,
+    as_json: bool,
+) -> Result<()> {
+    // Resolve the three fields from either --bundle or the individual flags.
+    let (org_did, org_pk_b64, cert_b64) = if let Some(b) = bundle {
+        let v: Value = serde_json::from_str(&b).with_context(|| "parsing --bundle as JSON")?;
+        let o = v
+            .get("org_did")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("--bundle missing 'org_did'"))?
+            .to_string();
+        let p = v
+            .get("org_pubkey")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("--bundle missing 'org_pubkey'"))?
+            .to_string();
+        let c = v
+            .get("member_cert")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("--bundle missing 'member_cert'"))?
+            .to_string();
+        (o, p, c)
+    } else {
+        let o = org.ok_or_else(|| anyhow!("--org is required when --bundle is not set"))?;
+        let p = org_pubkey
+            .ok_or_else(|| anyhow!("--org-pubkey is required when --bundle is not set"))?;
+        let c = member_cert
+            .ok_or_else(|| anyhow!("--member-cert is required when --bundle is not set"))?;
+        (o, p, c)
+    };
+
+    // Validate org_did shape — refuse before touching disk.
+    if !crate::agent_card::is_org_did(&org_did) {
+        bail!("not a valid organization DID (did:wire:org:<handle>-<32hex>): {org_did}");
+    }
+
+    // This operator must be enrolled — we need op_did to verify the cert
+    // is FOR US, not for a different operator. A cert valid against some
+    // other op_did would still verify on the org_pubkey but storing it
+    // here would be a misattribution.
+    let op_sk = crate::config::read_op_key().with_context(
+        || "this operator is not enrolled — run `wire enroll op` first to mint op_did",
+    )?;
+    let op_handle = crate::config::read_op_handle()
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "operator".to_string());
+    let op_pk = ed25519_dalek::SigningKey::from_bytes(&op_sk)
+        .verifying_key()
+        .to_bytes();
+    let op_did = crate::agent_card::did_for_op(&op_handle, &op_pk);
+
+    // Decode + verify the cert against org_pubkey + this op_did. Failure
+    // here is the load-bearing guard against the "stored bundle corrupts
+    // republish" footgun.
+    let org_pk_bytes =
+        crate::signing::b64decode(&org_pk_b64).with_context(|| "decoding --org-pubkey (base64)")?;
+    crate::identity::verify_member_cert(&org_pk_bytes, &cert_b64, &op_did)
+        .map_err(|e| anyhow!("member_cert verification failed: {e:?} — bundle is not valid for this operator (op_did={op_did})"))?;
+
+    // Idempotent store. add_membership retains-then-pushes so re-running
+    // with the same org_did replaces the prior entry; multiple distinct
+    // orgs accumulate.
+    crate::config::add_membership(&org_did, &org_pk_b64, &cert_b64)?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "stored": true,
+                "org_did": org_did,
+                "op_did": op_did,
+                "note": "run `wire enroll republish` to attach the claim to your agent card and republish",
+            }))?
+        );
+    } else {
+        println!(
+            "→ membership stored\n  org_did:  {org_did}\n  op_did:   {op_did}\n  next: `wire enroll republish` to attach + publish"
+        );
+    }
+    Ok(())
 }
 
 fn cmd_identity(cmd: IdentityCommand) -> Result<()> {
@@ -16110,5 +16244,111 @@ mod op_claims_surfacing_tests {
             claims.get("schema_version").and_then(Value::as_str),
             Some("v3.2")
         );
+    }
+}
+
+#[cfg(test)]
+mod enroll_add_membership_tests {
+    use super::*;
+    use crate::enroll::issue_member_cert;
+    use crate::signing::{b64encode, generate_keypair};
+
+    fn seed_op() -> ([u8; 32], [u8; 32], String) {
+        let (sk, pk) = generate_keypair();
+        crate::config::write_op_key(&sk).unwrap();
+        crate::config::write_op_handle("opfoo").unwrap();
+        let op_did = crate::agent_card::did_for_op("opfoo", &pk);
+        (sk, pk, op_did)
+    }
+
+    #[test]
+    fn add_membership_happy_path_stores_and_is_idempotent() {
+        config::test_support::with_temp_home(|| {
+            config::ensure_dirs().unwrap();
+            let (_op_sk, _op_pk, op_did) = seed_op();
+            let (org_sk, org_pk) = generate_keypair();
+            let org_did = crate::agent_card::did_for_org("acme", &org_pk);
+            let cert = issue_member_cert(&org_sk, &op_did).unwrap();
+            let bundle = json!({
+                "org_did": org_did,
+                "org_pubkey": b64encode(&org_pk),
+                "member_cert": cert,
+            })
+            .to_string();
+            cmd_enroll_add_membership(Some(bundle.clone()), None, None, None, true).unwrap();
+            let stored = config::read_memberships().unwrap();
+            assert_eq!(stored.len(), 1);
+            assert_eq!(
+                stored[0].get("org_did").and_then(Value::as_str),
+                Some(org_did.as_str())
+            );
+            // Idempotent: re-running with the same org_did replaces, not duplicates.
+            cmd_enroll_add_membership(Some(bundle), None, None, None, true).unwrap();
+            assert_eq!(config::read_memberships().unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn add_membership_rejects_cert_for_wrong_op_did() {
+        config::test_support::with_temp_home(|| {
+            config::ensure_dirs().unwrap();
+            let (_op_sk, _op_pk, _op_did) = seed_op();
+            let (org_sk, org_pk) = generate_keypair();
+            let org_did = crate::agent_card::did_for_org("acme", &org_pk);
+            // Cert signed for a DIFFERENT op_did. Verify must refuse.
+            let other_did = "did:wire:op:ghost-deadbeefdeadbeefdeadbeefdeadbeef";
+            let cert = issue_member_cert(&org_sk, other_did).unwrap();
+            let bundle = json!({
+                "org_did": org_did,
+                "org_pubkey": b64encode(&org_pk),
+                "member_cert": cert,
+            })
+            .to_string();
+            let err = cmd_enroll_add_membership(Some(bundle), None, None, None, true).unwrap_err();
+            assert!(
+                err.to_string().contains("verification failed"),
+                "got: {err:#}"
+            );
+            // And nothing landed on disk.
+            assert!(config::read_memberships().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn add_membership_rejects_when_not_enrolled() {
+        config::test_support::with_temp_home(|| {
+            config::ensure_dirs().unwrap();
+            // No op key written → we don't know our own op_did → refuse.
+            let (org_sk, org_pk) = generate_keypair();
+            let org_did = crate::agent_card::did_for_org("acme", &org_pk);
+            let cert = issue_member_cert(&org_sk, "did:wire:op:anybody-aaaa").unwrap();
+            let bundle = json!({
+                "org_did": org_did,
+                "org_pubkey": b64encode(&org_pk),
+                "member_cert": cert,
+            })
+            .to_string();
+            let err = cmd_enroll_add_membership(Some(bundle), None, None, None, true).unwrap_err();
+            assert!(err.to_string().contains("not enrolled"), "got: {err:#}");
+        });
+    }
+
+    #[test]
+    fn add_membership_rejects_malformed_org_did() {
+        config::test_support::with_temp_home(|| {
+            config::ensure_dirs().unwrap();
+            let _ = seed_op();
+            let bundle = json!({
+                "org_did": "did:wire:not-an-org",
+                "org_pubkey": "AAAA",
+                "member_cert": "AAAA",
+            })
+            .to_string();
+            let err = cmd_enroll_add_membership(Some(bundle), None, None, None, true).unwrap_err();
+            assert!(
+                err.to_string().contains("not a valid organization DID"),
+                "got: {err:#}"
+            );
+        });
     }
 }
