@@ -95,8 +95,64 @@ pub fn sessions_root() -> Result<PathBuf> {
 /// Full filesystem path for the named session's WIRE_HOME root.
 /// Inside this dir the standard wire layout applies: `config/wire/...`
 /// and `state/wire/...`.
+///
+/// Resolves the *legacy v0.6 top-level* layout only — joins the
+/// session name directly onto `sessions_root`. Operator-facing CLI
+/// paths that accept a user-typed session name should use
+/// [`find_session_home_by_name`] instead, which also handles the
+/// v0.13 `by-key/<hash>` layout where the on-disk dir name is a hash
+/// and the user-facing name is the persona handle derived from the
+/// card.
 pub fn session_dir(name: &str) -> Result<PathBuf> {
     Ok(sessions_root()?.join(sanitize_name(name)))
+}
+
+/// Operator-facing session-name → home_dir resolver. Handles BOTH
+/// layouts wire has shipped:
+///
+/// 1. **v0.6 top-level**: `sessions_root/<name>` — the user-typed
+///    name IS the directory name. [`session_dir`] is the direct
+///    primitive.
+/// 2. **v0.13 by-key/<hash>**: the on-disk dir is a 16-hex hash but
+///    operators type the persona handle (`coral-weasel`,
+///    `agate-nimbus`) — derived from the card's DID. [`list_sessions`]
+///    surfaces those entries with `SessionInfo.name = handle`, so we
+///    can walk it and match.
+///
+/// Order: try the literal top-level path first (fast, no enumeration),
+/// then fall back to a `list_sessions` walk for the by-key handle
+/// case. Returns `Ok(None)` when neither layout has a match — the
+/// caller decides whether to error or no-op.
+///
+/// v0.14.2 (#170 follow-up from #174's PR body): operators running
+/// `wire daemon --session foo` from a tmux pane on a v0.13 box hit
+/// `session 'foo' not found` because the literal path didn't exist.
+/// That's #174's exact failure mode (supervisor case, now fixed via
+/// env-pinned WIRE_HOME) reapplied to the operator-facing CLI path.
+pub fn find_session_home_by_name(name: &str) -> Result<Option<PathBuf>> {
+    // 1. Legacy literal lookup.
+    let direct = session_dir(name)?;
+    if direct.exists() {
+        return Ok(Some(direct));
+    }
+    // 2. v0.13 by-key walk: list_sessions overrides SessionInfo.name to
+    // the handle when the card is present; match against either the
+    // overridden name or the raw by-key hash.
+    let sanitized = sanitize_name(name);
+    for info in list_sessions().unwrap_or_default() {
+        if info.name == name
+            || info.name == sanitized
+            || info
+                .home_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|f| f == name)
+                .unwrap_or(false)
+        {
+            return Ok(Some(info.home_dir));
+        }
+    }
+    Ok(None)
 }
 
 /// Registry tracks `cwd → session_name` so repeated `wire session new`
@@ -1581,6 +1637,79 @@ mod tests {
             "by-key home must be enumerated: {:?}",
             sessions.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn find_session_home_by_name_resolves_both_layouts() {
+        // #44 / #170 follow-up: v0.6 top-level sessions (dir name ==
+        // operator-typed name) and v0.13 by-key sessions (dir name is
+        // a hash, operator types the persona handle from the card)
+        // must BOTH resolve via `find_session_home_by_name`. Pre-fix
+        // (`session_dir(name)` only) the v0.13 by-key case bailed
+        // with "session not found" even though `wire session list`
+        // showed it.
+        let _guard = crate::config::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!("wire-find-{}", rand::random::<u32>()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("sessions");
+
+        // Legacy v0.6 top-level: a dir named `legacy-pane` directly
+        // under sessions_root.
+        let legacy_home = root.join("legacy-pane");
+        let legacy_cfg = legacy_home.join("config").join("wire");
+        std::fs::create_dir_all(&legacy_cfg).unwrap();
+        std::fs::write(
+            legacy_cfg.join("agent-card.json"),
+            r#"{"did":"did:wire:legacy-pane-aaaa1111","handle":"legacy-pane","verify_keys":{}}"#,
+        )
+        .unwrap();
+
+        // v0.13 by-key: dir name is a hash, card's handle is `coral-weasel`.
+        let bykey_home = root.join("by-key").join("3049827d92d4fbd5");
+        let bykey_cfg = bykey_home.join("config").join("wire");
+        std::fs::create_dir_all(&bykey_cfg).unwrap();
+        std::fs::write(
+            bykey_cfg.join("agent-card.json"),
+            r#"{"did":"did:wire:coral-weasel-0616dc6c","handle":"coral-weasel","verify_keys":{}}"#,
+        )
+        .unwrap();
+
+        // SAFETY: ENV_LOCK is held.
+        unsafe { std::env::set_var("WIRE_HOME", &root) };
+
+        // Legacy lookup: operator types the literal dir name.
+        let legacy = super::find_session_home_by_name("legacy-pane").unwrap();
+        assert_eq!(
+            legacy.as_deref(),
+            Some(legacy_home.as_path()),
+            "v0.6 top-level layout: legacy-pane must resolve to its top-level dir"
+        );
+
+        // by-key lookup: operator types the persona handle, not the hash.
+        let bykey = super::find_session_home_by_name("coral-weasel").unwrap();
+        assert_eq!(
+            bykey.as_deref(),
+            Some(bykey_home.as_path()),
+            "v0.13 by-key layout: coral-weasel must resolve to its by-key/<hash> dir"
+        );
+
+        // by-key lookup via the hash itself also works (some tooling
+        // may pass the raw dir name).
+        let by_hash = super::find_session_home_by_name("3049827d92d4fbd5").unwrap();
+        assert_eq!(
+            by_hash.as_deref(),
+            Some(bykey_home.as_path()),
+            "v0.13 by-key layout: hash dir name must also resolve"
+        );
+
+        // Negative: an unknown name returns None, not an error.
+        let missing = super::find_session_home_by_name("never-existed").unwrap();
+        assert_eq!(missing, None, "unknown session must return None");
+
+        unsafe { std::env::remove_var("WIRE_HOME") };
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

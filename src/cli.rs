@@ -6058,13 +6058,21 @@ fn cmd_daemon(
     // fork-execs children, and operator-facing when running a one-session
     // foreground daemon outside launchd.
     if let Some(ref name) = session {
-        let home = crate::session::session_dir(name)
-            .with_context(|| format!("resolving session home for --session {name}"))?;
-        if !home.exists() {
-            bail!(
-                "session '{name}' not found — run `wire session list` to see initialized sessions"
-            );
-        }
+        // v0.14.2 #44: resolve via the layout-aware helper so v0.13
+        // by-key sessions (where the on-disk dir is a hash and the
+        // operator-typed name is the persona handle, e.g.
+        // "coral-weasel") work as well as legacy v0.6 top-level
+        // sessions. Pre-fix: `session_dir(name)` only resolved the
+        // legacy form → operator running `wire daemon --session
+        // coral-weasel` in a tmux pane saw "session not found" even
+        // though `wire session list` clearly enumerated it.
+        let home = crate::session::find_session_home_by_name(name)
+            .with_context(|| format!("resolving session home for --session {name}"))?
+            .ok_or_else(|| {
+                anyhow!(
+                    "session '{name}' not found — run `wire session list` to see initialized sessions"
+                )
+            })?;
         // SAFETY: cmd_daemon is the one process-lifetime entrypoint that
         // chooses a session. No other thread reads WIRE_HOME yet.
         unsafe {
