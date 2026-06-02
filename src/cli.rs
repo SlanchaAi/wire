@@ -12597,11 +12597,49 @@ fn cmd_upgrade(check_only: bool, local: bool, restart_mcp: bool, as_json: bool) 
     }
 
     // 5. Spawn fresh daemon via ensure_up — atomically waits for
-    //    process_alive + writes the versioned pidfile. (If the Daemon
-    //    service was refreshed above, it has already started a fresh
-    //    process under the new binary; ensure_daemon_running notices
-    //    and short-circuits to "already running".)
-    let spawned = crate::ensure_up::ensure_daemon_running()?;
+    //    process_alive + writes the versioned pidfile.
+    //
+    // v0.14.2 (#170 supervisor follow-up): when the Daemon service
+    // was successfully refreshed AND its launchd / systemd / Task
+    // Scheduler bootstrap succeeded, the OS will (re)start the
+    // `wire daemon --all-sessions` supervisor on the new binary
+    // within seconds, and the supervisor will spawn this session's
+    // child within its 10s registry poll. ensure_daemon_running()'s
+    // single-session foreground spawn is redundant in that path —
+    // it would create a transient daemon that the supervisor's
+    // singleton-guard subsequently no-ops, AND the
+    // "wire upgrade: spawned fresh daemon (pid N)" line in the
+    // output misleads operators into thinking pid N is the
+    // long-lived owner.
+    //
+    // Skip the redundant spawn only when BOTH conditions hold:
+    //   1. The Daemon service refresh succeeded (entry present,
+    //      action=="refreshed").
+    //   2. The bootstrap step itself returned a "loaded" / "enabled"
+    //      / "registered" status (per platform). This is what
+    //      `install_kind` reports in its `status` field when
+    //      launchctl bootstrap / systemctl enable --now / schtasks
+    //      Create succeeded. Anything else (status=="written")
+    //      means the OS bootstrap failed — fall back to the
+    //      foreground spawn so this session still has a daemon.
+    let supervisor_will_spawn = service_refreshes.iter().any(|r| {
+        let kind = r.get("kind").and_then(Value::as_str).unwrap_or("");
+        let action = r.get("action").and_then(Value::as_str).unwrap_or("");
+        let status = r.get("status").and_then(Value::as_str).unwrap_or("");
+        kind == "daemon"
+            && action == "refreshed"
+            && matches!(
+                status,
+                "loaded" | "enabled" | "active" | "registered" | "running"
+            )
+    });
+    let spawned = if supervisor_will_spawn {
+        // Defer to launchd / systemd / Task Scheduler. Pidfile reads
+        // below still report the eventual supervisor child's state.
+        None
+    } else {
+        Some(crate::ensure_up::ensure_daemon_running()?)
+    };
 
     // 5b. v0.13.2: session-scoped — no sibling respawn. `ensure_daemon_running`
     // above already respawned THIS session's daemon; sibling sessions were
@@ -12743,16 +12781,35 @@ fn cmd_upgrade(check_only: bool, local: bool, restart_mcp: bool, as_json: bool) 
                 }
             }
         }
-        if spawned {
-            println!(
+        match spawned {
+            Some(true) => println!(
                 "wire upgrade: spawned fresh daemon (pid {} v{})",
                 new_pid
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "?".to_string()),
                 new_version.as_deref().unwrap_or(&cli_version),
-            );
-        } else {
-            println!("wire upgrade: daemon was already running on current binary");
+            ),
+            Some(false) => {
+                println!("wire upgrade: daemon was already running on current binary");
+            }
+            // v0.14.2 (#170 follow-up): Daemon service refresh
+            // succeeded → launchd / systemd / Task Scheduler will
+            // (re)start the `--all-sessions` supervisor on the new
+            // binary, which spawns this session's child within its
+            // next registry poll (default 10s). No foreground spawn
+            // needed.
+            None => println!(
+                "wire upgrade: daemon refresh deferred to {} supervisor (will spawn within 10s)",
+                if cfg!(target_os = "macos") {
+                    "launchd"
+                } else if cfg!(target_os = "linux") {
+                    "systemd"
+                } else if cfg!(target_os = "windows") {
+                    "Task Scheduler"
+                } else {
+                    "OS"
+                }
+            ),
         }
         if !session_respawns.is_empty() {
             println!(
