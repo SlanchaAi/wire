@@ -8,6 +8,65 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.14.2] — 2026-06-01 (UNRELEASED)
+
+**v0.14.2 — the multi-session ops batch: silent-send class closed, `--all-sessions` supervisor architecture lands, three hotfixes caught by live dogfood.**
+
+honey-pine's 2026-06-01 multi-system dogfood (#162) surfaced an interlocking set of bugs that broke wire's daemon layer on any operator with more than one session: silent send failures, daemon-up-but-not-syncing on launchd, false-negative `wire status`, tier flap, notification storms. This release closes all of them and the architectural rework needed to keep them closed.
+
+13 PRs since the v0.14.1 tag. No trust ladder change, no protocol bump (v3.2 still the constant). Operator action required after upgrade: re-run `wire service install` (idempotent) so the launchd plist / systemd unit picks up the new `wire daemon --all-sessions --interval 5` ProgramArguments. `wire upgrade` does this automatically when a service was previously installed.
+
+### Silent-send class closed (honey-pine's #162 bug report)
+
+- **Send-lifecycle log + `pending_push_count` (#167).** Each successful relay POST appends `<outbox_dir>/<peer>.pushed.jsonl` so the caller can audit "queued → pushed" lifecycle. `wire_status` (MCP) now surfaces `pending_push_count` — the count of events in the outbox that have NOT yet appeared in the pushed log. With `stale_sync == true`, that's the diagnostic for the silent-send class honey-pine reported.
+- **Canonical `to:` DID on outbound send (#165).** Pre-fix `wire send` wrote `to: did:wire:<peer-handle>` (bare); peers running v0.14.x rejected on `to:` mismatch against their full `did:wire:<handle>-<fingerprint>`. `cmd_send` / `tool_send` now resolve the canonical pinned DID via the new `trust::resolve_peer_did`. This was THE silent-drop root cause; honey-pine's "BUG 1" closed.
+- **Durable `bilateral_completed_at` field stops tier flap (#166).** `effective_peer_tier` previously read slot_token presence to compute "VERIFIED vs PENDING_ACK". Re-pinning peer endpoints (which legitimately rewrites the slot_token block) made the tier flap. `bilateral_completed_at` is set monotonically on receipt of pair_drop_ack; never cleared. `pin_peer_endpoints` preserves it across re-pin events.
+- **Daemon-down lifecycle visibility (#163).** Per-process pidfile singleton guard with same-pid Drop preservation. `last_sync.json` written after every cycle so `wire_status` can report `last_sync_age_seconds` distinct from "any `wire daemon` process exists".
+- **Send response includes `daemon_seen` + `stale_sync` (#164).** `wire_send` (MCP) annotates its response with daemon-health hints so a caller seeing `status: queued` immediately knows whether the daemon is actually running and pushing or just silently no-op'ing into an outbox no daemon will drain.
+- **Stale `pending_inbound` clear on bilateral completion (#171).** When `maybe_consume_pair_drop_ack` flips a peer to bilateral-VERIFIED via the inbound ack path, any leftover `pending_inbound` record from the earlier pair_drop is cleared idempotently. Pre-fix: VERIFIED peer lingered in `pending_pairs.inbound_handles` ("sunlit-aurora" in honey-pine's report).
+- **Daemon stream resilience (#168).** SSE subscriber's TCP keepalive tightened from 60s → 30s. New `stream_state.json` writer tracks `state` (connecting/connected/reconnecting/error), `last_event_at`, `reconnect_count`. Surfaces via `wire_status`. honey's "BUG 2" closed.
+
+### Supervisor architecture (honey-pine's launchd diagnosis)
+
+- **`wire daemon --all-sessions` supervisor (#170).** Multi-session orchestrator: reads the session registry, fork-execs one child `wire daemon` per initialized session with `WIRE_HOME` env pinned to that session's home dir. Per-machine singleton on `<sessions_root>/supervisor.pid`. 10s registry-poll, rapid-failure backoff (1s → 60s cap), session-removal kill, pre-spawn pidfile check so operator-spawned tmux daemons coexist. Launchd plist + systemd unit + Windows task XML ProgramArguments updated. Closes the launchd-blind cwd-resolves-default-WIRE_HOME failure mode honey-pine spent multiple sessions diagnosing.
+
+- **🚨 Supervisor fork-bomb hotfix (#174).** Caught immediately via live dogfood of #170 on a 133-session box. Supervisor was passing `--session <character-name>` to each child as a belt-and-suspenders check, but `session_dir(name)` only resolves the legacy v0.6 top-level layout — v0.13 by-key sessions where `name` is the persona handle bailed. Fix: drop the redundant flag entirely; `WIRE_HOME` env is the sole contract.
+
+- **🚨 TLS hotfix: `rustls-tls-native-roots` → `rustls-tls-webpki-roots` (#176).** Also caught via the same dogfood pass. Once the supervisor put every daemon in launchd, every TLS handshake to wireup.net failed `UnknownIssuer`: launchd-spawned processes don't inherit Aqua-session keychain access on macOS, so `rustls-native-certs` returned an empty root set. Mozilla's bundled webpki-roots work in any process context. Trade-off: corporate CA / AV-resign transparency lost; operators use the existing `WIRE_INSECURE_SKIP_TLS_VERIFY=1` escape hatch. Proper dual-roots verifier filed as #177.
+
+- **`wire daemon --session <name>` resolves v0.13 by-key (#180).** Operator-facing counterpart to #174: `cmd_daemon`'s `--session` resolver now uses the new `session::find_session_home_by_name` which handles both v0.6 top-level and v0.13 by-key/persona-handle layouts.
+
+### Multi-session observability (honey-pine's "wire daemon status" ask)
+
+- **CLI status surface gap closer (#169).** `pending_push_count` + `stale_sync` + `stream_state` (added to MCP `wire_status` in #167/#168) hoisted into CLI `wire status`. Shared helpers in `config.rs` (`compute_pending_push_count`, `read_stream_state`, `stale_sync`) so MCP / CLI / future doctor stay in lock-step. Plain-text `wire status` adds three lines in operator-triage order: last sync → pending push → stream.
+
+- **Orphan-pid session annotation (#173).** When `wire status` flags orphan `wire daemon` processes (pidfile pid ≠ pgrep), each one now annotates with cmdline + parsed `--session` arg. Helps operators distinguish a stale leftover from a legitimate per-session child the supervisor is managing.
+
+- **Per-session pidfile walk for annotation (#175).** Post-#174 supervisor children no longer carry `--session` in their cmdline, so `parse_session_arg` misses them. New `session::pid_to_session_map` walks every session's `<home>/state/wire/daemon.pid` and builds `{pid: session_name}`. `cmd_status` consults the map first when annotating orphans; falls back to cmdline `--session` arg. Bonus: fixed a latent bug in `session::session_daemon_pid` where a legacy bare-integer pidfile silently returned None because the JSON parser swallowed it as a Number without a `.pid` field.
+
+- **`wire supervisor` CLI (#178).** New top-level command. `wire status` answers "is THIS session syncing?"; `wire supervisor` answers "what is the supervisor (and every session's daemon) doing across the box?". Pretty output collapses to one summary line when every session is healthy; JSON emits the full per-session topology. Closes honey-pine's BUG 3 ("wire daemon status CLI") ask.
+
+- **🚨 Cross-process toast dedup (#179).** Caught via live operator complaint within minutes of #176 landing. The 134-daemon supervisor turned the existing in-process `Mutex<HashMap>` toast dedup into theater — every daemon polled its own inbox, every daemon fired its own toast, the operator saw the same notification 134 times within seconds. Fix: cross-process atomic claim via `O_CREAT|O_EXCL` on a sha256-named touch file under `<cache_dir>/wire/toast-dedup/`. Once a key is claimed, no wire process anywhere on the host re-emits — ever. Bare `toast()` now defers to `toast_dedup()` with a content-hash key so the 5 legacy bare-toast sites inherit the cross-process guarantee without per-site changes.
+
+### Identity / enrollment
+
+- **`wire enroll republish` refreshes `capabilities[]` (#172, closes #126).** slate-lotus's v0.14.1 audit found that republish bumped `schema_version` v3.1 → v3.2 but left `capabilities=["wire/v3.1"]` stale, opening a stealth-skip vector for any future cap-gated feature. `rebuild_card_with_current_claims` now refreshes the wire/* entry to the binary's current `CARD_SCHEMA_VERSION` while preserving operator-defined non-wire caps (custom task tags, future feature flags) in their original order.
+
+### RFC-004 (Willard's contributions)
+
+- **AC-HP7 heartbeat body roundtrip proptest (#160).** Property-based test verifying that heartbeat bodies encode → relay → decode → re-encode → decode losslessly. WILLARDKLEIN.
+
+### CI + repo hygiene
+
+- **Re-run-friendly CI flake noted.** `uds_request_round_trips_200_with_body` hit again in this batch (the 4th observed instance per `feedback_uds_round_trips_ci_flake`). Recommend dedicated investigation alongside the dual-roots TLS work (#177); not yet a release blocker.
+
+### Operator notes
+
+- `wire upgrade` AUTOMATICALLY refreshes installed service units (rewrites plist / systemd unit with the new ProgramArguments). 0.14.1 → 0.14.2 operators don't need to manually re-run `wire service install` unless `wire upgrade` is skipped.
+- The `--all-sessions` supervisor manages every session by default. To opt out (e.g. one specific session running in a tmux pane), the operator-spawned `wire daemon` claims the pidfile first and the supervisor's pre-spawn check honors it.
+- Notification dedup state survives across daemon restarts. To re-see a notification class: `rm -rf ~/Library/Caches/wire/toast-dedup` (macOS) or `~/.cache/wire/toast-dedup` (linux).
+
+
 ## [v0.14.1] — 2026-05-30
 
 **v0.14.1 — v0.14.x DX completion: identity layer visible end-to-end, operator quality-of-life fixes.**
