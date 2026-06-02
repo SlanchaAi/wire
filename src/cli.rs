@@ -13330,15 +13330,47 @@ fn check_daemon_health() -> DoctorCheck {
             ),
             "`wire upgrade` to kill the orphan(s) and spawn a fresh daemon",
         ),
-        // Multiple daemons all matching … impossible by construction; fall back to warn.
-        (n, true, true) => DoctorCheck::warn(
-            "daemon",
-            format!(
-                "{n} `wire daemon` processes running (pids: {}). Multiple daemons race the relay cursor.",
-                fmt_pids(pgrep_pids)
-            ),
-            "kill all-but-one: `pkill -f \"wire daemon\"; wire daemon &`",
-        ),
+        // v0.14.2 (#170 supervisor follow-up): the
+        // `(n>1, true, orphan_pids.is_empty())` case is the
+        // legitimate `wire daemon --all-sessions` supervisor topology
+        // — supervisor + N session children, all accounted for via
+        // their per-session pidfiles + the central supervisor.pid.
+        // Pre-fix this fell through to the legacy "Multiple daemons
+        // race the relay cursor" warning with a destructive
+        // `pkill -f "wire daemon"; wire daemon &` recommendation
+        // that would WIPE the working supervisor + every session
+        // child. Operators on the #170 path saw it on every
+        // `wire doctor`.
+        (n, true, true) => {
+            // Probe: is one of these pids the supervisor?
+            let supervisor_pid: Option<u32> = crate::session::sessions_root()
+                .ok()
+                .map(|root| root.join("supervisor.pid"))
+                .filter(|p| p.exists())
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .filter(|p| crate::ensure_up::pid_is_alive(*p));
+            if let Some(sup) = supervisor_pid
+                && pgrep_pids.contains(&sup)
+            {
+                let child_count = n.saturating_sub(1);
+                DoctorCheck::pass(
+                    "daemon",
+                    format!(
+                        "supervisor (pid {sup}) + {child_count} session child daemon(s) — legitimate #170 `--all-sessions` topology, no orphans"
+                    ),
+                )
+            } else {
+                DoctorCheck::warn(
+                    "daemon",
+                    format!(
+                        "{n} `wire daemon` processes running (pids: {}). Multiple daemons race the relay cursor.",
+                        fmt_pids(pgrep_pids)
+                    ),
+                    "kill all-but-one: `pkill -f \"wire daemon\"; wire daemon &`",
+                )
+            }
+        }
     }
 }
 
