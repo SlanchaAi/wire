@@ -199,7 +199,13 @@ async fn invite_url_one_paste_pair_e2e() {
     assert!(
         wire(
             &willard,
-            &["send", &paul_h, "decision", "hello from willard via invite"]
+            &[
+                "send",
+                "--queue",
+                &paul_h,
+                "decision",
+                "hello from willard via invite"
+            ]
         )
         .status
         .success()
@@ -225,7 +231,13 @@ async fn invite_url_one_paste_pair_e2e() {
     assert!(
         wire(
             &paul,
-            &["send", &willard_h, "decision", "ack from paul via invite"]
+            &[
+                "send",
+                "--queue",
+                &willard_h,
+                "decision",
+                "ack from paul via invite"
+            ]
         )
         .status
         .success()

@@ -201,6 +201,7 @@ fn send_writes_to_outbox() {
         &home,
         &[
             "send",
+            "--queue",
             "willard",
             "decision",
             "ship the v0.1 demo",
@@ -1156,6 +1157,7 @@ fn send_with_fqdn_peer_normalizes_to_bare_handle_outbox() {
         &home,
         &[
             "send",
+            "--queue",
             "willard@wireup.net",
             "claim",
             "fqdn-peer test",
@@ -1189,6 +1191,7 @@ fn send_deadline_writes_signed_time_sensitive_until() {
         &home,
         &[
             "send",
+            "--queue",
             "willard",
             "decision",
             "ship before the window closes",
@@ -1221,11 +1224,25 @@ fn send_idempotent_under_identical_body() {
     let _ = run(&home, &["init", "paul", "--offline"]);
     let out1 = run(
         &home,
-        &["send", "willard", "decision", "fixed-body", "--json"],
+        &[
+            "send",
+            "--queue",
+            "willard",
+            "decision",
+            "fixed-body",
+            "--json",
+        ],
     );
     let out2 = run(
         &home,
-        &["send", "willard", "decision", "fixed-body", "--json"],
+        &[
+            "send",
+            "--queue",
+            "willard",
+            "decision",
+            "fixed-body",
+            "--json",
+        ],
     );
     let p1: serde_json::Value = serde_json::from_slice(&out1.stdout).unwrap();
     let p2: serde_json::Value = serde_json::from_slice(&out2.stdout).unwrap();
@@ -1242,7 +1259,10 @@ fn send_idempotent_under_identical_body() {
 fn verify_round_trips_a_send() {
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
-    let _ = run(&home, &["send", "paul", "decision", "self-test", "--json"]);
+    let _ = run(
+        &home,
+        &["send", "--queue", "paul", "decision", "self-test", "--json"],
+    );
     // Drop the queued event into a temp file and verify it.
     let outbox = home.join("state/wire/outbox/paul.jsonl");
     let line = std::fs::read_to_string(&outbox).unwrap();
@@ -1263,7 +1283,10 @@ fn verify_round_trips_a_send() {
 fn verify_rejects_tampered_event() {
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
-    let _ = run(&home, &["send", "paul", "decision", "original", "--json"]);
+    let _ = run(
+        &home,
+        &["send", "--queue", "paul", "decision", "original", "--json"],
+    );
     let outbox = home.join("state/wire/outbox/paul.jsonl");
     let line = std::fs::read_to_string(&outbox).unwrap();
     let mut event: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
@@ -1577,7 +1600,7 @@ fn forget_peer_purge_deletes_jsonl_files() {
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
     // send to peer to materialize outbox file
-    let _ = run(&home, &["send", "willard", "decision", "stuff"]);
+    let _ = run(&home, &["send", "--queue", "willard", "decision", "stuff"]);
     let outbox_path = home.join("state/wire/outbox/willard.jsonl");
     assert!(outbox_path.exists());
 
@@ -1603,8 +1626,8 @@ fn forget_peer_purge_deletes_jsonl_files() {
 fn status_after_send_shows_outbox_depth() {
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
-    let _ = run(&home, &["send", "willard", "decision", "hello"]);
-    let _ = run(&home, &["send", "willard", "decision", "world"]);
+    let _ = run(&home, &["send", "--queue", "willard", "decision", "hello"]);
+    let _ = run(&home, &["send", "--queue", "willard", "decision", "world"]);
     let out = run(&home, &["status", "--json"]);
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(parsed["outbox"]["files"], 1);

@@ -397,7 +397,14 @@ async fn dual_slot_send_prefers_local_endpoint() {
     assert!(
         wire(
             &alice,
-            &["send", &bob_h, "claim", "dual-slot hello", "--json"]
+            &[
+                "send",
+                "--queue",
+                &bob_h,
+                "claim",
+                "dual-slot hello",
+                "--json"
+            ]
         )
         .status
         .success()
@@ -509,7 +516,14 @@ async fn dual_slot_send_falls_back_to_federation_on_local_failure() {
     assert!(
         wire(
             &alice,
-            &["send", &bob_h, "claim", "fallback test", "--json"]
+            &[
+                "send",
+                "--queue",
+                &bob_h,
+                "claim",
+                "fallback test",
+                "--json"
+            ]
         )
         .status
         .success()
@@ -616,7 +630,14 @@ async fn dual_slot_back_compat_v0_5_16_peer_routes_via_federation() {
     assert!(
         wire(
             &alice,
-            &["send", &bob_h, "claim", "back-compat test", "--json"]
+            &[
+                "send",
+                "--queue",
+                &bob_h,
+                "claim",
+                "back-compat test",
+                "--json"
+            ]
         )
         .status
         .success()

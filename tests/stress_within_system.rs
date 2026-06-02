@@ -1360,7 +1360,7 @@ async fn stress_within_system_local_first_routing_v0_5_19() {
     let queue_start = Instant::now();
     for i in 0..FLOOD_COUNT {
         let body = format!("within-system flood msg {i}");
-        let out = wire(&alice, &["send", &bob_h, "claim", &body]);
+        let out = wire(&alice, &["send", "--queue", &bob_h, "claim", &body]);
         assert!(
             out.status.success(),
             "send {i} failed: {}",
@@ -1452,7 +1452,7 @@ async fn stress_within_system_failover_to_federation_on_local_death_v0_5_19() {
     for i in 0..half {
         let body = format!("pre-failover msg {i}");
         assert!(
-            wire(&alice, &["send", &bob_h, "claim", &body])
+            wire(&alice, &["send", "--queue", &bob_h, "claim", &body])
                 .status
                 .success()
         );
@@ -1500,7 +1500,7 @@ async fn stress_within_system_failover_to_federation_on_local_death_v0_5_19() {
     for i in half..FLOOD_COUNT {
         let body = format!("post-failover msg {i}");
         assert!(
-            wire(&alice, &["send", &bob_h, "claim", &body])
+            wire(&alice, &["send", "--queue", &bob_h, "claim", &body])
                 .status
                 .success()
         );
