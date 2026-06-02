@@ -14855,6 +14855,38 @@ fn cmd_setup(apply: bool) -> Result<()> {
             ));
         }
         targets.push(("GitHub Copilot CLI", home.join(".copilot/mcp-config.json")));
+
+        // v0.14.2: Pi (https://pi.dev / earendil-works/pi). Standard
+        // `mcpServers` shape — same as Claude Code. Default config
+        // path is `~/.pi/agent/mcp.json`; `$PI_CODING_AGENT_DIR` env
+        // var overrides the directory (`<dir>/mcp.json`). The
+        // `pi-mcp-adapter` package handles the runtime bridge; this
+        // only emits the config file Pi reads at agent startup.
+        if let Ok(pi_dir) = std::env::var("PI_CODING_AGENT_DIR") {
+            targets.push((
+                "Pi (PI_CODING_AGENT_DIR)",
+                PathBuf::from(pi_dir).join("mcp.json"),
+            ));
+        }
+        targets.push(("Pi", home.join(".pi/agent/mcp.json")));
+
+        // v0.14.2: OpenCode (https://opencode.ai). Custom shape:
+        // `{"mcp": {"<name>": {"type": "local", "command":
+        // ["wire","mcp"], "enabled": true}}}`. Project-local config
+        // takes precedence over the global path; both are honored.
+        // Path resolution mirrors OpenCode's own docs: XDG-first on
+        // Unix, then `~/.config/opencode/opencode.json` as the
+        // fallback.
+        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+            targets.push((
+                "OpenCode (XDG)",
+                PathBuf::from(xdg).join("opencode/opencode.json"),
+            ));
+        }
+        targets.push((
+            "OpenCode (global)",
+            home.join(".config/opencode/opencode.json"),
+        ));
     }
     // Workspace-local VS Code settings (GitHub Copilot workspace config)
     targets.push((
@@ -14863,6 +14895,9 @@ fn cmd_setup(apply: bool) -> Result<()> {
     ));
     // Project-local — works for several MCP-aware tools
     targets.push(("project-local (.mcp.json)", PathBuf::from(".mcp.json")));
+    // v0.14.2: OpenCode project-local config. Takes precedence over the
+    // global one when the project is opened from this cwd.
+    targets.push(("OpenCode (project-local)", PathBuf::from("opencode.json")));
 
     println!("wire setup\n");
     println!("MCP server snippet (add this to your client's mcpServers):");
@@ -14948,13 +14983,50 @@ fn upsert_mcp_entry(path: &std::path::Path, server_name: &str, entry: &Value) ->
     }
 
     // Detect VS Code settings.json (contains "mcp.servers" instead of "mcpServers")
-    let is_vscode = path.to_string_lossy().contains("Code/User/settings.json")
-        || path.to_string_lossy().contains(".vscode/settings.json")
-        || path.to_string_lossy().contains("Code - Insiders");
+    let path_str = path.to_string_lossy();
+    let is_vscode = path_str.contains("Code/User/settings.json")
+        || path_str.contains(".vscode/settings.json")
+        || path_str.contains("Code - Insiders");
+    // v0.14.2: OpenCode config uses a third shape — `mcp.<name>` directly
+    // (no `servers` intermediate), and each entry carries
+    // `type: "local"`, `command: ["wire", "mcp"]` (an ARRAY combining the
+    // binary + args), and `enabled: true`. See docs/integrations/OPENCODE.md.
+    let is_opencode =
+        path_str.ends_with("opencode.json") || path_str.contains("opencode/opencode.json");
 
     let root = cfg.as_object_mut().unwrap();
 
-    if is_vscode {
+    if is_opencode {
+        // OpenCode format: {"mcp": {"wire": {"type": "local", "command":
+        // ["wire", "mcp"], "enabled": true}}}. We map the standard
+        // {command, args} entry into OpenCode's combined `command`
+        // array — first element is the binary, the remaining are args.
+        let cmd_str = entry
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or("wire");
+        let args_arr: Vec<Value> = entry
+            .get("args")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut combined: Vec<Value> = vec![Value::String(cmd_str.to_string())];
+        combined.extend(args_arr);
+        let opencode_entry = json!({
+            "type": "local",
+            "command": combined,
+            "enabled": true,
+        });
+        let mcp = root.entry("mcp".to_string()).or_insert_with(|| json!({}));
+        if !mcp.is_object() {
+            *mcp = json!({});
+        }
+        let map = mcp.as_object_mut().unwrap();
+        if map.get(server_name) == Some(&opencode_entry) {
+            return Ok(false);
+        }
+        map.insert(server_name.to_string(), opencode_entry);
+    } else if is_vscode {
         // VS Code format: {"mcp": {"servers": {"wire": {...}}}}
         let mcp = root.entry("mcp".to_string()).or_insert_with(|| json!({}));
         if !mcp.is_object() {
@@ -15207,6 +15279,88 @@ fn resolve_git_bash() -> Option<String> {
         .into_iter()
         .flatten()
         .find(|c| PathBuf::from(c).exists())
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+
+    fn standard_entry() -> Value {
+        json!({"command": "wire", "args": ["mcp"]})
+    }
+
+    #[test]
+    fn upsert_writes_standard_mcpservers_for_pi_path() {
+        // Pi uses the standard `mcpServers` shape — same as Claude Code.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".pi").join("agent").join("mcp.json");
+        let entry = standard_entry();
+        assert!(upsert_mcp_entry(&path, "wire", &entry).unwrap());
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["mcpServers"]["wire"]["command"], "wire");
+        assert_eq!(v["mcpServers"]["wire"]["args"][0], "mcp");
+        // Idempotent.
+        assert!(!upsert_mcp_entry(&path, "wire", &entry).unwrap());
+    }
+
+    #[test]
+    fn upsert_writes_opencode_shape_with_combined_command_array() {
+        // OpenCode uses `mcp.<name>` (no `servers`) with
+        // {type:'local', command:[binary, ...args], enabled:true}.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        let entry = standard_entry();
+        assert!(upsert_mcp_entry(&path, "wire", &entry).unwrap());
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // No mcpServers root, no mcp.servers intermediate — direct `mcp.wire`.
+        assert!(
+            v.get("mcpServers").is_none(),
+            "OpenCode must not use mcpServers"
+        );
+        let wire = &v["mcp"]["wire"];
+        assert_eq!(wire["type"], "local");
+        assert_eq!(wire["enabled"], true);
+        // Combined command: [binary, ...args].
+        assert_eq!(wire["command"][0], "wire");
+        assert_eq!(wire["command"][1], "mcp");
+        assert_eq!(wire["command"].as_array().map(Vec::len), Some(2));
+        // Idempotent.
+        assert!(!upsert_mcp_entry(&path, "wire", &entry).unwrap());
+    }
+
+    #[test]
+    fn upsert_opencode_under_xdg_config_path_also_uses_opencode_shape() {
+        // Path detection covers `<dir>/opencode/opencode.json` (the
+        // XDG path), not just literal `opencode.json`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode").join("opencode.json");
+        let entry = standard_entry();
+        assert!(upsert_mcp_entry(&path, "wire", &entry).unwrap());
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(v["mcp"]["wire"]["enabled"].as_bool().unwrap_or(false));
+        assert_eq!(v["mcp"]["wire"]["type"], "local");
+    }
+
+    #[test]
+    fn upsert_preserves_existing_opencode_config_keys() {
+        // OpenCode users have other config in opencode.json — wire
+        // must merge under `mcp.wire` without touching sibling keys.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        std::fs::write(
+            &path,
+            r#"{"theme":"dark","providers":{"openai":{"apiKey":"sk-test"}}}"#,
+        )
+        .unwrap();
+        let entry = standard_entry();
+        assert!(upsert_mcp_entry(&path, "wire", &entry).unwrap());
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Sibling keys preserved.
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["providers"]["openai"]["apiKey"], "sk-test");
+        // wire added under mcp.
+        assert_eq!(v["mcp"]["wire"]["type"], "local");
+    }
 }
 
 #[cfg(test)]
