@@ -246,9 +246,9 @@ cargo test --release
 ```
 
 **Acceptance:**
-- `wire send peer kind body --deadline 30m` produces a queued event
-  whose JSON contains a `time_sensitive_until` field exactly 30 minutes
-  in the future, signed.
+- `wire send peer kind body --deadline 30m` produces a delivered (or
+  `--queue`d) event whose JSON contains a `time_sensitive_until` field
+  exactly 30 minutes in the future, signed.
 - `wire verify <event-with-deadline>.json` still verifies after the
   field is added (sig covers the new field).
 - `wire tail peer --json` includes the field unchanged on the receiver

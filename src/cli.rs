@@ -180,9 +180,11 @@ pub enum Command {
     /// 3. Otherwise → bail with a clear hint pointing at federation
     ///    syntax (`wire dial <handle>@<relay>` for cross-machine peers).
     ///
-    /// With an optional message, `wire dial <name> "<msg>"` also queues
-    /// and pushes the message after the pair completes. Idempotent: re-
-    /// dialling a known peer just sends.
+    /// With an optional message, `wire dial <name> "<msg>"` also sends
+    /// the message synchronously after the pair lands (#187 collapsed
+    /// the legacy queue→push step into a single direct relay POST;
+    /// the response carries the actual delivered/duplicate/etc.
+    /// verdict). Idempotent: re-dialling a known peer just sends.
     Dial {
         /// Peer name. Character nickname (preferred), session name,
         /// card handle, or DID — anything that identifies the peer to
@@ -3900,8 +3902,9 @@ fn cmd_send(
     // match wins; nickname (DID-hash auto-derived) is the fallback.
     // Ambiguous nicknames (two pinned peers DID-hash to the same
     // adj-noun pair) fail loudly with disambiguation; unknown handles
-    // pass through (matches existing `wire send` semantics — queue
-    // first, deliver best-effort).
+    // pass through and surface as `peer_unknown` from the sync
+    // delivery layer (post-#187 `wire send` is sync by default;
+    // `--queue` opts back into the legacy outbox-write path).
     let peer = match resolve_peer_handle(&peer_in) {
         Ok(Some(resolved)) if resolved != peer_in => {
             eprintln!("wire send: resolved nickname `{peer_in}` → peer `{resolved}`");
@@ -3920,7 +3923,7 @@ fn cmd_send(
 
     // v0.9 auto-pair-on-miss: if the resolved peer isn't pinned yet but
     // matches a local sister session, pair first (disk-read --local-sister
-    // path) then continue. Closes the "wire send returns queued but
+    // path) then continue. Pre-v0.14.2 closed the "wire send returns queued but
     // peer never receives because we were never paired" silent-fail
     // class. Equivalent to `wire dial <name>` followed by `wire send
     // <name> ...` in one step.
@@ -4013,7 +4016,8 @@ fn cmd_send(
     // R4: best-effort attentiveness pre-flight. Look up the peer's slot
     // coords in relay-state and ask the relay how recently the peer pulled.
     // Warn on stderr if the peer hasn't pulled in >5min OR has never pulled.
-    // Never blocks the send — the event still queues to outbox.
+    // Never blocks the send — the sync POST or `--queue` outbox-write
+    // happens below regardless.
     maybe_warn_peer_attentiveness(peer);
 
     // v0.14.2 (paul, 2026-06-01): collapse the legacy 3-step
