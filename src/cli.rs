@@ -6395,7 +6395,7 @@ fn run_sync_push() -> Result<Value> {
 /// `self.endpoints[]`, not the legacy top-level fields) actually pull.
 /// Pre-v0.9 this function read only the top-level fields and silently
 /// returned `{}` for any v0.5.17+ session.
-fn run_sync_pull() -> Result<Value> {
+pub fn run_sync_pull() -> Result<Value> {
     let state = config::read_relay_state()?;
     if state.get("self").map(Value::is_null).unwrap_or(true) {
         return Ok(json!({"written": [], "rejected": [], "total_seen": 0}));

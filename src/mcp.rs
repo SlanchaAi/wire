@@ -545,7 +545,7 @@ fn handle_initialize(id: &Value) -> Value {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION,
             },
-            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity), wire_status (daemon + sync health). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). ON SESSION START, DO THIS IMMEDIATELY (every wire session): (1) call wire_status to confirm the `wire daemon` sync loop is running — `daemon_running:true` + `last_sync_age_seconds < 60`; if not, the session won't push outbound or pull inbound and the operator must start a daemon (`wire daemon --interval 5` in a background shell, or systemd/launchd). (2) arm a PERSISTENT stream-watcher on `wire monitor --json` — in Claude Code, the Monitor tool with persistent:true — so peer messages surface live mid-session. The monitor does NOT sync the relay; it only tails the inbox the daemon writes. Both are required. WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you; this is how paired agents collaborate immediately. (Default filter strips pair_drop/pair_drop_ack/heartbeat noise.) v0.14.2: wire_send POSTs synchronously by default — response `status` is the actual relay verdict: `delivered` (event landed on peer's slot), `duplicate` (same event_id already on slot; peer can still pull), `peer_unknown` (peer not pinned — run wire_dial first), `slot_stale` (peer's slot rotated — run wire_dial to re-pair), or `transport_error` (TLS/DNS/relay-5xx; check `reason` field). Pass `queue:true` to opt back into the legacy outbox→daemon-push path for offline-buffer / pre-pair queueing. Legacy MCP tools (wire_pair_accept / wire_pair_reject / wire_pair_list_inbound, wire_pair_initiate/join/confirm) still callable but DEPRECATED — prefer canonical. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
+            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity), wire_status (daemon + sync health). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). ON SESSION START, DO THIS IMMEDIATELY (every wire session): (1) call wire_status to confirm the `wire daemon` sync loop is running — `daemon_running:true` + `last_sync_age_seconds < 60`; if not, the session won't push outbound or pull inbound and the operator must start a daemon (`wire daemon --interval 5` in a background shell, or systemd/launchd). (2) arm a PERSISTENT stream-watcher on `wire monitor --json` — in Claude Code, the Monitor tool with persistent:true — so peer messages surface live mid-session. The monitor does NOT sync the relay; it only tails the inbox the daemon writes. Both are required. WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you; this is how paired agents collaborate immediately. (Default filter strips pair_drop/pair_drop_ack/heartbeat noise.) v0.14.2: wire_send POSTs synchronously by default — response `status` is the actual relay verdict: `delivered` (event landed on peer's slot), `duplicate` (same event_id already on slot; peer can still pull), `peer_unknown` (peer not pinned — run wire_dial first), `slot_stale` (peer's slot rotated — run wire_dial to re-pair), or `transport_error` (TLS/DNS/relay-5xx; check `reason` field). Pass `queue:true` to opt back into the legacy outbox→daemon-push path for offline-buffer / pre-pair queueing. wire_pull is the symmetric receive primitive — call it to trigger an immediate relay GET instead of waiting for the daemon's 5s pull cycle; returns written[]/rejected[]/total_seen the same way `wire pull --json` does. Legacy MCP tools (wire_pair_accept / wire_pair_reject / wire_pair_list_inbound, wire_pair_initiate/join/confirm) still callable but DEPRECATED — prefer canonical. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
         }
     })
 }
@@ -590,6 +590,11 @@ fn tool_defs() -> Vec<Value> {
                 },
                 "required": ["peer", "kind", "body"]
             }
+        }),
+        json!({
+            "name": "wire_pull",
+            "description": "v0.14.2: trigger an immediate, synchronous pull from this agent's relay slot(s). Returns the same shape as `wire pull --json`: written[] (events landed in inbox), rejected[] (failed signature / cursor verify / dedupe), total_seen, cursor_blocked, endpoints_pulled. **Use this when you want events NOW** instead of waiting for the daemon's 5s pull cycle. Symmetric to wire_send's sync POST. Read-only — only consults the relay's GET, no mutations beyond writing inbox.jsonl + advancing per-slot cursors. Idempotent: re-pulling with the same cursor returns nothing new.",
+            "inputSchema": {"type": "object", "properties": {}, "required": []}
         }),
         json!({
             "name": "wire_tail",
@@ -964,6 +969,7 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
         "wire_status" => tool_status(),
         "wire_peers" => tool_peers(),
         "wire_send" => tool_send(&args),
+        "wire_pull" => tool_pull(),
         "wire_tail" => tool_tail(&args),
         "wire_verify" => tool_verify(&args),
         "wire_init" => tool_init(&args),
@@ -1447,6 +1453,16 @@ fn tool_send(args: &Value) -> Result<Value, String> {
         "last_sync_age_seconds": last_sync_age,
         "stale_sync": config::stale_sync(last_sync_age),
     }))
+}
+
+/// v0.14.2 (paul, post-#187): symmetric receive primitive. `wire_send`
+/// became sync in #187; `wire_pull` is the mirror — trigger an
+/// immediate relay GET on this agent's slot(s), write new events to
+/// inbox, advance per-slot cursors, return the verdict. Thin wrapper
+/// over `cli::run_sync_pull`; same code path the daemon's 5s pull
+/// loop uses.
+fn tool_pull() -> Result<Value, String> {
+    crate::cli::run_sync_pull().map_err(|e| format!("{e:#}"))
 }
 
 fn tool_tail(args: &Value) -> Result<Value, String> {
