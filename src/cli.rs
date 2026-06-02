@@ -4202,6 +4202,11 @@ fn cmd_here(as_json: bool) -> Result<()> {
         && let Ok(trust) = config::read_trust()
         && let Some(agents) = trust.get("agents").and_then(Value::as_object)
     {
+        // Read relay_state once so the effective-tier lookup
+        // doesn't hammer disk per peer. Missing file is fine —
+        // effective_tier handles it.
+        let relay_state =
+            config::read_relay_state().unwrap_or_else(|_| json!({"self": null, "peers": {}}));
         for (handle, agent) in agents {
             if handle == &self_handle {
                 continue; // skip self
@@ -4212,10 +4217,18 @@ fn cmd_here(as_json: bool) -> Result<()> {
             } else {
                 Some(crate::character::Character::from_did(did))
             };
+            // v0.14.3: use effective tier so `wire here`, `wire
+            // peers`, and `wire status` agree on what the daemon
+            // can actually do. Raw trust tier alone was lying when
+            // a VERIFIED peer's relay credentials were never
+            // delivered (slot_token empty, bilateral_completed_at
+            // missing). coral dogfood 2026-06-01 saw
+            // orchid-savanna as VERIFIED here but PENDING_ACK in
+            // the other two — same screen, two answers.
             peers.push(json!({
                 "handle": handle,
                 "did": did,
-                "tier": agent.get("tier").and_then(Value::as_str).unwrap_or("UNKNOWN"),
+                "tier": crate::trust::effective_tier(&trust, &relay_state, handle),
                 "persona": ch,
             }));
         }
