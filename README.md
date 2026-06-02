@@ -302,7 +302,7 @@ $ wire whoami --json
 {"did":"did:wire:paul","handle":"paul","fingerprint":"b2e5aae7","capabilities":["wire/v3.1"]}
 
 $ wire send willard decision "ship the v0.1 demo" --json
-{"event_id":"7cf276dc...","status":"queued","peer":"willard","outbox":"..."}
+{"event_id":"7cf276dc...","status":"delivered","peer":"willard","relay_url":"https://wireup.net","slot_id":"..."}
 ```
 
 ### Path 3 — File-system contract (sandboxed agents)
