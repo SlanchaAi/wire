@@ -82,7 +82,20 @@ fn run_subscriber(wake_tx: Sender<()>) {
         // restructuring the existing signature. The Vec<String> carries
         // at most one timestamp (latest); polled by reference below.
         let mut latest_event_ts: Vec<String> = Vec::new();
-        let outcome = connect_and_read(&wake_tx, &mut latest_event_ts);
+        // v0.14.3 (coral dogfood 2026-06-01): pass accumulated
+        // `last_event_at` + `reconnects` so the "connected" write
+        // inside connect_and_read preserves them. Pre-fix, every
+        // successful reconnect overwrote stream_state.json with
+        // `last_event_at:null, reconnect_count:0` even after
+        // events had arrived + previous reconnects had occurred.
+        // Operator surface always read "last event never" on
+        // long-running daemons.
+        let outcome = connect_and_read(
+            &wake_tx,
+            &mut latest_event_ts,
+            last_event_at.as_deref(),
+            reconnects,
+        );
         if let Some(ts) = latest_event_ts.into_iter().last() {
             last_event_at = Some(ts);
         }
@@ -105,7 +118,12 @@ fn run_subscriber(wake_tx: Sender<()>) {
     }
 }
 
-fn connect_and_read(wake_tx: &Sender<()>, last_event_ts: &mut Vec<String>) -> Result<()> {
+fn connect_and_read(
+    wake_tx: &Sender<()>,
+    last_event_ts: &mut Vec<String>,
+    accumulated_last_event_at: Option<&str>,
+    accumulated_reconnects: u64,
+) -> Result<()> {
     // Re-read relay-state on each reconnect so a fresh slot allocation /
     // rotation picks up automatically without daemon restart.
     let state = crate::config::read_relay_state()?;
@@ -188,7 +206,15 @@ fn connect_and_read(wake_tx: &Sender<()>, last_event_ts: &mut Vec<String>) -> Re
     // outer loop transitions to "reconnecting" on clean close or
     // "error" on failure; this is the only place we can confidently
     // claim "stream is live and pulling events for monitor".
-    write_stream_state("connected", None, 0);
+    //
+    // v0.14.3 (coral dogfood 2026-06-01): preserve accumulated
+    // last_event_at + reconnect counter instead of writing null/0
+    // and clobbering history every reconnect.
+    write_stream_state(
+        "connected",
+        accumulated_last_event_at,
+        accumulated_reconnects,
+    );
     let reader = BufReader::new(resp);
     for line in reader.lines() {
         let line = line?;
