@@ -2897,6 +2897,33 @@ fn cmd_supervisor(as_json: bool) -> Result<()> {
             }
         }
     }
+    // v0.14.2: surface sessions whose live daemon is on a stale
+    // binary version. Supervisor's existing-pidfile check protects
+    // alive daemons from respawn regardless of binary age, so
+    // mid-upgrade fleets accumulate version-drifted children.
+    // Operators see the list here + can act (manual kill, or a
+    // future `wire upgrade --refresh-stale-children`).
+    if !state.stale_binary_sessions.is_empty() {
+        let our_version = env!("CARGO_PKG_VERSION");
+        println!(
+            "stale binary:  {} session(s) running daemons older than this CLI (v{our_version}). Supervisor won't respawn them until they exit.",
+            state.stale_binary_sessions.len()
+        );
+        for name in &state.stale_binary_sessions {
+            // Look up the recorded version + pid so the diagnostic
+            // line is actionable: operator can `kill <pid>` to let
+            // the supervisor respawn on the fresh binary.
+            let session = state.sessions.iter().find(|s| &s.name == name);
+            let ver = session
+                .and_then(|s| s.daemon_version.clone())
+                .unwrap_or_else(|| "?".to_string());
+            let pid = session
+                .and_then(|s| s.daemon_pid)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            println!("  {name:<24} running v{ver} (pid {pid})");
+        }
+    }
     Ok(())
 }
 
