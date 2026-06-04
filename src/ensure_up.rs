@@ -471,12 +471,35 @@ fn ensure_background(name: &str, args: &[&str]) -> Result<bool> {
 
     crate::config::ensure_dirs()?;
     let exe = std::env::current_exe()?;
-    let child = Command::new(&exe)
-        .args(args)
+    let mut cmd = Command::new(&exe);
+    cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+
+    // Detach the child into its own session so it survives the launching
+    // process exiting. Without this the daemon `wire up` spawns is an orphan
+    // in the launcher's session/process-group: when `wire up` returns (and
+    // especially when the controlling terminal closes) the child is reaped by
+    // SIGHUP / process-group teardown — observed as "wire up: started fresh
+    // background daemon" followed by a dead daemon ~1-2s later on a fresh box.
+    // setsid() in the post-fork/pre-exec child makes it a session leader with
+    // no controlling terminal. The child is never a process-group leader at
+    // this point, so setsid() cannot fail with EPERM.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    let child = cmd.spawn()?;
 
     // P0.4: wait until the child is actually alive before persisting the
     // pid file. Otherwise a concurrent CLI sees the file pointing at a

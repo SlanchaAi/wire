@@ -4589,11 +4589,12 @@ fn cmd_dial(name: &str, message: Option<&str>, as_json: bool) -> Result<()> {
                 "kind": "local_sister",
                 "session": session_name,
             }));
-            // Drive the bilateral pair via the disk-read sister path.
-            // cmd_add_local_sister already handles "already paired"
-            // gracefully (its internal state.peers check returns the
-            // existing pin instead of re-issuing a pair_drop), so
-            // re-dialling is idempotent.
+            // Pin the sister + drop our pair-intro to their slot. The sister
+            // side is completed autonomously by the RECEIVER's daemon, which
+            // auto-accepts pending-inbound pairs from same-uid local sisters
+            // (see `auto_accept_local_sisters`) — so a single `wire dial`
+            // lands a finished bilateral pair without either operator running
+            // `wire accept`. cmd_add_local_sister is idempotent on re-dial.
             cmd_add_local_sister(session_name, true).map_err(|e| {
                 anyhow!("dial: local-sister pair to `{session_name}` failed: {e:#}")
             })?;
@@ -6477,7 +6478,18 @@ fn cmd_daemon(
     // warning's `--once` carve-out). Test escape hatch:
     // `WIRE_DAEMON_NO_SINGLETON=1`.
     let _pid_guard = if !once && std::env::var("WIRE_DAEMON_NO_SINGLETON").is_err() {
-        if let Some(holder_pid) = crate::ensure_up::daemon_singleton_holder() {
+        // A holder pid equal to OUR OWN pid is not a collision: the `wire up`
+        // spawn path (ensure_up::ensure_background) pre-writes the daemon
+        // pidfile with our pid before we exec, so a concurrent CLI never sees
+        // a half-spawned daemon. Without this carve-out the freshly-spawned
+        // daemon reads its own pre-written pidfile, concludes "another daemon
+        // is already running (pid <self>)", and exits ~immediately — the
+        // "wire up: started fresh background daemon" → dead-in-2s bug that
+        // left `wire up` with no syncing daemon on a fresh box. Only a LIVE
+        // holder with a DIFFERENT pid means a real second daemon.
+        if let Some(holder_pid) = crate::ensure_up::daemon_singleton_holder()
+            && holder_pid != std::process::id()
+        {
             if as_json {
                 println!(
                     "{}",
@@ -6541,6 +6553,22 @@ fn cmd_daemon(
             eprintln!("daemon: pull error: {e:#}");
             json!({"written": [], "rejected": [], "total_seen": 0, "error": e.to_string()})
         });
+        // Auto-complete pairs from same-uid LOCAL SISTER sessions. The receiver's
+        // daemon accepts a pending-inbound pair_drop from one of THIS operator's
+        // own sessions without a manual `wire accept` — this is what makes
+        // `wire dial <sister>` on one agent result in the other agent receiving
+        // the message and replying autonomously. Strangers are never touched.
+        match auto_accept_local_sisters() {
+            Ok(n) if n > 0 => {
+                // Re-pull immediately so anything the peer queued before we
+                // trusted them (e.g. the first `wire dial ... "hello"`, which
+                // was rejected as "not in trust" moments ago) lands THIS cycle
+                // rather than waiting a full interval.
+                let _ = run_sync_pull();
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("daemon: local-sister auto-accept error: {e:#}"),
+        }
         let pairs = crate::pending_pair::tick().unwrap_or_else(|e| {
             eprintln!("daemon: pending-pair tick error: {e:#}");
             json!({"transitions": []})
@@ -6626,6 +6654,57 @@ fn cmd_daemon(
         }
         while wake_rx.try_recv().is_ok() {}
     }
+}
+
+/// Auto-complete pending-inbound pairs that originate from a same-uid LOCAL
+/// SISTER session — one of THIS operator's own `wire` sessions on this box.
+/// Same-uid sisters are the documented trust anchor (`wire session
+/// pair-all-local` meshes them on the same basis), so the receiver's daemon
+/// finishes their pair without a manual `wire accept`. This is what lets a
+/// single `wire dial <sister>` on one agent end with the other agent
+/// receiving the message and replying autonomously.
+///
+/// SAFETY: a pending pair is auto-accepted ONLY if its peer DID exactly
+/// matches one of this uid's own session identities (`wire session list`).
+/// The peer card was signature-verified before the pending record was
+/// written, and a `did:wire:` DID is derived from that key, so the DID
+/// cryptographically binds to the sister's keypair — a stranger cannot forge
+/// a DID that collides with a local session's. Every other pending pair (all
+/// federation strangers) is left untouched for explicit operator consent,
+/// preserving the bilateral gate. Returns the count accepted this call.
+fn auto_accept_local_sisters() -> Result<usize> {
+    let pendings = crate::pending_inbound_pair::list_pending_inbound().unwrap_or_default();
+    if pendings.is_empty() {
+        return Ok(0);
+    }
+    // DIDs of this operator's own sessions on this box. `list_sessions`
+    // enumerates only this uid's session dir, so membership here IS the
+    // same-uid trust check.
+    let sister_dids: std::collections::HashSet<String> = crate::session::list_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|s| s.did)
+        .collect();
+    if sister_dids.is_empty() {
+        return Ok(0);
+    }
+    let mut accepted = 0usize;
+    for p in pendings {
+        if !sister_dids.contains(&p.peer_did) {
+            continue; // stranger — leave in pending-inbound for `wire accept`
+        }
+        let nick = crate::agent_card::bare_handle(&p.peer_handle).to_string();
+        match cmd_pair_accept(&nick, true) {
+            Ok(()) => {
+                accepted += 1;
+                eprintln!("wire daemon: auto-accepted local sister {nick} (same-uid)");
+            }
+            Err(e) => {
+                eprintln!("wire daemon: auto-accept of local sister {nick} failed: {e:#}");
+            }
+        }
+    }
+    Ok(accepted)
 }
 
 /// Programmatic push (no stdout, no exit on errors). Returns the same JSON
