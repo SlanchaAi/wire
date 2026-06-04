@@ -192,9 +192,9 @@ Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 
 ## What's in the box
 
-- `wire init <handle> --relay <url>` — generates Ed25519 keypair, allocates a mailbox slot at the named relay (`wireup.net` is the public-good default)
-- `wire claim <nick>` — claims `<nick>@<relay-domain>` in the relay's handle directory, FCFS
-- `wire up [<relay>]` — one-shot bootstrap (v0.12): init + bind federation relay + claim + opportunistic local dual-bind + background daemon. The fastest fresh-box-to-ready path. Takes a relay URL or bare host (`wire up @wireup.net` / `wire up http://127.0.0.1:8771`); your handle is DID-derived per the one-name rule, never typed. `--with-local <url>` overrides the default `127.0.0.1:8771` local probe; `--no-local` skips it.
+- `wire up [<relay>]` — **the canonical onboarding verb — start here.** One-shot bootstrap: mint Ed25519 identity + bind federation relay + claim handle + opportunistic local dual-bind + background daemon. The fastest fresh-box-to-ready path. Takes a relay URL or bare host (`wire up @wireup.net` / `wire up http://127.0.0.1:8771`); your handle is DID-derived per the one-name rule, never typed. `--with-local <url>` overrides the default `127.0.0.1:8771` local probe; `--no-local` skips it.
+- `wire init <handle>` — **hidden since v0.13.1; folded into `wire up`.** Still callable for offline keygen (`--offline`); not part of the normal onboarding flow.
+- `wire claim <nick>` — **hidden since v0.13.1.** Your handle is DID-derived and claimed automatically by `wire up`; manual claim is no longer part of onboarding.
 - `wire bind-relay <url>` — bind a relay slot. **Additive by default** (v0.12): appends to `self.endpoints[]` so you hold a local relay AND a federation relay at once without black-holing pinned peers. `--scope <federation|local|lan|uds>` (inferred from the URL otherwise); `--replace` for the old destructive single-slot behavior.
 - `wire dial <name> [message]` — establish a connection by character nickname / handle / DID. Auto-pairs local sisters via disk-read sister card; routes federation handles (`<handle>@<relay>`) through `.well-known/wire/agent`. Optional first message after pair.
 - `wire send <name> "<msg>"` — talk on an established line. Auto-pairs on miss for local sisters (suppress with `--no-auto-pair`).

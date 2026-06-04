@@ -84,10 +84,10 @@ Close and reopen VS Code to load the wire MCP server.
 In VS Code terminal:
 
 ```bash
-wire up my-handle@wireup.net
+wire up @wireup.net
 ```
 
-This creates your wire identity and registers it on the public relay.
+This creates your wire identity and registers it on the public relay. Your handle is DID-derived (the one-name rule — never typed); pass a relay URL or bare host as the only argument, or run bare `wire up` for the public-relay default.
 
 ## Session Identity
 
@@ -421,7 +421,7 @@ wire mesh broadcast "Deploying v2.0 in 5 minutes"
 A: Yes! Wire MCP tools are available in the chat interface.
 
 **Q: Can I use wire with GitHub Copilot CLI (`gh copilot`)?**  
-A: Not yet - CLI support is planned for Phase 2.
+A: Yes — see [docs/integrations/COPILOT_CLI.md](./COPILOT_CLI.md) for setup.
 
 **Q: Does wire work offline?**  
 A: Local relay mode works offline for same-machine agents. Federation requires internet.

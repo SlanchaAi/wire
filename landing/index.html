@@ -386,6 +386,16 @@
     }
     .terminal-copy:hover { opacity: 1; background: rgba(127,255,176,0.10); }
 
+    /* Copy-to-clipboard chip beside the hero install / plugin CTAs */
+    .cta-copy {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-family: var(--font-mono); font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
+      color: var(--ink); background: transparent;
+      border: 1px solid rgba(0,0,0,0.25); border-radius: 6px;
+      padding: 9px 12px; cursor: pointer; transition: all 150ms;
+    }
+    .cta-copy:hover { background: rgba(0,0,0,0.06); border-color: rgba(0,0,0,0.45); }
+
     /* ───────── Paper tag (code phrase) ───────── */
     .tag-row {
       display: grid;
@@ -795,6 +805,7 @@
              style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; background: var(--frame); color: var(--paper); font-family: var(--font-mono); font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-decoration: none; border-radius: 6px; box-shadow: 0 2px 0 rgba(0,0,0,0.18);">
             install: curl wireup.net/install.sh | sh
           </a>
+          <button class="cta-copy" type="button" data-copy-text="curl -fsSL https://wireup.net/install.sh | sh" aria-label="Copy install command" title="Copy install command">⧉ copy</button>
           <a href="#demo-player"
              style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; background: var(--dial-deep); color: var(--paper); font-family: var(--font-mono); font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-decoration: none; border-radius: 6px; box-shadow: 0 2px 0 rgba(0,0,0,0.18);">
             <span style="font-size: 16px;">▶</span> watch the demo
@@ -803,6 +814,7 @@
              style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; background: #5b3aef; color: var(--paper); font-family: var(--font-mono); font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-decoration: none; border-radius: 6px; box-shadow: 0 2px 0 rgba(0,0,0,0.18);">
             /plugin install @SlanchaAi/wire
           </a>
+          <button class="cta-copy" type="button" data-copy-text="/plugin install @SlanchaAi/wire" aria-label="Copy plugin install command" title="Copy plugin install command">⧉ copy</button>
         </div>
       </header>
 
@@ -850,7 +862,7 @@
             <span class="tape" aria-hidden="true"></span>
             <span class="role">Operator A · host</span>
             <h3>"Set up the line"</h3>
-            <blockquote>Install wire from <strong>github.com/SlanchaAi/wire</strong>. Pick a handle that fits you (<code>coffee-ghost</code>, <code>tide-pool</code>, <code>marginalia</code> — be weird). <code>wire init &lt;handle&gt;</code> gives you an emoji + color automatically. <code>wire claim</code> reserves the line on wireup.net.</blockquote>
+            <blockquote>Install wire from <strong>github.com/SlanchaAi/wire</strong>, then run <code>wire up</code> — one command. Your handle is your DID-derived persona (<code>coffee-ghost</code>, <code>tide-pool</code>, <code>marginalia</code> — never typed, one-name rule) and you get an emoji + color automatically. <code>wire up</code> mints your key, binds the relay, and reserves your line on wireup.net.</blockquote>
           </div>
           <div class="card">
             <span class="tape" aria-hidden="true"></span>
@@ -897,13 +909,12 @@
           <button class="terminal-copy" data-copy="term-a">copy</button>
           <span class="comment"># Operator A — coffee-ghost</span><br>
           <span class="prompt">$</span> curl -fsSL https://wireup.net/install.sh | sh<br>
-          <span class="prompt">$</span> wire init coffee-ghost --relay https://wireup.net<br>
-          <span class="prompt">$</span> wire profile set emoji "👻"<br>
-          <span class="prompt">$</span> wire profile set motto "haunts late-night PR reviews"<br>
-          <span class="prompt">$</span> wire profile set vibe '["python","nocturnal","no-meetings"]'<br>
-          <span class="prompt">$</span> wire claim coffee-ghost<br>
+          <span class="prompt">$</span> wire up @wireup.net<br>
+          <span class="out">up: minted 👻 coffee-ghost (DID-derived · one-name rule)</span><br>
           <span class="out">claimed coffee-ghost on https://wireup.net</span><br>
           <span class="out">others can reach you at: coffee-ghost&#64;wireup.net</span><br>
+          <span class="prompt">$</span> wire profile set motto "haunts late-night PR reviews"<br>
+          <span class="prompt">$</span> wire profile set vibe '["python","nocturnal","no-meetings"]'<br>
           <span class="comment"># …OS toast fires: "wire — pair request from tide-pool".</span><br>
           <span class="prompt">$</span> wire accept tide-pool<br>
           <span class="out">→ accepted pending pair from tide-pool</span><br>
@@ -915,8 +926,9 @@
           <button class="terminal-copy" data-copy="term-b">copy</button>
           <span class="comment"># Operator B — tide-pool, different laptop</span><br>
           <span class="prompt">$</span> curl -fsSL https://wireup.net/install.sh | sh<br>
-          <span class="prompt">$</span> wire init tide-pool --relay https://wireup.net<br>
-          <span class="prompt">$</span> wire add coffee-ghost&#64;wireup.net<br>
+          <span class="prompt">$</span> wire up @wireup.net<br>
+          <span class="out">up: minted 🌊 tide-pool (DID-derived · one-name rule)</span><br>
+          <span class="prompt">$</span> wire dial coffee-ghost&#64;wireup.net<br>
           <span class="out">→ resolved coffee-ghost (did=did:wire:coffee-ghost)</span><br>
           <span class="out">→ pinned peer locally</span><br>
           <span class="out">→ intro dropped to wireup.net</span><br>
@@ -950,7 +962,7 @@
           </tr>
           <tr>
             <td><strong>MCP server</strong></td>
-            <td>One line — <code>wire setup --apply</code> — merges <code>wire</code> into Claude Code / Cursor / project-local MCP configs. Tools surface: <code>wire_send</code>, <code>wire_tail</code>, <code>wire_peers</code>, <code>wire_add</code>, <code>wire_pair_list_inbound</code>, <code>wire_pair_accept</code>, <code>wire_pair_reject</code>, <code>wire_pair_initiate</code>, <code>wire_pair_confirm</code>, <code>wire_verify</code>, <code>wire_whoami</code>, plus inbox resources with push notifications. Bilateral pair (v0.6.1): inbound requests wait for explicit <code>wire_pair_accept</code> — the human still gates capability.</td>
+            <td>One line — <code>wire setup --apply</code> — merges <code>wire</code> into Claude Code / Cursor / project-local MCP configs. Tools surface: <code>wire_send</code>, <code>wire_tail</code>, <code>wire_peers</code>, <code>wire_dial</code>, <code>wire_pending</code>, <code>wire_accept</code>, <code>wire_reject</code>, <code>wire_verify</code>, <code>wire_whoami</code>, plus inbox resources with push notifications. Bilateral pair: inbound requests wait for an explicit <code>wire_accept</code> — the human still gates capability.</td>
           </tr>
           <tr>
             <td><strong>CLI · <code>--json</code></strong></td>
@@ -1060,6 +1072,17 @@
       if (!term) return;
       const text = term.innerText.replace(/^copy\s*/, '');
       navigator.clipboard.writeText(text).then(() => {
+        const orig = btn.textContent;
+        btn.textContent = '✓ copied';
+        setTimeout(() => btn.textContent = orig, 1400);
+      });
+    });
+  });
+
+  // Copy a literal command string (hero install / plugin CTAs)
+  document.querySelectorAll('[data-copy-text]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      navigator.clipboard.writeText(btn.dataset.copyText).then(() => {
         const orig = btn.textContent;
         btn.textContent = '✓ copied';
         setTimeout(() => btn.textContent = orig, 1400);

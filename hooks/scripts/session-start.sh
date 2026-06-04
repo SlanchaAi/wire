@@ -39,6 +39,6 @@ fi
 HANDLE=$(wire whoami --short 2>/dev/null || echo "?")
 cat <<EOF
 wire-plugin: ready (${HANDLE}, wire ${WIRE_VERSION}).
-  Slash commands: /wire:wire-pair, /wire:wire-monitor, /wire:wire-send, /wire:wire-enroll, /wire:wire-quiet
+  Slash commands: /wire:wire-init, /wire:wire-pair, /wire:wire-monitor, /wire:wire-send, /wire:wire-enroll, /wire:wire-quiet
   Arm the inbox watcher (persistent Monitor on wire monitor --json) as an early action — see /wire:wire-monitor.
 EOF
