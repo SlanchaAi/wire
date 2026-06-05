@@ -40,30 +40,43 @@ A phase does **not** merge until ALL of:
 
 `wire nuke` resets the machine to a clean wire state. It composes existing primitives:
 
+`wire nuke` is **hard by default** (the name demands it; precedent: `rustup self uninstall`, `docker system prune -a`). Two modes.
+
+**Default `wire nuke` — hard reset (everything wire did to the machine, binary kept):**
+
 1. **Service teardown** — `service::uninstall_kind(ServiceKind::Daemon)` + `service::uninstall_kind(ServiceKind::LocalRelay)`. Cross-platform via the existing impl (launchd bootout + plist rm / `systemctl --user disable --now` + unit rm / `schtasks /Delete`).
 2. **Kill survivors** — terminate any remaining `wire daemon` (supervisor + children) and `relay-server` processes not covered by unit teardown (pidfile-driven where possible; `pkill -f` fallback).
-3. **Delete state** — remove:
-   - `session::sessions_root()` (all session homes)
-   - `config::config_dir()` and `config::state_dir()` (default-session config/state/trust/inbox/cursors)
-   - `dirs::cache_dir()/wire/` (toast-dedup)
-   - wire logs (`~/Library/Logs/wire-*.log` on macOS; equivalents elsewhere)
-4. **Keep the `wire` binary** — nuke resets *state + services*, not the install. (You need `wire` to run nuke and to re-test without re-downloading.)
+3. **De-register from host MCP configs** — remove the `wire` server entry that `wire setup` wrote into each host's config (Claude Code / Cursor / Copilot / OpenCode `mcpServers` / OpenCode `mcp.*`), reusing the `adapters/harness.rs` registry in reverse (a `remove_mcp_entry` counterpart to `upsert_mcp_entry`). **Critical: without this, a "fresh" machine still shows the agent a dead `wire` MCP server — the exact confusion this whole effort removes.** Preserve sibling keys; only drop the `wire` entry.
+4. **Delete state** — remove `session::sessions_root()` (all session homes), `config::config_dir()` + `config::state_dir()` (default config/state/trust/inbox/cursors), `dirs::cache_dir()/wire/` (toast-dedup), and wire logs (`~/Library/Logs/wire-*.log` on macOS; equivalents elsewhere).
+5. **Keep the `wire` binary** — you need it to run nuke and to re-test without re-downloading.
 
-### Safety
+**`wire nuke --purge` — total uninstall (rustup-style, "never installed"):**
 
-- Requires `--force` to run non-interactively. Without `--force` in a TTY: print the exact path/unit list and require a typed confirmation (`nuke`); abort otherwise. Non-TTY without `--force`: refuse with a message.
-- `--json` prints `{removed_paths[], removed_units[], killed_pids[]}` for scripting.
-- Honors `WIRE_HOME` only insofar as the dir fns do; nuke targets the **machine-wide** sessions root + default dirs (full reset), not a single `WIRE_HOME`.
+Everything above, **plus**: remove the `wire` binary from PATH and scrub shell-config lines (`PATH` entries, `source` of any wire env, install.sh-added lines). **Windows caveat:** a running `.exe` can't delete itself — on Windows, `--purge` prints the one manual `del` command for the binary instead of failing (same wall `rustup` hits).
+
+### Safety (consensus pattern: enumerate → typed-confirm → default No)
+
+- **`--dry-run`** — print the full kill/unit/path/MCP-entry list that *would* be removed; do nothing. Implemented before the confirm so it's always a safe preview.
+- **Interactive (TTY, no `--force`)** — print the same enumeration, then require the operator to type `nuke` to proceed. Default is abort.
+- **`--force` / `--yes`** — skip the prompt for automation (and the cross-platform test harness).
+- **Non-TTY without `--force`** — refuse with a message (never silently destroy in a pipe).
+- **`--json`** — `{removed_paths[], removed_units[], removed_mcp_entries[], killed_pids[], binary_removed}` for scripting.
+- Targets the **machine-wide** sessions root + default dirs (full reset), not a single `WIRE_HOME`.
 
 ### Surface
 
-- New top-level subcommand `Nuke { force: bool, json: bool }` in `cli.rs`, dispatched to `cmd_nuke`.
+- New top-level subcommand `Nuke { force: bool, purge: bool, dry_run: bool, json: bool }` in `cli.rs`, dispatched to `cmd_nuke`.
 - NOT exposed as an MCP tool (destructive; operator-only).
+- New `service`/`adapters` helper `remove_mcp_entry(host)` mirroring `upsert_mcp_entry`, covered by the same per-host shape tests.
 
 ### Tests
 
-- Unit: path-set computation under a temp home; `--force` gating logic (pure, injectable confirmation).
-- Manual fresh-env: install → `wire up` → `wire nuke --force` → confirm state gone + services removed + binary intact + a subsequent `wire up` works clean. Run on macOS, Linux, Windows.
+- Unit: path-set computation under a temp home; confirm-gating logic (pure, injectable confirmation); `--dry-run` removes nothing; `remove_mcp_entry` drops only the `wire` key and preserves siblings (per-host shape, mirroring the `upsert_mcp_entry` tests).
+- Manual fresh-env, on **macOS + Linux + Windows**:
+  1. install → `wire setup` (registers MCP host entry) → `wire up` →
+  2. `wire nuke --dry-run` shows the full removal list, changes nothing →
+  3. `wire nuke --force` → confirm: state gone, service units removed, **MCP host entry gone**, binary intact, a subsequent `wire up` works clean →
+  4. `wire nuke --purge --force` → confirm binary + shell lines gone (Windows: prints the manual `del` line).
 
 ---
 
@@ -106,12 +119,13 @@ Tests: delete the legacy-layout/legacy-pidfile tests; confirm by-key path fully 
 ## Out of scope
 
 - No migration tooling (no users).
-- No removal of the `wire` binary by `nuke`.
+- Default `wire nuke` keeps the binary; only `--purge` removes it (so re-test loops don't require reinstall).
 - No change to canonical verbs, protocol (v3.2 constant), or trust ladder.
 
 ## Open questions
 
 - (resolved) Spec location → `.planning/` (crate-excluded).
 - (resolved) Scope → all three tiers + `wire nuke`.
-- (resolved) `nuke` blast radius → full machine reset.
-- (assumed, flag if wrong) `nuke` keeps the binary.
+- (resolved) `nuke` blast radius → full machine reset, **hard by default**, incl. MCP-host de-registration.
+- (resolved) two modes: default `nuke` keeps the binary; `wire nuke --purge` removes binary + shell lines (rustup-style).
+- (resolved) safety: `--dry-run` + typed-`nuke` confirm + `--force`/`--yes`, default No.
