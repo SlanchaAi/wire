@@ -81,6 +81,46 @@ fn map_session_key_source_label(resolver_label: &'static str) -> &'static str {
     }
 }
 
+/// RFC-008 §C — does this `WIRE_HOME` path point at the modern operator-
+/// explicit `sessions/by-key/<16-hex-hash>` shape, or at an older/foreign
+/// path?
+///
+/// The precedence flip in `maybe_adopt_session_wire_home` uses this to keep
+/// **explicit modern pins** winning (operator deliberately joining two CC
+/// tabs to one fleet-shared home, IDE config pinning a by-key path on
+/// purpose) while letting the **session-key chain** beat a stale pre-v0.13.5
+/// shell-profile `WIRE_HOME` pointing at the cwd-derived legacy layout
+/// (paul's RFC-005 Phase 4 deletes the LAYOUT reader, but a shell-set env
+/// var pointing at the path lingers across upgrades — that's the #210
+/// regression). A non-by-key-shape `WIRE_HOME` loses to a present
+/// session-key env var unless the operator opts back into legacy
+/// ordering via `WIRE_HOME_FORCE=1`.
+///
+/// Match rule: `/sessions/by-key/<16-hex>` substring anywhere in the path
+/// (anchored to a `by-key` segment). Cross-platform: works for both `/`
+/// and `\` separators by checking both.
+fn is_by_key_shape(path: &str) -> bool {
+    // Cheap substring scan. Cross-platform: check both separator shapes.
+    // The 16-hex hash is what `session_home_for_key` writes — anything
+    // else under `by-key/` is malformed and treated as legacy for safety.
+    for needle in ["/by-key/", "\\by-key\\"] {
+        if let Some(pos) = path.find(needle) {
+            let after = &path[pos + needle.len()..];
+            // Hash is the first path segment after `by-key/`. Take up to
+            // the next separator (or end of string).
+            let hash = after
+                .split(['/', '\\'])
+                .next()
+                .unwrap_or("");
+            // Wire writes exactly 16 lowercase hex chars; reject anything else.
+            if hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Root directory under which all session WIRE_HOMEs live.
 ///
 /// Honors `WIRE_HOME` for testing (sessions root becomes
@@ -1183,12 +1223,81 @@ fn read_wire_home_from_pid(pid: u32) -> Option<String> {
 /// `env::set_var` is unsafe in Rust 2024 because of thread-safety
 /// guarantees, and our use is safe only at process entry.
 pub fn maybe_adopt_session_wire_home(label: &str) {
-    if std::env::var("WIRE_HOME").is_ok() {
-        // RFC-008 §A: operator pinned WIRE_HOME in env (deliberate fleet-share
-        // pin OR stale shell profile — see #210). Either way, this is what won
-        // identity resolution; surface it on whoami so the operator can tell.
-        record_session_source("env:WIRE_HOME");
-        return;
+    // RFC-008 §C — precedence flip for the agent-host case.
+    //
+    // Before §C: presence of `WIRE_HOME` in env unconditionally
+    // short-circuited the session-key chain. A stale pre-v0.13.5 shell-
+    // profile pin (the #210 reproducer) silently overrode
+    // `CLAUDE_CODE_SESSION_ID` and every CC tab in the cwd collapsed to
+    // one persona.
+    //
+    // After §C: `WIRE_HOME` still wins for the OPERATOR-EXPLICIT cases
+    // (by-key-shape modern pin OR `WIRE_HOME_FORCE=1` legacy-shape
+    // override). A non-by-key-shape `WIRE_HOME` without
+    // `WIRE_HOME_FORCE=1` LOSES to a present session-key env var. This
+    // closes the silent-override path without breaking the deliberate-
+    // fleet-share contract.
+    //
+    // `WIRE_HOME_FORCE=1` is the documented escape hatch for operators
+    // who legitimately want a legacy-shape WIRE_HOME pin to override
+    // (e.g., a multi-session fleet sharing a single legacy home by
+    // design). Honest semantic: "I know my path is legacy-shaped; I
+    // want it to win anyway."
+    if let Ok(pin) = std::env::var("WIRE_HOME") {
+        let force = std::env::var("WIRE_HOME_FORCE").is_ok();
+        let by_key = is_by_key_shape(&pin);
+        if by_key {
+            // Modern operator-explicit pin. Always wins.
+            record_session_source("env:WIRE_HOME");
+            return;
+        }
+        if force {
+            // Legacy-shape pin + explicit operator opt-back-in.
+            // Surface the force so operators reading whoami can tell
+            // the override is active (not silent).
+            record_session_source("env:WIRE_HOME_FORCE");
+            return;
+        }
+        // Legacy-shape pin without WIRE_HOME_FORCE. Check if a
+        // session-key env var is present; if so, it WINS (the §C flip).
+        // If no session-key resolves either, fall through to honor the
+        // pin (preserves the bare-CLI bare-pin path).
+        if resolve_session_key().is_some() {
+            // Session-key chain takes over. Clear WIRE_HOME from env
+            // so downstream resolution writes the session-key by-key
+            // home instead of layering on top of the stale pin.
+            //
+            // SAFETY: caller contract is "before any thread spawn." All
+            // production sites (cli::run, mcp::run) call this fn as the
+            // first step in their respective entry points.
+            unsafe {
+                std::env::remove_var("WIRE_HOME");
+            }
+            // Audible warning to stderr (gated on interactive TTY +
+            // WIRE_VERBOSE, matching the existing autosession line at
+            // §1271-1278 below). Operator sees `env:CLAUDE_CODE_SESSION_ID`
+            // (or whichever adapter) as the recorded source on whoami,
+            // and a one-time warning explaining the flip. Suppress with
+            // WIRE_QUIET_AUTOSESSION=1 (same gate as the autosession
+            // chatter).
+            use std::io::IsTerminal;
+            let quiet = std::env::var("WIRE_QUIET_AUTOSESSION").is_ok();
+            let verbose = std::env::var("WIRE_VERBOSE").is_ok();
+            let interactive = std::io::stderr().is_terminal();
+            if !quiet && (interactive || verbose) {
+                eprintln!(
+                    "wire {label}: WIRE_HOME ({pin}) is legacy-shape and a session-key env var is present — the session-key resolution chain wins (RFC-008 §C precedence flip). Set WIRE_HOME_FORCE=1 to opt back into legacy ordering. See wire RFC-008 / #210."
+                );
+            }
+            // Fall through to the session-key resolution block below;
+            // it will record its own session_source label.
+        } else {
+            // No session-key. Fall back to honoring the pin (legacy
+            // shape but only signal present). Same as pre-§C behavior
+            // for this case.
+            record_session_source("env:WIRE_HOME");
+            return;
+        }
     }
     // v0.13: prefer the host-agnostic session key (WIRE_SESSION_ID >
     // CLAUDE_CODE_SESSION_ID). Each session gets its own WIRE_HOME under
@@ -2289,5 +2398,69 @@ mod tests {
             before, after,
             "record_session_source must be once-only — second call silently dropped"
         );
+    }
+
+    /// RFC-008 §C — `is_by_key_shape` must distinguish modern operator-
+    /// explicit `sessions/by-key/<16-hex>` pins from every other path
+    /// shape (legacy cwd-derived `sessions/<name>/config/wire`, foreign
+    /// paths, malformed by-key dirs). Fast — used at every wire startup
+    /// when WIRE_HOME is set — so this asserts cross-platform path-sep
+    /// handling without allocating.
+    #[test]
+    fn is_by_key_shape_recognizes_modern_pin() {
+        // Linux/macOS modern shape.
+        assert!(is_by_key_shape(
+            "/home/dev/.local/state/wire/sessions/by-key/0c38ce498aa9d955"
+        ));
+        // Windows modern shape (escaped backslashes).
+        assert!(is_by_key_shape(
+            "C:\\Users\\Willard\\AppData\\Local\\wire\\sessions\\by-key\\0c38ce498aa9d955"
+        ));
+        // With trailing path segments (e.g. /config/wire suffix).
+        assert!(is_by_key_shape(
+            "/home/dev/.local/state/wire/sessions/by-key/abcdef0123456789/config/wire"
+        ));
+        assert!(is_by_key_shape(
+            "C:\\wire\\sessions\\by-key\\abcdef0123456789\\config\\wire"
+        ));
+    }
+
+    #[test]
+    fn is_by_key_shape_rejects_legacy_and_malformed() {
+        // Legacy cwd-derived shape (the #210 case).
+        assert!(!is_by_key_shape(
+            "C:\\Users\\Willard\\AppData\\Local\\wire\\sessions\\willard\\config\\wire"
+        ));
+        assert!(!is_by_key_shape(
+            "/home/dev/.local/state/wire/sessions/projx/config/wire"
+        ));
+        // Foreign path, no `by-key/` at all.
+        assert!(!is_by_key_shape("/tmp/some-fleet-shared-dir"));
+        // by-key with wrong hash length (8 hex — too short).
+        assert!(!is_by_key_shape("/wire/sessions/by-key/abcdef01"));
+        // by-key with non-hex chars in hash.
+        assert!(!is_by_key_shape("/wire/sessions/by-key/not-a-hex-hash"));
+        // by-key with uppercase hex (wire writes lowercase only).
+        assert!(!is_by_key_shape(
+            "/wire/sessions/by-key/0C38CE498AA9D955"
+        ));
+        // by-key with hash too long (32 hex).
+        assert!(!is_by_key_shape(
+            "/wire/sessions/by-key/0c38ce498aa9d9550c38ce498aa9d955"
+        ));
+        // Empty path.
+        assert!(!is_by_key_shape(""));
+    }
+
+    /// RFC-008 §C — verify a path containing `by-key` as a partial substring
+    /// (NOT as a path segment) is correctly rejected. Catches a regex-style
+    /// regression where the matcher splits on the wrong delimiter.
+    #[test]
+    fn is_by_key_shape_substring_not_segment_rejected() {
+        // `by-key` appears, but NOT as a path segment — should reject.
+        assert!(!is_by_key_shape("/wire/sessions/foo-by-key-bar/0c38ce498aa9d955"));
+        // by-key/ but no hash after (just the bare dir).
+        assert!(!is_by_key_shape("/wire/sessions/by-key/"));
+        assert!(!is_by_key_shape("/wire/sessions/by-key"));
     }
 }

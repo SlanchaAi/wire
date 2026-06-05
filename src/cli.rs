@@ -3551,11 +3551,17 @@ fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
             json!(config::config_dir()?.to_string_lossy()),
         );
         // RFC-008 §A: surface which signal won identity resolution this
-        // process. `env:WIRE_HOME` | `env:CLAUDE_CODE_SESSION_ID` | `pidfile`
-        // | `mint:per-process` | `cwd-derive` | `machine-default` etc.
-        // Closes the #210 silent-override diagnostic gap so an operator can
-        // tell at a glance whether a stale shell pin or the session-key
-        // chain produced this identity.
+        // process. `env:WIRE_HOME` | `env:WIRE_HOME_FORCE` |
+        // `env:CLAUDE_CODE_SESSION_ID` | `pidfile` | `mint:per-process` |
+        // `cwd-derive` | `machine-default` etc. Closes the #210 silent-
+        // override diagnostic gap so an operator can tell at a glance whether
+        // a stale shell pin or the session-key chain produced this identity.
+        // RFC-008 §C precedence flip: `env:WIRE_HOME` means a by-key-shape
+        // modern pin won; `env:WIRE_HOME_FORCE` means an operator opted
+        // back into legacy-shape pin precedence; a legacy-shape pin that
+        // lost to the session-key chain surfaces whatever adapter won
+        // (e.g. `env:CLAUDE_CODE_SESSION_ID`) plus an autosession-style
+        // stderr warning on the flip.
         payload.insert(
             "session_source".into(),
             json!(crate::session::session_source().unwrap_or("machine-default")),
