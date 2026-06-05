@@ -56,6 +56,11 @@ pub struct HarnessAdapter {
     /// config file at `path`. Returns `Ok(true)` on change,
     /// `Ok(false)` on no-op (entry already exact).
     pub upsert_fn: fn(&Path, &str, &Value) -> Result<bool>,
+    /// Remove the `(server_name)` entry from the host's config at
+    /// `path`. Returns `Ok(true)` on change, `Ok(false)` if the file
+    /// is absent or the entry wasn't present (idempotent). MUST NOT
+    /// create a missing file.
+    pub remove_fn: fn(&Path, &str) -> Result<bool>,
 }
 
 /// The registry. Walked by `cli::cmd_setup` in order — first match
@@ -66,61 +71,73 @@ pub const HARNESS_ADAPTERS: &[HarnessAdapter] = &[
         name: "Claude Code",
         paths_fn: claude_code_paths,
         upsert_fn: upsert_standard,
+        remove_fn: remove_standard,
     },
     HarnessAdapter {
         name: "Claude Code (alt)",
         paths_fn: claude_code_alt_paths,
         upsert_fn: upsert_standard,
+        remove_fn: remove_standard,
     },
     HarnessAdapter {
         name: "Claude Desktop",
         paths_fn: claude_desktop_paths,
         upsert_fn: upsert_standard,
+        remove_fn: remove_standard,
     },
     HarnessAdapter {
         name: "Cursor",
         paths_fn: cursor_paths,
         upsert_fn: upsert_standard,
+        remove_fn: remove_standard,
     },
     HarnessAdapter {
         name: "VS Code (GitHub Copilot)",
         paths_fn: vscode_paths,
         upsert_fn: upsert_vscode,
+        remove_fn: remove_vscode,
     },
     HarnessAdapter {
         name: "VS Code Insiders",
         paths_fn: vscode_insiders_paths,
         upsert_fn: upsert_vscode,
+        remove_fn: remove_vscode,
     },
     HarnessAdapter {
         name: "GitHub Copilot CLI",
         paths_fn: copilot_cli_paths,
         upsert_fn: upsert_standard,
+        remove_fn: remove_standard,
     },
     HarnessAdapter {
         name: "Pi",
         paths_fn: pi_paths,
         upsert_fn: upsert_standard,
+        remove_fn: remove_standard,
     },
     HarnessAdapter {
         name: "OpenCode",
         paths_fn: opencode_paths,
         upsert_fn: upsert_opencode,
+        remove_fn: remove_opencode,
     },
     HarnessAdapter {
         name: "VS Code (workspace)",
         paths_fn: vscode_workspace_paths,
         upsert_fn: upsert_vscode,
+        remove_fn: remove_vscode,
     },
     HarnessAdapter {
         name: "project-local (.mcp.json)",
         paths_fn: project_mcp_paths,
         upsert_fn: upsert_standard,
+        remove_fn: remove_standard,
     },
     HarnessAdapter {
         name: "OpenCode (project-local)",
         paths_fn: opencode_project_paths,
         upsert_fn: upsert_opencode,
+        remove_fn: remove_opencode,
     },
 ];
 
@@ -402,6 +419,60 @@ pub fn upsert_opencode(path: &Path, server_name: &str, entry: &Value) -> Result<
     Ok(true)
 }
 
+/// Remove `server_name` from `{"mcpServers": {...}}`. No-op if the
+/// file is absent or the key is missing.
+pub fn remove_standard(path: &Path, server_name: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut cfg = read_config_value(path)?;
+    let changed = cfg
+        .get_mut("mcpServers")
+        .and_then(Value::as_object_mut)
+        .map(|m| m.remove(server_name).is_some())
+        .unwrap_or(false);
+    if changed {
+        write_config_value(path, &cfg)?;
+    }
+    Ok(changed)
+}
+
+/// Remove `server_name` from `{"mcp": {"servers": {...}}}` (VS Code).
+pub fn remove_vscode(path: &Path, server_name: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut cfg = read_config_value(path)?;
+    let changed = cfg
+        .get_mut("mcp")
+        .and_then(Value::as_object_mut)
+        .and_then(|m| m.get_mut("servers"))
+        .and_then(Value::as_object_mut)
+        .map(|m| m.remove(server_name).is_some())
+        .unwrap_or(false);
+    if changed {
+        write_config_value(path, &cfg)?;
+    }
+    Ok(changed)
+}
+
+/// Remove `server_name` from `{"mcp": {"<name>": {...}}}` (OpenCode).
+pub fn remove_opencode(path: &Path, server_name: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut cfg = read_config_value(path)?;
+    let changed = cfg
+        .get_mut("mcp")
+        .and_then(Value::as_object_mut)
+        .map(|m| m.remove(server_name).is_some())
+        .unwrap_or(false);
+    if changed {
+        write_config_value(path, &cfg)?;
+    }
+    Ok(changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,5 +599,80 @@ mod tests {
         // File must be unchanged.
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.starts_with("// theme override"));
+    }
+
+    #[test]
+    fn remove_standard_drops_only_wire_and_preserves_siblings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("mcp.json");
+        std::fs::write(
+            &p,
+            r#"{"mcpServers":{"wire":{"command":"wire","args":["mcp"]},"other":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        assert!(
+            remove_standard(&p, "wire").unwrap(),
+            "should report changed"
+        );
+        let v: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert!(v["mcpServers"].get("wire").is_none(), "wire removed");
+        assert!(v["mcpServers"].get("other").is_some(), "sibling preserved");
+        // idempotent: second remove is a no-op
+        assert!(!remove_standard(&p, "wire").unwrap());
+    }
+
+    #[test]
+    fn remove_vscode_drops_wire_under_mcp_servers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("settings.json");
+        std::fs::write(
+            &p,
+            r#"{"mcp":{"servers":{"wire":{"command":"wire"},"keep":{}}},"editor.fontSize":12}"#,
+        )
+        .unwrap();
+        assert!(remove_vscode(&p, "wire").unwrap());
+        let v: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert!(v["mcp"]["servers"].get("wire").is_none());
+        assert!(v["mcp"]["servers"].get("keep").is_some());
+        assert_eq!(v["editor.fontSize"], 12, "unrelated keys preserved");
+    }
+
+    #[test]
+    fn remove_opencode_drops_wire_under_mcp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("opencode.json");
+        std::fs::write(&p, r#"{"mcp":{"wire":{"type":"local","command":["wire","mcp"],"enabled":true},"keep":{}}}"#).unwrap();
+        assert!(remove_opencode(&p, "wire").unwrap());
+        let v: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert!(v["mcp"].get("wire").is_none());
+        assert!(v["mcp"].get("keep").is_some());
+    }
+
+    #[test]
+    fn remove_is_noop_when_file_absent_or_key_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let absent = tmp.path().join("nope.json");
+        assert!(
+            !remove_standard(&absent, "wire").unwrap(),
+            "absent file → no-op, no create"
+        );
+        assert!(!absent.exists(), "must not create the file");
+        let p = tmp.path().join("c.json");
+        std::fs::write(&p, r#"{"mcpServers":{"other":{}}}"#).unwrap();
+        assert!(!remove_standard(&p, "wire").unwrap(), "missing key → no-op");
+    }
+
+    #[test]
+    fn every_adapter_has_a_remove_fn() {
+        for a in HARNESS_ADAPTERS {
+            // remove_fn is a real fn pointer; calling it on an absent path is a safe no-op.
+            let tmp = tempfile::tempdir().unwrap();
+            let p = tmp.path().join("absent.json");
+            assert!(
+                !(a.remove_fn)(&p, "wire").unwrap(),
+                "{} remove_fn on absent → false",
+                a.name
+            );
+        }
     }
 }
