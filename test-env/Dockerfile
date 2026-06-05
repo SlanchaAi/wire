@@ -24,4 +24,7 @@ ENV CARGO_TERM_COLOR=always
 
 # Default command = the full CI gate. Overridden by any args passed to
 # `docker run` (see run.sh).
-CMD ["bash", "-lc", "cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test --all-targets -- --test-threads=1"]
+# Non-login shell (`-c`, not `-lc`): a login shell sources /etc/profile,
+# which resets PATH and drops the rust image's /usr/local/cargo/bin —
+# `cargo: command not found`. `-c` inherits the image's ENV PATH.
+CMD ["bash", "-c", "cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test --all-targets -- --test-threads=1"]

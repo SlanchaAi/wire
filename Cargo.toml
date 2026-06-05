@@ -53,7 +53,6 @@ tower-service = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "fs", "io-util"] }
 tokio-stream = "0.1"
 futures = "0.3"
-tower = "0.5"
 tower_governor = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots", "blocking", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
