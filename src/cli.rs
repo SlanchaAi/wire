@@ -2217,13 +2217,33 @@ fn kill_wire_processes() -> Vec<u32> {
     }
     #[cfg(windows)]
     {
-        // taskkill by image name; wire.exe children.
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/IM", "wire.exe"])
-            .output();
+        // Kill wire.exe by PID, EXCLUDING our own process — a broad
+        // `taskkill /IM wire.exe` would terminate this very `wire nuke`
+        // run mid-execution. Enumerate via `tasklist` CSV and skip self.
+        let self_pid = std::process::id();
+        if let Ok(out) = std::process::Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq wire.exe", "/FO", "CSV", "/NH"])
+            .output()
+        {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                // CSV row: "wire.exe","1234","Console","1","12,345 K"
+                if let Some(pid) = line
+                    .split(',')
+                    .nth(1)
+                    .and_then(|s| s.trim().trim_matches('"').parse::<u32>().ok())
+                {
+                    if pid != self_pid {
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/F", "/PID", &pid.to_string()])
+                            .output();
+                        killed.push(pid);
+                    }
+                }
+            }
+        }
     }
-    // (pid enumeration omitted; pkill/taskkill are the teardown. The
-    //  empty/recorded vec keeps the report shape stable.)
+    // unix records nothing granular (pkill is coarse, best-effort); the
+    // vec stays empty there, which keeps the report shape stable.
     let _ = &mut killed;
     killed
 }
