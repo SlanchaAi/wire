@@ -1906,7 +1906,6 @@ dependencies = [
  "time",
  "tokio",
  "tokio-stream",
- "tower",
  "tower-service",
  "tower_governor",
  "webpki-roots 0.26.11",
