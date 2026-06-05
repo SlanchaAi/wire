@@ -161,3 +161,48 @@ jobs:
           wire whoami --json | jq -e '.did | startswith("did:wire:")'
           wire here >/dev/null
           echo "install-smoke: fresh-user offline path OK"
+      - name: nuke smoke (dry-run changes nothing; --force resets; re-up works)
+        run: |
+          set -euo pipefail
+          export WIRE_HOME="$(mktemp -d)/home" WIRE_QUIET_AUTOSESSION=1
+          wire up --no-local
+          test -d "$WIRE_HOME"
+          wire nuke --dry-run                              # lists, must change nothing
+          test -d "$WIRE_HOME"                             # still there after dry-run
+          wire nuke --force --json | jq -e 'has("removed_paths")'
+          wire up --no-local                               # fresh again, no error
+          echo "install-smoke: nuke + re-up OK"
+
+  install-smoke-windows:
+    # Windows leg of the cross-platform gate: build wire.exe and run the
+    # fresh-user + nuke smoke in PowerShell from a clean WIRE_HOME. Windows
+    # can't be exercised on the maintainer's mac/linux hosts, so this CI
+    # job is the primary Windows signal (plus an operator confirm on a real
+    # box before merge).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --bin wire
+      - name: fresh-user + nuke smoke (PowerShell)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true   # native non-zero exit → throw
+          $wire = ".\target\release\wire.exe"
+          $env:WIRE_HOME = Join-Path $env:RUNNER_TEMP ("wh-" + [guid]::NewGuid().ToString("N"))
+          $env:WIRE_QUIET_AUTOSESSION = "1"
+          & $wire --version
+          & $wire --help | Out-Null
+          $pre = (& $wire whoami --json | ConvertFrom-Json)
+          if ($pre.initialized -ne $false) { throw "expected initialized:false pre-init" }
+          & $wire up --no-local
+          $post = (& $wire whoami --json | ConvertFrom-Json)
+          if (-not $post.did.StartsWith("did:wire:")) { throw "expected a did:wire: DID" }
+          & $wire here | Out-Null
+          & $wire nuke --dry-run
+          if (-not (Test-Path $env:WIRE_HOME)) { throw "dry-run must not delete state" }
+          & $wire nuke --force --json | ConvertFrom-Json | Out-Null
+          & $wire up --no-local
+          Write-Host "install-smoke-windows: fresh-user + nuke OK"
