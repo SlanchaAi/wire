@@ -1088,6 +1088,14 @@ fn tool_whoami() -> Result<Value, String> {
     payload.insert("key_id".into(), json!(key_id));
     payload.insert("public_key_b64".into(), json!(pk_b64));
     payload.insert("capabilities".into(), capabilities);
+    // RFC-008 §A: same `session_source` field the CLI `wire whoami --json`
+    // emits. MCP + CLI parity is the load-bearing invariant — agents reading
+    // the MCP response see the same identity-resolution signal as operators
+    // do via the CLI. See cli::cmd_whoami for the value-set rationale.
+    payload.insert(
+        "session_source".into(),
+        json!(crate::session::session_source().unwrap_or("machine-default")),
+    );
     for (k, v) in crate::cli::op_claims_from_card(&card) {
         payload.insert(k, v);
     }

@@ -3550,6 +3550,16 @@ fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
             "config_dir".into(),
             json!(config::config_dir()?.to_string_lossy()),
         );
+        // RFC-008 §A: surface which signal won identity resolution this
+        // process. `env:WIRE_HOME` | `env:CLAUDE_CODE_SESSION_ID` | `pidfile`
+        // | `mint:per-process` | `cwd-derive` | `machine-default` etc.
+        // Closes the #210 silent-override diagnostic gap so an operator can
+        // tell at a glance whether a stale shell pin or the session-key
+        // chain produced this identity.
+        payload.insert(
+            "session_source".into(),
+            json!(crate::session::session_source().unwrap_or("machine-default")),
+        );
         payload.insert("persona".into(), serde_json::to_value(&character)?);
         payload.insert("persona_override".into(), json!(has_override));
         // v0.14: surface the RFC-001 op claims (when enrolled) on the
@@ -11181,6 +11191,10 @@ pub fn maybe_auto_init_cwd_session(label: &str) {
             session_home.display()
         );
     }
+    // RFC-008 §A: surface the cwd-derive resolution path so an operator
+    // reading `wire whoami --json` can tell the identity came from the
+    // basename-of-cwd auto-init fallback, not from a session-key env var.
+    crate::session::record_session_source("cwd-derive");
     // SAFETY: caller contract is "before any thread spawn." MCP::run
     // calls this immediately after `maybe_adopt_session_wire_home`.
     unsafe {

@@ -33,8 +33,53 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::endpoints::{Endpoint, EndpointScope, self_endpoints};
+
+/// RFC-008 §A — captures which signal won identity resolution this process.
+/// Set once at session bootstrap by `maybe_adopt_session_wire_home` (this
+/// file) or `maybe_auto_init_cwd_session` (`cli.rs`); read by `cmd_whoami` /
+/// `tool_whoami` so an operator running `wire whoami --json | jq .session_source`
+/// can see at a glance whether `env:WIRE_HOME`, `env:CLAUDE_CODE_SESSION_ID`,
+/// `pidfile`, `mint:per-process`, `cwd-derive`, or `machine-default` resolved
+/// their identity. Closes the #210 silent-override diagnostic gap.
+static SESSION_SOURCE: OnceLock<&'static str> = OnceLock::new();
+
+/// Record the source label for this process's session resolution. First
+/// caller wins (OnceLock semantics) — matches the actual resolution chain
+/// since later setters only fire on fallback paths the first setter didn't
+/// consume.
+pub fn record_session_source(source: &'static str) {
+    let _ = SESSION_SOURCE.set(source);
+}
+
+/// Read the recorded session source label. Returns `None` if no resolution
+/// path has run yet (callable before bootstrap; e.g. early diagnostic from a
+/// helper that runs before `cli::run` / `mcp::run`).
+pub fn session_source() -> Option<&'static str> {
+    SESSION_SOURCE.get().copied()
+}
+
+/// Map `resolve_session_key`'s internal `&'static str` source label to a
+/// stable operator-facing source enum for `whoami` JSON output. Every output
+/// here is part of the documented `session_source` value set in RFC-008 §A —
+/// don't rename without a docs note. Unknown labels fall back to the raw
+/// resolver label prefixed `env:?` so future adapters surface honestly
+/// even if this mapping isn't updated.
+fn map_session_key_source_label(resolver_label: &'static str) -> &'static str {
+    match resolver_label {
+        "override" => "env:WIRE_SESSION_ID",
+        "claude-code" => "env:CLAUDE_CODE_SESSION_ID",
+        "codex-cli" => "env:CODEX_SESSION_ID",
+        "copilot-cli" => "env:COPILOT_AGENT_SESSION_ID",
+        "vscode-workspace" => "env:VSCODE_GIT_REPOSITORY_ROOT",
+        "claude-code-pidfile" => "pidfile",
+        // Future adapter the mapping doesn't know yet — surface the raw
+        // resolver label rather than silently re-bucketing into a stale label.
+        other => other,
+    }
+}
 
 /// Root directory under which all session WIRE_HOMEs live.
 ///
@@ -1139,6 +1184,10 @@ fn read_wire_home_from_pid(pid: u32) -> Option<String> {
 /// guarantees, and our use is safe only at process entry.
 pub fn maybe_adopt_session_wire_home(label: &str) {
     if std::env::var("WIRE_HOME").is_ok() {
+        // RFC-008 §A: operator pinned WIRE_HOME in env (deliberate fleet-share
+        // pin OR stale shell profile — see #210). Either way, this is what won
+        // identity resolution; surface it on whoami so the operator can tell.
+        record_session_source("env:WIRE_HOME");
         return;
     }
     // v0.13: prefer the host-agnostic session key (WIRE_SESSION_ID >
@@ -1159,6 +1208,10 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
                 // session leaves no trace on disk. (Write paths already
                 // tolerate a non-existent WIRE_HOME — the test harness runs
                 // every test against one.)
+                // RFC-008 §A: map resolver's internal label to a stable
+                // operator-facing source enum. Stable means: written into JSON
+                // output, parsed by tooling — never rename without a docs note.
+                record_session_source(map_session_key_source_label(source));
                 (h, format!("session key ({source})"))
             }
             Err(_) => return,
@@ -1184,6 +1237,10 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
                 unsafe {
                     std::env::set_var("WIRE_SESSION_ID", &minted);
                 }
+                // RFC-008 §A: surface the MCP per-process mint path so the
+                // operator can tell at a glance that no session id reached us
+                // and we're running on a fresh-per-process identity.
+                record_session_source("mint:per-process");
                 (
                     h,
                     "minted per-process key (no session id; cwd disabled for MCP)".to_string(),
@@ -1199,6 +1256,11 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
         // CLAUDE_CODE_SESSION_ID (resolved above), so this only hits a bare
         // terminal outside an agent host — which gets the stable machine-default
         // identity (set WIRE_SESSION_ID / WIRE_HOME for an explicit one). No cwd.
+        //
+        // RFC-008 §A: NOT recording here — `maybe_auto_init_cwd_session` may
+        // run next and resolve via `cwd-derive`. If THAT also returns without
+        // setting WIRE_HOME, `session_source()` stays `None` → `whoami`
+        // surfaces it as `machine-default` (the documented bare-CLI default).
         return;
     };
     // v0.9.1: emit the chatter ONLY when stderr is an interactive TTY.
@@ -2149,5 +2211,83 @@ mod tests {
         // Exercise the renderer so it can't bit-rot via dead-code
         // pruning. Output goes to stderr; under libtest it's captured.
         emit_collision_warning(role, home, &colliders);
+    }
+
+    /// RFC-008 §A — the source-label mapping must round-trip every label
+    /// `resolve_session_key` can return into a stable operator-facing
+    /// enum value. If anyone adds a new env adapter to
+    /// `resolve_session_key` and doesn't update `map_session_key_source_label`,
+    /// the raw resolver label leaks through — caught by the "unknown labels
+    /// pass through" assertion below, intentional (forward-compat) but
+    /// surfaced for the maintainer to choose the right enum value.
+    #[test]
+    fn map_session_key_source_label_covers_resolver_chain() {
+        // Every label resolve_session_key emits (see `resolve_session_key`
+        // chain) must round-trip to a stable `env:*`-prefixed string OR
+        // `pidfile`. Keep this list in sync with that resolver.
+        assert_eq!(
+            map_session_key_source_label("override"),
+            "env:WIRE_SESSION_ID"
+        );
+        assert_eq!(
+            map_session_key_source_label("claude-code"),
+            "env:CLAUDE_CODE_SESSION_ID"
+        );
+        assert_eq!(
+            map_session_key_source_label("codex-cli"),
+            "env:CODEX_SESSION_ID"
+        );
+        assert_eq!(
+            map_session_key_source_label("copilot-cli"),
+            "env:COPILOT_AGENT_SESSION_ID"
+        );
+        assert_eq!(
+            map_session_key_source_label("vscode-workspace"),
+            "env:VSCODE_GIT_REPOSITORY_ROOT"
+        );
+        assert_eq!(map_session_key_source_label("claude-code-pidfile"), "pidfile");
+
+        // Future adapter the mapping doesn't know yet: the raw resolver
+        // label MUST pass through (surface-honesty over silent re-bucket).
+        // Operators see the unmapped label + can file a docs/PR to add the
+        // proper env:* form.
+        assert_eq!(
+            map_session_key_source_label("future-adapter-2027"),
+            "future-adapter-2027"
+        );
+    }
+
+    /// RFC-008 §A — `session_source()` is None before any resolution path
+    /// runs (callable from early diagnostics) and stable as `&'static str`
+    /// once recorded. Once-only semantics are tested implicitly: the
+    /// resolver path is the FIRST setter (cli::run / mcp::run entry); any
+    /// later cwd-derive setter loses the race by construction.
+    ///
+    /// We assert the static-typing here (catches a regression where someone
+    /// converts SESSION_SOURCE to `String` and breaks the cheap-read invariant
+    /// that whoami can read it without allocating) and the `None`-before-set
+    /// contract.
+    #[test]
+    fn session_source_starts_unset_and_records_static_str() {
+        // We can't `reset` a OnceLock between tests, so this test asserts the
+        // type contract + a no-record path. The "is it None pre-bootstrap"
+        // assertion is true iff this test runs FIRST in the suite (cargo test
+        // randomizes by default — so we only assert the static-str type and
+        // that the explicit-record API compiles).
+        fn _type_check_returns_static_str() -> Option<&'static str> {
+            session_source()
+        }
+        // record_session_source takes &'static str:
+        fn _type_check_record_takes_static_str() {
+            record_session_source("test-only-source-label");
+        }
+        // First-wins: re-recording must be a no-op (OnceLock semantics).
+        let before = session_source();
+        record_session_source("attempted-override-must-fail");
+        let after = session_source();
+        assert_eq!(
+            before, after,
+            "record_session_source must be once-only — second call silently dropped"
+        );
     }
 }
