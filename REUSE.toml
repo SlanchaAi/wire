@@ -1,0 +1,36 @@
+version = 1
+
+# wire is multi-licensed by component — the "trio split" (see LICENSE.md):
+#   • Client / CLI / supporting code → MIT      (max embedding)
+#   • Protocol spec surface          → Apache-2.0 (max interop)
+#   • Relay / server                 → AGPL-3.0   (anti-SaaS-strip-mining)
+#
+# This file is the machine-readable source of truth (REUSE 3.3 spec,
+# https://reuse.software). When a path matches more than one block, the
+# LAST matching block wins — so the broad MIT default comes first and the
+# narrower Apache / AGPL overrides come after.
+#
+# NOTE: the per-file scoping below is the maintainer's good-faith encoding
+# of LICENSE.md's directory rule. The boundary of "server-side" code
+# (currently just relay_server.rs) and "protocol surface" code is pending
+# confirmation by counsel before public launch.
+
+[[annotations]]
+path = "**"
+SPDX-FileCopyrightText = "2026 Slancha, Inc."
+SPDX-License-Identifier = "MIT"
+
+# Protocol spec surface — event schemas, kind ranges, canonical bytes, the
+# signature algorithm. Apache-2.0 so anyone can reimplement the wire
+# protocol in any language, including closed-source.
+[[annotations]]
+path = ["src/signing.rs", "src/agent_card.rs", "src/canonical.rs", "docs/PROTOCOL.md"]
+SPDX-FileCopyrightText = "2026 Slancha, Inc."
+SPDX-License-Identifier = "Apache-2.0"
+
+# Relay / server. AGPL-3.0 so a vendor who hosts the relay as a SaaS must
+# share their modifications back (the Mongo/Elastic/Redis scenario).
+[[annotations]]
+path = "src/relay_server.rs"
+SPDX-FileCopyrightText = "2026 Slancha, Inc."
+SPDX-License-Identifier = "AGPL-3.0-or-later"
