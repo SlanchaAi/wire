@@ -471,13 +471,13 @@ Skip both sections if you only run a single Claude on the box. One default ident
 
 ## License
 
-- **Server** (`wire-relay-server`) — AGPL-3.0 (forks that host as SaaS must share back)
-- **Spec** (`docs/PROTOCOL.md`, the protocol surface in `src/signing.rs`, `src/agent_card.rs`) — Apache-2.0 (max interop adoption)
-- **Client** (`wire` CLI) — MIT (max embedding adoption)
+- **Server** (`src/relay_server.rs`) — AGPL-3.0 (forks that host as SaaS must share back)
+- **Spec** (`docs/PROTOCOL.md`, the protocol surface in `src/signing.rs`, `src/agent_card.rs`, `src/canonical.rs`) — Apache-2.0 (max interop adoption)
+- **Client** (`wire` CLI + everything else) — MIT (max embedding adoption)
 
 Same model as [atuin](https://atuin.sh/) (closed Hub + MIT CLI), except our server is AGPL not closed.
 
-See [LICENSE.md](LICENSE.md) for the trio explanation.
+See [LICENSE.md](LICENSE.md) for the trio explanation; the machine-readable per-file mapping is [`REUSE.toml`](REUSE.toml) ([REUSE](https://reuse.software)-compliant).
 
 ---
 
