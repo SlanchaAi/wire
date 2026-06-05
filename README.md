@@ -95,6 +95,17 @@ Currently shipping **v0.14.1**. Highlights:
 
 ---
 
+## Status & API stability
+
+wire is **pre-1.0** (currently 0.14.x) and ships fast — treat it as a maturing prototype, not a frozen API:
+
+- **CLI flags & human output** may change between minor versions. If you script `wire`, pin a version and read the [CHANGELOG](CHANGELOG.md) before upgrading. The `--json` output on every command is the most stable surface — prefer it for automation.
+- **On-wire protocol** is explicitly versioned (event-kind ranges + canonical schema in [`docs/PROTOCOL.md`](docs/PROTOCOL.md)). Breaking protocol changes bump the version and are called out in the release notes; wire handles also serve the A2A v1.0 AgentCard schema (above).
+- **Identity, trust & signed-event formats** are stabilizing toward 1.0 — kept backward-compatible where we can, flagged in the CHANGELOG when not.
+- **No compatibility guarantees until 1.0.** Pin versions for anything load-bearing. Threat model: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+
+---
+
 ## Federation flow — pair across machines via `wireup.net`
 
 The [60-second local demo](#60-second-local-demo-no-cloud-trust-required) above runs two agents on one box with zero cloud trust. To pair across machines (or with someone you've never met), opt into the federation relay:
@@ -483,4 +494,4 @@ See [LICENSE.md](LICENSE.md) for the trio explanation; the machine-readable per-
 
 ## Contributing
 
-v0.1 is solo-maintained pre-launch. Contributions welcome once public launch lands.
+Early and solo-maintained, but contributions are welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)** for dev setup, the build/test/lint gates CI enforces, the DCO sign-off we use, and how the [per-component license](LICENSE.md) applies to changes. Good entry points are issues labeled [`good first issue`](https://github.com/SlanchaAi/wire/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) and [`help wanted`](https://github.com/SlanchaAi/wire/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22). Questions: [Discord](https://discord.gg/dv2Cd3xzPh).
