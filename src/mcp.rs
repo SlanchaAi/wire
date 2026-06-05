@@ -17,20 +17,22 @@
 //! **Pairing (agent drives, but the user types the SAS digits back)**
 //!   - `wire_init`           — idempotent identity creation; same handle = no-op,
 //!     different handle = error (cannot re-key silently)
-//!   - `wire_pair_initiate`  — host opens a pair-slot; returns code phrase
-//!     agent shows to user out-of-band
-//!   - `wire_pair_join`      — guest accepts a code phrase; both sides reach SAS-ready
-//!   - `wire_pair_check`     — poll a pending session_id (used when initiate
-//!     returned before peer was on the line)
-//!   - `wire_pair_confirm`   — user types the 6 SAS digits back; mismatch aborts
+//!   - `wire_dial`           — canonical pair/auto-pair verb (v0.9+).
+//!     Replaces v0.1-era wire_pair_initiate/join/confirm SAS flow which was
+//!     removed in v0.15 (RFC-005 Phase 2). For detached cross-turn pairing
+//!     use wire_pair_initiate_detached / wire_pair_join_detached /
+//!     wire_pair_confirm_detached (daemon-orchestrated, returns
+//!     immediately).
+//!   - `wire_pair_check`     — poll a pending detached session_id.
 //!
 //! ## Why pairing is now agent-callable (T10 update)
 //!
-//! v0.1 originally refused `wire_init` / `wire_pair_*` over MCP entirely on
+//! v0.1 originally refused `wire_init` / pair tools over MCP entirely on
 //! the theory that a fully-autonomous agent would skip the SAS confirmation.
-//! The new design preserves the human gate by requiring the user to type the
-//! 6-digit SAS back into chat — `wire_pair_confirm(session_id, typed_digits)`
-//! compares against the cached SAS server-side, mismatch aborts the session.
+//! The detached design (wire_pair_*_detached) preserves the human gate by
+//! requiring the user to type the 6-digit SAS back into chat —
+//! `wire_pair_confirm_detached(code, typed_digits)` compares against the
+//! cached SAS server-side, mismatch aborts the session.
 //!
 //! Defense-in-depth:
 //!   1. SAS digits are returned as tool output the agent renders to the user.
@@ -325,7 +327,7 @@ fn handle_resources_list(id: &Value) -> Value {
         json!({
             "uri": "wire://pending-pair/all",
             "name": "wire pending pair sessions",
-            "description": "All detached pair-host/pair-join sessions the local daemon is driving. Subscribe to receive notifications/resources/updated when status changes (notably polling → sas_ready: the agent should then surface the SAS digits to the user and call wire_pair_confirm with the typed-back digits).",
+            "description": "All detached pair-host/pair-join sessions the local daemon is driving. Subscribe to receive notifications/resources/updated when status changes (notably polling → sas_ready: the agent should then surface the SAS digits to the user and call wire_pair_confirm_detached with the typed-back digits).",
             "mimeType": "application/json"
         }),
     ];
@@ -545,7 +547,7 @@ fn handle_initialize(id: &Value) -> Value {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION,
             },
-            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity), wire_status (daemon + sync health). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). ON SESSION START, DO THIS IMMEDIATELY (every wire session): (1) call wire_status to confirm the `wire daemon` sync loop is running — `daemon_running:true` + `last_sync_age_seconds < 60`; if not, the session won't push outbound or pull inbound and the operator must start a daemon (`wire daemon --interval 5` in a background shell, or systemd/launchd). (2) arm a PERSISTENT stream-watcher on `wire monitor --json` — in Claude Code, the Monitor tool with persistent:true — so peer messages surface live mid-session. The monitor does NOT sync the relay; it only tails the inbox the daemon writes. Both are required. WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you; this is how paired agents collaborate immediately. (Default filter strips pair_drop/pair_drop_ack/heartbeat noise.) v0.14.2: wire_send POSTs synchronously by default — response `status` is the actual relay verdict: `delivered` (event landed on peer's slot), `duplicate` (same event_id already on slot; peer can still pull), `peer_unknown` (peer not pinned — run wire_dial first), `slot_stale` (peer's slot rotated — run wire_dial to re-pair), or `transport_error` (TLS/DNS/relay-5xx; check `reason` field). Pass `queue:true` to opt back into the legacy outbox→daemon-push path for offline-buffer / pre-pair queueing. wire_pull is the symmetric receive primitive — call it to trigger an immediate relay GET instead of waiting for the daemon's 5s pull cycle; returns written[]/rejected[]/total_seen the same way `wire pull --json` does. Legacy MCP tools (wire_pair_accept / wire_pair_reject / wire_pair_list_inbound, wire_pair_initiate/join/confirm) still callable but DEPRECATED — prefer canonical. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
+            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity), wire_status (daemon + sync health). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). ON SESSION START, DO THIS IMMEDIATELY (every wire session): (1) call wire_status to confirm the `wire daemon` sync loop is running — `daemon_running:true` + `last_sync_age_seconds < 60`; if not, the session won't push outbound or pull inbound and the operator must start a daemon (`wire daemon --interval 5` in a background shell, or systemd/launchd). (2) arm a PERSISTENT stream-watcher on `wire monitor --json` — in Claude Code, the Monitor tool with persistent:true — so peer messages surface live mid-session. The monitor does NOT sync the relay; it only tails the inbox the daemon writes. Both are required. WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you; this is how paired agents collaborate immediately. (Default filter strips pair_drop/pair_drop_ack/heartbeat noise.) v0.14.2: wire_send POSTs synchronously by default — response `status` is the actual relay verdict: `delivered` (event landed on peer's slot), `duplicate` (same event_id already on slot; peer can still pull), `peer_unknown` (peer not pinned — run wire_dial first), `slot_stale` (peer's slot rotated — run wire_dial to re-pair), or `transport_error` (TLS/DNS/relay-5xx; check `reason` field). Pass `queue:true` to opt back into the legacy outbox→daemon-push path for offline-buffer / pre-pair queueing. wire_pull is the symmetric receive primitive — call it to trigger an immediate relay GET instead of waiting for the daemon's 5s pull cycle; returns written[]/rejected[]/total_seen the same way `wire pull --json` does. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
         }
     })
 }
@@ -634,35 +636,8 @@ fn tool_defs() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "wire_pair_initiate",
-            "description": "Open a host-side pair-slot. AUTO-INITS the local identity if `handle` is provided and not yet inited (idempotent). Returns a code phrase the agent shows to the user out-of-band (voice / separate text channel) for the peer to paste into their wire_pair_join. Blocks up to max_wait_secs (default 30) for the peer to join, returning SAS inline if so — wire_pair_check is only needed when the host's 30s window closes before the peer joins. Multiple concurrent sessions supported (each call returns a distinct session_id).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "handle": {"type": "string", "description": "Auto-init this handle if local identity not yet created. Skipped if already inited."},
-                    "relay_url": {"type": "string", "description": "Relay base URL. Defaults to the relay this agent's identity is already bound to."},
-                    "max_wait_secs": {"type": "integer", "minimum": 0, "maximum": 60, "default": 30, "description": "How long to block waiting for peer to join before returning waiting-state. 0 = return immediately with code phrase only."}
-                },
-                "required": []
-            }
-        }),
-        json!({
-            "name": "wire_pair_join",
-            "description": "Accept a code phrase from the host (the user types it in after the host shares it out-of-band). AUTO-INITS the local identity if `handle` is provided and not yet inited (idempotent). Returns SAS digits inline once SPAKE2 completes (typically <1s — host is already waiting). The user MUST then type the 6 SAS digits back into chat — pass them to wire_pair_confirm with the returned session_id.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "code_phrase": {"type": "string", "description": "Code phrase from the host (e.g. '73-2QXC4P')."},
-                    "handle": {"type": "string", "description": "Auto-init this handle if local identity not yet created. Skipped if already inited."},
-                    "relay_url": {"type": "string", "description": "Relay base URL. Defaults to the relay this agent's identity is already bound to."},
-                    "max_wait_secs": {"type": "integer", "minimum": 0, "maximum": 60, "default": 30, "description": "How long to block waiting for SPAKE2 exchange to complete."}
-                },
-                "required": ["code_phrase"]
-            }
-        }),
-        json!({
             "name": "wire_pair_check",
-            "description": "Poll a pending pair session. Returns {state: 'waiting'|'sas_ready'|'finalized'|'aborted', sas?, peer_handle?}. Rarely needed — wire_pair_initiate now blocks 30s by default, covering most cases.",
+            "description": "Poll a pending pair session. Returns {state: 'waiting'|'sas_ready'|'finalized'|'aborted', sas?, peer_handle?}.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -670,18 +645,6 @@ fn tool_defs() -> Vec<Value> {
                     "max_wait_secs": {"type": "integer", "minimum": 0, "maximum": 60, "default": 8}
                 },
                 "required": ["session_id"]
-            }
-        }),
-        json!({
-            "name": "wire_pair_confirm",
-            "description": "Verify the user typed the correct SAS digits, then finalize pairing (AEAD bootstrap exchange + pin peer). AUTO-SUBSCRIBES to wire://inbox/<peer> so the agent gets push notifications/resources/updated as new events arrive. The 6-digit SAS comes from the user via the agent's chat — the user reads digits from their peer (out-of-band side channel), then types them back into chat. Mismatch ABORTS this session permanently — start a fresh wire_pair_initiate. Accepts dashes/spaces ('384-217' or '384217' or '384 217').",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "session_id": {"type": "string"},
-                    "user_typed_digits": {"type": "string", "description": "The 6 SAS digits the user typed back, e.g. '384217' or '384-217'."}
-                },
-                "required": ["session_id", "user_typed_digits"]
             }
         }),
         json!({
@@ -760,7 +723,7 @@ fn tool_defs() -> Vec<Value> {
         // v0.5 — agentic hotline.
         json!({
             "name": "wire_add",
-            "description": "Bilateral pair (v0.5.14). Resolve a peer handle (`nick@domain`) via the domain's `.well-known/wire/agent`, pin them locally, and deliver a signed pair-intro to their slot. THE PEER MUST ALSO RUN `wire add` (or `wire pair-accept`) ON THEIR SIDE — bilateral-required as of v0.5.14, no auto-pin on receiver. Once both sides have gestured consent, capability flows in both directions. Use this for outgoing pair requests; for incoming pair_drops in the operator's pending-inbound queue, use `wire_pair_accept` or `wire_pair_reject` instead.",
+            "description": "Bilateral pair (v0.5.14). Resolve a peer handle (`nick@domain`) via the domain's `.well-known/wire/agent`, pin them locally, and deliver a signed pair-intro to their slot. THE PEER MUST ALSO RUN `wire add` (or `wire accept`) ON THEIR SIDE — bilateral-required as of v0.5.14, no auto-pin on receiver. Once both sides have gestured consent, capability flows in both directions. Use this for outgoing pair requests; for incoming pair_drops in the operator's pending-inbound queue, use `wire_accept` or `wire_reject` instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -770,37 +733,11 @@ fn tool_defs() -> Vec<Value> {
                 "required": ["handle"]
             }
         }),
-        json!({
-            "name": "wire_pair_accept",
-            "description": "Accept a pending-inbound pair request (v0.5.14). When a stranger has run `wire add you@<your-relay>` against this agent's handle, their signed pair_drop sits in pending-inbound — see `wire_pair_list_inbound` to enumerate. Calling this command pins them VERIFIED, ships our slot_token via `pair_drop_ack`, and deletes the pending record. Requires explicit operator consent: the agent SHOULD surface the pending request to the user (e.g. via OS toast or in chat) before calling this, because accepting grants the peer authenticated write access to this agent's inbox. Errors if no pending record exists for the named peer.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "peer": {"type": "string", "description": "Bare peer handle (without `@<relay>`). Match exactly what `wire_pair_list_inbound` returned in `peer_handle`."}
-                },
-                "required": ["peer"]
-            }
-        }),
-        json!({
-            "name": "wire_pair_reject",
-            "description": "Refuse a pending-inbound pair request (v0.5.14). Deletes the pending record. The peer never receives our slot_token; from their side the pair stays pending until they time out or remove their outbound record. Idempotent — succeeds with `rejected: false` if no record existed for that peer.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "peer": {"type": "string", "description": "Bare peer handle (without `@<relay>`)."}
-                },
-                "required": ["peer"]
-            }
-        }),
-        json!({
-            "name": "wire_pair_list_inbound",
-            "description": "DEPRECATED in v0.9 — use `wire_pending`. List pending-inbound pair requests (v0.5.14). Returns a flat array of `{peer_handle, peer_did, peer_relay_url, peer_slot_id, received_at, event_id}` records, oldest first.",
-            "inputSchema": {"type": "object", "properties": {}}
-        }),
         // v0.10.1: canonical MCP names mirroring the operator-facing
-        // verbs (wire dial / accept / reject / pending). Old wire_pair_*
-        // names stay callable as aliases (see dispatch); these new
-        // entries are what appears in tools/list for new clients.
+        // verbs (wire dial / accept / reject / pending). The legacy
+        // wire_pair_accept / wire_pair_reject / wire_pair_list_inbound
+        // aliases were removed in v0.15 per RFC-005 Phase 2 (agent-
+        // confusion fix: an LLM picking from near-synonyms picked wrong).
         json!({
             "name": "wire_dial",
             "description": "v0.8 — go talk to this name. Accepts a character nickname (`noble-slate`), session name, card handle, or DID — or a federation handle (`<handle>@<relay>`). Resolves through the local addressing layer (pinned peers, local sister sessions) or routes federation via `.well-known/wire/agent`. Drives the right pair flow (already-pinned: no-op, local sister: disk-read --local-sister, federation: pair_drop). After this completes the peer is in `wire_peers` and `wire_send` to them works.",
@@ -973,10 +910,7 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
         "wire_tail" => tool_tail(&args),
         "wire_verify" => tool_verify(&args),
         "wire_init" => tool_init(&args),
-        "wire_pair_initiate" => tool_pair_initiate(&args),
-        "wire_pair_join" => tool_pair_join(&args),
         "wire_pair_check" => tool_pair_check(&args),
-        "wire_pair_confirm" => tool_pair_confirm(&args, state),
         "wire_pair_initiate_detached" => tool_pair_initiate_detached(&args),
         "wire_pair_join_detached" => tool_pair_join_detached(&args),
         "wire_pair_list_pending" => tool_pair_list_pending(),
@@ -986,14 +920,12 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
         "wire_invite_accept" => tool_invite_accept(&args),
         // v0.5 — agentic hotline (handle + profile + zero-paste discovery).
         "wire_add" => tool_add(&args),
-        // v0.5.14 — bilateral-required pair: inbound queue management.
-        // v0.10.1: canonical names introduced (wire_accept, wire_reject,
-        // wire_pending, wire_dial); legacy wire_pair_* names stay as
-        // aliases for back-compat. Both surface in tools/list with
-        // legacy descriptions tagged DEPRECATED.
-        "wire_pair_accept" | "wire_accept" => tool_pair_accept(&args),
-        "wire_pair_reject" | "wire_reject" => tool_pair_reject(&args),
-        "wire_pair_list_inbound" | "wire_pending" => tool_pair_list_inbound(),
+        // v0.10.1 canonical names (RFC-005 Phase 2 removed the legacy
+        // wire_pair_accept / wire_pair_reject / wire_pair_list_inbound
+        // aliases in v0.15 — agent-confusion fix).
+        "wire_accept" => tool_pair_accept(&args),
+        "wire_reject" => tool_pair_reject(&args),
+        "wire_pending" => tool_pair_list_inbound(),
         "wire_dial" => tool_dial(&args),
         "wire_claim" => tool_claim_handle(&args),
         "wire_whois" => tool_whois(&args),
@@ -1007,10 +939,13 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
         "wire_group_list" => tool_group_list(),
         "wire_group_invite" => tool_group_invite(&args),
         "wire_group_join" => tool_group_join(&args),
-        // Legacy alias kept for older agent prompts that reference `wire_join`.
-        // Surfaces the operator-friendly error pointing to wire_pair_join.
+        // Legacy alias kept for older agent prompts that reference
+        // `wire_join`. RFC-005 Phase 2 removed wire_pair_join in v0.15,
+        // so the redirect now points at the canonical wire_dial verb.
         "wire_join" => Err(
-            "wire_join was renamed to wire_pair_join (use code_phrase argument). \
+            "wire_join is removed (v0.15). Use wire_dial (handle / nick / DID) \
+             for federation pairing; for same-machine sister sessions the \
+             addressing layer auto-resolves through wire_dial too. \
              See docs/AGENT_INTEGRATION.md."
                 .into(),
         ),
@@ -1686,106 +1621,12 @@ fn auto_init_if_needed(args: &Value) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-fn tool_pair_initiate(args: &Value) -> Result<Value, String> {
-    use crate::pair_session::{
-        pair_session_open, pair_session_wait_for_sas, store_insert, store_sweep_expired,
-    };
-
-    store_sweep_expired();
-    // Auto-init if `handle` arg provided and not yet inited (idempotent).
-    auto_init_if_needed(args)?;
-
-    let relay_url = resolve_relay_url(args)?;
-    let max_wait = args
-        .get("max_wait_secs")
-        .and_then(Value::as_u64)
-        .unwrap_or(30)
-        .min(60);
-
-    let mut s = pair_session_open("host", &relay_url, None).map_err(|e| e.to_string())?;
-    let code = s.code.clone();
-
-    let sas_opt = if max_wait > 0 {
-        pair_session_wait_for_sas(&mut s, max_wait, std::time::Duration::from_millis(250))
-            .map_err(|e| e.to_string())?
-    } else {
-        None
-    };
-
-    let session_id = store_insert(s);
-
-    let mut out = json!({
-        "session_id": session_id,
-        "code_phrase": code,
-        "relay_url": relay_url,
-    });
-    match sas_opt {
-        Some(sas) => {
-            out["state"] = json!("sas_ready");
-            out["sas"] = json!(sas);
-            out["next"] = json!(
-                "Show this SAS to the user and ask them to compare with their peer's SAS over a side channel (voice/text). \
-                 Then ask the user to TYPE the 6 digits BACK INTO CHAT — pass that to wire_pair_confirm."
-            );
-        }
-        None => {
-            out["state"] = json!("waiting");
-            out["next"] = json!(
-                "Share the code_phrase with the user; ask them to read it to their peer (the peer pastes into wire_pair_join). \
-                 Poll wire_pair_check(session_id) until state='sas_ready'."
-            );
-        }
-    }
-    Ok(out)
-}
-
-fn tool_pair_join(args: &Value) -> Result<Value, String> {
-    use crate::pair_session::{
-        pair_session_open, pair_session_wait_for_sas, store_insert, store_sweep_expired,
-    };
-
-    store_sweep_expired();
-    auto_init_if_needed(args)?;
-
-    let code = args
-        .get("code_phrase")
-        .and_then(Value::as_str)
-        .ok_or("missing 'code_phrase'")?;
-    let relay_url = resolve_relay_url(args)?;
-    let max_wait = args
-        .get("max_wait_secs")
-        .and_then(Value::as_u64)
-        .unwrap_or(30)
-        .min(60);
-
-    let mut s = pair_session_open("guest", &relay_url, Some(code)).map_err(|e| e.to_string())?;
-
-    let sas_opt =
-        pair_session_wait_for_sas(&mut s, max_wait, std::time::Duration::from_millis(250))
-            .map_err(|e| e.to_string())?;
-
-    let session_id = store_insert(s);
-
-    let mut out = json!({
-        "session_id": session_id,
-        "relay_url": relay_url,
-    });
-    match sas_opt {
-        Some(sas) => {
-            out["state"] = json!("sas_ready");
-            out["sas"] = json!(sas);
-            out["next"] = json!(
-                "Show this SAS to the user and ask them to compare with their peer's SAS over a side channel. \
-                 Then ask the user to TYPE the 6 digits BACK INTO CHAT — pass that to wire_pair_confirm."
-            );
-        }
-        None => {
-            out["state"] = json!("waiting");
-            out["next"] = json!("Poll wire_pair_check(session_id).");
-        }
-    }
-    Ok(out)
-}
+// RFC-005 Phase 2: tool_pair_initiate / tool_pair_join / tool_pair_confirm
+// removed in v0.15. The SAS-typeback pair flow is now exclusively driven by
+// the canonical `wire_dial` verb (auto-pairs on miss via the addressing
+// layer). The detached variants (tool_pair_initiate_detached /
+// tool_pair_join_detached / tool_pair_confirm_detached) remain for the
+// cross-turn handoff workflow.
 
 fn tool_pair_check(args: &Value) -> Result<Value, String> {
     use crate::pair_session::{pair_session_wait_for_sas, store_get, store_sweep_expired};
@@ -1829,106 +1670,13 @@ fn tool_pair_check(args: &Value) -> Result<Value, String> {
             "state": "sas_ready",
             "session_id": session_id,
             "sas": sas,
-            "next": "Have the user TYPE the 6 SAS digits BACK INTO CHAT, then pass to wire_pair_confirm."
+            "next": "Have the user TYPE the 6 SAS digits BACK INTO CHAT, then pass to wire_pair_confirm_detached."
         }),
         None => json!({
             "state": "waiting",
             "session_id": session_id,
         }),
     })
-}
-
-fn tool_pair_confirm(args: &Value, state: &McpState) -> Result<Value, String> {
-    use crate::pair_session::{
-        pair_session_confirm_sas, pair_session_finalize, store_get, store_remove,
-    };
-
-    let session_id = args
-        .get("session_id")
-        .and_then(Value::as_str)
-        .ok_or("missing 'session_id'")?;
-    let typed = args
-        .get("user_typed_digits")
-        .and_then(Value::as_str)
-        .ok_or(
-            "missing 'user_typed_digits' — the user must type the 6 SAS digits back into chat",
-        )?;
-
-    let arc = store_get(session_id).ok_or_else(|| format!("no such session_id: {session_id}"))?;
-
-    let confirm_err = {
-        let mut s = arc.lock().map_err(|e| e.to_string())?;
-        match pair_session_confirm_sas(&mut s, typed) {
-            Ok(()) => None,
-            Err(e) => Some((s.aborted.is_some(), e.to_string())),
-        }
-    };
-    if let Some((aborted, msg)) = confirm_err {
-        if aborted {
-            store_remove(session_id);
-        }
-        return Err(msg);
-    }
-
-    let mut result = {
-        let mut s = arc.lock().map_err(|e| e.to_string())?;
-        pair_session_finalize(&mut s, 30).map_err(|e| e.to_string())?
-    };
-    store_remove(session_id);
-
-    // ---- Post-pair auto-setup (Goal: zero friction after SAS) ----
-    // 1. Auto-subscribe to wire://inbox/<peer> so clients that support
-    //    resources/subscribe get push notifications/resources/updated.
-    // 2. Spawn `wire daemon` if not already running so push/pull is automatic.
-    // 3. Spawn `wire notify` if not already running so OS toasts fire on
-    //    inbox grow (covers MCP hosts that lack resources/subscribe).
-    // 4. Emit notifications/resources/list_changed via the writer channel so
-    //    a client that called resources/list before pairing refreshes its view.
-    let peer_handle = result["peer_handle"].as_str().unwrap_or("").to_string();
-    let peer_uri = format!("wire://inbox/{peer_handle}");
-
-    let mut auto = json!({
-        "subscribed": false,
-        "daemon": "unknown",
-        "notify": "unknown",
-        "resources_list_changed_emitted": false,
-    });
-
-    if !peer_handle.is_empty()
-        && let Ok(mut g) = state.subscribed.lock()
-    {
-        g.insert(peer_uri.clone());
-        auto["subscribed"] = json!(true);
-    }
-
-    auto["daemon"] = match crate::ensure_up::ensure_daemon_running() {
-        Ok(true) => json!("spawned"),
-        Ok(false) => json!("already_running"),
-        Err(e) => json!(format!("spawn_error: {e}")),
-    };
-    auto["notify"] = match crate::ensure_up::ensure_notify_running() {
-        Ok(true) => json!("spawned"),
-        Ok(false) => json!("already_running"),
-        Err(e) => json!(format!("spawn_error: {e}")),
-    };
-
-    if let Some(tx) = state.notif_tx.lock().ok().and_then(|g| g.clone()) {
-        let notif = json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/resources/list_changed",
-        });
-        if tx.send(notif.to_string()).is_ok() {
-            auto["resources_list_changed_emitted"] = json!(true);
-        }
-    }
-
-    result["auto"] = auto;
-    result["next"] = json!(
-        "Done. Daemon + notify running, subscribed to peer inbox. Use wire_send/wire_tail \
-         freely; new events arrive via notifications/resources/updated (where supported) and \
-         OS toasts (always)."
-    );
-    Ok(result)
 }
 
 // ---------- detached pair tools (daemon-orchestrated) ----------
@@ -2580,6 +2328,11 @@ mod tests {
             .iter()
             .filter_map(|t| t["name"].as_str())
             .collect();
+        // RFC-005 Phase 2 (v0.15): the 6 deprecated wire_pair_* tools
+        // (wire_pair_initiate / wire_pair_join / wire_pair_confirm /
+        // wire_pair_accept / wire_pair_reject / wire_pair_list_inbound)
+        // were removed; canonical wire_dial / wire_accept / wire_reject /
+        // wire_pending are the only entry points the agent sees.
         for required in [
             "wire_whoami",
             "wire_peers",
@@ -2587,27 +2340,45 @@ mod tests {
             "wire_tail",
             "wire_verify",
             "wire_init",
-            "wire_pair_initiate",
-            "wire_pair_join",
+            "wire_dial",
+            "wire_accept",
+            "wire_reject",
+            "wire_pending",
             "wire_pair_check",
-            "wire_pair_confirm",
+            "wire_pair_initiate_detached",
+            "wire_pair_join_detached",
+            "wire_pair_confirm_detached",
         ] {
             assert!(
                 names.contains(&required),
                 "missing required tool {required}"
             );
         }
-        // wire_join (the old direct alias for pair-join, no SAS-typeback) is
-        // explicitly NOT in the catalog. Calling it returns a deprecation
-        // pointing to wire_pair_join (test below covers this).
-        assert!(
-            !names.contains(&"wire_join"),
-            "wire_join must not be advertised — superseded by wire_pair_join"
-        );
+        // RFC-005 Phase 2: the legacy aliases MUST NOT appear in tools/list,
+        // so an LLM picking from near-synonyms can't pick the wrong one.
+        for removed in [
+            "wire_pair_initiate",
+            "wire_pair_join",
+            "wire_pair_confirm",
+            "wire_pair_accept",
+            "wire_pair_reject",
+            "wire_pair_list_inbound",
+            "wire_join",
+        ] {
+            assert!(
+                !names.contains(&removed),
+                "tool {removed} must NOT be advertised — removed in v0.15 per RFC-005 Phase 2"
+            );
+        }
     }
 
+    /// RFC-005 Phase 2 — `wire_join` was the original direct alias for
+    /// pair-join. It's been an error-string redirect since pre-v0.5; with
+    /// Phase 2 the target verb is now `wire_dial` (not the removed
+    /// `wire_pair_join`). Operator-facing redirect must point at the live
+    /// canonical verb so agents don't loop on a dead reference.
     #[test]
-    fn legacy_wire_join_call_returns_helpful_error() {
+    fn legacy_wire_join_call_redirects_to_wire_dial() {
         let req = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -2618,38 +2389,46 @@ mod tests {
         assert_eq!(resp["result"]["isError"], true);
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(
-            text.contains("wire_pair_join"),
-            "expected redirect to wire_pair_join, got: {text}"
+            text.contains("wire_dial"),
+            "expected redirect to wire_dial, got: {text}"
+        );
+        // Must NOT redirect to a tool name that no longer exists post-Phase 2.
+        assert!(
+            !text.contains("wire_pair_join"),
+            "redirect points to removed wire_pair_join, got: {text}"
         );
     }
 
+    /// RFC-005 Phase 2 — calling a removed tool returns "unknown tool: …",
+    /// not a stale handler shim. Catches a regression where the dispatch
+    /// keeps an entry pointing at a removed impl.
     #[test]
-    fn pair_confirm_missing_session_id_errors_cleanly() {
-        let req = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": "wire_pair_confirm", "arguments": {"user_typed_digits": "111111"}}
-        });
-        let resp = handle_request(&req, &McpState::default());
-        assert_eq!(resp["result"]["isError"], true);
-    }
-
-    #[test]
-    fn pair_confirm_unknown_session_errors_cleanly() {
-        let req = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "wire_pair_confirm",
-                "arguments": {"session_id": "definitely-not-real", "user_typed_digits": "111111"}
-            }
-        });
-        let resp = handle_request(&req, &McpState::default());
-        assert_eq!(resp["result"]["isError"], true);
-        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("no such session_id"), "got: {text}");
+    fn removed_pair_tools_return_unknown_tool() {
+        for removed in [
+            "wire_pair_initiate",
+            "wire_pair_join",
+            "wire_pair_confirm",
+            "wire_pair_accept",
+            "wire_pair_reject",
+            "wire_pair_list_inbound",
+        ] {
+            let req = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": removed, "arguments": {}}
+            });
+            let resp = handle_request(&req, &McpState::default());
+            assert_eq!(
+                resp["result"]["isError"], true,
+                "removed tool {removed} must error",
+            );
+            let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(
+                text.contains("unknown tool"),
+                "removed tool {removed} must report unknown, got: {text}"
+            );
+        }
     }
 
     #[test]
