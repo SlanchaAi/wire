@@ -237,58 +237,54 @@ mod tests {
     use super::*;
 
     // v0.14.x kill-switch tests. `toasts_disabled` is process-state-leaky
-    // (env var + filesystem), so each test sets its own WIRE_HOME tempdir
-    // and clears the env var explicitly. Run under --test-threads=1 (CI
-    // default since #111) to avoid env-mutation races.
+    // (reads WIRE_HOME, WIRE_NO_TOASTS, and a filesystem flag), so each
+    // test runs inside `with_temp_home` — it holds the shared ENV_LOCK and
+    // pins a throwaway WIRE_HOME, making them hermetic under the default
+    // parallel test runner instead of requiring --test-threads=1.
     #[test]
     fn disabled_false_in_clean_env_and_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: tests are gated to --test-threads=1.
-        unsafe {
-            std::env::remove_var("WIRE_NO_TOASTS");
-            std::env::set_var("WIRE_HOME", tmp.path());
-        }
-        assert!(!toasts_disabled());
+        crate::config::test_support::with_temp_home(|| {
+            unsafe { std::env::remove_var("WIRE_NO_TOASTS") };
+            assert!(!toasts_disabled());
+        });
     }
 
     #[test]
     fn disabled_true_when_env_set() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("WIRE_HOME", tmp.path());
-            std::env::set_var("WIRE_NO_TOASTS", "1");
-        }
-        assert!(toasts_disabled());
-        unsafe {
-            std::env::remove_var("WIRE_NO_TOASTS");
-        }
+        // Goes through `with_temp_home` so it holds the shared ENV_LOCK
+        // while mutating WIRE_HOME / WIRE_NO_TOASTS — otherwise it races
+        // every other test that reads those process-global vars (the
+        // source of the suite's parallel-run flakiness). Read the result
+        // before removing the var so cleanup survives an assert failure.
+        crate::config::test_support::with_temp_home(|| {
+            unsafe { std::env::set_var("WIRE_NO_TOASTS", "1") };
+            let disabled = toasts_disabled();
+            unsafe { std::env::remove_var("WIRE_NO_TOASTS") };
+            assert!(disabled);
+        });
     }
 
     #[test]
     fn disabled_true_when_quiet_flag_file_present() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::remove_var("WIRE_NO_TOASTS");
-            std::env::set_var("WIRE_HOME", tmp.path());
-        }
-        let cfg = tmp.path().join("config").join("wire");
-        std::fs::create_dir_all(&cfg).unwrap();
-        std::fs::write(cfg.join("quiet"), b"").unwrap();
-        assert!(toasts_disabled());
+        crate::config::test_support::with_temp_home(|| {
+            unsafe { std::env::remove_var("WIRE_NO_TOASTS") };
+            let home = std::env::var("WIRE_HOME").unwrap();
+            let cfg = std::path::PathBuf::from(&home).join("config").join("wire");
+            std::fs::create_dir_all(&cfg).unwrap();
+            std::fs::write(cfg.join("quiet"), b"").unwrap();
+            assert!(toasts_disabled());
+        });
     }
 
     #[test]
     fn env_var_zero_string_does_not_silence() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("WIRE_HOME", tmp.path());
-            std::env::set_var("WIRE_NO_TOASTS", "0");
-        }
-        // "0" / empty is operator-explicit "off"; respect it.
-        assert!(!toasts_disabled());
-        unsafe {
-            std::env::remove_var("WIRE_NO_TOASTS");
-        }
+        crate::config::test_support::with_temp_home(|| {
+            unsafe { std::env::set_var("WIRE_NO_TOASTS", "0") };
+            // "0" / empty is operator-explicit "off"; respect it.
+            let disabled = toasts_disabled();
+            unsafe { std::env::remove_var("WIRE_NO_TOASTS") };
+            assert!(!disabled);
+        });
     }
 
     #[test]
