@@ -78,8 +78,9 @@ Knowing a handle (`alice@wireup.net`) and being able to resolve it to a signed a
 
 ## Recent releases
 
-Currently shipping **v0.14.1**. Highlights:
+Currently shipping **v0.14.2**. Highlights:
 
+- **v0.14.2** (2026-06-05) — multi-session supervisor + queue collapse (synchronous send/pull verdicts), dual-roots TLS, then a launch-hardening pass: `--all-sessions` fork-storm fix, hermetic tests, REUSE-compliant license, install-smoke CI
 - **v0.14.1** (2026-05-30) — DX completion: identity layer visible end-to-end, operator quality-of-life
 - **v0.14.0** (2026-05-29) — RFC-001 identity layer: operator + organization + project, fully-offline self-certifying
 - **v0.13.4** (2026-05-25) — per-session identity (MCP + Windows) + group chat + merged `wire update`
@@ -372,7 +373,7 @@ If those make sense, we probably do too.
 
 ## Install
 
-### As a Claude Code plugin (recommended for Claude users — v0.14.1)
+### As a Claude Code plugin (recommended for Claude users — v0.14.2)
 
 ```bash
 # 1. install the wire binary on PATH (one of the three paths below)

@@ -8,13 +8,13 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
-## [v0.14.2] — 2026-06-01 (UNRELEASED)
+## [v0.14.2] — 2026-06-05
 
 **v0.14.2 — the multi-session ops batch + the queue collapse: silent-send class closed, `--all-sessions` supervisor architecture lands, four hotfixes caught by live dogfood, send + pull both become synchronous verdict-on-demand verbs.**
 
 honey-pine's 2026-06-01 multi-system dogfood (#162) surfaced an interlocking set of bugs that broke wire's daemon layer on any operator with more than one session: silent send failures, daemon-up-but-not-syncing on launchd, false-negative `wire status`, tier flap, notification storms. Paul (same day): *"why are we dealing with this whole outbox queued delivered thing it's a headache and always breaks can we streamline and collapse steps."* This release closes all of the dogfood bugs AND collapses the send/receive paths so the "queued ≠ delivered" silent-drop class can't reappear in the default surface.
 
-28 PRs since the v0.14.1 tag. No trust ladder change, no protocol bump (v3.2 still the constant). Operator action required after upgrade: re-run `wire service install` (idempotent) so the launchd plist / systemd unit picks up the new `wire daemon --all-sessions --interval 5` ProgramArguments. `wire upgrade` does this automatically when a service was previously installed.
+Dozens of PRs since the v0.14.1 tag — the #162 multi-session batch below, plus a launch-hardening + reliability follow-on (see the final subsection). No trust ladder change, no protocol bump (v3.2 still the constant). Operator action required after upgrade: re-run `wire service install` (idempotent) so the launchd plist / systemd unit picks up the new `wire daemon --all-sessions --interval 5` ProgramArguments. `wire upgrade` does this automatically when a service was previously installed.
 
 ### Silent-send class closed (honey-pine's #162 bug report)
 
@@ -105,6 +105,22 @@ Coral's 2026-06-01 dogfood found three status surfaces (`wire status`, `wire pee
 - `wire upgrade` AUTOMATICALLY refreshes installed service units (rewrites plist / systemd unit with the new ProgramArguments). 0.14.1 → 0.14.2 operators don't need to manually re-run `wire service install` unless `wire upgrade` is skipped.
 - The `--all-sessions` supervisor manages every session by default. To opt out (e.g. one specific session running in a tmux pane), the operator-spawned `wire daemon` claims the pidfile first and the supervisor's pre-spawn check honors it.
 - Notification dedup state survives across daemon restarts. To re-see a notification class: `rm -rf ~/Library/Caches/wire/toast-dedup` (macOS) or `~/.cache/wire/toast-dedup` (linux).
+
+### Launch hardening + reliability (post-#208 follow-on)
+
+The batch that took the supervisor work from "lands" to "safe to put in front of strangers."
+
+- **`wire upgrade --refresh-stale-children` (#209).** Companion to #198's stale-binary detection: force-reaps session daemons stuck on the old binary so an upgrade actually converges the whole box, instead of leaving version-drifted children alive behind the supervisor's respawn-protection.
+- **🚨 `--all-sessions` fork-storm fix — idle filter (#212).** The supervisor spawned one daemon per session *home*, and a long-lived box accumulates hundreds of ephemeral persona homes (one per Claude tab / `wire session new`) → 100+ daemons for a handful of real sessions. `supervisor_eligible` now keeps a session only if it has a registry cwd binding OR synced within an idle cutoff (`WIRE_ALL_SESSIONS_MAX_IDLE_DAYS`, default 7; `0` disables). `list_sessions()` untouched — filter applied only at the supervisor call site.
+- **Hermetic kill-switch tests — suite de-flake (#213).** Four `os_notify` tests mutated `WIRE_HOME`/`WIRE_NO_TOASTS` without the shared `ENV_LOCK`, racing every other test under the default parallel runner (a different subset failed each run; `--test-threads=1` masked it). Routed through `with_temp_home`; 20× parallel runs now 0 failures.
+- **REUSE-compliant trio-license + stale-doc fix (#214).** The AGPL-server / Apache-spec / MIT-client split was sound but `LICENSE.md` still scoped it by pre-Rust-rewrite Python paths, and GitHub couldn't classify it (NOASSERTION). Texts moved to `LICENSES/`, a `REUSE.toml` encodes the per-path mapping, docs corrected.
+- **README launch hardening (#215).** Status / API-stability section (pre-1.0, pin versions, `--json` is the stable surface), a real `CONTRIBUTING.md` (gates, DCO sign-off, per-component license), and good-first-issue pointers.
+- **Fresh-user install-smoke CI + reproducible Rust test-env (#217).** New CI job builds the PR binary, installs it to PATH, and runs the offline first-run sequence from a clean `WIRE_HOME` — catches breakage that compiles + passes tests but breaks the out-of-the-box experience. Plus `test-env/` — a pinned-toolchain container that runs the exact CI gate against a mounted checkout.
+- **Dead-code sweep (#218).** Dropped the unused `tower` direct dep, fixed the two real dead doc links, and fixed a `bash -lc` PATH bug in the test-env container's default gate command.
+
+### Operator notes (launch-hardening addendum)
+
+- After upgrading to 0.14.2, the `--all-sessions` supervisor will spawn daemons only for cwd-registered or recently-active sessions. If you rely on a long-idle unbound session keeping a daemon, set `WIRE_ALL_SESSIONS_MAX_IDLE_DAYS` higher (or `0` to disable the filter).
 
 
 ## [v0.14.1] — 2026-05-30
