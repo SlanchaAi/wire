@@ -26,6 +26,7 @@ pub mod identity;
 pub mod inbox_watch;
 pub mod macaroon;
 pub mod mcp;
+pub mod nuke;
 pub mod org_membership;
 pub mod org_policy;
 pub mod os_notify;

@@ -157,7 +157,68 @@ jobs:
           wire --version
           wire --help >/dev/null
           wire whoami --json | jq -e '.initialized == false'    # pre-init
-          wire up --no-local                                     # offline identity, no relay needed
+          # `wire up --no-local` creates the local identity but also tries to
+          # claim its DID-derived handle on the shared relay — that claim can
+          # 409 if the random persona is already taken (non-fatal). The real
+          # check is the local identity, so tolerate a nonzero exit and assert
+          # via whoami.
+          wire up --no-local || true
           wire whoami --json | jq -e '.did | startswith("did:wire:")'
           wire here >/dev/null
           echo "install-smoke: fresh-user offline path OK"
+      - name: nuke smoke (dry-run changes nothing; --force resets; re-up works)
+        run: |
+          set -euo pipefail
+          export WIRE_HOME="$(mktemp -d)/home" WIRE_QUIET_AUTOSESSION=1
+          wire up --no-local || true
+          wire whoami --json | jq -e '.did | startswith("did:wire:")'   # identity created
+          wire nuke --dry-run                              # lists, must change nothing
+          wire whoami --json | jq -e '.did | startswith("did:wire:")'   # dry-run kept it
+          wire nuke --force --json | jq -e 'has("removed_paths")'
+          wire whoami --json | jq -e '.initialized == false'            # state wiped
+          wire up --no-local || true                       # fresh again
+          wire whoami --json | jq -e '.did | startswith("did:wire:")'
+          echo "install-smoke: nuke + re-up OK"
+
+  install-smoke-windows:
+    # Windows leg of the cross-platform gate: build wire.exe and run the
+    # fresh-user + nuke smoke in PowerShell from a clean WIRE_HOME. Windows
+    # can't be exercised on the maintainer's mac/linux hosts, so this CI
+    # job is the primary Windows signal (plus an operator confirm on a real
+    # box before merge).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --bin wire
+      - name: fresh-user + nuke smoke (PowerShell)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true   # native non-zero exit → throw
+          $wire = ".\target\release\wire.exe"
+          $env:WIRE_HOME = Join-Path $env:RUNNER_TEMP ("wh-" + [guid]::NewGuid().ToString("N"))
+          $env:WIRE_QUIET_AUTOSESSION = "1"
+          & $wire --version
+          & $wire --help | Out-Null
+          $pre = (& $wire whoami --json | ConvertFrom-Json)
+          if ($pre.initialized -ne $false) { throw "expected initialized:false pre-init" }
+          # `wire up --no-local` creates the local identity but also tries to
+          # claim its handle on the shared relay; that claim can 409 (handle
+          # already taken) which is non-fatal. Tolerate a nonzero exit and
+          # assert the real outcome (local DID) via whoami.
+          try { & $wire up --no-local } catch { Write-Host "wire up claim non-fatal: $_" }
+          $post = (& $wire whoami --json | ConvertFrom-Json)
+          if (-not $post.did.StartsWith("did:wire:")) { throw "expected a did:wire: DID" }
+          & $wire here | Out-Null
+          & $wire nuke --dry-run
+          $afterDry = (& $wire whoami --json | ConvertFrom-Json)
+          if (-not $afterDry.did.StartsWith("did:wire:")) { throw "dry-run must not wipe state" }
+          & $wire nuke --force --json | ConvertFrom-Json | Out-Null
+          $afterNuke = (& $wire whoami --json | ConvertFrom-Json)
+          if ($afterNuke.initialized -ne $false) { throw "nuke --force should wipe state" }
+          try { & $wire up --no-local } catch { Write-Host "wire up claim non-fatal: $_" }
+          $fresh = (& $wire whoami --json | ConvertFrom-Json)
+          if (-not $fresh.did.StartsWith("did:wire:")) { throw "re-up should recreate identity" }
+          Write-Host "install-smoke-windows: fresh-user + nuke OK"

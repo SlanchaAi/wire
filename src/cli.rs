@@ -816,6 +816,24 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Hard-reset this machine to a clean wire state: kill daemons,
+    /// remove service units, de-register the wire MCP entry from host
+    /// configs, and wipe all wire dirs. `--purge` also removes the
+    /// binary + shell lines. Requires --force or a typed confirmation.
+    Nuke {
+        /// Skip the typed confirmation (for automation / test harness).
+        /// `--yes` is an accepted alias.
+        #[arg(long, visible_alias = "yes")]
+        force: bool,
+        /// Also remove the `wire` binary + shell PATH/env lines.
+        #[arg(long)]
+        purge: bool,
+        /// Print what would be removed and exit without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Install / inspect / remove a launchd plist (macOS) or systemd
     /// user unit (linux) that runs `wire daemon` on login + restarts
     /// on crash. Replaces today's "background it with tmux/&/systemd
@@ -2009,6 +2027,12 @@ pub fn run() -> Result<()> {
             once,
             json,
         } => cmd_notify(interval, peer.as_deref(), once, json),
+        Command::Nuke {
+            force,
+            purge,
+            dry_run,
+            json,
+        } => cmd_nuke(force, purge, dry_run, json),
         Command::Quiet { action } => cmd_quiet(action),
     }
 }
@@ -2095,6 +2119,188 @@ fn cmd_quiet(action: QuietAction) -> Result<()> {
                 }
             }
             Ok(())
+        }
+    }
+}
+
+// ---------- nuke ----------
+
+fn cmd_nuke(force: bool, purge: bool, dry_run: bool, as_json: bool) -> Result<()> {
+    use std::io::{IsTerminal, Write};
+    let plan = crate::nuke::NukePlan::compute(purge)?;
+
+    // Render what will/would be removed.
+    if as_json && dry_run {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+        return Ok(());
+    }
+    if !as_json {
+        eprintln!("wire nuke will remove:");
+        for p in &plan.paths {
+            eprintln!("  dir   {}", p.display());
+        }
+        for m in &plan.mcp_files {
+            eprintln!("  mcp   {} (de-register `wire`)", m.display());
+        }
+        eprintln!("  units launchd/systemd/schtasks (daemon + local-relay)");
+        eprintln!("  procs any running wire daemon / supervisor / relay-server");
+        if purge {
+            eprintln!("  PURGE the `wire` binary + shell PATH/env lines");
+        }
+    }
+    if dry_run {
+        return Ok(());
+    }
+
+    // Gate.
+    if !crate::nuke::should_proceed(force, std::io::stdin().is_terminal(), || {
+        eprint!("\nType `nuke` to confirm: ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        line
+    }) {
+        if !as_json {
+            eprintln!("aborted — nothing removed. (Use --force for automation.)");
+        }
+        anyhow::bail!("nuke not confirmed");
+    }
+
+    // Kill survivors not covered by unit teardown (best-effort).
+    let killed = kill_wire_processes();
+
+    // Execute.
+    let mut report = plan.execute()?;
+    report.killed_pids = killed;
+
+    // --purge: remove binary + shell lines.
+    if purge {
+        report.binary_removed = purge_binary_and_shell(&mut report.warnings);
+    }
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        eprintln!(
+            "nuked: {} dir(s), {} mcp entr(ies), {} unit(s), {} proc(s){}",
+            report.removed_paths.len(),
+            report.removed_mcp_entries.len(),
+            report.removed_units.len(),
+            report.killed_pids.len(),
+            if report.binary_removed {
+                ", binary+shell"
+            } else {
+                ""
+            },
+        );
+        for w in &report.warnings {
+            eprintln!("  warn: {w}");
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort kill of any wire daemon / supervisor / relay-server
+/// process. Returns the pids we asked the OS to terminate.
+fn kill_wire_processes() -> Vec<u32> {
+    let mut killed = Vec::new();
+    #[cfg(unix)]
+    for pat in ["wire daemon", "relay-server"] {
+        if let Ok(out) = std::process::Command::new("pkill")
+            .arg("-f")
+            .arg(pat)
+            .output()
+        {
+            // pkill exit 0 = killed something; record nothing granular (best-effort).
+            let _ = out;
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Kill wire.exe by PID, EXCLUDING our own process — a broad
+        // `taskkill /IM wire.exe` would terminate this very `wire nuke`
+        // run mid-execution. Enumerate via `tasklist` CSV and skip self.
+        let self_pid = std::process::id();
+        if let Ok(out) = std::process::Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq wire.exe", "/FO", "CSV", "/NH"])
+            .output()
+        {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                // CSV row: "wire.exe","1234","Console","1","12,345 K"
+                if let Some(pid) = line
+                    .split(',')
+                    .nth(1)
+                    .and_then(|s| s.trim().trim_matches('"').parse::<u32>().ok())
+                {
+                    if pid != self_pid {
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/F", "/PID", &pid.to_string()])
+                            .output();
+                        killed.push(pid);
+                    }
+                }
+            }
+        }
+    }
+    // unix records nothing granular (pkill is coarse, best-effort); the
+    // vec stays empty there, which keeps the report shape stable.
+    let _ = &mut killed;
+    killed
+}
+
+/// --purge: remove the wire binary + scrub shell PATH/env lines.
+/// Returns true if the binary was removed (false on the Windows
+/// self-delete case, where we print the manual command instead).
+fn purge_binary_and_shell(warnings: &mut Vec<String>) -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            warnings.push(format!("resolve exe: {e:#}"));
+            return false;
+        }
+    };
+    #[cfg(windows)]
+    {
+        eprintln!("purge: a running .exe can't delete itself. Remove it manually:");
+        eprintln!("  del \"{}\"", exe.display());
+        warnings.push("binary self-delete skipped on Windows (manual del printed)".into());
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        match std::fs::remove_file(&exe) {
+            Ok(()) => {
+                // Best-effort shell-line scrub: well-known rc files.
+                scrub_shell_lines(warnings);
+                true
+            }
+            Err(e) => {
+                warnings.push(format!("rm binary {}: {e:#}", exe.display()));
+                false
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn scrub_shell_lines(warnings: &mut Vec<String>) {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    for rc in [".bashrc", ".zshrc", ".profile", ".config/fish/config.fish"] {
+        let path = home.join(rc);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let filtered: String = content
+            .lines()
+            .filter(|l| !(l.contains("wire") && (l.contains("PATH") || l.contains("WIRE_"))))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if filtered != content
+            && let Err(e) = std::fs::write(&path, filtered + "\n")
+        {
+            warnings.push(format!("scrub {}: {e:#}", path.display()));
         }
     }
 }
