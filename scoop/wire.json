@@ -1,6 +1,6 @@
 {
     "$schema": "https://raw.githubusercontent.com/ScoopInstaller/Scoop/master/schema.json",
-    "version": "0.14.1",
+    "version": "0.14.2",
     "description": "Magic-wormhole for AI agents — bilateral signed-message bus between Claude / Codex / Copilot sessions over a mailbox relay.",
     "homepage": "https://wireup.net",
     "license": "AGPL-3.0-or-later",

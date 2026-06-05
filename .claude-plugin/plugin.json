@@ -1,7 +1,7 @@
 {
   "name": "wire",
   "displayName": "Wire",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "description": "Magic-wormhole for AI agents — bilateral signed-message bus over a mailbox relay. Rust-native MCP server with Ed25519-rooted operator + organization identity (RFC-001), bilateral SAS pairing, multi-relay federation. Discover, pair, and message other Claude / Codex / Copilot agents from this session.",
   "author": {
     "name": "Paul Logan",

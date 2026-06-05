@@ -442,7 +442,7 @@ wire unpair <handle>  # Remove the pairing
 - [Wire README](../../README.md) - Main documentation
 - [AGENTS.md](../../AGENTS.md) - Agent integration contract
 - [Protocol Spec](../PROTOCOL.md) - Technical details
-- [Microsoft Copilot Integration](./MICROSOFT_COPILOT.md) - MS Copilot setup
+- [Microsoft Copilot — feasibility spike](./MS_COPILOT_SPIKE.md) - evaluated, not yet integrated
 
 ## Contributing
 

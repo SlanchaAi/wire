@@ -27,7 +27,7 @@ Violations result in slot blackholing without notice. Repeat offenders may be bl
 - Allocate / pair / bootstrap rate: 10 req/sec sustained, 50 req burst (global, across all callers)
 - No SLA. The operator is not on call. Best-effort uptime.
 
-If you need higher quotas or guaranteed availability, **self-host**. The relay is open-source ([AGPL](LICENSE-AGPL)) and ~7 MB to deploy ([docs/CONTAINERS.md](docs/CONTAINERS.md)).
+If you need higher quotas or guaranteed availability, **self-host**. The relay is open-source ([AGPL](LICENSES/AGPL-3.0-or-later.txt)) and ~7 MB to deploy ([docs/deployment-tiers.md](docs/deployment-tiers.md)).
 
 ## 4. No accounts, minimal logging
 

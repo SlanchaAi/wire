@@ -78,8 +78,9 @@ Knowing a handle (`alice@wireup.net`) and being able to resolve it to a signed a
 
 ## Recent releases
 
-Currently shipping **v0.14.1**. Highlights:
+Currently shipping **v0.14.2**. Highlights:
 
+- **v0.14.2** (2026-06-05) — multi-session supervisor + queue collapse (synchronous send/pull verdicts), dual-roots TLS, then a launch-hardening pass: `--all-sessions` fork-storm fix, hermetic tests, REUSE-compliant license, install-smoke CI
 - **v0.14.1** (2026-05-30) — DX completion: identity layer visible end-to-end, operator quality-of-life
 - **v0.14.0** (2026-05-29) — RFC-001 identity layer: operator + organization + project, fully-offline self-certifying
 - **v0.13.4** (2026-05-25) — per-session identity (MCP + Windows) + group chat + merged `wire update`
@@ -92,6 +93,17 @@ Currently shipping **v0.14.1**. Highlights:
 **Full per-version detail: [CHANGELOG.md](CHANGELOG.md).**
 
 > **A2A v1.0 compat.** Wire handles serve `.well-known/agent-card.json` in the A2A v1.0 AgentCard schema — Microsoft Agent Framework, AWS, Salesforce, SAP, and ServiceNow A2A tooling can resolve wire handles without speaking any wire-specific protocol.
+
+---
+
+## Status & API stability
+
+wire is **pre-1.0** (currently 0.14.x) and ships fast — treat it as a maturing prototype, not a frozen API:
+
+- **CLI flags & human output** may change between minor versions. If you script `wire`, pin a version and read the [CHANGELOG](CHANGELOG.md) before upgrading. The `--json` output on every command is the most stable surface — prefer it for automation.
+- **On-wire protocol** is explicitly versioned (event-kind ranges + canonical schema in [`docs/PROTOCOL.md`](docs/PROTOCOL.md)). Breaking protocol changes bump the version and are called out in the release notes; wire handles also serve the A2A v1.0 AgentCard schema (above).
+- **Identity, trust & signed-event formats** are stabilizing toward 1.0 — kept backward-compatible where we can, flagged in the CHANGELOG when not.
+- **No compatibility guarantees until 1.0.** Pin versions for anything load-bearing. Threat model: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
 
 ---
 
@@ -361,7 +373,7 @@ If those make sense, we probably do too.
 
 ## Install
 
-### As a Claude Code plugin (recommended for Claude users — v0.14.1)
+### As a Claude Code plugin (recommended for Claude users — v0.14.2)
 
 ```bash
 # 1. install the wire binary on PATH (one of the three paths below)
@@ -471,16 +483,16 @@ Skip both sections if you only run a single Claude on the box. One default ident
 
 ## License
 
-- **Server** (`wire-relay-server`) — AGPL-3.0 (forks that host as SaaS must share back)
-- **Spec** (`docs/PROTOCOL.md`, the protocol surface in `src/signing.rs`, `src/agent_card.rs`) — Apache-2.0 (max interop adoption)
-- **Client** (`wire` CLI) — MIT (max embedding adoption)
+- **Server** (`src/relay_server.rs`) — AGPL-3.0 (forks that host as SaaS must share back)
+- **Spec** (`docs/PROTOCOL.md`, the protocol surface in `src/signing.rs`, `src/agent_card.rs`, `src/canonical.rs`) — Apache-2.0 (max interop adoption)
+- **Client** (`wire` CLI + everything else) — MIT (max embedding adoption)
 
 Same model as [atuin](https://atuin.sh/) (closed Hub + MIT CLI), except our server is AGPL not closed.
 
-See [LICENSE.md](LICENSE.md) for the trio explanation.
+See [LICENSE.md](LICENSE.md) for the trio explanation; the machine-readable per-file mapping is [`REUSE.toml`](REUSE.toml) ([REUSE](https://reuse.software)-compliant).
 
 ---
 
 ## Contributing
 
-v0.1 is solo-maintained pre-launch. Contributions welcome once public launch lands.
+Early and solo-maintained, but contributions are welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)** for dev setup, the build/test/lint gates CI enforces, the DCO sign-off we use, and how the [per-component license](LICENSE.md) applies to changes. Good entry points are issues labeled [`good first issue`](https://github.com/SlanchaAi/wire/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) and [`help wanted`](https://github.com/SlanchaAi/wire/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22). Questions: [Discord](https://discord.gg/dv2Cd3xzPh).

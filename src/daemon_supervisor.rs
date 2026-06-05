@@ -57,9 +57,9 @@
 //!   orchestrator.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -77,6 +77,97 @@ const REGISTRY_POLL_SECS: u64 = 10;
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const RAPID_FAIL_WINDOW: Duration = Duration::from_secs(10);
+
+/// Default idle cutoff for registry-unbound sessions. `list_sessions()`
+/// enumerates *every* session home ever minted on the machine — and
+/// because each Claude tab / `wire session new` mints a fresh persona
+/// home, a long-lived box accumulates hundreds (honey-pine's had 147).
+/// Spawning one daemon per home turns `--all-sessions` into a fork
+/// storm. A session is kept regardless of age if it has a registry cwd
+/// binding (operator deliberately bound it); an *unbound* session is
+/// only kept if it has been active within this window. Override via
+/// `WIRE_ALL_SESSIONS_MAX_IDLE_DAYS` (0 disables the filter → legacy
+/// spawn-for-all behavior).
+const DEFAULT_MAX_IDLE_DAYS: u64 = 7;
+
+/// Parse the idle cutoff. `None` raw → default; a `0` value → `None`
+/// (no filter, spawn for every session); any other integer → that many
+/// days; unparseable → default. Pure, so it's unit-testable without
+/// mutating process env.
+fn parse_max_idle(raw: Option<&str>) -> Option<Duration> {
+    match raw {
+        Some(v) => {
+            let days: u64 = v.trim().parse().unwrap_or(DEFAULT_MAX_IDLE_DAYS);
+            (days != 0).then(|| Duration::from_secs(days * 86_400))
+        }
+        None => Some(Duration::from_secs(DEFAULT_MAX_IDLE_DAYS * 86_400)),
+    }
+}
+
+/// Read the idle cutoff from the environment. `None` means "no idle
+/// filter" (spawn a daemon for every session — pre-fix behavior),
+/// selected by setting `WIRE_ALL_SESSIONS_MAX_IDLE_DAYS=0`.
+fn max_idle_from_env() -> Option<Duration> {
+    parse_max_idle(
+        std::env::var("WIRE_ALL_SESSIONS_MAX_IDLE_DAYS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Newest mtime among a session home's activity files — the
+/// supervisor's "last actually *synced*" signal. These live under the
+/// session's `state/wire/` subtree (same root the per-session daemon
+/// and `existing_daemon_for_session` use), NOT the home root.
+/// `last_sync.json` is rewritten on every successful daemon relay
+/// cycle; the cursors move on inbox/reactor activity. Returns `None`
+/// for a home that has never synced (a husk).
+///
+/// Deliberately excludes `daemon.pid`: it's written on *spawn*, so
+/// counting it would make eligibility self-perpetuating — the
+/// supervisor spawns a daemon, the pidfile refreshes, and the session
+/// would never age out even if it never actually syncs anything.
+fn fs_last_active(home: &Path) -> Option<SystemTime> {
+    let state = home.join("state").join("wire");
+    ["last_sync.json", "notify.cursor", "reactor.cursor"]
+        .iter()
+        .filter_map(|f| std::fs::metadata(state.join(f)).ok())
+        .filter_map(|m| m.modified().ok())
+        .max()
+}
+
+/// Filter `list_sessions()` down to the sessions the supervisor should
+/// own a daemon for. A session is eligible iff it has a registry cwd
+/// binding OR it was active within `max_idle`. `max_idle == None`
+/// disables the filter (every session eligible). Pure: the activity
+/// probe is injected so this is unit-testable without touching disk.
+fn supervisor_eligible<F>(
+    sessions: Vec<crate::session::SessionInfo>,
+    max_idle: Option<Duration>,
+    now: SystemTime,
+    last_active: F,
+) -> Vec<crate::session::SessionInfo>
+where
+    F: Fn(&Path) -> Option<SystemTime>,
+{
+    let Some(max_idle) = max_idle else {
+        return sessions;
+    };
+    sessions
+        .into_iter()
+        .filter(|s| {
+            if s.cwd.is_some() {
+                return true;
+            }
+            match last_active(&s.home_dir) {
+                // `duration_since` errors when the file mtime is in the
+                // future (clock skew) — treat that as "active now".
+                Some(t) => now.duration_since(t).map(|d| d <= max_idle).unwrap_or(true),
+                None => false,
+            }
+        })
+        .collect()
+}
 
 /// State the supervisor tracks per session it has spawned a child for.
 struct ChildState {
@@ -125,6 +216,17 @@ pub fn run_supervisor(interval_secs: u64, as_json: bool) -> Result<()> {
         );
     }
 
+    // Idle cutoff for registry-unbound sessions — read once at startup
+    // (env doesn't change under a running supervisor).
+    let max_idle = max_idle_from_env();
+    eprintln!(
+        "supervisor: idle cutoff for unbound sessions = {}",
+        match max_idle {
+            Some(d) => format!("{} days", d.as_secs() / 86_400),
+            None => "disabled (spawn-for-all)".to_string(),
+        }
+    );
+
     let mut children: HashMap<String, ChildState> = HashMap::new();
     // Per-session backoff that survives a child's reap → respawn → reap
     // cycle. Distinguishes "session crashes hard repeatedly" from
@@ -162,9 +264,22 @@ pub fn run_supervisor(interval_secs: u64, as_json: bool) -> Result<()> {
             children.remove(&n);
         }
 
-        // 2. Read registry, identify wanted sessions.
+        // 2. Read registry, identify wanted sessions. Filter out
+        //    registry-unbound sessions that have been idle past the
+        //    cutoff so the supervisor doesn't fan out a daemon per
+        //    every ephemeral persona home (the 147-home fork storm).
+        let all_sessions = crate::session::list_sessions().unwrap_or_default();
+        let total_sessions = all_sessions.len();
         let wanted: Vec<crate::session::SessionInfo> =
-            crate::session::list_sessions().unwrap_or_default();
+            supervisor_eligible(all_sessions, max_idle, SystemTime::now(), fs_last_active);
+        if wanted.len() != total_sessions {
+            eprintln!(
+                "supervisor: {} of {} sessions eligible (skipped {} registry-unbound + idle > cutoff)",
+                wanted.len(),
+                total_sessions,
+                total_sessions - wanted.len()
+            );
+        }
 
         // 3. Kill children whose session has been removed from the
         //    registry since last poll. (Operator ran `wire session
@@ -669,5 +784,117 @@ mod tests {
         std::fs::create_dir_all(&state).unwrap();
         std::fs::write(state.join("daemon.pid"), std::process::id().to_string()).unwrap();
         assert!(existing_daemon_for_session(tmp.path()).unwrap());
+    }
+
+    // ---- supervisor eligibility filter (the 147-home fork-storm fix) ----
+
+    fn mk_session(name: &str, cwd: Option<&str>) -> crate::session::SessionInfo {
+        crate::session::SessionInfo {
+            name: name.to_string(),
+            cwd: cwd.map(String::from),
+            home_dir: PathBuf::from(format!("/sessions/{name}")),
+            did: None,
+            handle: None,
+            daemon_running: false,
+            character: None,
+        }
+    }
+
+    #[test]
+    fn parse_max_idle_default_when_unset() {
+        assert_eq!(
+            parse_max_idle(None),
+            Some(Duration::from_secs(DEFAULT_MAX_IDLE_DAYS * 86_400))
+        );
+    }
+
+    #[test]
+    fn parse_max_idle_zero_disables_filter() {
+        assert_eq!(parse_max_idle(Some("0")), None);
+    }
+
+    #[test]
+    fn parse_max_idle_explicit_days() {
+        assert_eq!(
+            parse_max_idle(Some("3")),
+            Some(Duration::from_secs(3 * 86_400))
+        );
+        assert_eq!(
+            parse_max_idle(Some("  14 ")),
+            Some(Duration::from_secs(14 * 86_400))
+        );
+    }
+
+    #[test]
+    fn parse_max_idle_garbage_falls_back_to_default() {
+        assert_eq!(
+            parse_max_idle(Some("not-a-number")),
+            Some(Duration::from_secs(DEFAULT_MAX_IDLE_DAYS * 86_400))
+        );
+    }
+
+    #[test]
+    fn eligible_keeps_cwd_bound_even_when_ancient() {
+        // A registry-bound session is kept no matter how idle — the
+        // operator deliberately attached it to a project dir. (This is
+        // the real-world case: the cwd-bound `wire`/`slancha-*` sessions
+        // were the *oldest* on the box, yet must survive.)
+        let now = SystemTime::now();
+        let ancient = now - Duration::from_secs(365 * 86_400);
+        let sessions = vec![mk_session("wire", Some("/Users/p/Source/wire"))];
+        let out = supervisor_eligible(sessions, Some(Duration::from_secs(7 * 86_400)), now, |_| {
+            Some(ancient)
+        });
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "wire");
+    }
+
+    #[test]
+    fn eligible_keeps_unbound_recent_drops_unbound_idle() {
+        // The live-but-unbound persona sessions (each Claude tab) are
+        // recent → kept. The abandoned ones are idle → dropped.
+        let now = SystemTime::now();
+        let recent = now - Duration::from_secs(2 * 86_400);
+        let stale = now - Duration::from_secs(30 * 86_400);
+        let sessions = vec![
+            mk_session("rosy-rook", None),    // live tab
+            mk_session("agate-nimbus", None), // abandoned
+        ];
+        let out = supervisor_eligible(
+            sessions,
+            Some(Duration::from_secs(7 * 86_400)),
+            now,
+            |home| {
+                if home.ends_with("rosy-rook") {
+                    Some(recent)
+                } else {
+                    Some(stale)
+                }
+            },
+        );
+        let names: Vec<_> = out.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["rosy-rook"]);
+    }
+
+    #[test]
+    fn eligible_drops_unbound_with_no_activity_signal() {
+        // A never-synced husk (no activity files at all) and no cwd →
+        // dropped: nothing says it's a session anyone is using.
+        let now = SystemTime::now();
+        let sessions = vec![mk_session("husk", None)];
+        let out = supervisor_eligible(sessions, Some(Duration::from_secs(7 * 86_400)), now, |_| {
+            None
+        });
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn eligible_none_cutoff_keeps_everything() {
+        // Override = 0 (max_idle None) restores legacy spawn-for-all.
+        let now = SystemTime::now();
+        let ancient = now - Duration::from_secs(999 * 86_400);
+        let sessions = vec![mk_session("husk", None), mk_session("agate-nimbus", None)];
+        let out = supervisor_eligible(sessions, None, now, |_| Some(ancient));
+        assert_eq!(out.len(), 2);
     }
 }
