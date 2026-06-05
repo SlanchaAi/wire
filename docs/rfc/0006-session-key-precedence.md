@@ -1,23 +1,30 @@
-# RFC-005: Session-key precedence + legacy-pin deprecation
+# RFC-006: Session-key precedence + WIRE_HOME pin observability
 
 **Status:** Draft
 **Tracking:** #210
 **Author:** slate-lotus
-**Date:** 2026-06-03
-**Target:** v0.14.x (detection + warning + surface honesty) → v0.15 (precedence flip)
-**Question this answers:** When a pre-v0.13.5 legacy `WIRE_HOME` env pin coexists with a v0.13.5+ session-key env var, which wins, and how does the operator find out which is which?
+**Date:** 2026-06-03 (renumbered 2026-06-05 — RFC-005 slot taken by `0005-remove-backwards-compat.md`)
+**Target:** v0.14.x (surface honesty) → v0.15 (precedence flip, gated, lands with paul's RFC-005 Phase 4 cut)
+**Question this answers:** When an operator's shell pins `WIRE_HOME` in env before launching an agent host (Claude Code / Codex / Copilot), why does it silently override the session-key resolution chain, and how does the operator find out which signal won?
 
 ---
 
+## Relationship to RFC-005 (remove-backwards-compat + wire nuke)
+
+Paul's [RFC-005](0005-remove-backwards-compat.md) Phase 4 deletes the legacy `sessions/<name>` *layout reader* (the v0.6 top-level cwd-derived home, plus `did:wire:<handle>` no-fingerprint DIDs and flat endpoint shims). That closes the "wire chose cwd-shape on its own when no `WIRE_HOME` was set" failure path entirely.
+
+This RFC is **orthogonal**: it targets the case where `WIRE_HOME` IS set in env — by a stale operator shell profile, IDE wrapper, or launcher script — and silently overrides the session-key chain regardless of the path's shape. Phase 4 removes the layout; the env-var override at `src/session.rs:1141` survives Phase 4 unchanged, so a shell-pin `WIRE_HOME=…\sessions\willard\config\wire` after Phase 4 either points to a nuked path (wire creates an empty home there → still bypasses session-key) or to nothing (same outcome).
+
+The detection-shape angle of the original draft (§B legacy-cwd-shape regex) is **withdrawn** — paul deletes the shape, regex is moot. The §A surface-honesty piece and §C precedence-flip piece below remain load-bearing and complementary to paul's Phase 4. Target both for the v0.15.0 cut.
+
 ## TL;DR
 
-- Today: `WIRE_HOME` env presence silently disables the session-key resolution chain (`src/session.rs:1141`). Pre-v0.13.5 operators who pin `WIRE_HOME` in shell profiles continue to see cwd-derived identity collapse — `kelp-sable` everywhere — even after upgrading to a version that "fixes" cwd collapse.
-- Cost: silent identity merge across distinct Claude Code sessions. Wasted operator hours debugging. Reported as #210.
-- Proposal — three-layer fix:
-    1. **`session_source` field on `wire whoami --json`** — surface which signal won the resolution race. Operator immediately sees `env:WIRE_HOME` vs `env:CLAUDE_CODE_SESSION_ID`.
-    2. **Legacy-pin deprecation warning** — when `WIRE_HOME` points to a cwd-derived legacy shape (`sessions/<sanitized-basename>/config/wire`, not `sessions/by-key/<hash>`) AND a session-key env var is present, emit one-time stderr warning.
-    3. **Precedence flip (v0.15, gated):** session-key env vars beat legacy-shaped `WIRE_HOME`. Operator opt-back-into-legacy via `WIRE_HOME_FORCE=1`. By-key-shaped `WIRE_HOME` (operator explicit, modern shape) still wins unconditionally — the explicit-pin contract is preserved for fleet-shared homes.
-- Kill criterion: any fleet operator's tooling breaks unexpectedly under v0.15's precedence flip → revert flip, keep only the warning. Layers 1+2 are pure-additive and ship in v0.14.x regardless.
+- Today: `WIRE_HOME` env presence silently short-circuits the session-key resolution chain at `src/session.rs:1141`, BEFORE `resolve_session_key()` is consulted. Operator can't tell which signal won; symptom is identity collapse across distinct agent-host sessions. Reported as #210.
+- Two-layer fix:
+    1. **§A — `session_source` field on `wire whoami --json`** (v0.14.x, pure-additive): surfaces which signal won the resolution race. Operator immediately sees `env:WIRE_HOME` vs `env:CLAUDE_CODE_SESSION_ID` vs `pidfile` vs `mint` etc.
+    2. **§C — Precedence flip** (v0.15, gated, lands with paul's RFC-005 Phase 4 in the same breaking cut): session-key env vars beat `WIRE_HOME` in agent-host context. `WIRE_HOME_FORCE=1` reverts to today's WIRE_HOME-wins ordering for operators who deliberately pin (multi-tab fleet share by design).
+- §B (legacy-cwd-shape detection warning) **withdrawn** — paul's RFC-005 Phase 4 deletes the shape itself.
+- Kill criterion: §C v0.15 flip breaking any unanticipated operator's tooling → revert §C, keep §A. §A is pure-additive, has no rollback risk, ships ahead of v0.15 regardless.
 
 ## Motivation
 
@@ -102,7 +109,11 @@ Possible values (exhaustive, lowercase, stable for tooling):
 
 Implementation: thread the `source` label out of `resolve_session_key()` (already returned, just not surfaced) AND out of `maybe_adopt_session_wire_home`'s `why` string (already computed, just not stored). Stash on `process::IDENTITY_STATE` (existing `OnceCell`-style singleton — confirm during impl) and read on `cmd_whoami`.
 
-### §B: Legacy-pin deprecation warning (v0.14.x — pure additive)
+### §B: Legacy-pin deprecation warning — **WITHDRAWN**
+
+The original draft's §B detected a cwd-derived legacy `WIRE_HOME` path shape (`sessions/<name>/config/wire` excluding `by-key/<hex>`) and emitted a deprecation warning. Paul's [RFC-005 Phase 4](0005-remove-backwards-compat.md) deletes the entire `sessions/<name>` layout reader, so the legacy shape no longer exists as a wire-resolved layout. The shape-detection regex becomes moot. Detail preserved below in case a partial re-introduction is warranted; treat as struck-through for v0.15 planning.
+
+<details><summary>Original §B detail (struck — see paul's RFC-005 Phase 4)</summary>
 
 When `maybe_adopt_session_wire_home` short-circuits on `WIRE_HOME`, check:
 
@@ -129,7 +140,9 @@ When `maybe_adopt_session_wire_home` short-circuits on `WIRE_HOME`, check:
 
 Suppression: `WIRE_QUIET_LEGACY_PIN=1` — operator-explicit "yes I'm pinned legacy, don't tell me again."
 
-### §C: Precedence flip (v0.15 — gated, RFC-blocked)
+</details>
+
+### §C: Precedence flip (v0.15 — gated, lands with paul's RFC-005 Phase 4)
 
 Reverse the order in `maybe_adopt_session_wire_home`:
 
@@ -166,12 +179,12 @@ Where `is_legacy_cwd_shape(path)` matches `.*/sessions/[^/]+/config/wire` exclud
 ### §D: Migration path
 
 v0.14.x:
-- Ship §A (whoami source field) + §B (warning). Pure additive. No behavior change.
-- Document in CHANGELOG as a heads-up: "if your shell profile pins WIRE_HOME from `wire session env`, you'll see a new warning."
+- Ship §A (whoami source field) only. Pure additive. No behavior change. Operator runs `wire whoami --json | jq .session_source` and immediately knows whether their identity came from `env:WIRE_HOME` or the session-key chain.
 
 v0.15:
-- Default to §C precedence flip. `WIRE_HOME_FORCE=1` reverts.
-- Operators who saw §B's warning in v0.14.x and ignored it: their next CC session resolves to the session-key by-key home instead of the legacy pin. Their old per-session daemon + inbox state at the legacy home is intact on disk; they just stop using it. Migration is observably different identity, not data loss.
+- Default to §C precedence flip, lands alongside paul's RFC-005 Phase 4. `WIRE_HOME_FORCE=1` reverts to today's WIRE_HOME-first ordering for deliberate fleet-share pins.
+- Operators whose shell profile pins a stale `WIRE_HOME`: their next agent-host session resolves to the session-key by-key home instead of the env pin. Old per-session inbox state at the pinned path is untouched on disk; the new session just stops using it. Migration is observably different identity (likely a new persona), not data loss.
+- For operators who ALSO get nuked by `wire nuke` (paul's RFC-005 Phase 1): pinned `WIRE_HOME` may point at a wiped path — wire creates an empty home there. The §C flip makes the session-key path win instead of the empty home, which is the desired outcome.
 
 ## Security
 
@@ -191,7 +204,7 @@ v0.15:
 ## Acceptance criteria
 
 - **AC-LP1 (surface honesty):** `wire whoami --json` emits a `session_source` field whose value is one of the enumerated 10 source labels for every successful invocation. Measured: unit test snapshots one example per branch. Owner: implementor.
-- **AC-LP2 (legacy-pin warning):** Setting `WIRE_HOME` to a path matching `sessions/<name>/config/wire` (not `by-key`) AND setting `CLAUDE_CODE_SESSION_ID` AND running `wire whoami` interactively → stderr contains the warning string once per process. `WIRE_QUIET_LEGACY_PIN=1` suppresses. Setting `WIRE_HOME` to a `by-key/<hex>` path under the same conditions → NO warning. Measured: integration test. Owner: implementor.
+- ~~**AC-LP2 (legacy-pin warning):**~~ **WITHDRAWN** — §B replaced by paul's RFC-005 Phase 4 layout deletion. Not gated, not tested.
 - **AC-LP3 (precedence flip, v0.15):** With both `WIRE_HOME=<legacy-shape>` AND `CLAUDE_CODE_SESSION_ID=<uuid>` set, `wire whoami --json | jq .config_dir` resolves to `sessions/by-key/<hash>` derived from the UUID. Setting `WIRE_HOME_FORCE=1` reverts to the legacy pin. Measured: integration test. Owner: implementor.
 - **AC-LP4 (back-compat for explicit by-key pin):** With `WIRE_HOME=<sessions/by-key/<hex>>` AND any combination of session-key env vars, `wire whoami --json | jq .config_dir` resolves to the pinned `by-key` home. Measured: integration test. Owner: implementor.
 - **KILL CRITERION:** If §C lands in v0.15 and any fleet operator on the wire mesh reports unexpected identity change between v0.14.x → v0.15 that is NOT a legacy-shape pin (i.e., a genuine breakage), §C is reverted in the next point release. §A and §B remain — they are pure-additive and have no rollback risk.
