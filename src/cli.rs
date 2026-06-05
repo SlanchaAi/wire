@@ -438,205 +438,15 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Host a SAS-confirmed pairing. Generates a code phrase, prints it, waits
-    /// for a peer to `pair-join`, exchanges signed agent-cards via SPAKE2 +
-    /// ChaCha20-Poly1305. Auto-pins on success. (HUMAN-ONLY — operator must
-    /// read the SAS digits aloud and confirm.)
-    #[command(hide = true)] // v0.9 deprecated
-    PairHost {
-        /// Relay base URL.
-        #[arg(long)]
-        relay: String,
-        /// Skip the SAS confirmation prompt. ONLY use when piping under
-        /// automated tests or when the SAS has already been verified by
-        /// another channel. Documented as test-only.
-        #[arg(long)]
-        yes: bool,
-        /// How long (seconds) to wait for the peer to join before timing out.
-        #[arg(long, default_value_t = 300)]
-        timeout: u64,
-        /// Detach: write a pending-pair file, print the code phrase, and exit
-        /// immediately. The running `wire daemon` does the handshake in the
-        /// background; confirm SAS later via `wire pair-confirm <code> <digits>`.
-        /// `wire pair-list` shows pending sessions. Default is foreground
-        /// blocking behavior for backward compat.
-        #[arg(long)]
-        detach: bool,
-        /// Emit JSON instead of text. Currently only meaningful with --detach.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Join a pair-slot using a code phrase from the host. (HUMAN-ONLY.)
-    ///
-    /// Aliased as `wire join <code>` for magic-wormhole muscle-memory.
-    #[command(alias = "join")]
-    #[command(hide = true)] // v0.9 deprecated
-    PairJoin {
-        /// Code phrase from the host's `pair-host` output (e.g. `73-2QXC4P`).
-        code_phrase: String,
-        /// Relay base URL (must match the host's relay).
-        #[arg(long)]
-        relay: String,
-        #[arg(long)]
-        yes: bool,
-        #[arg(long, default_value_t = 300)]
-        timeout: u64,
-        /// Detach: see `pair-host --detach`.
-        #[arg(long)]
-        detach: bool,
-        /// Emit JSON instead of text. Currently only meaningful with --detach.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Confirm SAS digits for a detached pending pair. The daemon must be
-    /// running for this to do anything — it picks up the confirmation on its
-    /// next tick. Mismatch aborts the pair.
-    #[command(hide = true)] // v0.9 deprecated
-    PairConfirm {
-        /// The code phrase the original `wire pair-host --detach` printed.
-        code_phrase: String,
-        /// 6 digits as displayed by `wire pair-list` (dashes/spaces stripped).
-        digits: String,
-        /// Emit JSON instead of human-readable text.
-        #[arg(long)]
-        json: bool,
-    },
-    /// List all pending detached pair sessions and their state.
-    #[command(hide = true)] // v0.9 deprecated
-    PairList {
-        /// Emit JSON instead of the table.
-        #[arg(long)]
-        json: bool,
-        /// Stream mode: never exit; print one JSON line per status transition
-        /// (creation, status change, deletion) across all pending pairs.
-        /// Compose with bash `while read` to react in shell. Implies --json.
-        #[arg(long)]
-        watch: bool,
-        /// Poll interval in seconds for --watch.
-        #[arg(long, default_value_t = 1)]
-        watch_interval: u64,
-    },
-    /// Cancel a pending pair. Releases the relay slot and removes the pending file.
-    #[command(hide = true)] // v0.9 deprecated
-    PairCancel {
-        code_phrase: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Block until a pending pair reaches a target status (default sas_ready),
-    /// or terminates (finalized = file removed, aborted, aborted_restart), or
-    /// the timeout expires. Useful for shell scripts that want to drive the
-    /// detached flow without polling pair-list themselves.
-    ///
-    /// Exit codes:
-    ///   0 — reached target status (or finalized, if target was sas_ready)
-    ///   1 — terminated abnormally (aborted, aborted_restart, no such code)
-    ///   2 — timeout
-    #[command(hide = true)] // v0.9 deprecated
-    PairWatch {
-        code_phrase: String,
-        /// Target status to wait for. Default: sas_ready.
-        #[arg(long, default_value = "sas_ready")]
-        status: String,
-        /// Max seconds to wait.
-        #[arg(long, default_value_t = 300)]
-        timeout: u64,
-        /// Emit JSON on each status change (one per line) instead of just on exit.
-        #[arg(long)]
-        json: bool,
-    },
-    /// One-shot bootstrap. Inits identity (idempotent), opens pair-host or
-    /// pair-join, then registers wire as an MCP server. Single command from
-    /// nothing to paired and ready — no separate init/pair-host/setup steps.
-    /// Operator still must confirm SAS digits.
-    ///
-    /// Examples:
-    ///   wire pair paul                          # host a new pair on default relay
-    ///   wire pair willard --code 58-NMTY7A      # join paul's pair
-    ///
-    /// v0.10: hidden from --help. Federation pair flow is now
-    /// `wire dial <handle>@<relay>` + `wire accept-invite <URL>`.
-    /// `wire pair` stays callable for back-compat scripts; v1.0 removes.
-    #[command(hide = true)] // v0.10 deprecated — use `wire dial <h>@<relay>`
-    Pair {
-        /// Short handle for this agent (becomes did:wire:<handle>). Used by init
-        /// step if no identity exists; ignored if already initialized.
-        handle: String,
-        /// Code phrase from peer's pair-host output. Omit to be the host
-        /// (this command will print one for you to share).
-        #[arg(long)]
-        code: Option<String>,
-        /// Relay base URL. Defaults to the laulpogan public-good relay.
-        #[arg(long, default_value = "https://wireup.net")]
-        relay: String,
-        /// Skip SAS prompt. Test-only.
-        #[arg(long)]
-        yes: bool,
-        /// Pair-step timeout in seconds.
-        #[arg(long, default_value_t = 300)]
-        timeout: u64,
-        /// Skip the post-pair `setup --apply` step (don't register wire as
-        /// an MCP server in detected client configs).
-        #[arg(long)]
-        no_setup: bool,
-        /// Run via the daemon-orchestrated detached path (auto-starts daemon,
-        /// exits immediately, daemon does the handshake). Confirm via
-        /// `wire pair-confirm <code> <digits>` from any terminal. See
-        /// `pair-host --detach` for details.
-        #[arg(long)]
-        detach: bool,
-    },
-    /// Forget a half-finished pair-slot on the relay. Use this if `pair-host`
-    /// or `pair-join` crashed (process killed, network blip, OOM) before SAS
-    /// confirmation, leaving the relay-side slot stuck with "guest already
-    /// registered" or "host already registered" until the 5-minute TTL expires.
-    /// Either side can call. Idempotent.
-    #[command(hide = true)] // v0.9 deprecated
-    PairAbandon {
-        /// The code phrase from the original pair-host (e.g. `58-NMTY7A`).
-        code_phrase: String,
-        /// Relay base URL.
-        #[arg(long, default_value = "https://wireup.net")]
-        relay: String,
-    },
-    /// Accept a pending-inbound pair request (v0.5.14). Explicit alias for
-    /// the bilateral-completion path that `wire add <peer>@<relay>` also
-    /// drives — but doesn't require remembering the peer's relay domain
-    /// (the relay coords come from the stored pair_drop). Errors if no
-    /// pending-inbound record exists for that peer.
-    #[command(hide = true)] // v0.9 deprecated
-    PairAccept {
-        /// Bare peer handle (without `@<relay>`).
-        peer: String,
-        /// Emit JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Reject a pending pair request (v0.5.14). When someone runs `wire add
-    /// you@<your-relay>` against your handle, their signed pair_drop lands
-    /// in pending-inbound — visible via `wire pair-list`. Run `wire pair-reject
-    /// <peer>` to delete the record without pairing. The peer never receives
-    /// our slot_token; from their side the pair stays pending until they
-    /// time out.
-    #[command(hide = true)] // v0.9 deprecated
-    PairReject {
-        /// Bare peer handle (without `@<relay>`).
-        peer: String,
-        /// Emit JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Programmatic-shape list of pending-inbound pair requests (v0.5.14).
-    /// `--json` returns a flat array (matching the v0.5.13-and-earlier
-    /// `pair-list --json` shape but for inbound). Use this in scripts that
-    /// need to enumerate inbound pair requests without parsing the SPAKE2
-    /// table format from `wire pair-list`.
-    #[command(hide = true)] // v0.9 deprecated
-    PairListInbound {
-        /// Emit JSON.
-        #[arg(long)]
-        json: bool,
-    },
+    // RFC-005 Phase 3 (v0.15): 11 hidden-deprecated pair* + invite CLI verbs
+    // removed (PairHost / PairJoin / PairConfirm / PairList / PairCancel /
+    // PairWatch / Pair / PairAbandon / PairAccept / PairReject /
+    // PairListInbound). The canonical surface — `wire dial` (auto-pair on
+    // miss), `wire accept` / `wire reject` (consent over a pending-inbound),
+    // `wire pending` (enumerate inbound), `wire accept-invite` (URL paste) —
+    // is the only operator entry point now. See RFC-005 §Motivation: an
+    // operator (or LLM) picking from near-synonyms picked wrong; the cure is
+    // making the wrong choices unrepresentable.
     /// Manage isolated wire sessions on this machine (v0.5.16).
     ///
     /// Each session = its own DID + handle + relay slot + daemon + inbox/
@@ -896,30 +706,9 @@ pub enum Command {
         #[command(subcommand)]
         action: ProfileAction,
     },
-    /// Mint a one-paste invite URL. Anyone with this URL can pair to us in a
-    /// single step (no SAS digits, no code typing). Auto-inits + auto-allocates
-    /// a relay slot on first use. Default TTL 24h, single-use.
-    #[command(hide = true)] // v0.9 deprecated
-    Invite {
-        /// Override the relay URL for first-time auto-allocation.
-        #[arg(long, default_value = "https://wireup.net")]
-        relay: String,
-        /// Invite lifetime in seconds (default 86400 = 24h).
-        #[arg(long, default_value_t = 86_400)]
-        ttl: u64,
-        /// Number of distinct peers that can accept this invite before it's
-        /// consumed (default 1).
-        #[arg(long, default_value_t = 1)]
-        uses: u32,
-        /// Register the invite at the relay's short-URL endpoint and print
-        /// a `curl ... | sh` one-liner the peer can run on a fresh machine.
-        /// Installs wire if missing, then accepts the invite, then pairs.
-        #[arg(long)]
-        share: bool,
-        /// Emit JSON.
-        #[arg(long)]
-        json: bool,
-    },
+    // RFC-005 Phase 3 (v0.15): hidden-deprecated `wire invite` verb removed.
+    // Federation invite minting moves to the same canonical surface as the
+    // pair flow (see `wire dial <peer>@<relay>` / `wire accept-invite <url>`).
     /// v0.9: accept a pending-inbound pair request by character
     /// nickname or card handle. Replaces the verbose `wire pair-accept
     /// <peer>`.
@@ -1842,114 +1631,26 @@ pub fn run() -> Result<()> {
             session,
             json,
         } => cmd_daemon(interval, once, all_sessions, session, json),
-        Command::PairHost {
-            relay,
-            yes,
-            timeout,
-            detach,
-            json,
-        } => {
-            if detach {
-                cmd_pair_host_detach(&relay, json)
-            } else {
-                cmd_pair_host(&relay, yes, timeout)
-            }
-        }
-        Command::PairJoin {
-            code_phrase,
-            relay,
-            yes,
-            timeout,
-            detach,
-            json,
-        } => {
-            if detach {
-                cmd_pair_join_detach(&code_phrase, &relay, json)
-            } else {
-                cmd_pair_join(&code_phrase, &relay, yes, timeout)
-            }
-        }
-        Command::PairConfirm {
-            code_phrase,
-            digits,
-            json,
-        } => cmd_pair_confirm(&code_phrase, &digits, json),
-        Command::PairList {
-            json,
-            watch,
-            watch_interval,
-        } => cmd_pair_list(json, watch, watch_interval),
-        Command::PairCancel { code_phrase, json } => cmd_pair_cancel(&code_phrase, json),
-        Command::PairWatch {
-            code_phrase,
-            status,
-            timeout,
-            json,
-        } => cmd_pair_watch(&code_phrase, &status, timeout, json),
-        Command::Pair {
-            handle,
-            code,
-            relay,
-            yes,
-            timeout,
-            no_setup,
-            detach,
-        } => {
-            // P0.P (0.5.11): if the handle is in `nick@domain` form, route to
-            // the zero-paste megacommand path — `wire pair slancha-spark@
-            // wireup.net` does add + poll-for-ack + verify in one shot. The
-            // SAS / code-based pair flow stays available for handles without
-            // `@` (bootstrap pairing between two boxes that don't yet share a
-            // relay directory).
-            if handle.contains('@') && code.is_none() {
-                cmd_pair_megacommand(&handle, Some(&relay), timeout, false)
-            } else if detach {
-                cmd_pair_detach(&handle, code.as_deref(), &relay)
-            } else {
-                cmd_pair(&handle, code.as_deref(), &relay, yes, timeout, no_setup)
-            }
-        }
-        Command::PairAbandon { code_phrase, relay } => cmd_pair_abandon(&code_phrase, &relay),
-        Command::PairAccept { peer, json } => {
-            let j = json_default(json);
-            deprecation_warn("pair-accept", &format!("accept {peer}"), j);
-            cmd_pair_accept(&peer, j)
-        }
-        Command::PairReject { peer, json } => {
-            let j = json_default(json);
-            deprecation_warn("pair-reject", &format!("reject {peer}"), j);
-            cmd_pair_reject(&peer, j)
-        }
-        Command::PairListInbound { json } => {
-            let j = json_default(json);
-            deprecation_warn("pair-list-inbound", "pending", j);
-            cmd_pair_list_inbound(j)
-        }
+        // RFC-005 Phase 3 (v0.15): PairHost / PairJoin / PairConfirm /
+        // PairList / PairCancel / PairWatch / Pair / PairAbandon /
+        // PairAccept / PairReject / PairListInbound dispatch arms removed
+        // alongside the enum variants. The canonical surface routes through
+        // Dial / Accept / Reject / Pending below.
         Command::Session(cmd) => cmd_session(cmd),
         Command::Identity { cmd } => cmd_identity(cmd),
         Command::Mesh(cmd) => cmd_mesh(cmd),
         Command::Group(cmd) => cmd_group(cmd),
         Command::Enroll(cmd) => cmd_enroll(cmd),
-        Command::Invite {
-            relay,
-            ttl,
-            uses,
-            share,
-            json,
-        } => cmd_invite(&relay, ttl, uses, share, json),
+        // RFC-005 Phase 3 (v0.15): `wire invite` removed; mint via the
+        // canonical pair path.
         Command::Accept { target, json } => {
-            // v0.9.4: smart-dispatch retired. `wire accept` always means
-            // pair-accept by name. URL-shaped input gets a deprecation
-            // banner pointing at `wire accept-invite <URL>` and then
-            // (for back-compat with v0.9 scripts) routes to the invite
-            // accept path one last time. v1.0 will reject URLs here.
+            // RFC-005 Phase 3 (v0.15): the deprecation banner / shim path for
+            // URL-shaped input is gone — `wire accept` now ALWAYS means
+            // pair-accept by name. For URL invites use `wire accept-invite
+            // <url>` explicitly. The legacy URL-shape route was the last
+            // deprecation_warn callsite; helper retired in the same sweep.
             let j = json_default(json);
-            if target.starts_with("wire://pair?") {
-                deprecation_warn("accept-url", "accept-invite <url>", j);
-                cmd_accept(&target, j)
-            } else {
-                cmd_pair_accept(&target, j)
-            }
+            cmd_pair_accept(&target, j)
         }
         Command::AcceptInvite { url, json } => cmd_accept(&url, json_default(json)),
         Command::Whois {
@@ -13719,41 +13420,13 @@ fn known_local_names() -> Vec<String> {
     names
 }
 
-/// v0.9.2 deprecation banner with two ergonomic guards:
-/// 1. Suppress in JSON mode (the caller is expected to fold the
-///    deprecation note into its JSON output instead).
-/// 2. Cache once-per-shell-session via a marker env var; subsequent
-///    invocations in the same shell stay silent.
-///
-/// `verb` is the legacy verb name, `replacement` is the canonical one.
-fn deprecation_warn(verb: &str, replacement: &str, json_mode: bool) {
-    if json_mode {
-        return;
-    }
-    // Pull a marker from environment of THIS process. Persistent across
-    // multiple wire invocations only when the shell sets and exports
-    // WIRE_DEPRECATION_NAGGED — operators rarely do, so practically
-    // this nags once per `wire foo` invocation. The single-process
-    // dedup matters most for scripts that call multiple deprecated
-    // verbs in one wire run, which is currently impossible (one verb
-    // per process) but documented for future loop-style wire shells.
-    let key = format!("WIRE_DEPRECATION_NAGGED_{}", verb.replace('-', "_"));
-    if std::env::var(&key).is_ok() {
-        return;
-    }
-    // SAFETY: deprecation_warn is called from sync dispatcher code paths
-    // before any worker thread spawns; env::set_var in Rust 2024 is
-    // safe at that point. Pattern matches maybe_adopt_session_wire_home.
-    unsafe {
-        std::env::set_var(&key, "1");
-    }
-    eprintln!(
-        "wire {verb}: DEPRECATED in v0.9 — use `wire {replacement}`. \
-         Will be removed in v1.0 (target 2026-Q3). \
-         Suppress: set WIRE_DEPRECATION_NAGGED_{}=1.",
-        verb.replace('-', "_")
-    );
-}
+// RFC-005 Phase 3 (v0.15): the `deprecation_warn` helper was the v0.9.2
+// one-time banner for hidden-deprecated CLI verbs (PairHost / PairJoin /
+// PairConfirm / PairList / PairCancel / PairWatch / Pair / PairAbandon /
+// PairAccept / PairReject / PairListInbound / Invite / accept-url shim).
+// All call sites + the verbs themselves removed in v0.15; helper retired
+// with them. A removed verb now surfaces clap's standard "unknown
+// subcommand" — the operator-confusion fix RFC-005 §Motivation cites.
 
 // ---------- doctor (single-command diagnostic) ----------
 
