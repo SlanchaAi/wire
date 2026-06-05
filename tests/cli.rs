@@ -119,6 +119,24 @@ fn whoami_json_after_init_marks_initialized_true() {
 }
 
 #[test]
+fn whoami_json_surfaces_session_source() {
+    // RFC-008 §A: `wire whoami --json` reports WHICH signal won session/home
+    // resolution. The test harness pins `WIRE_HOME` explicitly (see `run`), so
+    // the winning source is the explicit-override path. This is the field an
+    // operator reads to diagnose a wrong/shared identity in one command.
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul", "--offline"]);
+    let out = run(&home, &["whoami", "--json"]);
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        parsed["session_source"],
+        serde_json::json!("env:WIRE_HOME"),
+        "harness sets WIRE_HOME, so session_source must report the explicit override: {parsed}"
+    );
+}
+
+#[test]
 fn init_creates_keypair_and_card() {
     let home = fresh_home();
     let out = run(&home, &["init", "paul", "--offline", "--json"]);

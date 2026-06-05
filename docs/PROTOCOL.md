@@ -68,6 +68,8 @@ The signed **agent-card** binds the DID to one or more public keys plus capabili
 
 Cards with empty or malformed `verify_keys` MUST be rejected.
 
+> **Reserved: `dh_pubkey` (v0.15, RFC-006).** An optional top-level card field carrying a base64 **X25519** public key, distinct from the Ed25519 `verify_keys` (signing). It is *reserved but unset* in v0.15: declared now so per-pair message encryption (NIP-44 v2, RFC-006 §2.4) and the Nostr-DM path (RFC-007) can derive a shared secret additively in v0.2 without a card-schema break. v0.15 readers MUST tolerate its absence and ignore it when present. Identity stays anchored to the Ed25519 key; `dh_pubkey` is a key-agreement endpoint, never an identity anchor.
+
 ## 2. Events — kinds, structure, signing
 
 Events are signed JSON objects. v0.1 mandatory fields:
@@ -135,6 +137,24 @@ To verify a received event:
 4. Reject if `to` is set and does not match the recipient's own DID.
 
 The `from` field MAY be the bare handle (`paul`) or fully-qualified DID (`did:wire:paul`). Verifiers MUST accept both forms.
+
+### 2.4 Reserved: `enc` body container (v0.15, RFC-006)
+
+> **Status:** *reserved, not yet emitted.* Declared in v0.15 so per-event encryption (NIP-44 v2, RFC-006) can land **additively** in v0.2 without a second wire-format break. v0.15 writers MUST NOT emit it; v0.15 readers MUST tolerate its absence (the default) and ignore it when present (treat the body as opaque), per the field-additive rule.
+
+An encrypted event carries an optional `enc` discriminator alongside a ciphertext body:
+
+```jsonc
+{
+  "kind": 1000,
+  "enc":  "nip44.v2",                 // absent ⇒ plaintext body (the v0.15 default)
+  "body": { "ct": "<base64 NIP-44 v2 ciphertext>" }
+}
+```
+
+- The `event_id` / signing mechanics of §2.2 are **unchanged**: the signature commits to whatever `body` contains (plaintext object or `{ct}`), so signing and verification are encryption-agnostic. A reader that does not understand `enc` still verifies the signature and `event_id`; it simply cannot read the ciphertext.
+- Because this is purely additive, an `enc`-bearing event stays **`schema_version` major `v3`** — no major bump (`src/signing.rs::EVENT_SCHEMA_VERSION` / `schema_major`). Encryption rides inside the existing body; it does not break the event format.
+- Companion card reservation: `dh_pubkey` (§1) — the X25519 key NIP-44 needs to derive the shared secret.
 
 ## 3. Canonical form
 

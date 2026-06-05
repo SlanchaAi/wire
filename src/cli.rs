@@ -3550,6 +3550,14 @@ fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()> {
             "config_dir".into(),
             json!(config::config_dir()?.to_string_lossy()),
         );
+        // RFC-008 §A: surface WHICH signal won session/home resolution, so an
+        // operator diagnosing a wrong/shared identity sees the cause in one
+        // command instead of a forensic deep-dive (cf. #210). Additive,
+        // read-only; absent only on pre-RFC-008 binaries.
+        payload.insert(
+            "session_source".into(),
+            json!(crate::session::session_source()),
+        );
         payload.insert("persona".into(), serde_json::to_value(&character)?);
         payload.insert("persona_override".into(), json!(has_override));
         // v0.14: surface the RFC-001 op claims (when enrolled) on the

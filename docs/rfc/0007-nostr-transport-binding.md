@@ -96,7 +96,7 @@ The published NIPs (`BACKLOG.md:17`):
 
 ## Open questions
 
-- **Q1 (blocking): curve.** Nostr is secp256k1/schnorr; wire is Ed25519. Dual-key, or push an Ed25519 NIP, or a key-derivation bridge? This determines whether public relays actually accept wire events. Owner: @laulpogan + @WILLARDKLEIN. Decision point: before any binding code.
+- **Q1 (blocking): curve. — RESOLVED 2026-06-05 → Option 1.** See the [curve-derivation spike](./0007-spike-curve-derivation.md). Survey verdict: **dual-key, secp256k1 marked transport-only, cross-signed by the Ed25519 identity key.** Option 2 (Ed25519 NIP) is NACK'd upstream (Nostr NIP PR #1522); Option 3 (HKDF-derive secp from Ed25519) has no standard equating the two keys and re-creates the cross-curve anti-pattern SLIP-0010 exists to prevent — its safe subset (single seed → SLIP-0010 → *distinct* key) collapses into Option 1. ONE-NAME invariant preserved: identity stays Ed25519, the Nostr key is a cross-signed transport endpoint via an additive `nostr_pubkey` card field. This unblocks D3.
 - **Q2: wireup.net topology.** Same host serving HTTP-slot + `wss://`, or a separate `relay.wireup.net` Nostr node bridged to the slot store? Owner: infra.
 - **Q3: default relay set.** Which public relays (if any) does wire default-publish to, vs opt-in only? Spam-filter risk argues opt-in. Owner: @laulpogan.
 - **Q4: npub UX.** How does a `did:wire` ↔ `npub` map surface to operators without confusing the one-name invariant ([[project_wire_one_name_invariant]])?
