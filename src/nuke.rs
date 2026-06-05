@@ -109,6 +109,19 @@ impl NukePlan {
     }
 }
 
+/// Decide whether to proceed. `force` bypasses all prompts; otherwise
+/// a non-TTY refuses, and a TTY proceeds only on an exact "nuke" line.
+/// `read_line` is injected so this is unit-testable.
+pub fn should_proceed(force: bool, is_tty: bool, read_line: impl FnOnce() -> String) -> bool {
+    if force {
+        return true;
+    }
+    if !is_tty {
+        return false;
+    }
+    read_line().trim() == "nuke"
+}
+
 /// What a nuke actually did (for --json + operator output).
 #[derive(Debug, Default, Serialize)]
 pub struct NukeReport {
@@ -151,6 +164,22 @@ mod tests {
             let plan = NukePlan::compute(true).unwrap();
             assert!(plan.purge_binary);
         });
+    }
+
+    #[test]
+    fn confirm_logic() {
+        // --force always proceeds, no input read.
+        assert!(should_proceed(
+            /*force*/ true,
+            /*is_tty*/ false,
+            || unreachable!()
+        ));
+        // non-TTY without force → refuse.
+        assert!(!should_proceed(false, false, String::new));
+        // TTY: proceed iff the typed line is exactly "nuke".
+        assert!(should_proceed(false, true, || "nuke".to_string()));
+        assert!(!should_proceed(false, true, || "no".to_string()));
+        assert!(!should_proceed(false, true, || "NUKE".to_string()));
     }
 
     #[test]
