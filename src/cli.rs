@@ -6796,10 +6796,12 @@ fn cmd_pin(card_file: &str, as_json: bool) -> Result<()> {
 
 // ---------- pair-host / pair-join (the magic-wormhole flow) ----------
 
+#[allow(dead_code)] // RFC-005 Phase 3: orphaned after CLI verb removal; impl preserved for follow-up sweep
 fn cmd_pair_host(relay_url: &str, auto_yes: bool, timeout_secs: u64) -> Result<()> {
     pair_orchestrate(relay_url, None, "host", auto_yes, timeout_secs)
 }
 
+#[allow(dead_code)] // RFC-005 Phase 3: orphaned after CLI verb removal; impl preserved for follow-up sweep
 fn cmd_pair_join(
     code_phrase: &str,
     relay_url: &str,
@@ -6914,6 +6916,7 @@ fn pair_orchestrate(
 
 // ---------- pair — single-shot init + pair-* + setup ----------
 
+#[allow(dead_code)] // RFC-005 Phase 3: orphaned after CLI verb removal; impl preserved for follow-up sweep
 fn cmd_pair(
     handle: &str,
     code: Option<&str>,
@@ -6977,6 +6980,7 @@ fn cmd_pair(
 /// `wire pair <handle> [--code <phrase>] --detach` — wraps init + detach
 /// pair-host/-join into a single command. The non-detached variant lives in
 /// `cmd_pair`; this one short-circuits to the daemon-orchestrated path.
+#[allow(dead_code)] // RFC-005 Phase 3: orphaned after CLI verb removal; impl preserved for follow-up sweep
 fn cmd_pair_detach(handle: &str, code: Option<&str>, relay: &str) -> Result<()> {
     let init_result = crate::pair_session::init_self_idempotent(handle, None, None)?;
     let did = init_result
@@ -7000,6 +7004,7 @@ fn cmd_pair_detach(handle: &str, code: Option<&str>, relay: &str) -> Result<()> 
     }
 }
 
+#[allow(dead_code)] // RFC-005 Phase 3: orphaned after CLI verb removal; impl preserved for follow-up sweep
 fn cmd_pair_host_detach(relay_url: &str, as_json: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
@@ -7061,6 +7066,7 @@ fn cmd_pair_host_detach(relay_url: &str, as_json: bool) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)] // RFC-005 Phase 3: orphaned after CLI verb removal; impl preserved for follow-up sweep
 fn cmd_pair_join_detach(code_phrase: &str, relay_url: &str, as_json: bool) -> Result<()> {
     if !config::is_initialized()? {
         bail!("not initialized — run `wire init <handle>` first");
@@ -7120,6 +7126,7 @@ fn cmd_pair_join_detach(code_phrase: &str, relay_url: &str, as_json: bool) -> Re
     Ok(())
 }
 
+#[allow(dead_code)] // RFC-005 Phase 3: orphaned after CLI verb removal; impl preserved for follow-up sweep
 fn cmd_pair_confirm(code_phrase: &str, typed_digits: &str, as_json: bool) -> Result<()> {
     let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
     let typed: String = typed_digits
@@ -7187,6 +7194,7 @@ fn cmd_pair_confirm(code_phrase: &str, typed_digits: &str, as_json: bool) -> Res
     Ok(())
 }
 
+#[allow(dead_code)] // RFC-005 Phase 3: orphaned after CLI verb removal; impl preserved for follow-up sweep
 fn cmd_pair_list(as_json: bool, watch: bool, watch_interval_secs: u64) -> Result<()> {
     if watch {
         return cmd_pair_list_watch(watch_interval_secs);
@@ -7261,6 +7269,7 @@ fn cmd_pair_list(as_json: bool, watch: bool, watch_interval_secs: u64) -> Result
 ///     ...
 /// done
 /// ```
+#[allow(dead_code)] // RFC-005 Phase 3: orphaned after CLI verb removal; impl preserved for follow-up sweep
 fn cmd_pair_list_watch(interval_secs: u64) -> Result<()> {
     use std::collections::HashMap;
     use std::io::Write;
@@ -7320,6 +7329,7 @@ fn cmd_pair_list_watch(interval_secs: u64) -> Result<()> {
 /// Block until a pending pair reaches `target_status` or terminates. Process
 /// exit code carries the outcome (0 success, 1 terminated abnormally, 2
 /// timeout) so shell scripts can branch directly.
+#[allow(dead_code)] // RFC-005 Phase 3: orphaned after CLI verb removal; impl preserved for follow-up sweep
 fn cmd_pair_watch(
     code_phrase: &str,
     target_status: &str,
@@ -7398,6 +7408,7 @@ fn cmd_pair_watch(
     }
 }
 
+#[allow(dead_code)] // RFC-005 Phase 3: orphaned after CLI verb removal; impl preserved for follow-up sweep
 fn cmd_pair_cancel(code_phrase: &str, as_json: bool) -> Result<()> {
     let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
     let p = crate::pending_pair::read_pending(&code)?
@@ -7421,6 +7432,7 @@ fn cmd_pair_cancel(code_phrase: &str, as_json: bool) -> Result<()> {
 
 // ---------- pair-abandon — release stuck pair-slot ----------
 
+#[allow(dead_code)] // RFC-005 Phase 3: orphaned after CLI verb removal; impl preserved for follow-up sweep
 fn cmd_pair_abandon(code_phrase: &str, relay_url: &str) -> Result<()> {
     // Accept either the raw phrase (e.g. "53-CKWIA5") or whatever the user
     // typed — normalize via the existing parser.
@@ -7435,6 +7447,7 @@ fn cmd_pair_abandon(code_phrase: &str, relay_url: &str) -> Result<()> {
 
 // ---------- invite / accept — one-paste pair (v0.4.0) ----------
 
+#[allow(dead_code)] // RFC-005 Phase 3: orphaned after CLI verb removal; impl preserved for follow-up sweep
 fn cmd_invite(relay: &str, ttl: u64, uses: u32, share: bool, as_json: bool) -> Result<()> {
     let url = crate::pair_invite::mint_invite(Some(ttl), uses, Some(relay))?;
 
@@ -15141,6 +15154,7 @@ fn assert_relay_url_clean_for_publish(url: &str) -> Result<()> {
 ///
 /// On timeout: hard-errors with the specific stuck step so the operator
 /// knows which side to chase. No silent partial success.
+#[allow(dead_code)] // RFC-005 Phase 3: orphaned after CLI verb removal; impl preserved for follow-up sweep
 fn cmd_pair_megacommand(
     handle_arg: &str,
     relay_override: Option<&str>,
