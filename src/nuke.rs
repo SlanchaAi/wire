@@ -56,6 +56,69 @@ impl NukePlan {
             purge_binary: purge,
         })
     }
+
+    /// Perform the teardown. Best-effort: a failure on one item is
+    /// recorded in `warnings` and the rest proceed (a nuke that
+    /// half-aborts leaves a confusing machine — the whole point is to
+    /// finish the job; cf. rustup #1072).
+    pub fn execute(&self) -> Result<NukeReport> {
+        let mut r = NukeReport::default();
+
+        // 1. Service units (cross-platform via existing impl).
+        for kind in [
+            crate::service::ServiceKind::Daemon,
+            crate::service::ServiceKind::LocalRelay,
+        ] {
+            match crate::service::uninstall_kind(kind) {
+                Ok(rep) => r.removed_units.push(format!("{kind:?}: {}", rep.platform)),
+                Err(e) => r.warnings.push(format!("uninstall {kind:?}: {e:#}")),
+            }
+        }
+
+        // 2. De-register the wire MCP entry from each host file.
+        //    For each file in the plan, try every adapter's remove_fn
+        //    (each is a no-op / Ok(false) on files it doesn't own).
+        //    First adapter that reports Ok(true) wins; the rest skip.
+        'files: for path in &self.mcp_files {
+            for adapter in crate::adapters::harness::HARNESS_ADAPTERS {
+                match (adapter.remove_fn)(path, "wire") {
+                    Ok(true) => {
+                        r.removed_mcp_entries.push(path.clone());
+                        continue 'files;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        r.warnings
+                            .push(format!("mcp de-register {}: {e:#}", path.display()));
+                        continue 'files;
+                    }
+                }
+            }
+        }
+
+        // 3. Delete dirs.
+        for p in &self.paths {
+            match std::fs::remove_dir_all(p) {
+                Ok(()) => r.removed_paths.push(p.clone()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => r.warnings.push(format!("rm {}: {e:#}", p.display())),
+            }
+        }
+
+        Ok(r)
+    }
+}
+
+/// What a nuke actually did (for --json + operator output).
+#[derive(Debug, Default, Serialize)]
+pub struct NukeReport {
+    pub removed_paths: Vec<PathBuf>,
+    pub removed_mcp_entries: Vec<PathBuf>,
+    pub removed_units: Vec<String>,
+    pub killed_pids: Vec<u32>,
+    pub binary_removed: bool,
+    /// Non-fatal warnings (e.g. a unit that wasn't installed).
+    pub warnings: Vec<String>,
 }
 
 #[cfg(test)]
@@ -87,6 +150,31 @@ mod tests {
         crate::config::test_support::with_temp_home(|| {
             let plan = NukePlan::compute(true).unwrap();
             assert!(plan.purge_binary);
+        });
+    }
+
+    #[test]
+    fn execute_removes_dirs_and_mcp_entry() {
+        crate::config::test_support::with_temp_home(|| {
+            crate::config::ensure_dirs().unwrap();
+            let state = crate::config::state_dir().unwrap();
+            assert!(state.exists());
+            // A fake host MCP file under the temp home with a wire entry.
+            let mcp =
+                std::path::PathBuf::from(std::env::var("WIRE_HOME").unwrap()).join("mcp.json");
+            std::fs::write(&mcp, r#"{"mcpServers":{"wire":{"command":"wire"}}}"#).unwrap();
+            let plan = NukePlan {
+                paths: vec![state.clone()],
+                mcp_files: vec![mcp.clone()],
+                purge_binary: false,
+            };
+            let report = plan.execute().unwrap();
+            assert!(!state.exists(), "state dir deleted");
+            let v: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&mcp).unwrap()).unwrap();
+            assert!(v["mcpServers"].get("wire").is_none(), "wire de-registered");
+            assert!(report.removed_paths.contains(&state));
+            assert!(report.removed_mcp_entries.contains(&mcp));
         });
     }
 }
