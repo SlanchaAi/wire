@@ -279,6 +279,16 @@ pub struct IdentityClaims {
     pub org_memberships: Vec<OrgMembership>,
     /// Opaque routing tag — NEVER trust-bearing. RFC-001 §6.
     pub project: Option<String>,
+    /// RFC-006 §A v0.15 schema reservation — optional X25519 public key
+    /// for per-event encryption (NIP-44 v2) and Nostr-DM interop
+    /// (RFC-007). MUST be `None` in v0.15 cards; reserved so v0.2+
+    /// writers can populate it field-additively per RFC-001
+    /// §field-additive without a card-schema break. Both the
+    /// vodozemac-from-pairing-secret ratchet path (`BACKLOG.md:70`)
+    /// and the X25519-on-card NIP-44 path compose with this
+    /// reservation, so the slot is allocated regardless of which v0.2
+    /// channel route lands per RFC-006 §Design Q2.
+    pub dh_pubkey: Option<String>,
 }
 
 /// Layer identity claims onto an existing (unsigned) card. The returned
@@ -335,6 +345,22 @@ pub fn with_identity_claims(
     if let Some(project) = &claims.project {
         out.insert("project".into(), Value::String(project.clone()));
     }
+
+    // RFC-006 §A v0.15 schema reservation — `dh_pubkey` is NOT written
+    // to the card JSON in v0.15 even if a caller mistakenly populates
+    // the struct field. The slot is reserved for v0.2+ writers (NIP-44
+    // X25519 path or vodozemac ratchet path per RFC-006 §Design Q2);
+    // v0.15 readers MUST NOT consume it. Once v0.2 implements the
+    // channel route, this branch flips to `if let Some(dh) =
+    // &claims.dh_pubkey { out.insert("dh_pubkey", ...); }` — pure
+    // field-additive, no schema_version bump (RFC-006 path-A).
+    // Asserting absence here (`debug_assert!`) protects against an
+    // accidental v0.15 leak that would trick a v0.2-ready reader into
+    // treating a v0.15 card as encryption-capable.
+    debug_assert!(
+        claims.dh_pubkey.is_none(),
+        "RFC-006 §A: dh_pubkey MUST be None in v0.15 cards; populated only in v0.2+",
+    );
 
     // v0.14.x retro-fix: when ANY RFC-001 op claim lands on the card,
     // bump `schema_version` to at least `CARD_SCHEMA_VERSION` (currently
@@ -927,5 +953,52 @@ mod tests {
         assert_eq!(max_schema_version("garbage", "v3.2"), "v3.2");
         assert_eq!(max_schema_version("v3.2", "garbage"), "v3.2");
         assert_eq!(max_schema_version("garbage1", "garbage2"), "garbage1");
+    }
+
+    /// RFC-006 §A v0.15 schema reservation — `IdentityClaims::default()`
+    /// MUST have `dh_pubkey = None`. The slot exists on the struct so
+    /// v0.2+ writers can populate it field-additively, but v0.15 cards
+    /// MUST NOT carry it. Closes the regression where a future commit
+    /// accidentally flips the default to a stub value, leaking the
+    /// reservation into v0.15 outputs.
+    #[test]
+    fn identity_claims_default_dh_pubkey_is_none_v015_reservation() {
+        let claims = IdentityClaims::default();
+        assert_eq!(
+            claims.dh_pubkey, None,
+            "RFC-006 §A: dh_pubkey MUST default to None in v0.15"
+        );
+    }
+
+    /// RFC-006 §A — `with_identity_claims` MUST NOT write `dh_pubkey`
+    /// to the card JSON in v0.15 even if a caller populates the struct
+    /// field. The debug_assert in `with_identity_claims` catches that
+    /// path in debug builds; this test pins the absence in the produced
+    /// JSON for release builds (debug_assert compiles to no-op).
+    #[test]
+    fn with_identity_claims_omits_dh_pubkey_from_card_json_v015() {
+        let card = json!({
+            "schema_version": "v3.1",
+            "did": "did:wire:alice-deadbeef",
+            "verify_keys": {"ed25519:alice:deadbeef": {"key": "AAAA", "alg": "ed25519", "active": true}},
+        });
+        // No claims set → dh_pubkey absent (trivially).
+        let bare = with_identity_claims(&card, &IdentityClaims::default()).unwrap();
+        assert!(
+            bare.get("dh_pubkey").is_none(),
+            "v0.15 card JSON MUST NOT carry dh_pubkey (default claims)"
+        );
+        // With other op claims set → dh_pubkey still absent (reservation invariant).
+        let claims = IdentityClaims {
+            op_did: Some("did:wire:op:alice-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            op_pubkey: Some("BBBB".into()),
+            op_cert: Some("CCCC".into()),
+            ..IdentityClaims::default()
+        };
+        let with = with_identity_claims(&card, &claims).unwrap();
+        assert!(
+            with.get("dh_pubkey").is_none(),
+            "v0.15 card JSON MUST NOT carry dh_pubkey (with op claims)"
+        );
     }
 }

@@ -60,6 +60,23 @@ The signed **agent-card** binds the DID to one or more public keys plus capabili
 >
 > Cert primitives live in `src/identity.rs` (`sign_did_cert` / `verify_op_cert` / `verify_member_cert`). Both verifiers take the inline pubkey directly — the design is **fully-offline self-certifying**: no resolver lookup on the pairing hot path. The 16-byte (32-hex) fingerprint for operator and organisation DIDs is computed by `agent_card::long_fingerprint`. See the [did:wire method spec](did-methods/did-wire-method.md) for the full DID shape catalogue.
 
+> **v0.15 / RFC-006 reservation — `dh_pubkey` (optional, unset in v0.15):**
+>
+> RFC-006 reserves an optional `dh_pubkey` field on the agent-card carrying the operator's X25519 public key for per-event encryption (NIP-44 v2 path) and for the Nostr-DM interop path described in RFC-007.
+>
+> ```jsonc
+> {
+>   "schema_version": "v3.2",
+>   "did": "did:wire:paul-b2e5aae7",
+>   "dh_pubkey": "<base64 X25519 pubkey>",  // RFC-006 — absent in v0.15; populated in v0.2+
+>   ...
+> }
+> ```
+>
+> v0.15 cards MUST NOT populate `dh_pubkey`; v0.15 readers MUST NOT consume it. The field is **reserved** so v0.2+ writers can add it field-additively (per RFC-001 §field-additive) without a card-schema break. v3.2-and-earlier consumers ignore unknown fields by construction; this reservation documents the slot so no future field name collides.
+>
+> The DH key is intentionally **separate** from the Ed25519 signing key — NIP-44 needs an X25519 shared secret which Ed25519 cannot directly provide. RFC-006 §Design Q2 explicitly leaves open whether the channel ratchet (vodozemac-from-pairing-secret, `BACKLOG.md:70`) or X25519-on-card is the v0.2 default; both compose with this reservation, so the field is allocated regardless of which path lands.
+
 **v0.13 DID format note:** since v0.5.7 the per-session DID is **pubkey-suffixed** (`did:wire:<handle>-<8hex>`) to prevent handle collisions across distinct keypairs. v0.1 cards using the bare `did:wire:<handle>` form remain verifiable for backward compatibility but new claims always carry the suffix.
 
 **Key id format:** `<handle>:<fingerprint>` where fingerprint = first 8 hex chars of SHA-256(public_key_bytes). Cards on disk prefix this with `ed25519:` to allow algorithm migration in v0.2+.
@@ -135,6 +152,26 @@ To verify a received event:
 4. Reject if `to` is set and does not match the recipient's own DID.
 
 The `from` field MAY be the bare handle (`paul`) or fully-qualified DID (`did:wire:paul`). Verifiers MUST accept both forms.
+
+### 2.4 v0.15 / RFC-006 reservation — `enc` body discriminator (optional, unset in v0.15)
+
+RFC-006 reserves an optional `enc` discriminator inside the event body for per-event encryption (NIP-44 v2 path). The body becomes an object carrying both the encryption tag and the ciphertext:
+
+```jsonc
+{
+  "kind": 1000,
+  "body": {
+    "enc": "nip44.v2",                 // RFC-006 — absent in v0.15
+    "ct": "<base64 NIP-44 ciphertext>"
+  }
+}
+```
+
+v0.15 events MUST NOT populate `enc`; v0.15 readers MUST NOT consume it. The reservation is **field-additive** per RFC-001 §field-additive — `event_id` and signature mechanics are unchanged (they commit to whatever `body` is). Unknown-field-tolerant readers ignore the `enc` discriminator they don't understand and simply can't decode the ciphertext.
+
+The reservation makes NIP-44 (and any later encryption scheme) land **without** a `schema_major` bump — the recommendation in RFC-006 §Design path-A. If a future encryption scheme requires reshaping canonicalization (path-B per RFC-006), `schema_major` bumps to `v4` independently of this reservation; the slot is harmless to declare ahead of time.
+
+`enc` MUST be paired with the body-discriminator carrier-rule (RFC-001 §carrier rule, [[project_wire_event_kind_carrier_rule]]) — ride existing kinds, discriminate in the body, never invent kinds.
 
 ## 3. Canonical form
 
