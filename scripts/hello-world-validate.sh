@@ -126,6 +126,12 @@ teardown() {
   [ -n "${ROOT:-}" ] && rm -rf "$ROOT" 2>/dev/null || true
 }
 
+# Clean up the in-flight run's daemons + relay even if we're killed (timeout,
+# Ctrl-C). Without this, an interrupted run leaks setsid-detached daemons that
+# survive (by design) and busy-spin against their now-deleted temp HOME,
+# starving later runs — the contention that made earlier stress runs flaky.
+trap teardown EXIT INT TERM
+
 for n in $(seq 1 "$ITERS"); do
   if run_once "$n"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); FAIL_ITERS+=("$n"); fi
 done
