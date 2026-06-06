@@ -79,7 +79,7 @@ case "$INVITE_URL" in
 esac
 
 echo "→ willard accepts URL (one paste)"
-ACCEPT_JSON=$(WIRE_HOME="$WILLARD_HOME" "$WIRE" accept "$INVITE_URL" --json)
+ACCEPT_JSON=$(WIRE_HOME="$WILLARD_HOME" "$WIRE" accept-invite "$INVITE_URL" --json)
 PAIRED_WITH=$(echo "$ACCEPT_JSON" | jq -r '.paired_with')
 case "$PAIRED_WITH" in
     "did:wire:$PAUL_H-"*) ;;
