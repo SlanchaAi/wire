@@ -101,7 +101,7 @@ inbound pair request from sapphire-meadow@wireup.net (1m ago) — "hello"
 $ wire accept sapphire-meadow                  # bilateral consent; tier → VERIFIED
 ```
 
-Bilateral pairing is the default — `wire dial` queues the request in the peer's `wire pending`; the peer's `wire accept` is the consent gate. Trust auto-pins at `VERIFIED` after the bilateral lane completes. For the legacy SAS-typed-back flow on a different machine (`wire pair-host` / `wire pair-join`, v0.3+ hidden from `--help`), see `wire pair-host --help`.
+Bilateral pairing is the default — `wire dial` queues the request in the peer's `wire pending`; the peer's `wire accept` is the consent gate. Trust auto-pins at `VERIFIED` after the bilateral lane completes. (The legacy SPAKE2 + SAS code-phrase flow was removed in the RFC-005 follow-on; `wire dial <handle>@<relay>` is the sole pairing path.)
 
 ## 7. Optional — long-running daemon
 
@@ -154,16 +154,16 @@ For AI agents (Claude Desktop, Claude Code, Cursor, Cline, Zed, anything MCP-awa
 
 After restart the agent has:
 
-**Tools** (10):
+**Tools**:
 - Always agent-safe: `wire_whoami`, `wire_peers`, `wire_send`, `wire_tail`, `wire_verify`
 - Identity: `wire_init` (idempotent — same handle no-op, different handle errors)
-- Pairing (SAS-typed-back is the gate): `wire_pair_initiate`, `wire_pair_join`, `wire_pair_check`, `wire_pair_confirm`
+- Pairing: `wire_dial` (initiate by handle), `wire_pending` / `wire_accept` / `wire_reject` (inbound bilateral gate), `wire_invite_mint` / `wire_invite_accept` (single-paste URL)
 
 **Resources** (`application/x-ndjson`):
 - `wire://inbox/all` — recent verified events across all pinned peers
 - `wire://inbox/<peer>` — recent verified events from a specific peer
 
-The pair flow is now fully agent-callable. The user types the 6 SAS digits back into chat to satisfy `wire_pair_confirm`; mismatch aborts permanently. See [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) (T10/T14).
+The pair flow is agent-callable, but the human gate is the bilateral accept: a dial only *sends* a request; the peer's operator must `wire_accept` (surfaced via `wire_pending`) before trust flows. See [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) (T10/T14).
 
 ## 10. OS-level event notifications (`wire notify`)
 

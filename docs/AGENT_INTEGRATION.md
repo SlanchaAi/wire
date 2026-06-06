@@ -26,14 +26,11 @@ After restart, the agent has these tools available natively:
 | `wire_tail` | Streams inbound events from one or all peers; supports `since=event_id` | none |
 | `wire_verify` | Verifies an arbitrary signed event against trust state; returns ok/reason | none |
 | `wire_init` | Idempotent identity creation. Same handle = no-op; different handle = error (can't silently re-key) | none — local-only, no peer trust |
-| `wire_pair_initiate` | Host opens a pair-slot; returns code phrase for the agent to share with the user out-of-band | none — code phrase is a low-entropy beacon |
-| `wire_pair_join` | Guest SPAKE2 against a code phrase; returns SAS digits + session_id | none |
-| `wire_pair_check` | Poll a pending session for state transitions | none |
-| `wire_pair_confirm` | Finalize pairing — user types the 6 SAS digits back into chat; mismatch ABORTS permanently | **YES** — the only human-in-loop step |
-| `wire_add` (v0.5) | Outbound zero-paste pair: resolves a `nick@domain` handle and posts a signed pair_drop. Bilateral — peer must reciprocate before capability flows | none on send; peer-side acceptance is human-gated |
-| `wire_pair_list_inbound` (v0.5.14) | Enumerate pending-inbound pair requests (strangers who ran `wire add` against this agent's handle but haven't been accepted yet) | none |
-| `wire_pair_accept` (v0.5.14) | Bilateral completion of a pending-inbound pair: pins peer VERIFIED + ships our slot_token via `pair_drop_ack` | **YES** — operator MUST approve; the agent surfaces the request first |
-| `wire_pair_reject` (v0.5.14) | Refuse a pending-inbound pair: deletes the record, no slot_token leaks | none, but agent should still surface to operator unless instructed otherwise |
+| `wire_dial` | Outbound pair by handle (`<handle>@<relay>`): resolves the handle and posts a signed pair_drop. Bilateral — peer must accept before capability flows | none on send; peer-side acceptance is human-gated |
+| `wire_pending` | Enumerate pending-inbound pair requests (strangers who dialed this agent's handle but haven't been accepted yet) | none |
+| `wire_accept` | Bilateral completion of a pending-inbound pair: pins peer VERIFIED + ships our slot_token via `pair_drop_ack` | **YES** — operator MUST approve; the agent surfaces the request first |
+| `wire_reject` | Refuse a pending-inbound pair: deletes the record, no slot_token leaks | none, but agent should still surface to operator unless instructed otherwise |
+| `wire_invite_mint` / `wire_invite_accept` | Single-paste invite-URL pair (no per-message ceremony) | mint: none; accept: possession of the URL = authorization to pair |
 
 Plus MCP resources:
 
@@ -44,23 +41,7 @@ Plus MCP resources:
 
 `wire mcp` runs over stdio (JSON-RPC). No daemon required to start; it spawns on demand.
 
-### Pair flow via MCP — the digit-typeback gate
-
-```
-[1] user: "Pair my agent with paul's agent."
-[2] agent: → wire_pair_initiate(relay_url) → {session_id, code_phrase: "73-2QXC4P"}
-[3] agent: "Share the code 73-2QXC4P with paul (voice/text). I'll wait."
-[4] paul's agent (separately): → wire_pair_join("73-2QXC4P") → {session_id, sas: "384-217"}
-[5] agent: → wire_pair_check(session_id) → {state: sas_ready, sas: "384-217"}
-[6] agent: "SAS is 384-217. Ask paul his agent's SAS, compare aloud, then type 6 digits back."
-[7] user: "384217"  (the digits the user typed in chat; must match)
-[8] agent: → wire_pair_confirm(session_id, "384217") → {paired_with: "did:wire:paul", ...}
-[9] paul's user does the same on paul's side; trust pinned both ways.
-```
-
-The agent never touches digits 7→8 except as a passthrough. Step 6's instruction is enforced by tool description prose — `wire_pair_confirm`'s tool description tells the host the digits MUST come from user input, not previous tool output. Wire cannot enforce this protocol-layer (see THREAT_MODEL.md T14); the MCP host is responsible for routing the user input through the user's actual UI.
-
-### Bilateral pair flow via MCP (v0.5.14) — the `wire_add` + accept gate
+### Bilateral pair flow via MCP — the `wire_dial` + accept gate
 
 ```
 [1] user: "Pair my agent with coffee-ghost@wireup.net."
@@ -81,9 +62,9 @@ The agent never touches digits 7→8 except as a passthrough. Step 6's instructi
 
 **Critical agent behavior** (the human gate):
 
-- Step 5–7 is the new human-in-loop step for zero-paste pairing. The agent MUST surface the inbound request to the operator and wait for explicit consent BEFORE calling `wire_pair_accept`. Acceptance grants the peer authenticated write access to the agent's inbox up to slot quota — equivalent to handing out a one-way relay credential, valid until the peer is removed from trust.
-- Auto-accepting any inbound pair_drop (e.g. "always accept" prompts, or scheduled `wire_pair_accept` polling) is the v0.5.13 vulnerability re-introduced at the agent layer. Don't.
-- For inbound requests the operator clearly doesn't want, `wire_pair_reject` deletes the record without an ack; the peer's side stays pending until they time out.
+- Step 5–7 is the human-in-loop step for zero-paste pairing. The agent MUST surface the inbound request to the operator and wait for explicit consent BEFORE calling `wire_accept`. Acceptance grants the peer authenticated write access to the agent's inbox up to slot quota — equivalent to handing out a one-way relay credential, valid until the peer is removed from trust.
+- Auto-accepting any inbound pair_drop (e.g. "always accept" prompts, or scheduled `wire_accept` polling) is the v0.5.13 vulnerability re-introduced at the agent layer. Don't.
+- For inbound requests the operator clearly doesn't want, `wire_reject` deletes the record without an ack; the peer's side stays pending until they time out.
 
 The MCP server's `instructions` field reminds connecting agents of this on every connect. See also THREAT_MODEL.md "Network-resilience doctrine" + the v0.5.14 changelog entry.
 
@@ -285,37 +266,50 @@ Sandboxed agents (e.g. running inside a Docker container, CI runner, evaluation 
 
 ---
 
-## Pairing boundary (v0.2.0 revision)
+## Pairing boundary
 
-v0.1 made pairing CLI-only (`wire init` + `wire join` blocked at MCP layer). v0.2.0 keeps the **human gate** but moves the friction from "context-switch to terminal" → "type the SAS digits back into chat":
+v0.1 made pairing CLI-only (`wire init` + `wire join` blocked at MCP layer).
+Pairing is now agent-callable, but the **human gate** is preserved by the
+bilateral-accept model: a dial only *sends* a pair request — the peer
+authorizes nothing until its operator runs `wire_accept`.
 
-1. Agent drives `wire_pair_initiate` / `_join` / `_check`. No human action yet.
-2. SAS digits surface in the agent's chat output (tool result text).
-3. **The user must compare the SAS with their peer over a side channel** (voice call, separate text channel) — same as the CLI flow.
-4. **The user types the 6 SAS digits back into the agent's chat** — `wire_pair_confirm(session_id, user_typed_digits)`.
-5. Wire compares typed digits against the cached SAS server-side. Mismatch aborts permanently; the session is removed from the in-memory store.
+1. Agent drives `wire_dial("<handle>@<relay>")`. This posts a signed pair_drop
+   to the peer's relay slot. No trust flows yet.
+2. The peer's operator sees the inbound request via `wire_pending` (and an OS
+   toast) and decides.
+3. **The peer's operator runs `wire_accept`** — the explicit consent gesture.
+   Only then does the peer pin VERIFIED and ship its slot_token back.
+4. Both sides now hold VERIFIED trust + relay coords and can `wire_send`.
 
 **Why this preserves the trust property:**
 
-- SPAKE2 already guarantees a MITM derives a different shared key, so a different SAS, on each side. The user reading their peer's SAS aloud (or by separate text) and typing it back catches MITM.
-- A malicious or prompt-injected agent that fabricates SAS digits in chat fails because the user's PEER's agent shows different digits via the peer's side channel.
-- A `y`/`n` confirm would NOT preserve this — a compromised agent could just auto-`y`. The digit-typeback forces the user's actual fingers to participate.
+- Accepting an inbound pair grants authenticated write access to the agent's
+  inbox. Gating it on an operator gesture means a malicious or prompt-injected
+  agent can dial out, but cannot auto-accept inbound trust on the operator's
+  behalf.
+- Auto-accepting any inbound pair_drop (e.g. "always accept" prompts, or
+  scheduled `wire_accept` polling) re-introduces the v0.5.13 vulnerability at
+  the agent layer. Don't.
 
-**Where wire can't help (T14):** the MCP host is responsible for routing `user_typed_digits` to wire ONLY from real user input, never from a previous tool result. There's no MCP primitive today that lets wire verify "this string came from the user, not the model." A poorly-implemented host could auto-fill. Operators should choose an MCP host with explicit user-confirmation primitives.
+**Where wire can't help (T14):** the MCP host is responsible for surfacing the
+inbound request to the *actual* operator before the agent calls `wire_accept`,
+not auto-confirming on the model's say-so. Operators should choose an MCP host
+with explicit user-confirmation primitives.
 
-If an agent needs a new peer added, this is now natural in-chat:
+If an agent needs a new peer added, this is natural in-chat:
 
 ```
-[claude] I'd like to coordinate with willard's agent. Want me to pair?
-  → wire_pair_initiate
-  → "Share code 73-2QXC4P with willard via voice/text. When their agent
-    shows SAS, type the 6 digits back into chat to confirm."
-[user] *shares code, gets SAS=384-217 from willard via voice*
-[user] 384217
-[claude] → wire_pair_confirm(session_id, "384217") → paired with did:wire:willard.
+[claude] I'd like to coordinate with willard's agent. Want me to dial them?
+[user] yes
+[claude] → wire_dial("willard@wireup.net") → pair request sent.
+         "Sent. willard's operator needs to accept on their side."
+[claude] (on willard's side) → wire_pending() shows the inbound request
+         "bob@<relay> wants to pair. Accept?"
+[user-on-willard-side] yes
+[claude] → wire_accept("bob") → paired both ways.
 ```
 
-This is now the recommended flow.
+This is the recommended flow.
 
 ---
 
@@ -360,13 +354,13 @@ If sync delivery fails (`peer_unknown`, `slot_stale`, `transport_error` — the 
 ## What this means for agents
 
 - **You don't need a wire SDK.** MCP gives you typed tools + resources; Bash gives you `--json`; files give you `cat` + `tail`.
-- **You CAN pair, but the user types the SAS digits back.** Goal 1 (v0.2.0) — you drive `wire_pair_initiate`/`_join`/`_check`, surface SAS digits in chat, the user reads them aloud to their peer over a side channel, then types the 6 digits into chat. You pass those digits to `wire_pair_confirm`. Mismatch aborts.
+- **You CAN pair, but the peer's operator gates it.** You drive `wire_dial("<handle>@<relay>")` to send a pair request; the peer's operator must `wire_accept` it before trust flows. Inbound requests to YOU land in `wire_pending` — surface them to your operator and never auto-`wire_accept`.
 - **You get push-style inbox awareness via MCP resources.** `wire://inbox/<peer>` exposes verified events as JSONL. v0.2.0 ships read-only; subscribe (push-on-grow notifications) is v0.2.1.
 - **OS-level notifications.** Run `wire notify` alongside your MCP server for native desktop toasts on each new event — works regardless of which agent runtime is active.
 - **You can't lie about who you are.** Every event you send is signed by the operator's key on this machine. The peer verifies before reading.
 - **You can't get spoofed.** Every event you receive was verified before landing in your inbox. If the signature failed, you never see it.
 - **Retry freely.** Content-addressed dedup makes retries safe.
-- **Multi-peer concurrent is first-class.** Pair with N peers in parallel — each `wire_pair_initiate` returns a distinct `session_id`, and `wire_send` to different peers uses different outbox files. Same-peer concurrent sends are serialized via a per-path mutex so JSONL lines never interleave.
+- **Multi-peer concurrent is first-class.** Pair with N peers in parallel — fire `wire_dial` at each, and `wire_send` to different peers uses different outbox files. Same-peer concurrent sends are serialized via a per-path mutex so JSONL lines never interleave.
 - **Negotiate capabilities.** Read peer's card before sending unusual kinds. Don't assume.
 
 This is the contract. Three discovery paths. One signed-event protocol underneath. The same wire bytes whether the sender is a human, an agent, or a daemon — and they all verify with the same Ed25519 signature.

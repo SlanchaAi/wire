@@ -190,7 +190,7 @@ Pi: → mcp__wire__wire_accept({peer: "sapphire-meadow"})
 
 ## Trust model
 
-Wire's trust ladder is independent of Pi's tool surface — wire never auto-accepts a stranger pair request and only mints `VERIFIED` after bilateral consent (operator-side `wire accept` or the SAS gesture). Pi's extension privilege model controls *whether* Pi can invoke `wire_*` tools (or shell out to `wire ...`); wire's bilateral consent controls *whom* those tools can reach.
+Wire's trust ladder is independent of Pi's tool surface — wire never auto-accepts a stranger pair request and only mints `VERIFIED` after bilateral consent (operator-side `wire accept`). Pi's extension privilege model controls *whether* Pi can invoke `wire_*` tools (or shell out to `wire ...`); wire's bilateral consent controls *whom* those tools can reach.
 
 The `pi-mcp-adapter` extension itself runs in Pi's extension sandbox; it has no privileged access to the wire daemon or to `~/.config/wire/op.key`. Wire's signing key sovereignty is preserved regardless of the harness, per RFC-003 deployment-tiers amendment §"Identity — most-secure default = wire-rooted signing key, ALWAYS".
 
