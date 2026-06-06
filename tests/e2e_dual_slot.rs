@@ -362,7 +362,7 @@ async fn dual_slot_send_prefers_local_endpoint() {
     assert!(add_out.status.success(), "alice wire add failed");
 
     // Bob's daemon would normally pull and stash to pending-inbound. Do
-    // it inline via `wire pull` then `wire pair-accept`.
+    // it inline via `wire pull` then `wire accept`.
     let pull_out = wire(&bob, &["pull", "--json"]);
     assert!(pull_out.status.success(), "bob pull failed: {pull_out:?}");
     let accept_out = wire(&bob, &["accept", &alice_h, "--json"]);

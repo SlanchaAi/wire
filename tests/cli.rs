@@ -279,7 +279,7 @@ fn write_pending_inbound_fixture(home: &std::path::Path, peer_handle: &str) {
 #[test]
 fn pair_list_inbound_surfaces_pending_v0_5_14() {
     // v0.5.14: zero-paste pair_drops from strangers land in pending-inbound
-    // and surface programmatically via `wire pair-list-inbound --json`.
+    // and surface programmatically via `wire pending --json`.
     // Receiver auto-pin was the v0.5.13 spam vector; this test asserts the
     // record is enumerable + the back-compat `pair-list --json` shape is
     // preserved for existing scripts.
@@ -324,8 +324,8 @@ fn status_reports_pending_inbound_count_v0_5_14() {
 
 #[test]
 fn pair_reject_deletes_pending_inbound_v0_5_14() {
-    // `wire pair-reject <peer>` removes the pending record. After reject,
-    // pair-list MUST NOT show the peer and the on-disk file MUST be gone.
+    // `wire reject <peer>` removes the pending record. After reject,
+    // the pending list MUST NOT show the peer and the on-disk file MUST be gone.
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
     write_pending_inbound_fixture(&home, "spammer");
@@ -1156,7 +1156,7 @@ fn accept_errors_cleanly_when_no_pending_request_v0_5_14() {
 
 #[test]
 fn reject_idempotent_on_missing_peer_v0_5_14() {
-    // v0.10: migrated from `wire pair-reject` to `wire reject`. Idempotent.
+    // v0.10+: `wire reject` is idempotent — succeeds even if no pending record.
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
     let out = run(&home, &["reject", "ghost", "--json"]);

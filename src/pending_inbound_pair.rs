@@ -5,7 +5,7 @@
 //! The drop lands here, awaiting the operator's explicit consent: running
 //! `wire add <peer>@<relay>` on the receiver side promotes the entry to
 //! `VERIFIED` trust and ships our slot_token back via `pair_drop_ack`.
-//! Running `wire pair-reject <peer>` deletes the entry without pairing.
+//! Running `wire reject <peer>` deletes the entry without pairing.
 //!
 //! This restores the bilateral-required semantic to zero-paste pairing:
 //! `wire add` must fire on both sides before any capability flows. The
@@ -42,7 +42,7 @@ pub struct PendingInboundPair {
     /// only flows when operator runs `wire add` to accept.
     pub peer_slot_token: String,
     /// v0.5.17: full set of endpoints the peer advertised (federation +
-    /// optional local). When the operator accepts via `wire pair-accept`,
+    /// optional local). When the operator accepts via `wire accept`,
     /// every endpoint here gets pinned into relay_state via
     /// `endpoints::pin_peer_endpoints`. Absent on records written by
     /// v0.5.16-and-earlier code paths; downstream code synthesizes a
@@ -120,7 +120,7 @@ pub fn list_pending_inbound() -> Result<Vec<PendingInboundPair>> {
 }
 
 /// Delete a pending-inbound record (called from `wire add` on bilateral
-/// completion and from `wire pair-reject`). Idempotent — `Ok(())` if the
+/// completion and from `wire reject`). Idempotent — `Ok(())` if the
 /// record didn't exist.
 pub fn consume_pending_inbound(peer_handle: &str) -> Result<()> {
     let path = pending_inbound_path(peer_handle)?;

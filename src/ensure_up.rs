@@ -1,7 +1,7 @@
 //! Background-process bootstrapper for the MCP path.
 //!
 //! Post-pair, an agent shouldn't have to ask the user "start the daemon?" —
-//! `wire_pair_confirm` invokes [`ensure_daemon_running`] + [`ensure_notify_running`]
+//! the MCP accept/dial tools invoke [`ensure_daemon_running`] + [`ensure_notify_running`]
 //! so push/pull and OS toasts are already armed by the time the agent surfaces
 //! "paired ✓" back to chat.
 //!
@@ -47,7 +47,7 @@
 //! inherit no TTY → no SIGHUP arrives when the parent exits, so they
 //! survive a Claude Code restart cycle. PIDs are reaped by init.
 //!
-//! Worst case: a child dies; the next `wire_pair_confirm` call respawns it.
+//! Worst case: a child dies; the next accept/dial call respawns it.
 //! No data is lost (outbox/inbox is on disk, content-addressed dedupe).
 
 use std::path::PathBuf;
@@ -468,7 +468,7 @@ fn wait_until_alive(pid: u32, budget: Duration) -> bool {
 
 fn ensure_background(name: &str, args: &[&str]) -> Result<bool> {
     // Test escape hatch — tests/mcp_pair.rs spawns wire mcp with this env
-    // var set so wire_pair_confirm doesn't fork persistent daemon/notify
+    // var set so wire_accept/wire_dial don't fork persistent daemon/notify
     // processes that survive the test's temp WIRE_HOME.
     if std::env::var("WIRE_MCP_SKIP_AUTO_UP").is_ok() {
         return Ok(false);

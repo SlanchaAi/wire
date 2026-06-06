@@ -17,8 +17,10 @@
 //! join URL, Signal group invite. Operator's act of moving the URL between
 //! channels IS the authentication ceremony. No SAS digits, no PAKE.
 //!
-//! The legacy SPAKE2 + SAS flow remains available via `wire pair --require-sas`
-//! for operators who want the stronger MITM-resistance model.
+//! The SPAKE2 + SAS code-phrase flow (`wire pair-host` / `wire pair-join` /
+//! `wire pair-confirm`) was removed in the RFC-005 follow-on. `wire dial` (with
+//! the bilateral `wire accept` gate) is the sole canonical pairing path;
+//! `wire invite` + `wire accept-invite` cover the recipient-can't-host-a-slot case.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -203,7 +205,7 @@ pub fn ensure_self_with_relay(
     // `--local-only` sessions don't have legacy `self.slot_id` but DO
     // have `self.endpoints[]` with a local slot — those should be
     // honored, not stomped with a fresh federation allocation. Without
-    // this guard, `wire pair-accept` on a local-only session would
+    // this guard, `wire accept` on a local-only session would
     // auto-allocate a federation slot at DEFAULT_RELAY (wireup.net)
     // every time, silently turning local-only sessions into dual-slot.
     let existing = crate::endpoints::self_endpoints(&relay_state);
@@ -569,7 +571,7 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
     // the operator runs `wire add <peer>@<their-relay>` to accept.
     //
     // This closes the v0.5.13 phonebook-scrape spam vector: an attacker
-    // can deposit one entry in N victims' `wire pair-list --pending`, but
+    // can deposit one entry in N victims' `wire pending`, but
     // no slot_token leaks and no message-write capability accrues.
     if nonce_opt.is_some() {
         // ----- SPAKE2 invite-URL path (unchanged) -----
@@ -680,13 +682,13 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
             &format!("notify-pair:{peer_handle}"),
             &format!("wire — org-verified pair request from {peer_handle}"),
             &format!(
-                "verified member of {org_did} (your org_policies.json says `notify`). run `wire pair-accept {peer_handle}` to pin VERIFIED, or `wire pair-reject {peer_handle}`",
+                "verified member of {org_did} (your org_policies.json says `notify`). run `wire accept {peer_handle}` to pin VERIFIED, or `wire reject {peer_handle}`",
             ),
         ),
         None => crate::os_notify::toast(
             &format!("wire — pair request from {peer_handle}"),
             &format!(
-                "run `wire pair-accept {peer_handle}` (or `wire add {peer_handle}@{peer_relay}`) to accept, or `wire pair-reject {peer_handle}` to refuse",
+                "run `wire accept {peer_handle}` (or `wire add {peer_handle}@{peer_relay}`) to accept, or `wire reject {peer_handle}` to refuse",
             ),
         ),
     }

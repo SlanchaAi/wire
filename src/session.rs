@@ -958,11 +958,8 @@ pub fn session_home_for_key(key: &str) -> Result<PathBuf> {
 /// Keep this list in sync with [`warn_on_identity_collision`]'s pgrep
 /// predicate and the call-site list in `cli::run` / `mcp::run`.
 ///
-/// `pair-host*` is intentionally absent: it works against the
-/// per-pair relay slot, not the shared inbox cursor, and is meant
-/// to coexist with a `wire daemon` that advances the queued pair —
-/// warning there would be a false positive for the documented
-/// "queue + daemon" pattern.
+/// Note: `pair-host` (and the rest of the SAS code-phrase flow) was removed
+/// in RFC-005 follow-on, so it is naturally absent from this list.
 ///
 /// Short-lived commands (`whoami`, `status`, `send`, `peers`, …) are
 /// intentionally absent — they write atomically and don't race, and
@@ -2087,9 +2084,8 @@ mod tests {
         assert!(INBOX_OWNING_SUBCOMMANDS.contains(&"daemon"));
         assert!(INBOX_OWNING_SUBCOMMANDS.contains(&"monitor"));
         assert!(INBOX_OWNING_SUBCOMMANDS.contains(&"notify"));
-        // Pair-host is documented-coexist with daemon — must NOT be in
-        // the list or operators get a false positive on every queued
-        // pair flow.
+        // pair-host (SAS code-phrase flow) was removed in RFC-005 follow-on
+        // and must not appear in the list.
         assert!(!INBOX_OWNING_SUBCOMMANDS.contains(&"pair-host"));
     }
 

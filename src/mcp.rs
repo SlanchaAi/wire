@@ -596,10 +596,10 @@ fn tool_defs() -> Vec<Value> {
             }
         }),
         // v0.10.1: canonical MCP names mirroring the operator-facing
-        // verbs (wire dial / accept / reject / pending). Deprecated
-        // wire_pair_accept / wire_pair_reject / wire_pair_list_inbound
-        // removed from catalog (RFC-005 Phase 2); calls to those names
-        // return a helpful redirect error (see dispatch).
+        // verbs (wire dial / accept / reject / pending). Deprecated aliases
+        // wire_pair_accept / wire_pair_reject / wire_pair_list_inbound were
+        // removed from the catalog in RFC-005 Phase 2; calls to those names
+        // now return a helpful redirect error (see dispatch).
         json!({
             "name": "wire_dial",
             "description": "v0.8 — go talk to this name. Accepts a character nickname (`noble-slate`), session name, card handle, or DID — or a federation handle (`<handle>@<relay>`). Resolves through the local addressing layer (pinned peers, local sister sessions) or routes federation via `.well-known/wire/agent`. Drives the right pair flow (already-pinned: no-op, local sister: disk-read --local-sister, federation: pair_drop). After this completes the peer is in `wire_peers` and `wire_send` to them works.",
@@ -1627,10 +1627,10 @@ fn tool_add(args: &Value) -> Result<Value, String> {
     }))
 }
 
-/// v0.5.14: MCP `wire_pair_accept` — bilateral completion of a
-/// pending-inbound pair request. The agent SHOULD have surfaced the
-/// pending request to the operator before calling this; acceptance
-/// grants peer authenticated write access to this agent's inbox.
+/// MCP `wire_accept` (v0.9+, formerly wire_pair_accept) — bilateral completion
+/// of a pending-inbound pair request. The agent SHOULD have surfaced the
+/// pending request to the operator before calling this; acceptance grants
+/// peer authenticated write access to this agent's inbox.
 fn tool_pair_accept(args: &Value) -> Result<Value, String> {
     let peer = args
         .get("peer")
@@ -1641,7 +1641,7 @@ fn tool_pair_accept(args: &Value) -> Result<Value, String> {
         .map_err(|e| format!("{e:#}"))?
         .ok_or_else(|| {
             format!(
-                "no pending pair request from {nick}. Call wire_pair_list_inbound to enumerate, \
+                "no pending pair request from {nick}. Call wire_pending to enumerate, \
                  or wire_add to send a fresh outbound pair request."
             )
         })?;
@@ -1695,8 +1695,9 @@ fn tool_pair_accept(args: &Value) -> Result<Value, String> {
     }))
 }
 
-/// v0.5.14: MCP `wire_pair_reject` — delete a pending-inbound record
-/// without pairing. Peer never receives our slot_token. Idempotent.
+/// MCP `wire_reject` (v0.9+, formerly wire_pair_reject) — delete a
+/// pending-inbound record without pairing. Peer never receives our
+/// slot_token. Idempotent.
 fn tool_pair_reject(args: &Value) -> Result<Value, String> {
     let peer = args
         .get("peer")
@@ -1713,8 +1714,9 @@ fn tool_pair_reject(args: &Value) -> Result<Value, String> {
     }))
 }
 
-/// v0.5.14: MCP `wire_pair_list_inbound` — enumerate pending-inbound
-/// pair requests for operator review. Flat array sorted oldest-first.
+/// MCP `wire_pending` (v0.9+, formerly wire_pair_list_inbound) — enumerate
+/// pending-inbound pair requests for operator review. Flat array sorted
+/// oldest-first.
 fn tool_pair_list_inbound() -> Result<Value, String> {
     let items =
         crate::pending_inbound_pair::list_pending_inbound().map_err(|e| format!("{e:#}"))?;

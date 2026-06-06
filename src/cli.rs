@@ -115,9 +115,8 @@ pub enum Command {
         json: bool,
     },
     /// v0.9 canonical surface: list pending-inbound pair requests waiting
-    /// for your consent. Aliases the legacy `pair-list-inbound` verb
-    /// but with the shorter, intent-first name. Operators reach for
-    /// "what's pending?" not "what's in my pair-list-inbound table?"
+    /// for your consent. Operators reach for "what's pending?" not a
+    /// longer table-dump verb.
     Pending {
         #[arg(long)]
         json: bool,
@@ -718,8 +717,7 @@ pub enum Command {
         json: bool,
     },
     /// v0.9: accept a pending-inbound pair request by character
-    /// nickname or card handle. Replaces the verbose `wire pair-accept
-    /// <peer>`.
+    /// nickname or card handle.
     ///
     /// v0.9.4: the URL-vs-name smart-dispatch from v0.9 is gone. To
     /// accept a federation invite URL use `wire accept-invite <URL>`
@@ -748,8 +746,7 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// v0.9: refuse a pending-inbound pair request without pairing. Aliases
-    /// the legacy `wire pair-reject <peer>`.
+    /// v0.9: refuse a pending-inbound pair request without pairing.
     Reject {
         /// Peer name (character nickname or handle) from `wire pending`.
         peer: String,
@@ -1109,7 +1106,7 @@ pub enum SessionCommand {
     /// v0.6.0 (issue #12): mesh-pair every sister session against every
     /// other in O(N²) handshakes. For each unordered pair (A, B) that
     /// is not already paired, drives the bilateral flow end-to-end:
-    /// `wire add` from A → B (queued + pushed), `wire pair-accept` on
+    /// `wire add` from A → B (queued + pushed), `wire accept` on
     /// B's side, then a final pull on A so the ack lands. Idempotent —
     /// re-running skips pairs already in `state.peers`.
     ///
@@ -2420,9 +2417,9 @@ fn cmd_status(as_json: bool) -> Result<()> {
         // pending_inbound on receipt of the peer's ack; operators
         // with pre-#171 data on disk see their VERIFIED peers show
         // up in `inbound pair requests`, prompting a misleading
-        // `wire pair-accept` suggestion. The stale records still
-        // exist on disk (operator can clear via `wire reject` if
-        // they care); the status surface just stops showing them.
+        // `wire accept` suggestion. The stale records still exist on
+        // disk (operator can clear via `wire reject` if they care);
+        // the status surface just stops showing them.
         // Records for genuinely-not-pinned peers — or peers at
         // UNTRUSTED/PENDING_ACK — surface normally.
         let pinned_verified_handles: std::collections::HashSet<String> =
@@ -2635,7 +2632,7 @@ fn cmd_status(as_json: bool) -> Result<()> {
                         .unwrap_or("UNKNOWN");
                     let count = entry.get("count").and_then(Value::as_u64).unwrap_or(0);
                     // Tier-specific hint. PENDING_ACK = wedged
-                    // pair (operator action: `wire pair-accept`
+                    // pair (operator action: `wire accept`
                     // or `wire reject`). UNTRUSTED = peer not yet
                     // pinned (rare but possible if trust file
                     // was hand-edited). VERIFIED + queued =
@@ -3071,7 +3068,7 @@ fn cmd_status_peer(peer: &str, as_json: bool) -> Result<()> {
     Ok(())
 }
 
-// (Old cmd_join stub removed — superseded by cmd_pair_join below.)
+// (Old cmd_join stub removed — superseded by wire_dial / cmd_pair_accept.)
 
 // ---------- whoami ----------
 
@@ -7604,12 +7601,12 @@ fn cmd_add_accept_pending(
     Ok(())
 }
 
-/// v0.5.14: explicit `wire pair-accept <peer>` — bilateral-completion path
-/// for a pending-inbound pair request. Pin trust, write relay_state from the
-/// stored pair_drop, send `pair_drop_ack` with our slot_token, delete the
-/// pending record. Equivalent to running `wire add <peer>@<their-relay>`
-/// when a pending-inbound record exists, but without needing to remember
-/// the peer's relay domain.
+/// `wire accept <peer>` (v0.9+) — bilateral-completion path for a
+/// pending-inbound pair request. Pin trust, write relay_state from the stored
+/// pair_drop, send `pair_drop_ack` with our slot_token, delete the pending
+/// record. Equivalent to running `wire add <peer>@<their-relay>` when a
+/// pending-inbound record exists, but without needing to remember the peer's
+/// relay domain.
 fn cmd_pair_accept(peer_nick: &str, as_json: bool) -> Result<()> {
     let nick = crate::agent_card::bare_handle(peer_nick);
     let pending = crate::pending_inbound_pair::read_pending_inbound(nick)?.ok_or_else(|| {
@@ -7632,8 +7629,8 @@ fn cmd_pair_accept(peer_nick: &str, as_json: bool) -> Result<()> {
     )
 }
 
-/// v0.5.14: programmatic access to pending-inbound for scripts.
-/// `wire pair-list-inbound --json` returns a flat array of records.
+/// `wire pending --json` — programmatic access to pending-inbound for scripts.
+/// Returns a flat array of records sorted oldest-first.
 fn cmd_pair_list_inbound(as_json: bool) -> Result<()> {
     let items = crate::pending_inbound_pair::list_pending_inbound()?;
     if as_json {
@@ -7678,9 +7675,9 @@ fn cmd_pair_list_inbound(as_json: bool) -> Result<()> {
     Ok(())
 }
 
-/// v0.5.14: `wire pair-reject <peer>` — drop a pending-inbound record
-/// without pairing. No event is sent back to the peer; their side stays
-/// pending until they time out or the operator-side data ages out.
+/// `wire reject <peer>` (v0.9+) — drop a pending-inbound record without
+/// pairing. No event is sent back to the peer; their side stays pending
+/// until they time out or the operator-side data ages out.
 fn cmd_pair_reject(peer_nick: &str, as_json: bool) -> Result<()> {
     let nick = crate::agent_card::bare_handle(peer_nick);
     let existed = crate::pending_inbound_pair::read_pending_inbound(nick)?;
@@ -9879,7 +9876,7 @@ fn try_allocate_local_slot(
     // ensure_self_with_relay fallback, v0.5.16-era back-compat readers)
     // still find a valid slot. Pre-v0.6.6 this branch wrote
     // `relay_url: federation_relay` with no slot_id, which produced
-    // half-populated self state that broke pair-accept on local-only
+    // half-populated self state that broke wire-accept on local-only
     // sessions.
     let (legacy_relay, legacy_slot_id, legacy_slot_token) = match fed_endpoint.clone() {
         Some(f) => (f.relay_url, f.slot_id, f.slot_token),
@@ -10375,7 +10372,7 @@ fn cmd_session_list_local(as_json: bool) -> Result<()> {
 ///   2. WIRE_HOME=A wire push --json            (sends pair_drop to relay)
 ///   3. sleep settle_secs                       (pair_drop reaches B)
 ///   4. WIRE_HOME=B wire pull --json            (B receives pair_drop)
-///   5. WIRE_HOME=B wire pair-accept <A-bare>   (B pins A, sends ack)
+///   5. WIRE_HOME=B wire accept <A-bare>   (B pins A, sends ack)
 ///   6. WIRE_HOME=B wire push --json            (sends pair_drop_ack)
 ///   7. sleep settle_secs                       (ack reaches A)
 ///   8. WIRE_HOME=A wire pull --json            (A pins B)
@@ -10938,7 +10935,7 @@ fn drive_bilateral_pair(
     };
 
     // v0.11: each session's agent-card.handle is the DID-derived
-    // character, not the session name. pair-accept lookups key on the
+    // character, not the session name. wire-accept lookups key on the
     // CARD HANDLE, so we discover each side's canonical handle from
     // its agent-card on disk before driving the pair flow.
     let read_card_handle = |home: &std::path::Path| -> Result<String> {
