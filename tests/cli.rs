@@ -54,7 +54,7 @@ fn help_flag_lists_subcommands() {
     assert!(out.status.success(), "help failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
     for cmd in [
-        "init", "join", "whoami", "peers", "send", "tail", "verify", "mcp",
+        "init", "dial", "whoami", "peers", "send", "tail", "verify", "mcp",
     ] {
         assert!(s.contains(cmd), "missing subcommand {cmd} in help: {s}");
     }
@@ -480,22 +480,29 @@ fn session_destroy_requires_force_flag_v0_5_16() {
 #[test]
 fn legacy_pair_verbs_removed_from_dispatch_v0_10() {
     // RFC-005 / Phase 3: pair-accept, pair-reject, pair-list-inbound, and
-    // the `pair` megacommand are removed. They must now be unknown subcommands
-    // (clap exits nonzero). pair-host + pair-join remain (SAS flow).
+    // the `pair` megacommand are removed. RFC-005 follow-on: the SAS
+    // code-phrase flow (pair-host / pair-join / pair-confirm / pair-list /
+    // pair-cancel / pair-watch / pair-abandon, plus the `join` alias) is
+    // removed too. All must be unknown subcommands (clap exits nonzero).
     let home = fresh_home();
-    for verb in ["pair-accept", "pair-reject", "pair-list-inbound", "pair"] {
+    for verb in [
+        "pair-accept",
+        "pair-reject",
+        "pair-list-inbound",
+        "pair",
+        "pair-host",
+        "pair-join",
+        "pair-confirm",
+        "pair-list",
+        "pair-cancel",
+        "pair-watch",
+        "pair-abandon",
+        "join",
+    ] {
         let out = run(&home, &[verb, "--help"]);
         assert!(
             !out.status.success(),
-            "`{verb}` should be an unknown subcommand after RFC-005 removal — got success"
-        );
-    }
-    // SAS verbs must still be callable.
-    for verb in ["pair-host", "pair-join"] {
-        let out = run(&home, &[verb, "--help"]);
-        assert!(
-            out.status.success(),
-            "SAS verb `{verb}` must remain callable — got failure"
+            "`{verb}` should be an unknown subcommand after SAS removal — got success"
         );
     }
 }
@@ -1317,27 +1324,6 @@ fn verify_rejects_tampered_event() {
 }
 
 #[test]
-fn join_alias_resolves_to_pair_join() {
-    // `wire join` is a clap alias for `wire pair-join`. Without a relay it
-    // should fail at the not-initialized check (we haven't run init in this
-    // home), but the failure must come from pair-join's logic, not from clap
-    // saying "unknown subcommand".
-    let home = fresh_home();
-    let out = run(
-        &home,
-        &["join", "12-ABCDEF", "--relay", "http://127.0.0.1:1"],
-    );
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    // Either "not initialized" (uninited home) or relay healthz failure —
-    // both prove the alias dispatched into pair_orchestrate.
-    assert!(
-        stderr.contains("not initialized") || stderr.contains("healthz"),
-        "join alias didn't dispatch to pair-join (stderr: {stderr})"
-    );
-}
-
-#[test]
 fn mcp_initialize_then_tools_list_round_trip() {
     use std::io::Write as _;
     use std::process::Stdio;
@@ -1392,17 +1378,23 @@ fn mcp_initialize_then_tools_list_round_trip() {
     // Always-safe messaging tools
     assert!(names.contains(&"wire_whoami"));
     assert!(names.contains(&"wire_send"));
-    // Goal 1: pairing tools now exposed (with SAS-digit type-back as the gate)
+    // Canonical pairing tools.
     assert!(names.contains(&"wire_init"));
-    assert!(names.contains(&"wire_pair_initiate"));
-    assert!(names.contains(&"wire_pair_join"));
-    assert!(names.contains(&"wire_pair_check"));
-    assert!(names.contains(&"wire_pair_confirm"));
-    // Legacy wire_join is not advertised — superseded by wire_pair_join
-    assert!(
-        !names.contains(&"wire_join"),
-        "wire_join is the deprecated alias; surface wire_pair_join instead"
-    );
+    assert!(names.contains(&"wire_dial"));
+    // SAS code-phrase pair tools were removed (RFC-005 follow-on) — must NOT
+    // be advertised.
+    for removed in [
+        "wire_pair_initiate",
+        "wire_pair_join",
+        "wire_pair_check",
+        "wire_pair_confirm",
+        "wire_join",
+    ] {
+        assert!(
+            !names.contains(&removed),
+            "removed SAS pair tool {removed} must not be advertised"
+        );
+    }
 }
 
 #[test]
