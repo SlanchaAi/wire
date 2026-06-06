@@ -186,7 +186,7 @@ pub fn ensure_self_with_relay(
 
     if !config::is_initialized()? {
         let handle = default_handle();
-        crate::pair_session::init_self_idempotent(&handle, None, Some(relay))
+        crate::init::init_self_idempotent(&handle, None, Some(relay))
             .with_context(|| format!("auto-init as did:wire:{handle}"))?;
     }
 

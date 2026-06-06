@@ -24,6 +24,7 @@ pub mod ensure_up;
 pub mod group;
 pub mod identity;
 pub mod inbox_watch;
+pub mod init;
 pub mod macaroon;
 pub mod mcp;
 pub mod nuke;

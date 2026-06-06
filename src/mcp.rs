@@ -1641,7 +1641,7 @@ fn tool_init(args: &Value) -> Result<Value, String> {
         .ok_or("missing 'handle'")?;
     let name = args.get("name").and_then(Value::as_str);
     let relay = args.get("relay_url").and_then(Value::as_str);
-    crate::pair_session::init_self_idempotent(handle, name, relay).map_err(|e| e.to_string())
+    crate::init::init_self_idempotent(handle, name, relay).map_err(|e| e.to_string())
 }
 
 /// Resolve the relay URL: explicit arg wins, else the relay this agent's
@@ -1672,7 +1672,7 @@ fn auto_init_if_needed(args: &Value) -> Result<(), String> {
         "not initialized — pass `handle` to auto-init, or call wire_init explicitly first",
     )?;
     let relay = args.get("relay_url").and_then(Value::as_str);
-    crate::pair_session::init_self_idempotent(handle, None, relay)
+    crate::init::init_self_idempotent(handle, None, relay)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
