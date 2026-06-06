@@ -31,6 +31,11 @@ use crate::canonical::canonical;
 /// Legacy events without this field are accepted (we can't retroactively
 /// stamp 0.5.10 traffic), so the field's *absence* is fine; only its
 /// *presence with a wrong major* is a hard reject.
+///
+/// RFC-006 (v0.15): a future `enc`-bearing (encrypted-body) event stays
+/// major `v3` — encryption rides inside `body` additively and does NOT bump
+/// the major (see `docs/PROTOCOL.md` §2.4). Only a body-shape change a v3
+/// reader would mis-decode warrants `v4`.
 pub const EVENT_SCHEMA_VERSION: &str = "v3.1";
 
 /// Major component of a `v<major>.<minor>` schema_version. Used to decide
@@ -458,5 +463,46 @@ mod tests {
         for c in eid.chars() {
             assert!(c.is_ascii_hexdigit());
         }
+    }
+
+    #[test]
+    fn enc_bearing_event_verifies_additively_path_a() {
+        // RFC-006 path-A proof (PROTOCOL.md §2.4): an event whose body is an
+        // opaque ciphertext container plus an `enc` discriminator signs and
+        // verifies with ZERO encryption-aware code. A current (encryption-
+        // unaware) reader still verifies the signature + event_id — it just
+        // can't read the body. This is the evidence that NIP-44 can land
+        // additively with no schema-major bump, instead of a second wire-
+        // format break. (Test proposed by slate-lotus on PR #221.)
+        let (sk, pk) = generate_keypair();
+        let msg = json!({
+            "timestamp": "2026-06-05T00:00:00Z",
+            "from": "paul",
+            "type": "decision",
+            "kind": 1000,
+            "enc": "nip44.v2",
+            "body": { "ct": "c29tZS1vcGFxdWUtY2lwaGVydGV4dA==" },
+        });
+        let signed = sign_message_v31(&msg, &sk, &pk, "paul").unwrap();
+
+        // Encryption-unaware verifier accepts: event_id + signature are
+        // body-agnostic (verify recomputes event_id internally and checks it).
+        verify_message_v31(&signed, &trust_for("paul", &pk)).unwrap();
+
+        // Integrity holds over the ciphertext: tampering `ct` breaks the id.
+        let mut tampered = signed.clone();
+        tampered["body"]["ct"] = json!("dGFtcGVyZWQ=");
+        assert!(matches!(
+            verify_message_v31(&tampered, &trust_for("paul", &pk)).unwrap_err(),
+            VerifyError::EventIdMismatch
+        ));
+
+        // The `enc` discriminator + opaque body are preserved untouched — the
+        // signing path treats the body as opaque, never inspecting `ct`.
+        assert_eq!(signed.get("enc").and_then(Value::as_str), Some("nip44.v2"));
+        assert_eq!(
+            signed["body"]["ct"],
+            json!("c29tZS1vcGFxdWUtY2lwaGVydGV4dA==")
+        );
     }
 }

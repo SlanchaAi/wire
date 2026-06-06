@@ -1088,6 +1088,13 @@ fn tool_whoami() -> Result<Value, String> {
     payload.insert("key_id".into(), json!(key_id));
     payload.insert("public_key_b64".into(), json!(pk_b64));
     payload.insert("capabilities".into(), capabilities);
+    // RFC-008 §A: same `session_source` the CLI `wire whoami --json` emits —
+    // which signal won session/home resolution — so an agent diagnosing a
+    // wrong/shared identity over MCP sees the cause without shelling out.
+    payload.insert(
+        "session_source".into(),
+        json!(crate::session::session_source()),
+    );
     for (k, v) in crate::cli::op_claims_from_card(&card) {
         payload.insert(k, v);
     }

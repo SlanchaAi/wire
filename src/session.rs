@@ -1137,8 +1137,27 @@ fn read_wire_home_from_pid(pid: u32) -> Option<String> {
 /// MUST be called BEFORE any worker thread or async task spawns —
 /// `env::set_var` is unsafe in Rust 2024 because of thread-safety
 /// guarantees, and our use is safe only at process entry.
+/// Process-global record of WHICH signal won session/home resolution,
+/// captured at adoption time by [`maybe_adopt_session_wire_home`]. Read by
+/// `wire whoami --json` (`session_source`) so an operator can see in one
+/// command whether identity came from an explicit `WIRE_HOME`, a host
+/// session-id adapter, the Claude-Code pidfile fallback, a minted
+/// per-process key, or the machine default. Post-hoc re-derivation is
+/// unreliable — minting sets `WIRE_SESSION_ID` and `WIRE_HOME` is always set
+/// after adoption — so the winning source MUST be captured here, once.
+static SESSION_SOURCE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// The signal that won session/home resolution for this process. One of:
+/// `env:WIRE_HOME`, `override` (`WIRE_SESSION_ID`), `claude-code`,
+/// `claude-code-pidfile`, `codex-cli`, `copilot-cli`, `vscode-workspace`,
+/// `minted`, `machine-default`, or `unknown` if adoption never ran.
+pub fn session_source() -> &'static str {
+    SESSION_SOURCE.get().copied().unwrap_or("unknown")
+}
+
 pub fn maybe_adopt_session_wire_home(label: &str) {
     if std::env::var("WIRE_HOME").is_ok() {
+        let _ = SESSION_SOURCE.set("env:WIRE_HOME");
         return;
     }
     // v0.13: prefer the host-agnostic session key (WIRE_SESSION_ID >
@@ -1159,6 +1178,7 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
                 // session leaves no trace on disk. (Write paths already
                 // tolerate a non-existent WIRE_HOME — the test harness runs
                 // every test against one.)
+                let _ = SESSION_SOURCE.set(source);
                 (h, format!("session key ({source})"))
             }
             Err(_) => return,
@@ -1184,6 +1204,7 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
                 unsafe {
                     std::env::set_var("WIRE_SESSION_ID", &minted);
                 }
+                let _ = SESSION_SOURCE.set("minted");
                 (
                     h,
                     "minted per-process key (no session id; cwd disabled for MCP)".to_string(),
@@ -1199,6 +1220,7 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
         // CLAUDE_CODE_SESSION_ID (resolved above), so this only hits a bare
         // terminal outside an agent host — which gets the stable machine-default
         // identity (set WIRE_SESSION_ID / WIRE_HOME for an explicit one). No cwd.
+        let _ = SESSION_SOURCE.set("machine-default");
         return;
     };
     // v0.9.1: emit the chatter ONLY when stderr is an interactive TTY.

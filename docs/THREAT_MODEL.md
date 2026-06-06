@@ -127,6 +127,14 @@ That's a significant redesign — BACKLOG'd.
 
 **Status:** rotation primitive ships v0.1; auto-rotation is v0.2 candidate.
 
+## Threat T15 — group-room confidentiality and member eviction (RFC-006)
+
+**Threat:** a group room (`src/group.rs`, v0.13.3) is a shared relay slot whose `slot_token` is the read+write room key, distributed to every vouched member. Two exposures follow: (a) **confidentiality** — group event bodies are signed-plaintext on the slot, exactly like DMs (T1), so the relay and anyone holding the room key reads all group content; (b) **eviction** — "kicking" a member is `wire group` rotating the slot (the I3 kick path), which re-keys *write access* but does **not** cryptographically evict: a removed member who cached the old `slot_token` and prior events retains plaintext of everything sent before rotation, and the group has no forward secrecy or post-compromise security.
+
+**Mitigation (v0.1/v0.2 posture):** the creator-signed roster (`creator_sig`, `epoch`) gives **integrity** — members verify the member set and pin introduced peers' keys on the creator's vouch, and `epoch` orders revocations. Confidentiality and cryptographic eviction are **deliberately deferred**, consistent with the v0.1 "not confidential against the relay" model (T1, T3). The standards-grade fix is **MLS (RFC 9420 / OpenMLS)** — async group key agreement with forward secrecy, post-compromise security, and cryptographic add/remove — gated on group rooms becoming a real workload (`BACKLOG.md:71`, `ANTI_FEATURES.md:13`). The `enc` reservation (PROTOCOL.md §2.4) covers group events too, since they share the event envelope.
+
+**Status:** roster **integrity** is strong; group **confidentiality** + **cryptographic eviction** are by-design absent pre-MLS, mirroring the DM posture in T1. Operators MUST treat group content as relay-observable and a kicked member as retaining pre-kick plaintext until MLS lands. (This entry closes the documentation parity gap RFC-006 flagged: the DM-plaintext deferral was written in T1; the group case was implicit until now.)
+
 ## Threat T10 — MCP-host compromise (revised v0.2 of this threat, Goal 1)
 
 **Threat:** a malicious MCP host (compromised Claude Desktop, evil VS Code
