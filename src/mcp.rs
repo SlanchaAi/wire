@@ -545,7 +545,7 @@ fn handle_initialize(id: &Value) -> Value {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION,
             },
-            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity), wire_status (daemon + sync health). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). ON SESSION START, DO THIS IMMEDIATELY (every wire session): (1) call wire_status to confirm the `wire daemon` sync loop is running — `daemon_running:true` + `last_sync_age_seconds < 60`; if not, the session won't push outbound or pull inbound and the operator must start a daemon (`wire daemon --interval 5` in a background shell, or systemd/launchd). (2) arm a PERSISTENT stream-watcher on `wire monitor --json` — in Claude Code, the Monitor tool with persistent:true — so peer messages surface live mid-session. The monitor does NOT sync the relay; it only tails the inbox the daemon writes. Both are required. WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you; this is how paired agents collaborate immediately. (Default filter strips pair_drop/pair_drop_ack/heartbeat noise.) v0.14.2: wire_send POSTs synchronously by default — response `status` is the actual relay verdict: `delivered` (event landed on peer's slot), `duplicate` (same event_id already on slot; peer can still pull), `peer_unknown` (peer not pinned — run wire_dial first), `slot_stale` (peer's slot rotated — run wire_dial to re-pair), or `transport_error` (TLS/DNS/relay-5xx; check `reason` field). Pass `queue:true` to opt back into the legacy outbox→daemon-push path for offline-buffer / pre-pair queueing. wire_pull is the symmetric receive primitive — call it to trigger an immediate relay GET instead of waiting for the daemon's 5s pull cycle; returns written[]/rejected[]/total_seen the same way `wire pull --json` does. Legacy MCP tools (wire_pair_accept / wire_pair_reject / wire_pair_list_inbound, wire_pair_initiate/join/confirm) still callable but DEPRECATED — prefer canonical. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
+            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity), wire_status (daemon + sync health). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). ON SESSION START, DO THIS IMMEDIATELY (every wire session): (1) call wire_status to confirm the `wire daemon` sync loop is running — `daemon_running:true` + `last_sync_age_seconds < 60`; if not, the session won't push outbound or pull inbound and the operator must start a daemon (`wire daemon --interval 5` in a background shell, or systemd/launchd). (2) arm a PERSISTENT stream-watcher on `wire monitor --json` — in Claude Code, the Monitor tool with persistent:true — so peer messages surface live mid-session. The monitor does NOT sync the relay; it only tails the inbox the daemon writes. Both are required. WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you; this is how paired agents collaborate immediately. (Default filter strips pair_drop/pair_drop_ack/heartbeat noise.) v0.14.2: wire_send POSTs synchronously by default — response `status` is the actual relay verdict: `delivered` (event landed on peer's slot), `duplicate` (same event_id already on slot; peer can still pull), `peer_unknown` (peer not pinned — run wire_dial first), `slot_stale` (peer's slot rotated — run wire_dial to re-pair), or `transport_error` (TLS/DNS/relay-5xx; check `reason` field). Pass `queue:true` to opt back into the legacy outbox→daemon-push path for offline-buffer / pre-pair queueing. wire_pull is the symmetric receive primitive — call it to trigger an immediate relay GET instead of waiting for the daemon's 5s pull cycle; returns written[]/rejected[]/total_seen the same way `wire pull --json` does. Legacy MCP tools (wire_pair_initiate/join/confirm) still callable but DEPRECATED — prefer canonical. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
         }
     })
 }
@@ -760,7 +760,7 @@ fn tool_defs() -> Vec<Value> {
         // v0.5 — agentic hotline.
         json!({
             "name": "wire_add",
-            "description": "Bilateral pair (v0.5.14). Resolve a peer handle (`nick@domain`) via the domain's `.well-known/wire/agent`, pin them locally, and deliver a signed pair-intro to their slot. THE PEER MUST ALSO RUN `wire add` (or `wire pair-accept`) ON THEIR SIDE — bilateral-required as of v0.5.14, no auto-pin on receiver. Once both sides have gestured consent, capability flows in both directions. Use this for outgoing pair requests; for incoming pair_drops in the operator's pending-inbound queue, use `wire_pair_accept` or `wire_pair_reject` instead.",
+            "description": "Bilateral pair (v0.5.14). Resolve a peer handle (`nick@domain`) via the domain's `.well-known/wire/agent`, pin them locally, and deliver a signed pair-intro to their slot. THE PEER MUST ALSO RUN `wire add` (or `wire accept`) ON THEIR SIDE — bilateral-required as of v0.5.14, no auto-pin on receiver. Once both sides have gestured consent, capability flows in both directions. Use this for outgoing pair requests; for incoming pair_drops in the operator's pending-inbound queue, use `wire_accept` or `wire_reject` instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -770,37 +770,11 @@ fn tool_defs() -> Vec<Value> {
                 "required": ["handle"]
             }
         }),
-        json!({
-            "name": "wire_pair_accept",
-            "description": "Accept a pending-inbound pair request (v0.5.14). When a stranger has run `wire add you@<your-relay>` against this agent's handle, their signed pair_drop sits in pending-inbound — see `wire_pair_list_inbound` to enumerate. Calling this command pins them VERIFIED, ships our slot_token via `pair_drop_ack`, and deletes the pending record. Requires explicit operator consent: the agent SHOULD surface the pending request to the user (e.g. via OS toast or in chat) before calling this, because accepting grants the peer authenticated write access to this agent's inbox. Errors if no pending record exists for the named peer.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "peer": {"type": "string", "description": "Bare peer handle (without `@<relay>`). Match exactly what `wire_pair_list_inbound` returned in `peer_handle`."}
-                },
-                "required": ["peer"]
-            }
-        }),
-        json!({
-            "name": "wire_pair_reject",
-            "description": "Refuse a pending-inbound pair request (v0.5.14). Deletes the pending record. The peer never receives our slot_token; from their side the pair stays pending until they time out or remove their outbound record. Idempotent — succeeds with `rejected: false` if no record existed for that peer.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "peer": {"type": "string", "description": "Bare peer handle (without `@<relay>`)."}
-                },
-                "required": ["peer"]
-            }
-        }),
-        json!({
-            "name": "wire_pair_list_inbound",
-            "description": "DEPRECATED in v0.9 — use `wire_pending`. List pending-inbound pair requests (v0.5.14). Returns a flat array of `{peer_handle, peer_did, peer_relay_url, peer_slot_id, received_at, event_id}` records, oldest first.",
-            "inputSchema": {"type": "object", "properties": {}}
-        }),
         // v0.10.1: canonical MCP names mirroring the operator-facing
-        // verbs (wire dial / accept / reject / pending). Old wire_pair_*
-        // names stay callable as aliases (see dispatch); these new
-        // entries are what appears in tools/list for new clients.
+        // verbs (wire dial / accept / reject / pending). Deprecated
+        // wire_pair_accept / wire_pair_reject / wire_pair_list_inbound
+        // removed from catalog (RFC-005 Phase 2); calls to those names
+        // return a helpful redirect error (see dispatch).
         json!({
             "name": "wire_dial",
             "description": "v0.8 — go talk to this name. Accepts a character nickname (`noble-slate`), session name, card handle, or DID — or a federation handle (`<handle>@<relay>`). Resolves through the local addressing layer (pinned peers, local sister sessions) or routes federation via `.well-known/wire/agent`. Drives the right pair flow (already-pinned: no-op, local sister: disk-read --local-sister, federation: pair_drop). After this completes the peer is in `wire_peers` and `wire_send` to them works.",
@@ -987,13 +961,23 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
         // v0.5 — agentic hotline (handle + profile + zero-paste discovery).
         "wire_add" => tool_add(&args),
         // v0.5.14 — bilateral-required pair: inbound queue management.
-        // v0.10.1: canonical names introduced (wire_accept, wire_reject,
-        // wire_pending, wire_dial); legacy wire_pair_* names stay as
-        // aliases for back-compat. Both surface in tools/list with
-        // legacy descriptions tagged DEPRECATED.
-        "wire_pair_accept" | "wire_accept" => tool_pair_accept(&args),
-        "wire_pair_reject" | "wire_reject" => tool_pair_reject(&args),
-        "wire_pair_list_inbound" | "wire_pending" => tool_pair_list_inbound(),
+        // v0.10.1: canonical names introduced; v0.14.x (RFC-005 Phase 2):
+        // deprecated wire_pair_* alias surface removed from tools/list.
+        // Calls to the old names return a helpful redirect error.
+        "wire_accept" => tool_pair_accept(&args),
+        "wire_reject" => tool_pair_reject(&args),
+        "wire_pending" => tool_pair_list_inbound(),
+        "wire_pair_accept" => Err("wire_pair_accept was renamed to wire_accept (v0.9+). \
+             Use wire_accept instead."
+            .into()),
+        "wire_pair_reject" => Err("wire_pair_reject was renamed to wire_reject (v0.9+). \
+             Use wire_reject instead."
+            .into()),
+        "wire_pair_list_inbound" => Err(
+            "wire_pair_list_inbound was renamed to wire_pending (v0.9+). \
+             Use wire_pending instead."
+                .into(),
+        ),
         "wire_dial" => tool_dial(&args),
         "wire_claim" => tool_claim_handle(&args),
         "wire_whois" => tool_whois(&args),
@@ -2628,6 +2612,64 @@ mod tests {
             text.contains("wire_pair_join"),
             "expected redirect to wire_pair_join, got: {text}"
         );
+    }
+
+    #[test]
+    fn tools_list_canonical_present_deprecated_absent() {
+        let req = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let resp = handle_request(&req, &McpState::default());
+        let names: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+
+        // Canonical names must be present.
+        for required in ["wire_accept", "wire_reject", "wire_pending"] {
+            assert!(
+                names.contains(&required),
+                "canonical tool {required} missing from tools/list"
+            );
+        }
+
+        // Deprecated aliases must NOT be advertised (RFC-005 Phase 2).
+        for removed in [
+            "wire_pair_accept",
+            "wire_pair_reject",
+            "wire_pair_list_inbound",
+        ] {
+            assert!(
+                !names.contains(&removed),
+                "deprecated tool {removed} must not appear in tools/list"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_pair_accept_call_returns_helpful_error() {
+        for (old_name, canonical) in [
+            ("wire_pair_accept", "wire_accept"),
+            ("wire_pair_reject", "wire_reject"),
+            ("wire_pair_list_inbound", "wire_pending"),
+        ] {
+            let req = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": old_name, "arguments": {}}
+            });
+            let resp = handle_request(&req, &McpState::default());
+            assert_eq!(
+                resp["result"]["isError"], true,
+                "calling {old_name} should return isError:true"
+            );
+            let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(
+                text.contains(canonical),
+                "error for {old_name} should mention {canonical}, got: {text}"
+            );
+        }
     }
 
     #[test]
