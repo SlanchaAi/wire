@@ -14,36 +14,17 @@
 //!   - `wire_tail`           — read recent signed events from inbox
 //!   - `wire_verify`         — verify a signed event JSON
 //!
-//! **Pairing (agent drives, but the user types the SAS digits back)**
+//! **Pairing (agent drives; operator gates via bilateral accept)**
 //!   - `wire_init`           — idempotent identity creation; same handle = no-op,
 //!     different handle = error (cannot re-key silently)
-//!   - `wire_pair_initiate`  — host opens a pair-slot; returns code phrase
-//!     agent shows to user out-of-band
-//!   - `wire_pair_join`      — guest accepts a code phrase; both sides reach SAS-ready
-//!   - `wire_pair_check`     — poll a pending session_id (used when initiate
-//!     returned before peer was on the line)
-//!   - `wire_pair_confirm`   — user types the 6 SAS digits back; mismatch aborts
+//!   - `wire_dial`           — initiate a pair by handle (`<handle>@<relay>`);
+//!     the canonical pairing path
+//!   - `wire_pending` / `wire_accept` / `wire_reject` — inbound bilateral gate
+//!   - `wire_invite_mint` / `wire_invite_accept` — single-paste invite-URL pair
 //!
-//! ## Why pairing is now agent-callable (T10 update)
-//!
-//! v0.1 originally refused `wire_init` / `wire_pair_*` over MCP entirely on
-//! the theory that a fully-autonomous agent would skip the SAS confirmation.
-//! The new design preserves the human gate by requiring the user to type the
-//! 6-digit SAS back into chat — `wire_pair_confirm(session_id, typed_digits)`
-//! compares against the cached SAS server-side, mismatch aborts the session.
-//!
-//! Defense-in-depth:
-//!   1. SAS digits are returned as tool output the agent renders to the user.
-//!      A malicious agent that fabricates digits in chat fails because the
-//!      user's peer reads their independently-derived SAS over a side channel
-//!      (voice / unrelated text channel). Mismatch on type-back aborts.
-//!   2. The host runtime (Claude Desktop, etc.) is responsible for surfacing
-//!      the type-back step to the actual user, not auto-filling. Wire cannot
-//!      enforce this — see THREAT_MODEL.md T14.
-//!
-//! Concurrent multi-peer: each pair flow has its own session_id (the relay
-//! pair_id) and its own `Mutex<PairSessionState>` in the in-memory store.
-//! Pairing with N peers in parallel is fully supported.
+//! The SAS / code-phrase / SPAKE2 ceremony (`wire_pair_initiate` / `_join` /
+//! `_confirm` and their detached variants) was removed in the RFC-005
+//! follow-on — `wire_dial` is the sole canonical pairing path.
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -170,11 +151,6 @@ pub fn run() -> Result<()> {
             Ok(w) => w,
             Err(_) => return,
         };
-        // Per-code fingerprint (status string) of the last seen pending-pair
-        // snapshot. Used to detect transitions so we emit at most one
-        // notification per actual change (not per poll).
-        let mut prev_pending: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
         let poll_interval = Duration::from_secs(2);
         let mut next_poll = Instant::now() + poll_interval;
         loop {
@@ -206,25 +182,6 @@ pub fn run() -> Result<()> {
                         affected.insert(peer_uri);
                     }
                 }
-            }
-
-            // ---- pending-pair state changes ----
-            // Always poll (cheap dir read); only emit if subscribed.
-            if let Ok(items) = crate::pending_pair::list_pending() {
-                let mut cur: std::collections::HashMap<String, String> =
-                    std::collections::HashMap::new();
-                for p in &items {
-                    cur.insert(p.code.clone(), p.status.clone());
-                }
-                // Detect any change vs. prev_pending: new code, removed code,
-                // or status flip on existing code.
-                let changed = cur.len() != prev_pending.len()
-                    || cur.iter().any(|(k, v)| prev_pending.get(k) != Some(v))
-                    || prev_pending.keys().any(|k| !cur.contains_key(k));
-                if changed && subs_snapshot.contains("wire://pending-pair/all") {
-                    affected.insert("wire://pending-pair/all".to_string());
-                }
-                prev_pending = cur;
             }
 
             for uri in affected {
@@ -322,12 +279,6 @@ fn handle_resources_list(id: &Value) -> Value {
             "description": "Most recent verified events from all pinned peers, JSONL.",
             "mimeType": "application/x-ndjson"
         }),
-        json!({
-            "uri": "wire://pending-pair/all",
-            "name": "wire pending pair sessions",
-            "description": "All detached pair-host/pair-join sessions the local daemon is driving. Subscribe to receive notifications/resources/updated when status changes (notably polling → sas_ready: the agent should then surface the SAS digits to the user and call wire_pair_confirm with the typed-back digits).",
-            "mimeType": "application/json"
-        }),
     ];
 
     if let Ok(trust) = crate::config::read_trust() {
@@ -371,19 +322,16 @@ fn handle_resources_subscribe(id: &Value, params: &Value, state: &McpState) -> V
         Some(u) => u.to_string(),
         None => return error_response(id, -32602, "missing 'uri'"),
     };
-    // Validate the URI shape. Accept wire://inbox/<peer>, wire://inbox/all,
-    // wire://pending-pair/all. Anything else is rejected so we don't pile up
-    // dead subscriptions.
+    // Validate the URI shape. Accept wire://inbox/<peer>, wire://inbox/all.
+    // Anything else is rejected so we don't pile up dead subscriptions.
     let inbox_peer = parse_inbox_uri(&uri);
-    let is_pending = uri == "wire://pending-pair/all";
     if let Some(ref p) = inbox_peer
         && p.starts_with("__invalid__")
-        && !is_pending
     {
         return error_response(
             id,
             -32602,
-            "subscribe URI must be wire://inbox/<peer>, wire://inbox/all, or wire://pending-pair/all",
+            "subscribe URI must be wire://inbox/<peer> or wire://inbox/all",
         );
     }
     if let Ok(mut g) = state.subscribed.lock() {
@@ -408,26 +356,6 @@ fn handle_resources_read(id: &Value, params: &Value) -> Value {
         Some(u) => u,
         None => return error_response(id, -32602, "missing 'uri'"),
     };
-    // pending-pair takes priority over inbox parsing.
-    if uri == "wire://pending-pair/all" {
-        return match crate::pending_pair::list_pending() {
-            Ok(items) => {
-                let body = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string());
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "contents": [{
-                            "uri": uri,
-                            "mimeType": "application/json",
-                            "text": body,
-                        }]
-                    }
-                })
-            }
-            Err(e) => error_response(id, -32603, &e.to_string()),
-        };
-    }
     let peer_opt = parse_inbox_uri(uri);
     match read_inbox_resource(peer_opt) {
         Ok(payload) => json!({
@@ -545,7 +473,7 @@ fn handle_initialize(id: &Value) -> Value {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION,
             },
-            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity), wire_status (daemon + sync health). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). ON SESSION START, DO THIS IMMEDIATELY (every wire session): (1) call wire_status to confirm the `wire daemon` sync loop is running — `daemon_running:true` + `last_sync_age_seconds < 60`; if not, the session won't push outbound or pull inbound and the operator must start a daemon (`wire daemon --interval 5` in a background shell, or systemd/launchd). (2) arm a PERSISTENT stream-watcher on `wire monitor --json` — in Claude Code, the Monitor tool with persistent:true — so peer messages surface live mid-session. The monitor does NOT sync the relay; it only tails the inbox the daemon writes. Both are required. WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you; this is how paired agents collaborate immediately. (Default filter strips pair_drop/pair_drop_ack/heartbeat noise.) v0.14.2: wire_send POSTs synchronously by default — response `status` is the actual relay verdict: `delivered` (event landed on peer's slot), `duplicate` (same event_id already on slot; peer can still pull), `peer_unknown` (peer not pinned — run wire_dial first), `slot_stale` (peer's slot rotated — run wire_dial to re-pair), or `transport_error` (TLS/DNS/relay-5xx; check `reason` field). Pass `queue:true` to opt back into the legacy outbox→daemon-push path for offline-buffer / pre-pair queueing. wire_pull is the symmetric receive primitive — call it to trigger an immediate relay GET instead of waiting for the daemon's 5s pull cycle; returns written[]/rejected[]/total_seen the same way `wire pull --json` does. Legacy MCP tools (wire_pair_initiate/join/confirm) still callable but DEPRECATED — prefer canonical. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
+            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity), wire_status (daemon + sync health). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). ON SESSION START, DO THIS IMMEDIATELY (every wire session): (1) call wire_status to confirm the `wire daemon` sync loop is running — `daemon_running:true` + `last_sync_age_seconds < 60`; if not, the session won't push outbound or pull inbound and the operator must start a daemon (`wire daemon --interval 5` in a background shell, or systemd/launchd). (2) arm a PERSISTENT stream-watcher on `wire monitor --json` — in Claude Code, the Monitor tool with persistent:true — so peer messages surface live mid-session. The monitor does NOT sync the relay; it only tails the inbox the daemon writes. Both are required. WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you; this is how paired agents collaborate immediately. (Default filter strips pair_drop/pair_drop_ack/heartbeat noise.) v0.14.2: wire_send POSTs synchronously by default — response `status` is the actual relay verdict: `delivered` (event landed on peer's slot), `duplicate` (same event_id already on slot; peer can still pull), `peer_unknown` (peer not pinned — run wire_dial first), `slot_stale` (peer's slot rotated — run wire_dial to re-pair), or `transport_error` (TLS/DNS/relay-5xx; check `reason` field). Pass `queue:true` to opt back into the legacy outbox→daemon-push path for offline-buffer / pre-pair queueing. wire_pull is the symmetric receive primitive — call it to trigger an immediate relay GET instead of waiting for the daemon's 5s pull cycle; returns written[]/rejected[]/total_seen the same way `wire pull --json` does. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
         }
     })
 }
@@ -631,107 +559,6 @@ fn tool_defs() -> Vec<Value> {
                     "relay_url": {"type": "string", "description": "Optional relay URL — if set, also binds a relay slot."}
                 },
                 "required": ["handle"]
-            }
-        }),
-        json!({
-            "name": "wire_pair_initiate",
-            "description": "Open a host-side pair-slot. AUTO-INITS the local identity if `handle` is provided and not yet inited (idempotent). Returns a code phrase the agent shows to the user out-of-band (voice / separate text channel) for the peer to paste into their wire_pair_join. Blocks up to max_wait_secs (default 30) for the peer to join, returning SAS inline if so — wire_pair_check is only needed when the host's 30s window closes before the peer joins. Multiple concurrent sessions supported (each call returns a distinct session_id).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "handle": {"type": "string", "description": "Auto-init this handle if local identity not yet created. Skipped if already inited."},
-                    "relay_url": {"type": "string", "description": "Relay base URL. Defaults to the relay this agent's identity is already bound to."},
-                    "max_wait_secs": {"type": "integer", "minimum": 0, "maximum": 60, "default": 30, "description": "How long to block waiting for peer to join before returning waiting-state. 0 = return immediately with code phrase only."}
-                },
-                "required": []
-            }
-        }),
-        json!({
-            "name": "wire_pair_join",
-            "description": "Accept a code phrase from the host (the user types it in after the host shares it out-of-band). AUTO-INITS the local identity if `handle` is provided and not yet inited (idempotent). Returns SAS digits inline once SPAKE2 completes (typically <1s — host is already waiting). The user MUST then type the 6 SAS digits back into chat — pass them to wire_pair_confirm with the returned session_id.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "code_phrase": {"type": "string", "description": "Code phrase from the host (e.g. '73-2QXC4P')."},
-                    "handle": {"type": "string", "description": "Auto-init this handle if local identity not yet created. Skipped if already inited."},
-                    "relay_url": {"type": "string", "description": "Relay base URL. Defaults to the relay this agent's identity is already bound to."},
-                    "max_wait_secs": {"type": "integer", "minimum": 0, "maximum": 60, "default": 30, "description": "How long to block waiting for SPAKE2 exchange to complete."}
-                },
-                "required": ["code_phrase"]
-            }
-        }),
-        json!({
-            "name": "wire_pair_check",
-            "description": "Poll a pending pair session. Returns {state: 'waiting'|'sas_ready'|'finalized'|'aborted', sas?, peer_handle?}. Rarely needed — wire_pair_initiate now blocks 30s by default, covering most cases.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "session_id": {"type": "string"},
-                    "max_wait_secs": {"type": "integer", "minimum": 0, "maximum": 60, "default": 8}
-                },
-                "required": ["session_id"]
-            }
-        }),
-        json!({
-            "name": "wire_pair_confirm",
-            "description": "Verify the user typed the correct SAS digits, then finalize pairing (AEAD bootstrap exchange + pin peer). AUTO-SUBSCRIBES to wire://inbox/<peer> so the agent gets push notifications/resources/updated as new events arrive. The 6-digit SAS comes from the user via the agent's chat — the user reads digits from their peer (out-of-band side channel), then types them back into chat. Mismatch ABORTS this session permanently — start a fresh wire_pair_initiate. Accepts dashes/spaces ('384-217' or '384217' or '384 217').",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "session_id": {"type": "string"},
-                    "user_typed_digits": {"type": "string", "description": "The 6 SAS digits the user typed back, e.g. '384217' or '384-217'."}
-                },
-                "required": ["session_id", "user_typed_digits"]
-            }
-        }),
-        json!({
-            "name": "wire_pair_initiate_detached",
-            "description": "Detached variant of wire_pair_initiate: queues a host-side pair via the local `wire daemon` (auto-spawned if not running) and returns IMMEDIATELY with the code phrase. The daemon drives the handshake in the background. Subscribe to wire://pending-pair/all to get notifications/resources/updated when status → sas_ready, then call wire_pair_confirm_detached(code, digits). Use this if your agent prompt expects to surface the code first and confirm later (across multiple chat turns) rather than block 30s.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "handle": {"type": "string", "description": "Optional handle for auto-init (idempotent)."},
-                    "relay_url": {"type": "string"}
-                }
-            }
-        }),
-        json!({
-            "name": "wire_pair_join_detached",
-            "description": "Detached variant of wire_pair_join. Same flow as wire_pair_initiate_detached but as guest: queues a pair-join on the local daemon. Returns immediately. Subscribe to wire://pending-pair/all for the eventual sas_ready notification.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "handle": {"type": "string"},
-                    "code_phrase": {"type": "string"},
-                    "relay_url": {"type": "string"}
-                },
-                "required": ["code_phrase"]
-            }
-        }),
-        json!({
-            "name": "wire_pair_list_pending",
-            "description": "Return the local daemon's pending detached pair sessions (all states). Same shape as `wire pair-list` JSON. Cheap call — agent can poll, but prefer subscribing to wire://pending-pair/all for push notifications.",
-            "inputSchema": {"type": "object", "properties": {}}
-        }),
-        json!({
-            "name": "wire_pair_confirm_detached",
-            "description": "Confirm a detached pair after SAS surfaces (status=sas_ready). The user must read the SAS digits aloud to their peer over a side channel; if they match the peer's digits, the user types digits back into chat — pass those to this tool. Mismatch ABORTS. The daemon picks up the confirmation on its next tick and finalizes.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "code_phrase": {"type": "string"},
-                    "user_typed_digits": {"type": "string"}
-                },
-                "required": ["code_phrase", "user_typed_digits"]
-            }
-        }),
-        json!({
-            "name": "wire_pair_cancel_pending",
-            "description": "Cancel a pending detached pair. Releases the relay slot and removes the local pending file. Safe to call regardless of current status (idempotent).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {"code_phrase": {"type": "string"}},
-                "required": ["code_phrase"]
             }
         }),
         json!({
@@ -928,7 +755,7 @@ fn tool_defs() -> Vec<Value> {
     ]
 }
 
-fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
+fn handle_tools_call(id: &Value, params: &Value, _state: &McpState) -> Value {
     let name = match params.get("name").and_then(Value::as_str) {
         Some(n) => n,
         None => return error_response(id, -32602, "missing tool name"),
@@ -947,15 +774,6 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
         "wire_tail" => tool_tail(&args),
         "wire_verify" => tool_verify(&args),
         "wire_init" => tool_init(&args),
-        "wire_pair_initiate" => tool_pair_initiate(&args),
-        "wire_pair_join" => tool_pair_join(&args),
-        "wire_pair_check" => tool_pair_check(&args),
-        "wire_pair_confirm" => tool_pair_confirm(&args, state),
-        "wire_pair_initiate_detached" => tool_pair_initiate_detached(&args),
-        "wire_pair_join_detached" => tool_pair_join_detached(&args),
-        "wire_pair_list_pending" => tool_pair_list_pending(),
-        "wire_pair_confirm_detached" => tool_pair_confirm_detached(&args),
-        "wire_pair_cancel_pending" => tool_pair_cancel_pending(&args),
         "wire_invite_mint" => tool_invite_mint(&args),
         "wire_invite_accept" => tool_invite_accept(&args),
         // v0.5 — agentic hotline (handle + profile + zero-paste discovery).
@@ -992,9 +810,11 @@ fn handle_tools_call(id: &Value, params: &Value, state: &McpState) -> Value {
         "wire_group_invite" => tool_group_invite(&args),
         "wire_group_join" => tool_group_join(&args),
         // Legacy alias kept for older agent prompts that reference `wire_join`.
-        // Surfaces the operator-friendly error pointing to wire_pair_join.
+        // The SAS code-phrase pair flow it pointed at is gone — redirect to the
+        // canonical handle-dial path.
         "wire_join" => Err(
-            "wire_join was renamed to wire_pair_join (use code_phrase argument). \
+            "wire_join (SAS code-phrase pairing) was removed. \
+             Use wire_dial(\"<handle>@<relay>\") to pair by handle. \
              See docs/AGENT_INTEGRATION.md."
                 .into(),
         ),
@@ -1468,27 +1288,11 @@ fn tool_send(args: &Value) -> Result<Value, String> {
         .and_then(|s| s.get("peers").and_then(Value::as_object).cloned())
         .map(|peers| peers.contains_key(peer))
         .unwrap_or(false);
-    let pending_outbound = crate::pending_pair::list_pending()
-        .ok()
-        .map(|v| {
-            v.iter().any(|p| {
-                p.peer_did
-                    .as_deref()
-                    .map(|d| {
-                        crate::agent_card::display_handle_from_did(d)
-                            .to_string()
-                            .eq(peer)
-                    })
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false);
     let pending_inbound = crate::pending_inbound_pair::list_pending_inbound()
         .ok()
         .map(|v| v.iter().any(|p| p.peer_handle == peer))
         .unwrap_or(false);
-    let unpushable =
-        !peer_pinned_in_trust && !peer_in_relay_state && !pending_outbound && !pending_inbound;
+    let unpushable = !peer_pinned_in_trust && !peer_in_relay_state && !pending_inbound;
     let mut out = json!({
         "event_id": event_id,
         "status": "queued",
@@ -1642,443 +1446,6 @@ fn tool_init(args: &Value) -> Result<Value, String> {
     let name = args.get("name").and_then(Value::as_str);
     let relay = args.get("relay_url").and_then(Value::as_str);
     crate::init::init_self_idempotent(handle, name, relay).map_err(|e| e.to_string())
-}
-
-/// Resolve the relay URL: explicit arg wins, else the relay this agent's
-/// identity is already bound to (from `wire init --relay` or a previous
-/// pair_initiate). Errors if neither is set.
-fn resolve_relay_url(args: &Value) -> Result<String, String> {
-    if let Some(url) = args.get("relay_url").and_then(Value::as_str) {
-        return Ok(url.to_string());
-    }
-    let state = crate::config::read_relay_state().map_err(|e| e.to_string())?;
-    state["self"]["relay_url"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| "no relay_url provided and no relay bound (call wire_init with relay_url, or pass relay_url here)".into())
-}
-
-/// If `handle` is provided and identity isn't yet initialized, call
-/// `init_self_idempotent` so a single MCP call can do both. If handle is
-/// missing and not initialized, surface a clear error pointing the agent at
-/// wire_init. If already initialized under a different handle, the
-/// idempotent init errors clearly (same as direct wire_init).
-fn auto_init_if_needed(args: &Value) -> Result<(), String> {
-    let initialized = crate::config::is_initialized().map_err(|e| e.to_string())?;
-    if initialized {
-        return Ok(());
-    }
-    let handle = args.get("handle").and_then(Value::as_str).ok_or(
-        "not initialized — pass `handle` to auto-init, or call wire_init explicitly first",
-    )?;
-    let relay = args.get("relay_url").and_then(Value::as_str);
-    crate::init::init_self_idempotent(handle, None, relay)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
-
-fn tool_pair_initiate(args: &Value) -> Result<Value, String> {
-    use crate::pair_session::{
-        pair_session_open, pair_session_wait_for_sas, store_insert, store_sweep_expired,
-    };
-
-    store_sweep_expired();
-    // Auto-init if `handle` arg provided and not yet inited (idempotent).
-    auto_init_if_needed(args)?;
-
-    let relay_url = resolve_relay_url(args)?;
-    let max_wait = args
-        .get("max_wait_secs")
-        .and_then(Value::as_u64)
-        .unwrap_or(30)
-        .min(60);
-
-    let mut s = pair_session_open("host", &relay_url, None).map_err(|e| e.to_string())?;
-    let code = s.code.clone();
-
-    let sas_opt = if max_wait > 0 {
-        pair_session_wait_for_sas(&mut s, max_wait, std::time::Duration::from_millis(250))
-            .map_err(|e| e.to_string())?
-    } else {
-        None
-    };
-
-    let session_id = store_insert(s);
-
-    let mut out = json!({
-        "session_id": session_id,
-        "code_phrase": code,
-        "relay_url": relay_url,
-    });
-    match sas_opt {
-        Some(sas) => {
-            out["state"] = json!("sas_ready");
-            out["sas"] = json!(sas);
-            out["next"] = json!(
-                "Show this SAS to the user and ask them to compare with their peer's SAS over a side channel (voice/text). \
-                 Then ask the user to TYPE the 6 digits BACK INTO CHAT — pass that to wire_pair_confirm."
-            );
-        }
-        None => {
-            out["state"] = json!("waiting");
-            out["next"] = json!(
-                "Share the code_phrase with the user; ask them to read it to their peer (the peer pastes into wire_pair_join). \
-                 Poll wire_pair_check(session_id) until state='sas_ready'."
-            );
-        }
-    }
-    Ok(out)
-}
-
-fn tool_pair_join(args: &Value) -> Result<Value, String> {
-    use crate::pair_session::{
-        pair_session_open, pair_session_wait_for_sas, store_insert, store_sweep_expired,
-    };
-
-    store_sweep_expired();
-    auto_init_if_needed(args)?;
-
-    let code = args
-        .get("code_phrase")
-        .and_then(Value::as_str)
-        .ok_or("missing 'code_phrase'")?;
-    let relay_url = resolve_relay_url(args)?;
-    let max_wait = args
-        .get("max_wait_secs")
-        .and_then(Value::as_u64)
-        .unwrap_or(30)
-        .min(60);
-
-    let mut s = pair_session_open("guest", &relay_url, Some(code)).map_err(|e| e.to_string())?;
-
-    let sas_opt =
-        pair_session_wait_for_sas(&mut s, max_wait, std::time::Duration::from_millis(250))
-            .map_err(|e| e.to_string())?;
-
-    let session_id = store_insert(s);
-
-    let mut out = json!({
-        "session_id": session_id,
-        "relay_url": relay_url,
-    });
-    match sas_opt {
-        Some(sas) => {
-            out["state"] = json!("sas_ready");
-            out["sas"] = json!(sas);
-            out["next"] = json!(
-                "Show this SAS to the user and ask them to compare with their peer's SAS over a side channel. \
-                 Then ask the user to TYPE the 6 digits BACK INTO CHAT — pass that to wire_pair_confirm."
-            );
-        }
-        None => {
-            out["state"] = json!("waiting");
-            out["next"] = json!("Poll wire_pair_check(session_id).");
-        }
-    }
-    Ok(out)
-}
-
-fn tool_pair_check(args: &Value) -> Result<Value, String> {
-    use crate::pair_session::{pair_session_wait_for_sas, store_get, store_sweep_expired};
-
-    store_sweep_expired();
-    let session_id = args
-        .get("session_id")
-        .and_then(Value::as_str)
-        .ok_or("missing 'session_id'")?;
-    let max_wait = args
-        .get("max_wait_secs")
-        .and_then(Value::as_u64)
-        .unwrap_or(8)
-        .min(60);
-
-    let arc = store_get(session_id)
-        .ok_or_else(|| format!("no such session_id (expired or never opened): {session_id}"))?;
-    let mut s = arc.lock().map_err(|e| e.to_string())?;
-
-    if s.finalized {
-        return Ok(json!({
-            "state": "finalized",
-            "session_id": session_id,
-            "sas": s.formatted_sas(),
-        }));
-    }
-    if let Some(reason) = s.aborted.clone() {
-        return Ok(json!({
-            "state": "aborted",
-            "session_id": session_id,
-            "reason": reason,
-        }));
-    }
-
-    let sas_opt =
-        pair_session_wait_for_sas(&mut s, max_wait, std::time::Duration::from_millis(250))
-            .map_err(|e| e.to_string())?;
-
-    Ok(match sas_opt {
-        Some(sas) => json!({
-            "state": "sas_ready",
-            "session_id": session_id,
-            "sas": sas,
-            "next": "Have the user TYPE the 6 SAS digits BACK INTO CHAT, then pass to wire_pair_confirm."
-        }),
-        None => json!({
-            "state": "waiting",
-            "session_id": session_id,
-        }),
-    })
-}
-
-fn tool_pair_confirm(args: &Value, state: &McpState) -> Result<Value, String> {
-    use crate::pair_session::{
-        pair_session_confirm_sas, pair_session_finalize, store_get, store_remove,
-    };
-
-    let session_id = args
-        .get("session_id")
-        .and_then(Value::as_str)
-        .ok_or("missing 'session_id'")?;
-    let typed = args
-        .get("user_typed_digits")
-        .and_then(Value::as_str)
-        .ok_or(
-            "missing 'user_typed_digits' — the user must type the 6 SAS digits back into chat",
-        )?;
-
-    let arc = store_get(session_id).ok_or_else(|| format!("no such session_id: {session_id}"))?;
-
-    let confirm_err = {
-        let mut s = arc.lock().map_err(|e| e.to_string())?;
-        match pair_session_confirm_sas(&mut s, typed) {
-            Ok(()) => None,
-            Err(e) => Some((s.aborted.is_some(), e.to_string())),
-        }
-    };
-    if let Some((aborted, msg)) = confirm_err {
-        if aborted {
-            store_remove(session_id);
-        }
-        return Err(msg);
-    }
-
-    let mut result = {
-        let mut s = arc.lock().map_err(|e| e.to_string())?;
-        pair_session_finalize(&mut s, 30).map_err(|e| e.to_string())?
-    };
-    store_remove(session_id);
-
-    // ---- Post-pair auto-setup (Goal: zero friction after SAS) ----
-    // 1. Auto-subscribe to wire://inbox/<peer> so clients that support
-    //    resources/subscribe get push notifications/resources/updated.
-    // 2. Spawn `wire daemon` if not already running so push/pull is automatic.
-    // 3. Spawn `wire notify` if not already running so OS toasts fire on
-    //    inbox grow (covers MCP hosts that lack resources/subscribe).
-    // 4. Emit notifications/resources/list_changed via the writer channel so
-    //    a client that called resources/list before pairing refreshes its view.
-    let peer_handle = result["peer_handle"].as_str().unwrap_or("").to_string();
-    let peer_uri = format!("wire://inbox/{peer_handle}");
-
-    let mut auto = json!({
-        "subscribed": false,
-        "daemon": "unknown",
-        "notify": "unknown",
-        "resources_list_changed_emitted": false,
-    });
-
-    if !peer_handle.is_empty()
-        && let Ok(mut g) = state.subscribed.lock()
-    {
-        g.insert(peer_uri.clone());
-        auto["subscribed"] = json!(true);
-    }
-
-    auto["daemon"] = match crate::ensure_up::ensure_daemon_running() {
-        Ok(true) => json!("spawned"),
-        Ok(false) => json!("already_running"),
-        Err(e) => json!(format!("spawn_error: {e}")),
-    };
-    auto["notify"] = match crate::ensure_up::ensure_notify_running() {
-        Ok(true) => json!("spawned"),
-        Ok(false) => json!("already_running"),
-        Err(e) => json!(format!("spawn_error: {e}")),
-    };
-
-    if let Some(tx) = state.notif_tx.lock().ok().and_then(|g| g.clone()) {
-        let notif = json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/resources/list_changed",
-        });
-        if tx.send(notif.to_string()).is_ok() {
-            auto["resources_list_changed_emitted"] = json!(true);
-        }
-    }
-
-    result["auto"] = auto;
-    result["next"] = json!(
-        "Done. Daemon + notify running, subscribed to peer inbox. Use wire_send/wire_tail \
-         freely; new events arrive via notifications/resources/updated (where supported) and \
-         OS toasts (always)."
-    );
-    Ok(result)
-}
-
-// ---------- detached pair tools (daemon-orchestrated) ----------
-
-fn tool_pair_initiate_detached(args: &Value) -> Result<Value, String> {
-    auto_init_if_needed(args)?;
-    let relay_url = resolve_relay_url(args)?;
-    if std::env::var("WIRE_MCP_SKIP_AUTO_UP").is_err() {
-        let _ = crate::ensure_up::ensure_daemon_running();
-    }
-    let code = crate::sas::generate_code_phrase();
-    let code_hash = crate::pair_session::derive_code_hash(&code);
-    let now = time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default();
-    let p = crate::pending_pair::PendingPair {
-        code: code.clone(),
-        code_hash,
-        role: "host".to_string(),
-        relay_url: relay_url.clone(),
-        status: "request_host".to_string(),
-        sas: None,
-        peer_did: None,
-        created_at: now,
-        last_error: None,
-        pair_id: None,
-        our_slot_id: None,
-        our_slot_token: None,
-        spake2_seed_b64: None,
-    };
-    crate::pending_pair::write_pending(&p).map_err(|e| e.to_string())?;
-    Ok(json!({
-        "code_phrase": code,
-        "relay_url": relay_url,
-        "state": "queued",
-        "next": "Share code_phrase with the user. Subscribe to wire://pending-pair/all; when notifications/resources/updated arrives, read the resource and surface the SAS digits to the user once status=sas_ready. Then call wire_pair_confirm_detached with code_phrase + user_typed_digits."
-    }))
-}
-
-fn tool_pair_join_detached(args: &Value) -> Result<Value, String> {
-    auto_init_if_needed(args)?;
-    let relay_url = resolve_relay_url(args)?;
-    let code_phrase = args
-        .get("code_phrase")
-        .and_then(Value::as_str)
-        .ok_or("missing 'code_phrase'")?;
-    let code = crate::sas::parse_code_phrase(code_phrase)
-        .map_err(|e| e.to_string())?
-        .to_string();
-    let code_hash = crate::pair_session::derive_code_hash(&code);
-    if std::env::var("WIRE_MCP_SKIP_AUTO_UP").is_err() {
-        let _ = crate::ensure_up::ensure_daemon_running();
-    }
-    let now = time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default();
-    let p = crate::pending_pair::PendingPair {
-        code: code.clone(),
-        code_hash,
-        role: "guest".to_string(),
-        relay_url: relay_url.clone(),
-        status: "request_guest".to_string(),
-        sas: None,
-        peer_did: None,
-        created_at: now,
-        last_error: None,
-        pair_id: None,
-        our_slot_id: None,
-        our_slot_token: None,
-        spake2_seed_b64: None,
-    };
-    crate::pending_pair::write_pending(&p).map_err(|e| e.to_string())?;
-    Ok(json!({
-        "code_phrase": code,
-        "relay_url": relay_url,
-        "state": "queued",
-        "next": "Subscribe to wire://pending-pair/all; on sas_ready notification, surface digits to user and call wire_pair_confirm_detached."
-    }))
-}
-
-fn tool_pair_list_pending() -> Result<Value, String> {
-    let items = crate::pending_pair::list_pending().map_err(|e| e.to_string())?;
-    Ok(json!({"pending": items}))
-}
-
-fn tool_pair_confirm_detached(args: &Value) -> Result<Value, String> {
-    let code_phrase = args
-        .get("code_phrase")
-        .and_then(Value::as_str)
-        .ok_or("missing 'code_phrase'")?;
-    let typed = args
-        .get("user_typed_digits")
-        .and_then(Value::as_str)
-        .ok_or("missing 'user_typed_digits'")?;
-    let code = crate::sas::parse_code_phrase(code_phrase)
-        .map_err(|e| e.to_string())?
-        .to_string();
-    let typed: String = typed.chars().filter(|c| c.is_ascii_digit()).collect();
-    if typed.len() != 6 {
-        return Err(format!(
-            "expected 6 digits (got {} after stripping non-digits)",
-            typed.len()
-        ));
-    }
-    let mut p = crate::pending_pair::read_pending(&code)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("no pending pair for code {code}"))?;
-    if p.status != "sas_ready" {
-        return Err(format!(
-            "pair {code} not in sas_ready state (current: {})",
-            p.status
-        ));
-    }
-    let stored = p
-        .sas
-        .as_ref()
-        .ok_or("pending file has status=sas_ready but no sas field")?
-        .clone();
-    if stored == typed {
-        p.status = "confirmed".to_string();
-        crate::pending_pair::write_pending(&p).map_err(|e| e.to_string())?;
-        Ok(json!({
-            "state": "confirmed",
-            "code_phrase": code,
-            "next": "Daemon will finalize on its next tick (~1s). Poll wire_peers or watch wire://pending-pair/all for the entry to disappear."
-        }))
-    } else {
-        p.status = "aborted".to_string();
-        p.last_error = Some(format!(
-            "SAS digit mismatch (typed {typed}, expected {stored})"
-        ));
-        let client = crate::relay_client::RelayClient::new(&p.relay_url);
-        let _ = client.pair_abandon(&p.code_hash);
-        let _ = crate::pending_pair::write_pending(&p);
-        crate::os_notify::toast(
-            &format!("wire — pair aborted ({code})"),
-            p.last_error.as_deref().unwrap_or("digits mismatch"),
-        );
-        Err(
-            "digits mismatch — pair aborted. Re-issue with wire_pair_initiate_detached."
-                .to_string(),
-        )
-    }
-}
-
-fn tool_pair_cancel_pending(args: &Value) -> Result<Value, String> {
-    let code_phrase = args
-        .get("code_phrase")
-        .and_then(Value::as_str)
-        .ok_or("missing 'code_phrase'")?;
-    let code = crate::sas::parse_code_phrase(code_phrase)
-        .map_err(|e| e.to_string())?
-        .to_string();
-    if let Some(p) = crate::pending_pair::read_pending(&code).map_err(|e| e.to_string())? {
-        let client = crate::relay_client::RelayClient::new(&p.relay_url);
-        let _ = client.pair_abandon(&p.code_hash);
-    }
-    crate::pending_pair::delete_pending(&code).map_err(|e| e.to_string())?;
-    Ok(json!({"state": "cancelled", "code_phrase": code}))
 }
 
 // ---------- invite-URL one-paste pair (v0.4.0) ----------
@@ -2578,22 +1945,37 @@ mod tests {
             "wire_tail",
             "wire_verify",
             "wire_init",
-            "wire_pair_initiate",
-            "wire_pair_join",
-            "wire_pair_check",
-            "wire_pair_confirm",
+            "wire_dial",
         ] {
             assert!(
                 names.contains(&required),
                 "missing required tool {required}"
             );
         }
-        // wire_join (the old direct alias for pair-join, no SAS-typeback) is
-        // explicitly NOT in the catalog. Calling it returns a deprecation
-        // pointing to wire_pair_join (test below covers this).
+        // The SAS code-phrase pair tools were removed (RFC-005 follow-on) —
+        // they must NOT be advertised.
+        for removed in [
+            "wire_pair_initiate",
+            "wire_pair_join",
+            "wire_pair_check",
+            "wire_pair_confirm",
+            "wire_pair_initiate_detached",
+            "wire_pair_join_detached",
+            "wire_pair_list_pending",
+            "wire_pair_confirm_detached",
+            "wire_pair_cancel_pending",
+        ] {
+            assert!(
+                !names.contains(&removed),
+                "SAS pair tool {removed} must not be advertised after removal"
+            );
+        }
+        // wire_join (the old direct alias for the SAS pair-join) is explicitly
+        // NOT in the catalog. Calling it returns a deprecation pointing to
+        // wire_dial (test below covers this).
         assert!(
             !names.contains(&"wire_join"),
-            "wire_join must not be advertised — superseded by wire_pair_join"
+            "wire_join must not be advertised — SAS pairing removed"
         );
     }
 
@@ -2609,8 +1991,8 @@ mod tests {
         assert_eq!(resp["result"]["isError"], true);
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(
-            text.contains("wire_pair_join"),
-            "expected redirect to wire_pair_join, got: {text}"
+            text.contains("wire_dial"),
+            "expected redirect to wire_dial, got: {text}"
         );
     }
 
@@ -2670,35 +2052,6 @@ mod tests {
                 "error for {old_name} should mention {canonical}, got: {text}"
             );
         }
-    }
-
-    #[test]
-    fn pair_confirm_missing_session_id_errors_cleanly() {
-        let req = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": "wire_pair_confirm", "arguments": {"user_typed_digits": "111111"}}
-        });
-        let resp = handle_request(&req, &McpState::default());
-        assert_eq!(resp["result"]["isError"], true);
-    }
-
-    #[test]
-    fn pair_confirm_unknown_session_errors_cleanly() {
-        let req = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "wire_pair_confirm",
-                "arguments": {"session_id": "definitely-not-real", "user_typed_digits": "111111"}
-            }
-        });
-        let resp = handle_request(&req, &McpState::default());
-        assert_eq!(resp["result"]["isError"], true);
-        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("no such session_id"), "got: {text}");
     }
 
     #[test]
