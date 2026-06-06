@@ -98,8 +98,8 @@ Honest residual, unchanged by this RFC and stated for the record so the group ca
 
 ## Open questions
 
-- **Path A or B?** Decide whether NIP-44 body-encryption is additive (reserve `enc`, stay v3) or breaking (needs `v4`). Owner: whoever scopes the v0.2 encryption PR. Decision point: before v0.15 schema freeze.
-- **Ratchet vs DH-on-card?** vodozemac-from-pairing-secret (`BACKLOG.md:70`, no card field) vs X25519-on-card NIP-44 (additive field). The former gives FS/PCS; the latter gives Nostr-DM interop (`BACKLOG.md:17`). Possibly both. Owner: @laulpogan. Not blocking this RFC — only the *reservation* is.
+- **Path A or B? — RESOLVED → A (additive, stay v3).** Proven by the path-A fixture `signing.rs::enc_bearing_event_verifies_additively_path_a` (PR #228): an `enc`-bearing event signs + verifies with zero encryption-aware code, so NIP-44 needs no `v4` bump.
+- **Ratchet vs DH-on-card? — RESOLVED → NIP-44 (X25519 `dh_pubkey`), defer vodozemac.** See the [vodozemac-vs-NIP-44 spike](./0006-spike-vodozemac-vs-nip44.md). vodozemac does NOT key from the SPAKE2 secret (it runs its own Curve25519 X3DH; the `BACKLOG.md:70` "seal swap" framing is a category error, ~800–1500 LOC not 300), its Double-Ratchet PCS only partially delivers for store-and-forward/passive-replier peers, and it doesn't compose with Nostr interop. NIP-44 is stateless, store-and-forward-clean, and gives the Nostr-DM path — accept "no FS/PCS," mitigate with relay TTL + Ed25519 integrity. vodozemac deferred unless a concrete threat model demands per-message FS for bidirectionally-active high-value pairs.
 - **Does group ride DM encryption or wait for MLS?** If DM NIP-44 lands in v0.2 and groups in v0.3, is there a plaintext-group gap to flag louder? Owner: maintainer.
 
 ## Alternatives considered
