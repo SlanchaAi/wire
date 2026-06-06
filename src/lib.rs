@@ -58,7 +58,7 @@ pub use signing::{
 
 pub use agent_card::{
     AgentCard, CARD_SCHEMA_VERSION, CardError, DID_METHOD, build_agent_card, card_canonical,
-    compute_sas, did_for, sign_agent_card, verify_agent_card,
+    compute_sas, sign_agent_card, verify_agent_card,
 };
 
 pub use trust::{

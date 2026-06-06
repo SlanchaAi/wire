@@ -572,19 +572,11 @@ fn read_card_identity(card_path: &Path) -> (Option<String>, Option<String>) {
 pub fn session_daemon_pid(session_home: &Path) -> Option<u32> {
     let pidfile = session_home.join("state").join("wire").join("daemon.pid");
     let bytes = std::fs::read(&pidfile).ok()?;
-    // Pidfile is either JSON `{"pid": <n>, ...}` (v0.5.11+) or a bare
-    // integer (legacy). Try JSON-with-pid-field first; if that yields
-    // None (parse failed OR JSON parsed successfully as a bare Number
-    // with no `.pid` field), fall through to the bare-int path.
-    // Pre-fix: a legacy bare-integer pidfile silently returned None
-    // here because `serde_json::from_slice("67890")` succeeds as
-    // Value::Number, then `v.get("pid")` is None, and the else
-    // branch never ran. Caused legitimate pre-v0.5.11 sessions to
-    // read as "no daemon" in list-local and orphan-detection paths.
+    // Pidfile is the JSON `{"pid": <n>, ...}` form (v0.5.11+). Anything
+    // else reads as "no daemon".
     serde_json::from_slice::<serde_json::Value>(&bytes)
         .ok()
         .and_then(|v| v.get("pid").and_then(|p| p.as_u64()))
-        .or_else(|| String::from_utf8_lossy(&bytes).trim().parse::<u64>().ok())
         .map(|p| p as u32)
 }
 
@@ -1765,14 +1757,13 @@ mod tests {
         let h1 = mk_session("abc123def4567890", "alpha-aurora");
         let h2 = mk_session("def456abc7890123", "beta-blossom");
         let _h3 = mk_session("0000aaaabbbbcccc", "gamma-gorge");
-        // h1 / h2 get pidfiles (JSON form + legacy-int form for coverage);
-        // h3 gets none.
+        // h1 / h2 get JSON pidfiles; h3 gets none.
         let state1 = h1.join("state").join("wire");
         let state2 = h2.join("state").join("wire");
         std::fs::create_dir_all(&state1).unwrap();
         std::fs::create_dir_all(&state2).unwrap();
         std::fs::write(state1.join("daemon.pid"), r#"{"pid": 12345}"#).unwrap();
-        std::fs::write(state2.join("daemon.pid"), "67890").unwrap();
+        std::fs::write(state2.join("daemon.pid"), r#"{"pid": 67890}"#).unwrap();
 
         // SAFETY: ENV_LOCK is held, serializing all env access.
         unsafe { std::env::set_var("WIRE_HOME", &h1) };
@@ -1794,7 +1785,7 @@ mod tests {
         assert_eq!(
             map.get(&67890).map(String::as_str),
             Some("beta-blossom"),
-            "pid 67890 should map (legacy-int pidfile form, handle for h2)"
+            "pid 67890 should map (JSON pidfile form, handle for h2)"
         );
         // Sanity: no entry for an unrelated pid.
         assert!(
