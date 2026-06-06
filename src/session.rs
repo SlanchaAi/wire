@@ -2295,9 +2295,7 @@ mod tests {
         // by-key with non-hex chars in hash.
         assert!(!is_by_key_shape("/wire/sessions/by-key/not-a-hex-hash"));
         // by-key with uppercase hex (wire writes lowercase only).
-        assert!(!is_by_key_shape(
-            "/wire/sessions/by-key/0C38CE498AA9D955"
-        ));
+        assert!(!is_by_key_shape("/wire/sessions/by-key/0C38CE498AA9D955"));
         // by-key with hash too long (32 hex).
         assert!(!is_by_key_shape(
             "/wire/sessions/by-key/0c38ce498aa9d9550c38ce498aa9d955"
