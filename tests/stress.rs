@@ -151,18 +151,14 @@ async fn pair_two_homes(
     // alice: wait for pending-inbound, then accept.
     let alice_has_pending = wait_until(Instant::now() + Duration::from_secs(15), || {
         let _ = wire(&alice, &["pull", "--json"]);
-        let p = wire(&alice, &["pair-list-inbound", "--json"]);
+        let p = wire(&alice, &["pending", "--json"]);
         String::from_utf8_lossy(&p.stdout).contains(bob_h.as_str())
     });
     assert!(
         alice_has_pending,
         "alice never saw pending-inbound from {bob_h}"
     );
-    assert!(
-        wire(&alice, &["pair-accept", &bob_h, "--json"])
-            .status
-            .success()
-    );
+    assert!(wire(&alice, &["accept", &bob_h, "--json"]).status.success());
 
     // bob: pull pair_drop_ack — pins alice.
     let bob_pinned_alice = wait_until(Instant::now() + Duration::from_secs(15), || {

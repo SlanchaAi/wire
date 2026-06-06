@@ -133,7 +133,7 @@ async fn invite_url_one_paste_pair_e2e() {
     );
 
     // 2. willard accepts (zero-config, no prior init). Auto-inits + allocates.
-    let out = wire(&willard, &["accept", &invite_url, "--json"]);
+    let out = wire(&willard, &["accept-invite", &invite_url, "--json"]);
     assert!(
         out.status.success(),
         "accept failed:\nstdout: {}\nstderr: {}",
@@ -288,7 +288,7 @@ async fn expired_invite_rejected_on_accept() {
 
     std::thread::sleep(Duration::from_secs(2));
 
-    let out = wire(&willard, &["accept", &invite_url, "--json"]);
+    let out = wire(&willard, &["accept-invite", &invite_url, "--json"]);
     assert!(
         !out.status.success(),
         "expected accept to fail on expired invite"
@@ -327,7 +327,7 @@ async fn accept_zero_config_auto_init() {
     let url = mint_json["invite_url"].as_str().unwrap().to_string();
 
     // No prior init on `bare` — accept must bootstrap from nothing.
-    let out = wire(&bare, &["accept", &url, "--json"]);
+    let out = wire(&bare, &["accept-invite", &url, "--json"]);
     assert!(
         out.status.success(),
         "zero-config accept failed:\nstdout: {}\nstderr: {}",

@@ -224,7 +224,7 @@ Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 - `wire daemon` — long-lived sync loop (push outbox + pull inbox + complete bilateral pairs)
 - `wire relay-server` — self-host the mailbox relay binary (AGPL; serves the landing page + protocol endpoints + `/stats` from a single Rust binary, no extras to wire up)
 - `wire mcp` — MCP server over stdio so Claude Code / Cursor / Claude Desktop see `wire_send`, `wire_tail`, `wire_add` etc. as native tools
-- **Legacy flows** (hidden from `--help`, still callable, v1.0 removes): `wire pair-host` / `wire pair-join` (SPAKE2 + SAS, v0.3), `wire invite` + `wire accept-invite` (paste-URL, v0.4), `wire pair-accept` / `wire pair-reject` / `wire pair-list-inbound` (replaced by `wire accept` / `wire reject` / `wire pending` in v0.9).
+- **Legacy flows** (hidden from `--help`, still callable, v1.0 removes): `wire pair-host` / `wire pair-join` (SPAKE2 + SAS, v0.3), `wire invite` + `wire accept-invite` (paste-URL, v0.4). **Removed in RFC-005**: `wire pair-accept` / `wire pair-reject` / `wire pair-list-inbound` / `wire pair` (use `wire accept` / `wire reject` / `wire pending` / `wire dial`).
 
 ---
 

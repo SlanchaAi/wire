@@ -5,7 +5,7 @@
 #   1. boots a local relay-server
 #   2. inits two wire homes (paul + willard) on the local relay
 #   3. paul: `wire invite` → URL
-#   4. willard: `wire accept <URL>` → sends signed pair_drop event
+#   4. willard: `wire accept-invite <URL>` → sends signed pair_drop event
 #   5. paul `wire pull` → consumes pair_drop → pins willard
 #   6. paul `wire send willard` → willard `wire pull` → message lands
 #   7. willard `wire send paul` → paul `wire pull` → ack lands
@@ -79,7 +79,7 @@ case "$INVITE_URL" in
 esac
 
 echo "→ willard accepts URL (one paste)"
-ACCEPT_JSON=$(WIRE_HOME="$WILLARD_HOME" "$WIRE" accept "$INVITE_URL" --json)
+ACCEPT_JSON=$(WIRE_HOME="$WILLARD_HOME" "$WIRE" accept-invite "$INVITE_URL" --json)
 PAIRED_WITH=$(echo "$ACCEPT_JSON" | jq -r '.paired_with')
 case "$PAIRED_WITH" in
     "did:wire:$PAUL_H-"*) ;;
