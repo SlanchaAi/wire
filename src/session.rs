@@ -1120,8 +1120,8 @@ fn read_wire_home_from_pid(pid: u32) -> Option<String> {
 /// use. Noop when `WIRE_HOME` is already set (explicit override wins).
 ///
 /// `label` distinguishes the caller in the stderr line (`mcp` vs
-/// `cli`). Set `WIRE_QUIET_AUTOSESSION=1` to suppress the stderr line
-/// while keeping the env-var application active.
+/// `cli`). Output only appears on interactive TTYs; set `WIRE_VERBOSE=1`
+/// to force it on in non-interactive contexts.
 ///
 /// MUST be called BEFORE any worker thread or async task spawns —
 /// `env::set_var` is unsafe in Rust 2024 because of thread-safety
@@ -1217,13 +1217,11 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
     // Bash tool, scripts, daemons), the auto-detect line is captured
     // alongside command output and pollutes both — wasting agent
     // context tokens and breaking JSON parsers that read combined
-    // streams. WIRE_VERBOSE=1 forces the line on; WIRE_QUIET_AUTOSESSION
-    // still forces it off for back-compat with v0.9 scripts.
+    // streams. WIRE_VERBOSE=1 forces the line on.
     use std::io::IsTerminal;
-    let quiet_env = std::env::var("WIRE_QUIET_AUTOSESSION").is_ok();
     let verbose_env = std::env::var("WIRE_VERBOSE").is_ok();
     let interactive = std::io::stderr().is_terminal();
-    if !quiet_env && (interactive || verbose_env) {
+    if interactive || verbose_env {
         eprintln!(
             "wire {label}: adopted {why} → WIRE_HOME=`{}`",
             home.display()
