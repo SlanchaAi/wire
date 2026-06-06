@@ -241,6 +241,31 @@ fn write_pid_record(name: &str, record: &DaemonPid) -> Result<()> {
     Ok(())
 }
 
+/// Daemon-startup: claim the `daemon.pid` file for THIS process.
+///
+/// A daemon started directly (`wire daemon`, not via `ensure_background`)
+/// must write its own versioned-JSON pidfile so `wire status` / doctor /
+/// the singleton guard can see it. Idempotent: if the pidfile already
+/// records our PID we leave it untouched. (Historically this lived in
+/// `pending_pair::cleanup_on_startup` alongside the now-removed SAS
+/// pending-pair recovery; the pidfile write was never SAS-specific.)
+pub fn write_self_daemon_pid() -> Result<()> {
+    let path = pid_file("daemon")?;
+    let my_pid = std::process::id();
+    if path.exists()
+        && let Ok(s) = std::fs::read_to_string(&path)
+        && let Ok(rec) = serde_json::from_str::<DaemonPid>(s.trim())
+        && rec.pid == my_pid
+    {
+        // We already own this pidfile — nothing to do.
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    write_pid_record("daemon", &build_pid_record(my_pid))
+}
+
 /// Schema string written into every JSON last-sync file. Bumped if the
 /// shape ever changes incompatibly. Readers tolerate any schema string +
 /// fall back to "unknown last_sync" when they don't recognize it.

@@ -300,9 +300,9 @@ fn pair_list_inbound_surfaces_pending_v0_5_14() {
 
 #[test]
 fn status_reports_pending_inbound_count_v0_5_14() {
-    // `wire status --json` must surface inbound_count separately from
-    // SPAKE2 pending_pairs.total so monitoring + dashboards can distinguish
-    // "stranger requests awaiting accept" from "active SPAKE2 sessions".
+    // `wire status --json` must surface pending_pairs.inbound_count — the
+    // count of stranger requests awaiting an operator accept — so monitoring
+    // + dashboards can see who's waiting.
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
     write_pending_inbound_fixture(&home, "alice");

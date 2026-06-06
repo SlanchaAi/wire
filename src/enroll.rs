@@ -81,7 +81,7 @@ pub fn with_op_claims_if_enrolled(
 
 /// Rebuild the on-disk agent card with the **current** enrollment state and
 /// re-sign it. Closes the enroll-after-`init` DX gap: claims are normally
-/// attached at card-build time (`pair_session::init_self` / `cli.rs` init via
+/// attached at card-build time (`init::init_self_idempotent` / `cli.rs` init via
 /// [`with_op_claims_if_enrolled`]), but an operator who enrolls AFTER `init`
 /// has a stored card that pre-dates the claims. This reads the stored card,
 /// strips any pre-existing identity-claim fields + signature, overlays the

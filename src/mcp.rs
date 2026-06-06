@@ -272,14 +272,12 @@ fn handle_request(req: &Value, state: &McpState) -> Value {
 //   wire://inbox/all       last 50 events across all peers, newest first
 
 fn handle_resources_list(id: &Value) -> Value {
-    let mut resources = vec![
-        json!({
-            "uri": "wire://inbox/all",
-            "name": "wire inbox (all peers)",
-            "description": "Most recent verified events from all pinned peers, JSONL.",
-            "mimeType": "application/x-ndjson"
-        }),
-    ];
+    let mut resources = vec![json!({
+        "uri": "wire://inbox/all",
+        "name": "wire inbox (all peers)",
+        "description": "Most recent verified events from all pinned peers, JSONL.",
+        "mimeType": "application/x-ndjson"
+    })];
 
     if let Ok(trust) = crate::config::read_trust() {
         let agents = trust
@@ -812,12 +810,10 @@ fn handle_tools_call(id: &Value, params: &Value, _state: &McpState) -> Value {
         // Legacy alias kept for older agent prompts that reference `wire_join`.
         // The SAS code-phrase pair flow it pointed at is gone — redirect to the
         // canonical handle-dial path.
-        "wire_join" => Err(
-            "wire_join (SAS code-phrase pairing) was removed. \
+        "wire_join" => Err("wire_join (SAS code-phrase pairing) was removed. \
              Use wire_dial(\"<handle>@<relay>\") to pair by handle. \
              See docs/AGENT_INTEGRATION.md."
-                .into(),
-        ),
+            .into()),
         other => Err(format!("unknown tool: {other}")),
     };
 

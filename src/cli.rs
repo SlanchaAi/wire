@@ -792,7 +792,7 @@ pub enum Command {
 #[derive(Subcommand, Debug)]
 pub enum QuietAction {
     /// Touch `<config_dir>/quiet` — silences every wire desktop toast
-    /// (pair_drop, pending_pair, monitor, inbox). Idempotent.
+    /// (pair_drop, monitor, inbox). Idempotent.
     On,
     /// Remove `<config_dir>/quiet` — re-enables toasts. Idempotent (no
     /// error if already off / file absent).
@@ -2226,9 +2226,7 @@ fn cmd_init(
             println!("next step: `wire dial <handle>@{url}` to pair with a peer.");
         } else {
             println!();
-            println!(
-                "next step: `wire dial <handle>@<relay>` to bind a relay + pair with a peer."
-            );
+            println!("next step: `wire dial <handle>@<relay>` to bind a relay + pair with a peer.");
         }
     }
     Ok(())
@@ -2415,12 +2413,6 @@ fn cmd_status(as_json: bool) -> Result<()> {
         daemon["orphans_detail"] = json!(orphans_detail);
         summary["daemon"] = daemon;
 
-        // Pending pair sessions — counts by status.
-        let pending = crate::pending_pair::list_pending().unwrap_or_default();
-        let mut counts: std::collections::BTreeMap<String, u32> = Default::default();
-        for p in &pending {
-            *counts.entry(p.status.clone()).or_default() += 1;
-        }
         // v0.5.14: pending-inbound zero-paste pair_drops awaiting accept.
         // v0.14.2: filter out records whose peer is already pinned at
         // VERIFIED+ tier (i.e., bilateral completed via some other
@@ -2467,8 +2459,6 @@ fn cmd_status(as_json: bool) -> Result<()> {
             .map(|p| p.peer_handle.as_str())
             .collect();
         summary["pending_pairs"] = json!({
-            "total": pending.len(),
-            "by_status": counts,
             "inbound_count": pending_inbound.len(),
             "inbound_handles": inbound_handles,
             // Surface the filtered-as-stale set so operators with
@@ -2686,23 +2676,10 @@ fn cmd_status(as_json: bool) -> Result<()> {
                 );
             }
         }
-        let pending_total = summary["pending_pairs"]["total"].as_u64().unwrap_or(0);
         let inbound_count = summary["pending_pairs"]["inbound_count"]
             .as_u64()
             .unwrap_or(0);
-        if pending_total > 0 {
-            print!("pending pairs: {pending_total}");
-            if let Some(obj) = summary["pending_pairs"]["by_status"].as_object() {
-                let parts: Vec<String> = obj
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, v.as_u64().unwrap_or(0)))
-                    .collect();
-                if !parts.is_empty() {
-                    print!(" ({})", parts.join(", "));
-                }
-            }
-            println!();
-        } else if inbound_count == 0 {
+        if inbound_count == 0 {
             println!("pending pairs: none");
         }
         // v0.5.14: separate line for pending-inbound zero-paste requests.
@@ -4189,30 +4166,12 @@ fn cmd_send(
         .map(|a| a.contains_key(peer))
         .unwrap_or(false);
     if !peer_pinned_in_trust && !peer_is_pinned {
-        // Check both directions: outbound (we dialed, daemon
-        // hasn't completed the pair yet — peer_did may be set if
-        // the relay returned it) and inbound (we received an
-        // invite drop awaiting accept — explicit peer_handle).
-        let pending_outbound = crate::pending_pair::list_pending()
-            .ok()
-            .map(|v| {
-                v.iter().any(|p| {
-                    p.peer_did
-                        .as_deref()
-                        .map(|d| {
-                            crate::agent_card::display_handle_from_did(d)
-                                .to_string()
-                                .eq(peer)
-                        })
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
+        // We received an invite drop awaiting accept (explicit peer_handle).
         let pending_inbound = crate::pending_inbound_pair::list_pending_inbound()
             .ok()
             .map(|v| v.iter().any(|p| p.peer_handle == peer))
             .unwrap_or(false);
-        if !pending_outbound && !pending_inbound {
+        if !pending_inbound {
             eprintln!(
                 "wire send: WARN — `{peer}` is not pinned and has no pending pair. \
                  The event will sit in outbox forever unless you pair first \
@@ -6434,11 +6393,11 @@ fn cmd_daemon(
         }
     }
 
-    // Recover from prior crash: any pending pair in transient state had its
-    // in-memory SPAKE2 secret lost when the previous daemon exited. Release
-    // the relay slots and mark the files so the operator can re-issue.
-    if let Err(e) = crate::pending_pair::cleanup_on_startup() {
-        eprintln!("daemon: pending-pair cleanup_on_startup error: {e:#}");
+    // Claim the daemon pidfile for this process so `wire status` / doctor /
+    // the singleton guard can see us when started directly (not via
+    // ensure_background). Best-effort.
+    if let Err(e) = crate::ensure_up::write_self_daemon_pid() {
+        eprintln!("daemon: pidfile write error: {e:#}");
     }
 
     // R1 phase 2: spawn the SSE stream subscriber. On every event pushed
@@ -6459,10 +6418,6 @@ fn cmd_daemon(
         let pulled = run_sync_pull().unwrap_or_else(|e| {
             eprintln!("daemon: pull error: {e:#}");
             json!({"written": [], "rejected": [], "total_seen": 0, "error": e.to_string()})
-        });
-        let pairs = crate::pending_pair::tick().unwrap_or_else(|e| {
-            eprintln!("daemon: pending-pair tick error: {e:#}");
-            json!({"transitions": []})
         });
 
         // v0.14.2 (#162): persist a `last_sync.json` record after every
@@ -6485,41 +6440,12 @@ fn cmd_daemon(
                         .unwrap_or_default(),
                     "push": pushed,
                     "pull": pulled,
-                    "pairs": pairs,
                 }))?
             );
-        } else {
-            let pair_transitions = pairs["transitions"]
-                .as_array()
-                .map(|a| a.len())
-                .unwrap_or(0);
-            if cycle_push_n > 0 || cycle_pull_n > 0 || cycle_rejected_n > 0 || pair_transitions > 0
-            {
-                eprintln!(
-                    "daemon: pushed={cycle_push_n} pulled={cycle_pull_n} rejected={cycle_rejected_n} pair-transitions={pair_transitions}"
-                );
-            }
-            // Loud per-transition logging so operator sees pair progress live.
-            if let Some(arr) = pairs["transitions"].as_array() {
-                for t in arr {
-                    eprintln!(
-                        "  pair {} : {} → {}",
-                        t.get("code").and_then(Value::as_str).unwrap_or("?"),
-                        t.get("from").and_then(Value::as_str).unwrap_or("?"),
-                        t.get("to").and_then(Value::as_str).unwrap_or("?")
-                    );
-                    if let Some(sas) = t.get("sas").and_then(Value::as_str)
-                        && t.get("to").and_then(Value::as_str) == Some("sas_ready")
-                    {
-                        eprintln!("    SAS digits: {}-{}", &sas[..3], &sas[3..]);
-                        eprintln!(
-                            "    Run: wire pair-confirm {} {}",
-                            t.get("code").and_then(Value::as_str).unwrap_or("?"),
-                            sas
-                        );
-                    }
-                }
-            }
+        } else if cycle_push_n > 0 || cycle_pull_n > 0 || cycle_rejected_n > 0 {
+            eprintln!(
+                "daemon: pushed={cycle_push_n} pulled={cycle_pull_n} rejected={cycle_rejected_n}"
+            );
         }
 
         if once {
