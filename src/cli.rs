@@ -2519,12 +2519,6 @@ fn cmd_status(as_json: bool) -> Result<()> {
                     "cli": env!("CARGO_PKG_VERSION"),
                 });
             }
-        } else if matches!(snap.record, crate::ensure_up::PidRecord::LegacyInt(_)) {
-            daemon["pidfile_form"] = json!("legacy-int");
-            daemon["version_mismatch"] = json!({
-                "daemon": "<pre-0.5.11>",
-                "cli": env!("CARGO_PKG_VERSION"),
-            });
         }
         // v0.14.2 (#162): surface "is the sync loop actually running RIGHT NOW?"
         // distinct from "is there a process named `wire daemon` somewhere?".
@@ -12747,7 +12741,6 @@ fn cmd_upgrade(
     let record = crate::ensure_up::read_pid_record("daemon");
     let recorded_version: Option<String> = match &record {
         crate::ensure_up::PidRecord::Json(d) => Some(d.version.clone()),
-        crate::ensure_up::PidRecord::LegacyInt(_) => Some("<pre-0.5.11>".to_string()),
         _ => None,
     };
     let cli_version = env!("CARGO_PKG_VERSION").to_string();
@@ -13764,30 +13757,6 @@ fn check_daemon_pid_consistency() -> DoctorCheck {
             format!("daemon.pid is corrupt: {reason}"),
             "delete state/wire/daemon.pid; next `wire daemon &` will rewrite",
         ),
-        crate::ensure_up::PidRecord::LegacyInt(pid) => {
-            // Legacy pidfile: still surface liveness so a dead legacy pid
-            // doesn't quietly PASS this check while status says DOWN.
-            let pid = *pid;
-            if !crate::ensure_up::pid_is_alive(pid) {
-                return DoctorCheck::warn(
-                    "daemon_pid_consistency",
-                    format!(
-                        "daemon.pid (legacy-int) points at pid {pid} which is not running. \
-                         Stale pidfile from a crashed pre-0.5.11 daemon. \
-                         (Issue #2: this surface used to PASS while `wire status` said DOWN.)"
-                    ),
-                    "`wire upgrade` (kills any orphan + spawns a fresh daemon with JSON pidfile)",
-                );
-            }
-            DoctorCheck::warn(
-                "daemon_pid_consistency",
-                format!(
-                    "daemon.pid is legacy-int form (pid={pid}, no version/bin_path metadata). \
-                     Daemon was started by a pre-0.5.11 binary."
-                ),
-                "run `wire upgrade` to kill the old daemon and start a fresh one with the JSON pidfile",
-            )
-        }
         crate::ensure_up::PidRecord::Json(d) => {
             // v0.5.19 liveness gate: if the recorded pid is dead, the
             // pidfile is stale and the rest of the content drift checks

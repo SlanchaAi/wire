@@ -485,8 +485,8 @@ pub struct SupervisedSession {
     /// cycle (read from `last_sync.json`); None if never recorded.
     pub last_sync_age_seconds: Option<u64>,
     /// Version string the running daemon recorded when it wrote its
-    /// pidfile (`PidRecord::Json.version`). None for legacy-int
-    /// pidfiles. Surfaced so operators can spot version drift across
+    /// pidfile (`PidRecord::Json.version`). None when the pidfile is
+    /// missing or corrupt. Surfaced so operators can spot version drift across
     /// the supervisor fleet — the supervisor's pre-spawn
     /// existing-pidfile check skips alive daemons regardless of
     /// their binary version, so a daemon spawned on v0.13.x and
