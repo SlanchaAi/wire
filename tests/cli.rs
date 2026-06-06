@@ -478,23 +478,24 @@ fn session_destroy_requires_force_flag_v0_5_16() {
 }
 
 #[test]
-fn legacy_pair_verbs_still_callable_but_hidden_v0_10() {
-    // v0.10: legacy pair-* verbs stay callable for back-compat (v1.0
-    // removes them). They're hidden from --help (v0.9.1) and fire a
-    // deprecation banner on use (v0.9.2). This test asserts the
-    // back-compat contract: direct invocation still resolves.
+fn legacy_pair_verbs_removed_from_dispatch_v0_10() {
+    // RFC-005 / Phase 3: pair-accept, pair-reject, pair-list-inbound, and
+    // the `pair` megacommand are removed. They must now be unknown subcommands
+    // (clap exits nonzero). pair-host + pair-join remain (SAS flow).
     let home = fresh_home();
-    for verb in [
-        "pair-host",
-        "pair-join",
-        "pair-accept",
-        "pair-reject",
-        "pair-list-inbound",
-    ] {
+    for verb in ["pair-accept", "pair-reject", "pair-list-inbound", "pair"] {
+        let out = run(&home, &[verb, "--help"]);
+        assert!(
+            !out.status.success(),
+            "`{verb}` should be an unknown subcommand after RFC-005 removal — got success"
+        );
+    }
+    // SAS verbs must still be callable.
+    for verb in ["pair-host", "pair-join"] {
         let out = run(&home, &[verb, "--help"]);
         assert!(
             out.status.success(),
-            "v0.10 must keep `{verb}` callable for back-compat (v1.0 removes)"
+            "SAS verb `{verb}` must remain callable — got failure"
         );
     }
 }
@@ -512,20 +513,20 @@ fn send_no_auto_pair_flag_exists_v0_10() {
 }
 
 #[test]
-fn pair_hidden_from_help_v0_10() {
+fn pair_removed_from_dispatch_v0_10() {
+    // RFC-005 Phase 3: `wire pair` (megacommand) is removed entirely.
+    // It must not appear in --help and must exit nonzero as an unknown subcommand.
     let home = fresh_home();
     let out = run(&home, &["--help"]);
     let stdout = String::from_utf8(out.stdout).unwrap();
-    // `pair` was the megacommand — now hidden.
     assert!(
         !stdout.contains("  pair  ") && !stdout.contains("  pair\n"),
-        "v0.10 should hide `pair` from --help — got: {stdout}"
+        "RFC-005: `pair` must not appear in --help — got: {stdout}"
     );
-    // Still callable directly.
     let out = run(&home, &["pair", "--help"]);
     assert!(
-        out.status.success(),
-        "wire pair --help should still work (back-compat): {out:?}"
+        !out.status.success(),
+        "RFC-005: `wire pair` must be unknown subcommand — got success: {out:?}"
     );
 }
 
@@ -624,10 +625,9 @@ fn accept_invite_verb_exists_v0_9_4() {
 }
 
 #[test]
-fn accept_with_url_emits_deprecation_banner_v0_9_4() {
-    // v0.9.4: `wire accept wire://pair?...` still works (back-compat
-    // with v0.9 smart-dispatch) but emits a deprecation banner
-    // pointing operators at the explicit `wire accept-invite` verb.
+fn accept_with_url_errors_and_redirects_v0_10() {
+    // RFC-005 Phase 3: `wire accept wire://pair?...` is no longer silently
+    // forwarded — it exits nonzero with a clear redirect to `wire accept-invite`.
     let home = fresh_home();
     let out = std::process::Command::new(wire_bin())
         .args(["accept", "wire://pair?v=1&inv=bogus"])
@@ -635,10 +635,14 @@ fn accept_with_url_emits_deprecation_banner_v0_9_4() {
         .env("WIRE_NO_AUTO_JSON", "1")
         .output()
         .expect("spawn wire");
+    assert!(
+        !out.status.success(),
+        "accept <url> should now exit nonzero (RFC-005): {out:?}"
+    );
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("DEPRECATED") && stderr.contains("accept-invite"),
-        "accept-with-url should fire deprecation banner — got: {stderr}"
+        stderr.contains("accept-invite"),
+        "error message should redirect to `accept-invite` — got: {stderr}"
     );
 }
 
@@ -806,19 +810,16 @@ fn whois_typo_returns_json_success_with_candidates_v0_9_2() {
     );
 }
 
-// v0.10: pair-accept verb removed entirely, so the v0.9.2 deprecation-
-// banner tests (which exercised pair-accept) are obsolete. The
-// deprecation_warn helper is still exercised by the `accept <URL>`
-// back-compat path — covered by accept_with_url_emits_deprecation_banner_v0_9_4.
+// RFC-005 Phase 3: pair-accept, pair-reject, pair-list-inbound, and the `pair`
+// megacommand are removed from dispatch entirely (not merely hidden). The tests
+// that asserted they were "still callable" are replaced by
+// legacy_pair_verbs_removed_from_dispatch_v0_10.
 
 #[test]
 fn deprecated_verbs_hidden_from_help_v0_9_1() {
-    // v0.9.1: --help should not list the deprecated pair-* + invite
-    // verbs as their own subcommand entries (lines starting with two
-    // spaces + the verb name + whitespace, which is clap's subcommand-
-    // list format). They MAY still appear inside other commands'
-    // description text (e.g. `pin` mentions pair-host); the test
-    // checks subcommand-listing position, not arbitrary substring.
+    // v0.9.1+: --help must not list the SAS-legacy pair-* verbs or invite
+    // as subcommand entries. RFC-005: pair-accept/reject/list-inbound/pair
+    // are now fully removed (not just hidden), so they must also not appear.
     let home = fresh_home();
     let out = run(&home, &["--help"]);
     assert!(out.status.success(), "--help failed: {out:?}");
@@ -829,11 +830,12 @@ fn deprecated_verbs_hidden_from_help_v0_9_1() {
         "pair-accept",
         "pair-reject",
         "pair-list-inbound",
+        "pair",
     ] {
         let leading_pattern = format!("  {hidden} ");
         assert!(
             !stdout.contains(&leading_pattern),
-            "--help should hide `{hidden}` from subcommand list (v0.9.1)"
+            "--help must not list `{hidden}` (RFC-005 removed or SAS-hidden)"
         );
     }
     for visible in ["dial", "send", "pending", "accept", "reject", "whois"] {
@@ -844,10 +846,6 @@ fn deprecated_verbs_hidden_from_help_v0_9_1() {
         );
     }
 }
-
-// v0.10: pair-accept removed entirely. The v0.9.1 "still callable
-// via direct invocation" guarantee is no longer applicable;
-// legacy_pair_verbs_removed_from_dispatch_v0_10 asserts the new contract.
 
 #[test]
 fn init_offline_creates_keypair_without_slot_v0_9_1() {

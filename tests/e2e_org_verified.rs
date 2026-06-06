@@ -270,7 +270,7 @@ async fn non_member_dialer_still_gated_to_pending() {
     // B pulls → A should land in pending-inbound, NOT be auto-pinned.
     let in_pending = wait_until(Instant::now() + Duration::from_secs(20), || {
         let _ = wire(&b, &["pull", "--json"]);
-        let p = wire(&b, &["pair-list-inbound", "--json"]);
+        let p = wire(&b, &["pending", "--json"]);
         String::from_utf8_lossy(&p.stdout).contains(a_h.as_str())
     });
     assert!(

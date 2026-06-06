@@ -365,10 +365,10 @@ async fn dual_slot_send_prefers_local_endpoint() {
     // it inline via `wire pull` then `wire pair-accept`.
     let pull_out = wire(&bob, &["pull", "--json"]);
     assert!(pull_out.status.success(), "bob pull failed: {pull_out:?}");
-    let accept_out = wire(&bob, &["pair-accept", &alice_h, "--json"]);
+    let accept_out = wire(&bob, &["accept", &alice_h, "--json"]);
     assert!(
         accept_out.status.success(),
-        "bob pair-accept failed: {accept_out:?}"
+        "bob accept failed: {accept_out:?}"
     );
 
     // Alice's daemon would pull bob's ack and pin. Do it inline.
@@ -491,11 +491,7 @@ async fn dual_slot_send_falls_back_to_federation_on_local_failure() {
         .success()
     );
     assert!(wire(&bob, &["pull", "--json"]).status.success());
-    assert!(
-        wire(&bob, &["pair-accept", &alice_h, "--json"])
-            .status
-            .success()
-    );
+    assert!(wire(&bob, &["accept", &alice_h, "--json"]).status.success());
     assert!(wire(&alice, &["pull", "--json"]).status.success());
 
     // Patch Alice's view of bob's local endpoint to a port that nothing
@@ -603,11 +599,7 @@ async fn dual_slot_back_compat_v0_5_16_peer_routes_via_federation() {
         .success()
     );
     assert!(wire(&bob, &["pull", "--json"]).status.success());
-    assert!(
-        wire(&bob, &["pair-accept", &alice_h, "--json"])
-            .status
-            .success()
-    );
+    assert!(wire(&bob, &["accept", &alice_h, "--json"]).status.success());
     assert!(wire(&alice, &["pull", "--json"]).status.success());
 
     // Bob's pair_drop_ack carries only ONE endpoint (federation) because
