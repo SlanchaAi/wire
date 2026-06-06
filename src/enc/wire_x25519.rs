@@ -10,11 +10,25 @@
 //!
 //! Design + rationale: `docs/rfc/0006-d1-nip44-design.md`.
 //!
-//! Security note (load-bearing): this symmetric layer has **no standalone
-//! sender/recipient/direction authenticity** — that comes from the outer
-//! Ed25519 signature. `open()` MUST NOT be called on an event that has not
-//! passed `verify_message_v31`. The `(from, to)` context bound into the HKDF
-//! `info` is defence-in-depth (reflection resistance), not a substitute.
+//! Security notes (load-bearing):
+//! - **No standalone authenticity.** This symmetric layer has no sender/
+//!   recipient/direction authenticity — that comes from the outer Ed25519
+//!   signature. `open()` MUST NOT be called on an event that has not passed
+//!   `verify_message_v31`. The `(from, to)` context bound into the HKDF `info`
+//!   is defence-in-depth (reflection resistance), not a substitute. The
+//!   integration MUST make verify-before-open structural (a `VerifiedEvent`
+//!   newtype or a `decrypt_verified_event` wrapper that re-verifies), not a
+//!   call-site convention.
+//! - **Canonical identity form (NORMATIVE).** `from`/`to` MUST be the VERBATIM
+//!   `from`/`to` DID strings as they appear on the signed event (which the
+//!   `event_id`/signature already commit to). Readers MUST decrypt from the
+//!   persisted signed line and MUST NOT re-resolve/normalize identities — a
+//!   spelling mismatch (bare handle vs `did:wire:h` vs `did:wire:h-<8hex>`)
+//!   between seal and open silently breaks decryption (→ `MacFail`).
+//! - **No forward secrecy / no post-compromise security.** The conversation
+//!   key is static per identity-pair; an Ed25519-seed compromise retroactively
+//!   decrypts every message ever exchanged. Treat the seed as a long-term root
+//!   secret. (Inherited NIP-44 property; FS would need an epoch/ephemeral input.)
 
 use chacha20::ChaCha20;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
@@ -34,9 +48,9 @@ pub const ENC_DISCRIMINATOR: &str = "wire-x25519.v1";
 const HKDF_SALT: &[u8] = b"wire-x25519-v1";
 const VERSION: u8 = 0x02;
 const MAX_PLAINTEXT: usize = 65535;
-// version(1) + nonce(32) + min-ciphertext(2 + 32) + mac(32)
+// version(1) + nonce(32) + min-ciphertext(2-byte len prefix + 32 padded) + mac(32)
 const MIN_RAW: usize = 1 + 32 + 34 + 32; // 99
-// version(1) + nonce(32) + max-ciphertext(2 + 65536) + mac(32)
+// version(1) + nonce(32) + max-ciphertext(2-byte len prefix + 65536 padded) + mac(32)
 const MAX_RAW: usize = 1 + 32 + (2 + 65536) + 32; // 65603
 
 type HmacSha256 = Hmac<Sha256>;
@@ -106,14 +120,18 @@ pub fn derive_conversation_key(
 
 // ------------------------------------------------------------ per-message keys
 
-/// `context_info = nonce(32) ‖ from ‖ 0x00 ‖ to` — bound into HKDF-Expand so
-/// per-message keys are direction-specific (reflection/cross-direction
-/// resistance at the symmetric layer; defence-in-depth behind the signature).
+/// `context_info = nonce(32) ‖ u16_be(len from) ‖ from ‖ u16_be(len to) ‖ to`
+/// — bound into HKDF-Expand so per-message keys are direction-specific
+/// (reflection/cross-direction resistance at the symmetric layer; defence-in-
+/// depth behind the signature). Length-prefixed (not 0x00-separated) so the
+/// framing is injective regardless of the identity charset — the bound `from`/
+/// `to` are full signed-event DIDs, which contain `:` and `-` (review fix #6/#9).
 fn context_info(nonce: &[u8; 32], from: &str, to: &str) -> Vec<u8> {
-    let mut v = Vec::with_capacity(32 + from.len() + 1 + to.len());
+    let mut v = Vec::with_capacity(32 + 2 + from.len() + 2 + to.len());
     v.extend_from_slice(nonce);
+    v.extend_from_slice(&(from.len() as u16).to_be_bytes());
     v.extend_from_slice(from.as_bytes());
-    v.push(0u8);
+    v.extend_from_slice(&(to.len() as u16).to_be_bytes());
     v.extend_from_slice(to.as_bytes());
     v
 }
@@ -228,6 +246,12 @@ pub fn open(
     if payload_b64.as_bytes().first() == Some(&b'#') {
         return Err(EncError::BadVersion);
     }
+    // Bound the INPUT length before decoding (decode-bomb / OOM guard, review
+    // fix #4): base64 allocates ~3/4 of the input up front, so cap the encoded
+    // string at the max-payload's base64 size before paying that allocation.
+    if payload_b64.len() > MAX_RAW * 4 / 3 + 4 {
+        return Err(EncError::BadPayloadLen);
+    }
     let raw = b64decode(payload_b64).map_err(|_| EncError::BadBase64)?;
     if !(MIN_RAW..=MAX_RAW).contains(&raw.len()) {
         return Err(EncError::BadPayloadLen);
@@ -273,14 +297,124 @@ mod tests {
         derive_conversation_key(&our, &peer_pub).unwrap()
     }
 
+    fn hex_to_32(h: &str) -> [u8; 32] {
+        let v = hex::decode(h).expect("valid hex");
+        let mut a = [0u8; 32];
+        a.copy_from_slice(&v);
+        a
+    }
+
     #[test]
-    fn calc_padded_len_matches_nip44() {
-        assert_eq!(calc_padded_len(1), 32);
-        assert_eq!(calc_padded_len(32), 32);
-        assert_eq!(calc_padded_len(33), 64);
-        assert_eq!(calc_padded_len(100), 128);
-        assert_eq!(calc_padded_len(256), 256);
-        assert_eq!(calc_padded_len(257), 320);
+    fn round_trips_with_production_did_identity_form() {
+        // Canonicalization guard (review findings #1/#2): the bound `from`/`to`
+        // are the FULL signed-event DIDs (`did:wire:<handle>-<8hex>`), which
+        // contain `:` and `-`. Exercise that production spelling, not "alice".
+        let ck = conv(&SEED_A, &SEED_B);
+        let from = "did:wire:alice-1b1b58dd";
+        let to = "did:wire:bob-60346e7c";
+        let payload = seal(&ck, b"production-form message", from, to).unwrap();
+        assert_eq!(
+            open(&ck, &payload, from, to).unwrap(),
+            "production-form message"
+        );
+        // A different DID spelling for the same party fails — this is exactly
+        // the silent-decryption-outage the integration MUST avoid by binding
+        // the verbatim event DID on both ends.
+        assert_eq!(
+            open(&ck, &payload, "alice", to).unwrap_err(),
+            EncError::MacFail
+        );
+    }
+
+    #[test]
+    fn oversized_input_rejected_without_large_alloc() {
+        // Decode-bomb guard (review finding #4): a multi-MB payload is rejected
+        // by the pre-decode length cap, not after allocating a ~3/4-size Vec.
+        let ck = conv(&SEED_A, &SEED_B);
+        let bomb = "A".repeat(10_000_000);
+        assert_eq!(
+            open(&ck, &bomb, "a", "b").unwrap_err(),
+            EncError::BadPayloadLen
+        );
+    }
+
+    #[test]
+    fn truncated_payload_rejected() {
+        let ck = conv(&SEED_A, &SEED_B);
+        let payload = seal(&ck, b"hi", "a", "b").unwrap();
+        let raw = b64decode(&payload).unwrap();
+        let truncated = b64encode(&raw[..raw.len() - 40]); // below MIN_RAW
+        assert_eq!(
+            open(&ck, &truncated, "a", "b").unwrap_err(),
+            EncError::BadPayloadLen
+        );
+    }
+
+    #[test]
+    fn calc_padded_len_conformance_nip44_vectors() {
+        // EXTERNAL ANCHOR — the official NIP-44 v2 `calc_padded_len` vectors
+        // (github.com/paulmillr/nip44 nip44.vectors.json). Salt/curve/info-
+        // independent, so they apply verbatim. Catches a wrong-but-self-
+        // consistent padding formula that round-trip + golden would miss
+        // (review finding #5a). Plus a couple of small cases (1, 32).
+        let nip44: &[(usize, usize)] = &[
+            (1, 32),
+            (16, 32),
+            (32, 32),
+            (33, 64),
+            (37, 64),
+            (45, 64),
+            (49, 64),
+            (64, 64),
+            (65, 96),
+            (100, 128),
+            (111, 128),
+            (200, 224),
+            (250, 256),
+            (320, 320),
+            (383, 384),
+            (384, 384),
+            (400, 448),
+            (500, 512),
+            (512, 512),
+            (515, 640),
+            (700, 768),
+            (800, 896),
+            (900, 1024),
+            (1020, 1024),
+            (65536, 65536),
+        ];
+        for &(unpadded, padded) in nip44 {
+            assert_eq!(
+                calc_padded_len(unpadded),
+                padded,
+                "calc_padded_len({unpadded})"
+            );
+        }
+    }
+
+    #[test]
+    fn message_keys_conformance_nip44_vector() {
+        // EXTERNAL ANCHOR for the HKDF-Expand split (review finding #5b):
+        // the official NIP-44 v2 `get_message_keys` vector. NIP-44 derives
+        // per-message keys as HKDF-Expand(prk=conversation_key, info=nonce, 76)
+        // split 32/12/32. Our `message_keys` takes arbitrary `info`; feeding
+        // info = the 32-byte nonce reproduces NIP-44 exactly, anchoring the
+        // okm offsets to an external authority (catches an okm[40..72] bug that
+        // self-consistent tests cannot).
+        let conversation_key =
+            hex_to_32("a1a3d60f3470a8612633924e91febf96dc5366ce130f658b1f0fc652c20b3b54");
+        let nonce = hex_to_32("e1e6f880560d6d149ed83dcc7e5861ee62a5ee051f7fde9975fe5d25d2a02d72");
+        let (chacha_key, chacha_nonce, hmac_key) = message_keys(&conversation_key, &nonce);
+        assert_eq!(
+            hex::encode(chacha_key),
+            "f145f3bed47cb70dbeaac07f3a3fe683e822b3715edb7c4fe310829014ce7d76"
+        );
+        assert_eq!(hex::encode(chacha_nonce), "c4ad129bb01180c0933a160c");
+        assert_eq!(
+            hex::encode(hmac_key),
+            "027c1db445f05e2eee864a0975b0ddef5b7110583c8c192de3732571ca5838c4"
+        );
     }
 
     #[test]
@@ -338,7 +472,7 @@ mod tests {
     fn tamper_is_rejected_before_decrypt() {
         let ck = conv(&SEED_A, &SEED_B);
         let payload = seal(&ck, b"hello world", "alice", "bob").unwrap();
-        let mut raw = b64decode(&payload).unwrap();
+        let raw = b64decode(&payload).unwrap();
 
         // flip a ciphertext byte
         let mut t = raw.clone();
@@ -365,10 +499,11 @@ mod tests {
             EncError::MacFail
         );
 
-        // bad version
-        raw[0] = 0x01;
+        // bad version (clone, not in-place — avoids order-coupling footgun)
+        let mut t = raw.clone();
+        t[0] = 0x01;
         assert_eq!(
-            open(&ck, &b64encode(&raw), "alice", "bob").unwrap_err(),
+            open(&ck, &b64encode(&t), "alice", "bob").unwrap_err(),
             EncError::BadVersion
         );
     }
