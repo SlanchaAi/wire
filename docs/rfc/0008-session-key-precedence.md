@@ -1,10 +1,10 @@
-# RFC-006: Session-key precedence + WIRE_HOME pin observability
+# RFC-008: Session-key precedence + WIRE_HOME pin observability
 
-**Status:** Draft
+**Status:** Discussion (§A delivered via #228 A5; §C ready via #224)
 **Tracking:** #210
 **Author:** slate-lotus
-**Date:** 2026-06-03 (renumbered 2026-06-05 — RFC-005 slot taken by `0005-remove-backwards-compat.md`)
-**Target:** v0.14.x (surface honesty) → v0.15 (precedence flip, gated, lands with paul's RFC-005 Phase 4 cut)
+**Date:** 2026-06-03 (renumbered 2026-06-05 — RFC-005, 006, 007 slots taken by paul's `0005-remove-backwards-compat.md` / `0006-confidentiality-roadmap-sequencing.md` / `0007-nostr-transport-binding.md`)
+**Target:** §A → v0.14.x (delivered via paul's PR #228 A5, surface honesty on whoami JSON + MCP) · §C → v0.15 (precedence flip, my PR #224 rebased onto #228)
 **Question this answers:** When an operator's shell pins `WIRE_HOME` in env before launching an agent host (Claude Code / Codex / Copilot), why does it silently override the session-key resolution chain, and how does the operator find out which signal won?
 
 ---
