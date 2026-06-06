@@ -1173,7 +1173,15 @@ fn is_by_key_shape(path: &str) -> bool {
             // Wire writes exactly 16 lowercase hex chars
             // (`session_home_for_key`); reject anything else as malformed
             // → treat as legacy for safety.
-            if hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            // Lowercase-only: wire emits `hex::encode(...)` which is
+            // lowercase. `is_ascii_hexdigit` accepts both cases, so guard
+            // explicitly against uppercase to keep the test pin from
+            // `is_by_key_shape_rejects_legacy_and_malformed` honest.
+            if hash.len() == 16
+                && hash
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+            {
                 return true;
             }
         }
