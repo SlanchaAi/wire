@@ -187,11 +187,10 @@ async fn wire_add_zero_paste_e2e() {
     let _ = wire(&b, &["push", "--json"]);
     let a_got = wait_until(Instant::now() + Duration::from_secs(15), || {
         let _ = wire(&a, &["pull", "--json"]);
-        let p = a.join(format!("state/wire/inbox/{b_h}.jsonl"));
-        p.exists()
-            && std::fs::read_to_string(&p)
-                .map(|s| s.contains("hello via wire add"))
-                .unwrap_or(false)
+        // D1: paired peers' messages are encrypted at rest — read the decrypted
+        // view via `tail`, not the raw (ciphertext) inbox JSONL.
+        let t = wire(&a, &["tail", &b_h, "--json"]);
+        String::from_utf8_lossy(&t.stdout).contains("hello via wire add")
     });
     assert!(a_got, "A never received B's message");
 
@@ -207,11 +206,9 @@ async fn wire_add_zero_paste_e2e() {
     let _ = wire(&a, &["push", "--json"]);
     let b_got = wait_until(Instant::now() + Duration::from_secs(15), || {
         let _ = wire(&b, &["pull", "--json"]);
-        let p = b.join(format!("state/wire/inbox/{a_h}.jsonl"));
-        p.exists()
-            && std::fs::read_to_string(&p)
-                .map(|s| s.contains("ack from coffee-ghost"))
-                .unwrap_or(false)
+        // D1: decrypted view via tail (raw inbox is ciphertext for paired peers).
+        let t = wire(&b, &["tail", &a_h, "--json"]);
+        String::from_utf8_lossy(&t.stdout).contains("ack from coffee-ghost")
     });
     assert!(b_got, "B never received A's ack");
 }

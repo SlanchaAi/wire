@@ -212,15 +212,10 @@ async fn invite_url_one_paste_pair_e2e() {
     );
     let _ = wire(&willard, &["push", "--json"]);
     let paul_got = wait_until(Instant::now() + Duration::from_secs(15), || {
-        let p = paul
-            .join("state")
-            .join("wire")
-            .join("inbox")
-            .join(format!("{willard_h}.jsonl"));
-        p.exists()
-            && std::fs::read_to_string(&p)
-                .map(|s| s.contains("hello from willard"))
-                .unwrap_or(false)
+        let _ = wire(&paul, &["pull", "--json"]);
+        // D1: decrypted view via tail (raw inbox is ciphertext for paired peers).
+        let t = wire(&paul, &["tail", &willard_h, "--json"]);
+        String::from_utf8_lossy(&t.stdout).contains("hello from willard")
     });
     assert!(
         paul_got,
@@ -245,15 +240,10 @@ async fn invite_url_one_paste_pair_e2e() {
     let _willard_d = spawn_daemon(&willard);
     let _ = wire(&paul, &["push", "--json"]);
     let willard_got = wait_until(Instant::now() + Duration::from_secs(15), || {
-        let p = willard
-            .join("state")
-            .join("wire")
-            .join("inbox")
-            .join(format!("{paul_h}.jsonl"));
-        p.exists()
-            && std::fs::read_to_string(&p)
-                .map(|s| s.contains("ack from paul"))
-                .unwrap_or(false)
+        let _ = wire(&willard, &["pull", "--json"]);
+        // D1: decrypted view via tail (raw inbox is ciphertext for paired peers).
+        let t = wire(&willard, &["tail", &paul_h, "--json"]);
+        String::from_utf8_lossy(&t.stdout).contains("ack from paul")
     });
     assert!(willard_got, "willard never received paul's ({paul_h}) ack");
 }
