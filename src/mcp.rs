@@ -1223,6 +1223,9 @@ fn tool_send(args: &Value) -> Result<Value, String> {
     let trust_for_did = config::read_trust().unwrap_or_else(|_| json!({"agents": {}}));
     let to_did = crate::trust::resolve_peer_did(&trust_for_did, peer);
     let mut event = json!({
+        // Parity with the CLI send skeleton (review finding #4): carry
+        // schema_version so enc-bearing MCP events pass the same schema gate.
+        "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
         "timestamp": now,
         "from": did,
         "to": to_did,
@@ -1233,6 +1236,12 @@ fn tool_send(args: &Value) -> Result<Value, String> {
     if let Some(deadline) = deadline {
         event["time_sensitive_until"] =
             json!(crate::cli::parse_deadline_until(deadline).map_err(|e| e.to_string())?);
+    }
+    // D1 (RFC-006): encrypt the body when the recipient is dh-capable. Binds the
+    // event's own from/to; runs BEFORE signing. Plaintext for legacy peers.
+    if let Some(peer_dh) = crate::enc::wire_x25519::peer_dh_pubkey(&trust_for_did, peer) {
+        crate::enc::wire_x25519::seal_event_body(&mut event, &peer_dh, &sk_seed)
+            .map_err(|e| e.to_string())?;
     }
     let signed =
         sign_message_v31(&event, &sk_seed, &pk_bytes, &handle).map_err(|e| e.to_string())?;

@@ -54,9 +54,11 @@ use chacha20::cipher::{KeyIvInit, StreamCipher};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256, Sha512};
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroizing;
 
 use crate::signing::{b64decode, b64encode};
 
@@ -229,7 +231,10 @@ fn unpad(buf: &[u8]) -> Result<Vec<u8>, EncError> {
 
 /// Encrypt `plaintext` for the conversation, bound to `(from, to)`. Returns the
 /// base64 payload `version(0x02) ‖ nonce(32) ‖ ciphertext ‖ mac(32)`.
-pub fn seal(
+///
+/// `pub(crate)`: the only PUBLIC entry is [`seal_event_body`], which binds
+/// `from`/`to` from the event itself (CRITICAL canonicalization gate).
+pub(crate) fn seal(
     conversation_key: &[u8; 32],
     plaintext: &[u8],
     from: &str,
@@ -262,7 +267,11 @@ pub fn seal(
 
 /// Decrypt a `wire-x25519.v1` payload. MAC is verified (constant-time) BEFORE
 /// decryption. Caller MUST have verified the outer event signature first.
-pub fn open(
+///
+/// `pub(crate)`: the only PUBLIC entry is [`open_event_body`], which re-runs
+/// `verify_message_v31` (structural verify-before-open gate) and binds
+/// `from`/`to` from the verified event.
+pub(crate) fn open(
     conversation_key: &[u8; 32],
     payload_b64: &str,
     from: &str,
@@ -307,6 +316,123 @@ pub fn open(
     cipher.apply_keystream(&mut buf);
     let out = unpad(&buf)?;
     String::from_utf8(out).map_err(|_| EncError::BadUtf8)
+}
+
+// ----------------------------------------------------------- event-level API
+// The ONLY public entry points. They close the two CRITICAL integration-gate
+// items structurally: (1) `from`/`to` are read from the event itself, never
+// stringified by a caller; (2) `open_event_body` re-runs `verify_message_v31`
+// before decrypting, so decryption cannot run on an unverified event.
+
+/// Base64 X25519 public key for the agent card's `dh_pubkey`, derived from the
+/// Ed25519 seed (same-curve map). Emitted on the card at build/sign time.
+pub fn self_dh_pubkey_b64(seed: &[u8; 32]) -> String {
+    b64encode(&x25519_pub_from_ed25519_seed(seed))
+}
+
+fn decode_dh(b64: &str) -> Option<[u8; 32]> {
+    let v = b64decode(b64).ok()?;
+    let arr: [u8; 32] = v.try_into().ok()?;
+    Some(arr)
+}
+
+/// Read a peer's pinned `dh_pubkey` from the trust map (`agents[<handle>].card`).
+/// `None` ⇒ legacy/unenrolled peer ⇒ caller falls back to plaintext.
+pub fn peer_dh_pubkey(trust: &Value, peer_did_or_handle: &str) -> Option<[u8; 32]> {
+    let handle = crate::agent_card::display_handle_from_did(peer_did_or_handle);
+    let b64 = trust
+        .get("agents")?
+        .get(handle)?
+        .get("card")?
+        .get("dh_pubkey")?
+        .as_str()?;
+    decode_dh(b64)
+}
+
+/// Seal an outbound event's `body` IN PLACE, binding the event's own `from`/`to`
+/// (CRITICAL #1: identities are read here, never stringified by a caller). Sets
+/// `enc = "wire-x25519.v1"` and replaces `body` with `{"ct": <base64>}`. Call
+/// only when the peer is dh-capable (see [`peer_dh_pubkey`]); MUST run BEFORE
+/// the event is signed so the signature covers the ciphertext body.
+pub fn seal_event_body(
+    event: &mut Value,
+    peer_dh_pubkey: &[u8; 32],
+    our_seed: &[u8; 32],
+) -> anyhow::Result<()> {
+    let from = event
+        .get("from")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("event missing `from`"))?
+        .to_string();
+    let to = event
+        .get("to")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("encryption requires a `to` recipient on the event"))?
+        .to_string();
+    let our_scalar = Zeroizing::new(x25519_scalar_from_ed25519_seed(our_seed));
+    let ck = Zeroizing::new(
+        derive_conversation_key(&our_scalar, peer_dh_pubkey)
+            .map_err(|e| anyhow::anyhow!("derive conversation key: {e}"))?,
+    );
+    let pt = serde_json::to_vec(event.get("body").unwrap_or(&Value::Null))?;
+    let ct = seal(&ck, &pt, &from, &to).map_err(|e| anyhow::anyhow!("seal: {e}"))?;
+    let obj = event
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("event is not a JSON object"))?;
+    obj.insert("enc".into(), json!(ENC_DISCRIMINATOR));
+    obj.insert("body".into(), json!({ "ct": ct }));
+    Ok(())
+}
+
+/// VERIFY-GATED decrypt of an inbound event's body.
+/// - `Ok(None)` — not `enc`-bearing (plaintext) OR an `enc` scheme we don't know;
+/// - `Ok(Some(body))` — the decrypted body `Value`;
+/// - `Err(_)` — signature verification failed, peer has no `dh_pubkey`, or
+///   decryption failed (opaque — post-MAC errors are not distinguishable, no oracle).
+///
+/// CRITICAL #2: re-runs `verify_message_v31` before any decryption, and binds
+/// `from`/`to` from the verified event. Decryption is unreachable for an
+/// unverified event by construction (`open` is `pub(crate)`).
+pub fn open_event_body(
+    event: &Value,
+    trust: &Value,
+    our_seed: &[u8; 32],
+) -> anyhow::Result<Option<Value>> {
+    match event.get("enc").and_then(Value::as_str) {
+        Some(ENC_DISCRIMINATOR) => {}
+        Some(_) | None => return Ok(None),
+    }
+    // STRUCTURAL verify-before-open gate.
+    crate::signing::verify_message_v31(event, trust)
+        .map_err(|e| anyhow::anyhow!("refusing to decrypt unverified event: {e}"))?;
+
+    let from = event
+        .get("from")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("event missing `from`"))?;
+    let to = event
+        .get("to")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("encrypted event missing `to`"))?;
+    let ct = event
+        .get("body")
+        .and_then(|b| b.get("ct"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("enc event body missing `ct`"))?;
+
+    let peer_dh = peer_dh_pubkey(trust, from)
+        .ok_or_else(|| anyhow::anyhow!("sender has no pinned dh_pubkey — cannot decrypt"))?;
+    let our_scalar = Zeroizing::new(x25519_scalar_from_ed25519_seed(our_seed));
+    let ck = Zeroizing::new(
+        derive_conversation_key(&our_scalar, &peer_dh)
+            .map_err(|e| anyhow::anyhow!("derive conversation key: {e}"))?,
+    );
+    // Opaque on failure (verify already passed → a failure here is key-mismatch
+    // or corruption, never an attacker-driven oracle).
+    let pt = open(&ck, ct, from, to).map_err(|_| anyhow::anyhow!("decryption failed"))?;
+    let body: Value = serde_json::from_str(&pt)
+        .map_err(|_| anyhow::anyhow!("decrypted body is not valid json"))?;
+    Ok(Some(body))
 }
 
 #[cfg(test)]
@@ -591,6 +717,58 @@ mod tests {
             open(&wrong, &payload, "alice", "bob").unwrap_err(),
             EncError::MacFail
         );
+    }
+
+    #[test]
+    fn event_level_round_trip_and_verify_gate() {
+        // End-to-end integration proof of the public event API: A seals a body
+        // for B, signs it; B verify-gates + decrypts; tamper is refused by the
+        // gate; a plaintext event passes through as None.
+        use crate::signing::{generate_keypair, make_key_id, sign_message_v31};
+
+        let (a_seed, a_pk) = generate_keypair();
+        let (b_seed, b_pk) = generate_keypair();
+        let a_did = "did:wire:alice-1b1b58dd";
+        let b_did = "did:wire:bob-60346e7c";
+        let b_dh = x25519_pub_from_ed25519_seed(&b_seed);
+        let a_dh = x25519_pub_from_ed25519_seed(&a_seed);
+        let _ = &b_pk;
+
+        // B's trust pins A: A's verify key + A's card (carrying A's dh_pubkey).
+        let trust_b = json!({"agents": {"alice": {
+            "public_keys": [{"key_id": make_key_id("alice", &a_pk), "key": b64encode(&a_pk), "active": true}],
+            "card": {"dh_pubkey": b64encode(&a_dh)},
+        }}});
+
+        // A: build → seal (binds the event's own from/to) → sign.
+        let mut event = json!({
+            "from": a_did, "to": b_did, "type": "decision", "kind": 1000,
+            "body": "secret hello",
+        });
+        seal_event_body(&mut event, &b_dh, &a_seed).unwrap();
+        assert_eq!(event["enc"], json!(ENC_DISCRIMINATOR));
+        assert!(
+            event["body"]["ct"].is_string(),
+            "body replaced with ciphertext"
+        );
+        assert_ne!(event["body"], json!("secret hello"));
+        let signed = sign_message_v31(&event, &a_seed, &a_pk, "alice").unwrap();
+
+        // B: verify-gated decrypt recovers the plaintext body.
+        assert_eq!(
+            open_event_body(&signed, &trust_b, &b_seed).unwrap(),
+            Some(json!("secret hello"))
+        );
+
+        // Verify-gate: tampering the ciphertext breaks the signature → refused
+        // BEFORE any decrypt attempt.
+        let mut tampered = signed.clone();
+        tampered["body"]["ct"] = json!("AAAAAAAA");
+        assert!(open_event_body(&tampered, &trust_b, &b_seed).is_err());
+
+        // Plaintext event → None (caller renders the body as-is).
+        let plain = json!({"from": a_did, "to": b_did, "body": "hi"});
+        assert_eq!(open_event_body(&plain, &trust_b, &b_seed).unwrap(), None);
     }
 
     // Golden literals — captured from this implementation; any drift fails CI.

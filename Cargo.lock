@@ -1911,6 +1911,7 @@ dependencies = [
  "tower_governor",
  "webpki-roots 0.26.11",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

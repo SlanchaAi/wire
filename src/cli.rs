@@ -4082,6 +4082,13 @@ fn cmd_send(
     if let Some(deadline) = deadline {
         event["time_sensitive_until"] = json!(parse_deadline_until(deadline)?);
     }
+    // D1 (RFC-006): encrypt the body when the recipient is dh-capable (has a
+    // pinned `dh_pubkey`). seal_event_body binds the event's OWN from/to and
+    // runs BEFORE signing so the signature covers the `{ct}` body. Legacy peers
+    // (no dh_pubkey) fall through to plaintext.
+    if let Some(peer_dh) = crate::enc::wire_x25519::peer_dh_pubkey(&trust_for_did, peer) {
+        crate::enc::wire_x25519::seal_event_body(&mut event, &peer_dh, &sk_seed)?;
+    }
     let signed = sign_message_v31(&event, &sk_seed, &pk_bytes, &handle)?;
     let event_id = signed["event_id"].as_str().unwrap_or("").to_string();
 
