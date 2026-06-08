@@ -421,13 +421,28 @@ pub fn sign_agent_card(card: &AgentCard, private_key: &[u8]) -> AgentCard {
     let mut sk_bytes = [0u8; 32];
     sk_bytes.copy_from_slice(&private_key[..32]);
     let sk = SigningKey::from_bytes(&sk_bytes);
-    let sig = sk.sign(&card_canonical(card));
-    let mut out = card.as_object().cloned().unwrap_or_default();
+    // D1 (RFC-006): attach the X25519 `dh_pubkey` derived from THIS signing seed
+    // before canonicalizing, so the self-signature covers it. Single chokepoint
+    // guaranteeing every signed card carries dh_pubkey; a stripped/substituted
+    // value breaks the signature (caught by verify_agent_card on the receiver).
+    let mut card_obj = card.as_object().cloned().unwrap_or_default();
+    card_obj.insert(
+        "dh_pubkey".into(),
+        Value::String(crate::enc::wire_x25519::self_dh_pubkey_b64(&sk_bytes)),
+    );
+    let card_with_dh = Value::Object(card_obj);
+    let sig = sk.sign(&card_canonical(&card_with_dh));
+    let mut out = card_with_dh.as_object().cloned().unwrap_or_default();
     out.insert(
         "signature".into(),
         Value::String(b64encode(&sig.to_bytes())),
     );
     Value::Object(out)
+}
+
+/// Read `dh_pubkey` (base64 X25519) from a card. `None` ⇒ pre-D1/unsigned card.
+pub fn card_dh_pubkey(card: &AgentCard) -> Option<&str> {
+    card.get("dh_pubkey").and_then(Value::as_str)
 }
 
 /// Verify a signed card. Picks the first verify_key, validates the

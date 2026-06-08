@@ -29,6 +29,35 @@ use serde_json::Value;
 /// hint. Full body is still available via `InboxEvent::raw`.
 const BODY_PREVIEW_CHARS: usize = 120;
 
+/// Our Ed25519 seed, loaded once (immutable per process). `None` if this home
+/// is uninitialized — then enc-bearing events simply render the sentinel.
+fn self_seed() -> Option<&'static [u8; 32]> {
+    static SEED: std::sync::OnceLock<Option<[u8; 32]>> = std::sync::OnceLock::new();
+    SEED.get_or_init(|| {
+        let v = crate::config::read_private_key().ok()?;
+        let s = v.get(..32)?;
+        let mut a = [0u8; 32];
+        a.copy_from_slice(s);
+        Some(a)
+    })
+    .as_ref()
+}
+
+/// Decrypt an enc-bearing event's body for DISPLAY (D1). Trust is read fresh so
+/// a newly-pinned peer's messages decrypt without a process restart. Returns a
+/// sentinel `Value` on any failure — never errors out the inbox render. The
+/// persisted event is untouched (ciphertext at rest).
+fn decrypt_body_for_display(signed: &Value) -> Value {
+    self_seed()
+        .and_then(|seed| {
+            let trust = crate::config::read_trust().ok()?;
+            crate::enc::wire_x25519::open_event_body(signed, &trust, seed)
+                .ok()
+                .flatten()
+        })
+        .unwrap_or_else(|| Value::String("<encrypted: cannot read>".to_string()))
+}
+
 /// One delivered event surfaced by a watcher.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxEvent {
@@ -64,7 +93,18 @@ impl InboxEvent {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let body_raw = signed.get("body").cloned().unwrap_or(Value::Null);
+        // D1 (RFC-006): decrypt for DISPLAY only — the persisted `raw` event
+        // (and at-rest inbox JSONL) stays the verbatim ciphertext, preserving
+        // event_id/signature integrity. `open_event_body` re-verifies the
+        // signature before decrypting (structural gate) and binds from/to from
+        // the event. Only enc-bearing events pay the trust read.
+        let body_raw = if signed.get("enc").and_then(Value::as_str)
+            == Some(crate::enc::wire_x25519::ENC_DISCRIMINATOR)
+        {
+            decrypt_body_for_display(&signed)
+        } else {
+            signed.get("body").cloned().unwrap_or(Value::Null)
+        };
         let body_str = match &body_raw {
             Value::String(s) => s.clone(),
             other => serde_json::to_string(other).unwrap_or_default(),

@@ -148,7 +148,8 @@ for i in "${!RING[@]}"; do
     src=${RING[$i]}
     dst=${RING[$(( (i + 1) % N ))]}
     src_char="${CHAR_OF[$src]}"
-    if ! grep -q "hi $dst" "$WORK/$dst/state/wire/inbox/$src_char.jsonl" 2>/dev/null; then
+    # D1: paired peers' messages are encrypted at rest — read decrypted via tail.
+    if ! WIRE_HOME="$WORK/$dst" "$WIRE" tail "$src_char" --json 2>/dev/null | grep -q "hi $dst"; then
         echo "  FAIL: $dst (${CHAR_OF[$dst]}) did not receive $src ($src_char)'s ring message"
         exit 1
     fi

@@ -140,21 +140,22 @@ The `from` field MAY be the bare handle (`paul`) or fully-qualified DID (`did:wi
 
 ### 2.4 Reserved: `enc` body container (v0.15, RFC-006)
 
-> **Status:** *reserved, not yet emitted.* Declared in v0.15 so per-event encryption (NIP-44 v2, RFC-006) can land **additively** in v0.2 without a second wire-format break. v0.15 writers MUST NOT emit it; v0.15 readers MUST tolerate its absence (the default) and ignore it when present (treat the body as opaque), per the field-additive rule.
+> **Status:** *reserved, not yet emitted.* Declared in v0.15 so per-event encryption can land **additively** in v0.2 without a second wire-format break. v0.15 writers MUST NOT emit it; v0.15 readers MUST tolerate its absence (the default) and ignore it when present (treat the body as opaque), per the field-additive rule. Full design: [RFC-006 D1](rfc/0006-d1-nip44-design.md).
 
 An encrypted event carries an optional `enc` discriminator alongside a ciphertext body:
 
 ```jsonc
 {
   "kind": 1000,
-  "enc":  "nip44.v2",                 // absent ⇒ plaintext body (the v0.15 default)
-  "body": { "ct": "<base64 NIP-44 v2 ciphertext>" }
+  "enc":  "wire-x25519.v1",           // absent ⇒ plaintext body (the v0.15 default)
+  "body": { "ct": "<base64 ciphertext>" }
 }
 ```
 
+- **Discriminator is `wire-x25519.v1`, NOT `nip44.v2`.** D1 reuses NIP-44 v2's *symmetric envelope* (HKDF → ChaCha20 + HMAC-SHA256 + length-hiding padding) but derives the conversation key from an **X25519** ECDH (wire identities are Ed25519 → X25519), with a wire-specific HKDF salt (`wire-x25519-v1`). It is therefore **deliberately not** Nostr-wire-compatible NIP-44 — the rename prevents a Nostr reader from mis-decrypting a wire body. (True Nostr-DM interop is an RFC-007/D3 concern over a separate secp256k1 transport key.)
 - The `event_id` / signing mechanics of §2.2 are **unchanged**: the signature commits to whatever `body` contains (plaintext object or `{ct}`), so signing and verification are encryption-agnostic. A reader that does not understand `enc` still verifies the signature and `event_id`; it simply cannot read the ciphertext.
 - Because this is purely additive, an `enc`-bearing event stays **`schema_version` major `v3`** — no major bump (`src/signing.rs::EVENT_SCHEMA_VERSION` / `schema_major`). Encryption rides inside the existing body; it does not break the event format.
-- Companion card reservation: `dh_pubkey` (§1) — the X25519 key NIP-44 needs to derive the shared secret.
+- Companion card reservation: `dh_pubkey` (§1) — the **X25519** key used to derive the per-pair shared secret.
 
 ## 3. Canonical form
 
