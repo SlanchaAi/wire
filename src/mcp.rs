@@ -439,8 +439,25 @@ fn read_inbox_resource(peer_opt: Option<String>) -> Result<String, String> {
     let take_from = events.len().saturating_sub(LIMIT);
     let tail = &events[take_from..];
 
+    // D1: our seed, to decrypt enc-bearing bodies for the agent reading this
+    // resource. The on-disk JSONL stays verbatim ciphertext; only the response
+    // body is decrypted (and a `dec: true` flag marks it).
+    let seed: Option<[u8; 32]> = crate::config::read_private_key()
+        .ok()
+        .and_then(|v| v.get(..32).and_then(|s| <[u8; 32]>::try_from(s).ok()));
+
     let mut out = String::new();
     for (_peer, verified, mut event) in tail.iter().cloned() {
+        // Decrypt for agent consumption (verify-gated inside open_event_body).
+        if event.get("enc").and_then(Value::as_str)
+            == Some(crate::enc::wire_x25519::ENC_DISCRIMINATOR)
+            && let Some(ref s) = seed
+            && let Ok(Some(plain)) = crate::enc::wire_x25519::open_event_body(&event, &trust, s)
+            && let Some(obj) = event.as_object_mut()
+        {
+            obj.insert("body".into(), plain);
+            obj.insert("dec".into(), json!(true));
+        }
         if let Some(obj) = event.as_object_mut() {
             obj.insert("verified".into(), json!(verified));
         }
@@ -1341,6 +1358,7 @@ fn tool_tail(args: &Value) -> Result<Value, String> {
         return Ok(json!([]));
     }
     let trust = config::read_trust().map_err(|e| e.to_string())?;
+    let seed = crate::enc::wire_x25519::self_seed_for_read();
     let entries: Vec<_> = std::fs::read_dir(&inbox)
         .map_err(|e| e.to_string())?
         .filter_map(|e| e.ok())
@@ -1365,7 +1383,11 @@ fn tool_tail(args: &Value) -> Result<Value, String> {
                 Err(_) => continue,
             };
             let verified = verify_message_v31(&event, &trust).is_ok();
-            let mut event_with_meta = event.clone();
+            // D1: decrypt enc-bearing bodies for the agent (verify-gated).
+            let mut event_with_meta = match &seed {
+                Some(s) => crate::enc::wire_x25519::decrypt_event_for_read(&event, &trust, s),
+                None => event.clone(),
+            };
             if let Some(obj) = event_with_meta.as_object_mut() {
                 obj.insert("verified".into(), json!(verified));
             }
