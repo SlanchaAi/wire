@@ -29,6 +29,25 @@
 //!   key is static per identity-pair; an Ed25519-seed compromise retroactively
 //!   decrypts every message ever exchanged. Treat the seed as a long-term root
 //!   secret. (Inherited NIP-44 property; FS would need an epoch/ephemeral input.)
+//!
+//! INTEGRATION GATE (the residual risk — `seal`/`open` have NO production
+//! callers yet; these MUST be closed in the wiring PR, two hostile-review
+//! passes flagged the first two as CRITICAL):
+//!   1. [CRITICAL] Bind the verbatim signed-event `from`/`to` DID *inside*
+//!      seal/open (take the event / a `CanonicalParticipants`), never let two
+//!      call sites stringify identities — a spelling mismatch is a silent,
+//!      total, per-peer decryption outage indistinguishable from an attack.
+//!   2. [CRITICAL] Make verify-before-open STRUCTURAL — a `VerifiedEvent`
+//!      newtype only `verify_message_v31` can mint, required by `open()`'s
+//!      signature — not a call-site convention. Collapse post-MAC
+//!      `BadPadding`/`BadUtf8` into one opaque variant (no decryption oracle).
+//!   3. Never downgrade a dh-capable peer to plaintext (sticky encryption once
+//!      a peer's `dh_pubkey` is pinned) — else a stripped field forces
+//!      plaintext. (The card self-signature already prevents *strip*; this is
+//!      the policy backstop. Add a strip/substitute tamper test when
+//!      `dh_pubkey` is emitted.)
+//!   4. Zeroize-wrap the stack secrets (`scalar`, `conversation_key`, `okm`,
+//!      message keys) — `Zeroizing<[u8;32]>` — alongside the above.
 
 use chacha20::ChaCha20;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
@@ -127,6 +146,13 @@ pub fn derive_conversation_key(
 /// framing is injective regardless of the identity charset — the bound `from`/
 /// `to` are full signed-event DIDs, which contain `:` and `-` (review fix #6/#9).
 fn context_info(nonce: &[u8; 32], from: &str, to: &str) -> Vec<u8> {
+    // The u16 length-prefix is injective only for identities ≤ 65535 bytes.
+    // wire DIDs are <100 bytes; assert in dev so a future long identity can't
+    // silently truncate the cast and break the framing (review re-sweep #3).
+    debug_assert!(
+        from.len() <= u16::MAX as usize && to.len() <= u16::MAX as usize,
+        "identity too long for u16 length-prefix framing"
+    );
     let mut v = Vec::with_capacity(32 + 2 + from.len() + 2 + to.len());
     v.extend_from_slice(nonce);
     v.extend_from_slice(&(from.len() as u16).to_be_bytes());
@@ -348,6 +374,38 @@ mod tests {
             open(&ck, &truncated, "a", "b").unwrap_err(),
             EncError::BadPayloadLen
         );
+    }
+
+    #[test]
+    fn zero_shared_secret_is_rejected() {
+        // The all-zero u-coordinate is a low-order Curve25519 point; X25519
+        // against it yields an all-zero shared secret. Must be rejected before
+        // key derivation (C3 / RFC 7748 §6.1) — coverage for the guard path.
+        let our = x25519_scalar_from_ed25519_seed(&SEED_A);
+        assert_eq!(
+            derive_conversation_key(&our, &[0u8; 32]).unwrap_err(),
+            EncError::ZeroSharedSecret
+        );
+    }
+
+    #[test]
+    fn decode_bomb_cap_boundary() {
+        // One char over the base64 ceiling for a max payload → rejected pre-decode;
+        // a legitimately-sized payload still round-trips (the cap is not too tight).
+        let ck = conv(&SEED_A, &SEED_B);
+        let over = "A".repeat(MAX_RAW * 4 / 3 + 5);
+        assert_eq!(
+            open(&ck, &over, "a", "b").unwrap_err(),
+            EncError::BadPayloadLen
+        );
+        // a real near-max payload (~64KB plaintext) seals + opens under the cap
+        let big = vec![b'z'; 60000];
+        let payload = seal(&ck, &big, "a", "b").unwrap();
+        assert!(
+            payload.len() < MAX_RAW * 4 / 3 + 5,
+            "real payload is under the cap"
+        );
+        assert_eq!(open(&ck, &payload, "a", "b").unwrap().len(), 60000);
     }
 
     #[test]

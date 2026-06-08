@@ -118,10 +118,10 @@ Plaintext bounds: **1..=65535 bytes**. The 2-byte length prefix is prepended; th
 **§2c — Context binding in HKDF `info` (review finding #1 — folded in).** The symmetric layer alone provides **zero** sender/recipient/direction binding: the conversation key is identical in both directions (`conv(a,B)==conv(b,A)`), the MAC covers only `nonce ‖ ciphertext`, and open is keyed on the `from` handle. A captured A→B ciphertext re-injected as B→A would decrypt cleanly *under the symmetric layer alone*. Today this is saved **solely** by the outer Ed25519 signature, which commits to `from`/`to`/`event_id` over the canonical body (`signing.rs:261-313`) and is verified *before* decrypt (`pull.rs:230`). To remove the sole reliance and make the inner layer itself context-bound:
 
 ```text
-context_info = nonce(32) ‖ ascii(from_handle) ‖ 0x00 ‖ ascii(to_handle)
+context_info = nonce(32) ‖ u16_be(len from) ‖ from ‖ u16_be(len to) ‖ to
 ```
 
-is fed as the HKDF-Expand `info` (step 3). This binds the per-message keys to direction, so a reflected/cross-direction ciphertext derives different `chacha_key`/`hmac_key` and fails the MAC even if an attacker could somehow bypass the signature. `from`/`to` are the handles already on the signed event; binding them costs nothing and is covered by the same golden vectors (§7). **This is defence-in-depth, not a replacement for verify-before-open** — see §4 for the hard ordering invariant.
+is fed as the HKDF-Expand `info` (step 3). **Length-prefixed, not 0x00-separated** (as implemented): injective regardless of the identity charset, since `from`/`to` are the **verbatim signed-event DIDs** (which contain `:` and `-`), not bare handles. This binds the per-message keys to direction, so a reflected/cross-direction ciphertext derives different `chacha_key`/`hmac_key` and fails the MAC even if an attacker could somehow bypass the signature. Binding them costs nothing and is covered by the golden + direction-binding tests (§7). **This is defence-in-depth, not a replacement for verify-before-open** — see §4 for the hard ordering invariant.
 
 **`Open(conversation_key, base64_payload, from, to) -> plaintext` — strict order:**
 
@@ -131,7 +131,7 @@ is fed as the HKDF-Expand `info` (step 3). This binds the per-message keys to di
    raw = base64_decode(payload); assert 99 <= len(raw) <= 65603
    version,nonce,ciphertext,mac = split(raw)
    if version != 0x02: FAIL("version not supported")
-3. keys = HKDF-Expand(... info = nonce ‖ from ‖ 0x00 ‖ to ...)   // re-derive with the SAME context (§2c)
+3. keys = HKDF-Expand(... info = nonce ‖ u16(len from) ‖ from ‖ u16(len to) ‖ to ...)  // SAME context (§2c)
 4. mac' = HMAC-SHA256(hmac_key, concat(nonce, ciphertext))
    if !constant_time_eq(mac', mac): FAIL                  // CONSTANT-TIME, BEFORE decrypt
 5. padded = ChaCha20(chacha_key, chacha_nonce, 0, ciphertext)
@@ -146,7 +146,7 @@ Step 4 (MAC verify) **strictly precedes** step 5 (decrypt). Use `hmac::Mac::veri
 
 - **Generate:** at `init.rs::init_self_idempotent` (keygen `:111`, card build `:124`). Mint the X25519 keypair *together with* identity so card `dh_pubkey` and stored `x25519.key` are co-minted. Derive per §1a from the Ed25519 identity seed so it is stable + re-derivable; store the private scalar at `config_dir()/x25519.key` mode 0600 (§5).
 - **Emit on card:** `agent_card.rs::build_agent_card` — add top-level `"dh_pubkey": b64(x25519_pub)`, **parallel to** `verify_keys`, never inside it (`PROTOCOL.md §1`). `card_canonical` hashes all fields except `signature`, so adding it before `sign_agent_card` makes the self-signature cover it automatically — **no signing change**. Add reader `card_dh_pubkey(card) -> Option<&str>` next to `card_op_did`.
-- **Exchange via dial (`pair_drop`) — zero new payload field:** dial POSTs a signed `kind=1100 pair_drop` event carrying our own card (`pair_invite.rs`; `make_pair_drop`/`maybe_consume_pair_drop`). Since the card already carries `dh_pubkey`, the X25519 key rides the existing **Ed25519-signed** card inside the pair_drop — no new field, no SPAKE2/AEAD bootstrap (that flow is gone). The card's self-signature + the receiver's pin are the integrity gate.
+- **Exchange via dial (`pair_drop`) — zero new payload field:** dial (`cli.rs::cmd_dial`) builds + POSTs a signed `kind=1100 pair_drop` event carrying our own card; the receiver's daemon consumes it via `pair_invite.rs::maybe_consume_pair_drop`. Since the card already carries `dh_pubkey`, the X25519 key rides the existing **Ed25519-signed** card inside the pair_drop — no new field, no SPAKE2/AEAD bootstrap (that flow is gone). The card's self-signature + the receiver's pin are the integrity gate; a stripped/substituted `dh_pubkey` breaks the card signature → rejected before pin.
 - **Pin per peer:** receiver verifies the card (`pair_invite.rs:341`, `verify_agent_card`) and pins via `add_agent_card_pin` (`pair_invite.rs:387` → `trust.rs`), which stores the **entire** peer card under `agents[handle].card` ⇒ `dh_pubkey` is automatically persisted in `trust.json` and self-signature-verified by construction. Read at derivation time via `trust["agents"][handle]["card"]["dh_pubkey"]`.
 
 ## 4. Code hooks — seal-on-send / open-on-pull (signing stays body-agnostic)
