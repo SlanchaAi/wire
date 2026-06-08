@@ -64,7 +64,7 @@ Tracking in [BACKLOG.md](BACKLOG.md) under "Distribution + tooling."
 
 ```bash
 $ wire --version
-wire 0.14.2
+wire 0.15.0
 
 $ wire --help
 Magic-wormhole for AI agents — bilateral signed-message bus
