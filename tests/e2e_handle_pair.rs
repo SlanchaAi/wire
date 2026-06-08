@@ -134,7 +134,7 @@ async fn wire_add_zero_paste_e2e() {
     // the pending-inbound record to appear, then accept it.
     let a_has_pending_b = wait_until(Instant::now() + Duration::from_secs(15), || {
         let _ = wire(&a, &["pull", "--json"]);
-        let p = wire(&a, &["pair-list-inbound", "--json"]);
+        let p = wire(&a, &["pending", "--json"]);
         let body = String::from_utf8_lossy(&p.stdout);
         body.contains(b_h.as_str())
     });
@@ -145,10 +145,10 @@ async fn wire_add_zero_paste_e2e() {
 
     // A explicitly accepts — the bilateral gate's consent step. Only after
     // this does A pin B and emit pair_drop_ack with A's endpoints.
-    let accept_out = wire(&a, &["pair-accept", &b_h, "--json"]);
+    let accept_out = wire(&a, &["accept", &b_h, "--json"]);
     assert!(
         accept_out.status.success(),
-        "pair-accept failed: {}",
+        "accept failed: {}",
         String::from_utf8_lossy(&accept_out.stderr)
     );
 
@@ -157,7 +157,7 @@ async fn wire_add_zero_paste_e2e() {
         let p = wire(&a, &["peers", "--json"]);
         String::from_utf8_lossy(&p.stdout).contains(b_h.as_str())
     });
-    assert!(a_pinned_b, "A never pinned B ({b_h}) post-pair-accept");
+    assert!(a_pinned_b, "A never pinned B ({b_h}) post-accept");
 
     // B pulls → consumes pair_drop_ack → relay-state gains A's slot_token.
     let b_got_token = wait_until(Instant::now() + Duration::from_secs(15), || {

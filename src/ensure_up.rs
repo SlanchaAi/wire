@@ -1,7 +1,7 @@
 //! Background-process bootstrapper for the MCP path.
 //!
 //! Post-pair, an agent shouldn't have to ask the user "start the daemon?" —
-//! `wire_pair_confirm` invokes [`ensure_daemon_running`] + [`ensure_notify_running`]
+//! the MCP accept/dial tools invoke [`ensure_daemon_running`] + [`ensure_notify_running`]
 //! so push/pull and OS toasts are already armed by the time the agent surfaces
 //! "paired ✓" back to chat.
 //!
@@ -30,9 +30,8 @@
 //! }
 //! ```
 //!
-//! Readers are TOLERANT of the legacy int form for one transition cycle —
-//! `read_daemon_pid` falls through to raw-int parse when JSON decode fails
-//! and reports `version: None` so callers can degrade gracefully.
+//! The JSON `DaemonPid` form is the only supported on-disk format;
+//! `read_pid_record` reports anything else as `Corrupt`.
 //!
 //! ## Wait-until-alive
 //!
@@ -48,7 +47,7 @@
 //! inherit no TTY → no SIGHUP arrives when the parent exits, so they
 //! survive a Claude Code restart cycle. PIDs are reaped by init.
 //!
-//! Worst case: a child dies; the next `wire_pair_confirm` call respawns it.
+//! Worst case: a child dies; the next accept/dial call respawns it.
 //! No data is lost (outbox/inbox is on disk, content-addressed dedupe).
 
 use std::path::PathBuf;
@@ -88,12 +87,11 @@ pub struct DaemonPid {
     pub relay_url: Option<String>,
 }
 
-/// Result of reading a pid file. Distinguishes legacy-int (no metadata)
-/// from JSON (full metadata) so callers can degrade gracefully.
+/// Result of reading a pid file. JSON (full metadata) is the only
+/// supported on-disk form; anything else is `Corrupt`.
 #[derive(Debug, Clone)]
 pub enum PidRecord {
     Json(DaemonPid),
-    LegacyInt(u32),
     Missing,
     Corrupt(String),
 }
@@ -102,7 +100,6 @@ impl PidRecord {
     pub fn pid(&self) -> Option<u32> {
         match self {
             PidRecord::Json(d) => Some(d.pid),
-            PidRecord::LegacyInt(p) => Some(*p),
             _ => None,
         }
     }
@@ -142,7 +139,7 @@ pub struct DaemonLiveness {
     /// PIDs in `pgrep_pids` that do NOT match `pidfile_pid`. These are
     /// orphan daemons racing the cursor with the pidfile-recorded one.
     pub orphan_pids: Vec<u32>,
-    /// Full parsed pidfile record (Json / LegacyInt / Missing / Corrupt).
+    /// Full parsed pidfile record (Json / Missing / Corrupt).
     pub record: PidRecord,
 }
 
@@ -215,8 +212,8 @@ pub fn daemon_liveness() -> DaemonLiveness {
     }
 }
 
-/// Read a pid file, tolerating both JSON and legacy-int forms. Never
-/// panics — corrupt input becomes `PidRecord::Corrupt`.
+/// Read a pid file. Only the JSON `DaemonPid` form is supported; any
+/// other content is reported as `Corrupt`. Never panics.
 pub fn read_pid_record(name: &str) -> PidRecord {
     let path = match pid_file(name) {
         Ok(p) => p,
@@ -230,19 +227,9 @@ pub fn read_pid_record(name: &str) -> PidRecord {
     if trimmed.is_empty() {
         return PidRecord::Missing;
     }
-    // JSON form first.
-    if trimmed.starts_with('{') {
-        match serde_json::from_str::<DaemonPid>(trimmed) {
-            Ok(d) => return PidRecord::Json(d),
-            Err(e) => return PidRecord::Corrupt(format!("JSON parse: {e}")),
-        }
-    }
-    // Legacy raw-int form — keep readable for one transition cycle so a
-    // 0.5.11 daemon can take over from a 0.5.10 leftover without
-    // operator intervention.
-    match trimmed.parse::<u32>() {
-        Ok(pid) => PidRecord::LegacyInt(pid),
-        Err(e) => PidRecord::Corrupt(format!("expected int or JSON: {e}")),
+    match serde_json::from_str::<DaemonPid>(trimmed) {
+        Ok(d) => PidRecord::Json(d),
+        Err(e) => PidRecord::Corrupt(format!("JSON parse: {e}")),
     }
 }
 
@@ -252,6 +239,31 @@ fn write_pid_record(name: &str, record: &DaemonPid) -> Result<()> {
     let body = serde_json::to_vec_pretty(record)?;
     std::fs::write(&path, body)?;
     Ok(())
+}
+
+/// Daemon-startup: claim the `daemon.pid` file for THIS process.
+///
+/// A daemon started directly (`wire daemon`, not via `ensure_background`)
+/// must write its own versioned-JSON pidfile so `wire status` / doctor /
+/// the singleton guard can see it. Idempotent: if the pidfile already
+/// records our PID we leave it untouched. (Historically this lived in
+/// `pending_pair::cleanup_on_startup` alongside the now-removed SAS
+/// pending-pair recovery; the pidfile write was never SAS-specific.)
+pub fn write_self_daemon_pid() -> Result<()> {
+    let path = pid_file("daemon")?;
+    let my_pid = std::process::id();
+    if path.exists()
+        && let Ok(s) = std::fs::read_to_string(&path)
+        && let Ok(rec) = serde_json::from_str::<DaemonPid>(s.trim())
+        && rec.pid == my_pid
+    {
+        // We already own this pidfile — nothing to do.
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    write_pid_record("daemon", &build_pid_record(my_pid))
 }
 
 /// Schema string written into every JSON last-sync file. Bumped if the
@@ -456,7 +468,7 @@ fn wait_until_alive(pid: u32, budget: Duration) -> bool {
 
 fn ensure_background(name: &str, args: &[&str]) -> Result<bool> {
     // Test escape hatch — tests/mcp_pair.rs spawns wire mcp with this env
-    // var set so wire_pair_confirm doesn't fork persistent daemon/notify
+    // var set so wire_accept/wire_dial don't fork persistent daemon/notify
     // processes that survive the test's temp WIRE_HOME.
     if std::env::var("WIRE_MCP_SKIP_AUTO_UP").is_ok() {
         return Ok(false);
@@ -497,7 +509,7 @@ fn ensure_background(name: &str, args: &[&str]) -> Result<bool> {
 
 /// Check the running daemon's version against the CLI's CARGO_PKG_VERSION.
 /// Returns Some(stale_version) if they disagree, None if they match (or no
-/// daemon, or legacy-int pidfile without version info).
+/// daemon).
 ///
 /// Called by `wire status` + `wire doctor`. The intent is loud, non-fatal
 /// warning — don't BLOCK CLI invocations on version mismatch (operator may
@@ -516,11 +528,6 @@ pub fn daemon_version_mismatch() -> Option<String> {
             } else {
                 None
             }
-        }
-        PidRecord::LegacyInt(_) => {
-            // Legacy pidfile = pre-0.5.11 daemon writing raw int. By
-            // definition older than this CLI, so flag it.
-            Some("<pre-0.5.11>".to_string())
         }
         _ => None,
     }
@@ -565,24 +572,6 @@ mod tests {
             match read {
                 PidRecord::Json(d) => assert_eq!(d, record),
                 other => panic!("expected JSON record, got {other:?}"),
-            }
-        });
-    }
-
-    #[test]
-    fn pid_record_tolerates_legacy_int_form() {
-        // The whole point of LegacyInt: a 0.5.11 daemon must be able to
-        // take over from a 0.5.10 leftover without operator intervention.
-        // If this assertion fails, every operator with a 0.5.10 daemon
-        // running has to manually delete their pidfile on upgrade.
-        crate::config::test_support::with_temp_home(|| {
-            crate::config::ensure_dirs().unwrap();
-            let path = super::pid_file("daemon").unwrap();
-            std::fs::write(&path, "98765").unwrap();
-            let read = read_pid_record("daemon");
-            match read {
-                PidRecord::LegacyInt(pid) => assert_eq!(pid, 98765),
-                other => panic!("expected LegacyInt, got {other:?}"),
             }
         });
     }

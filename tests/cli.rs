@@ -54,7 +54,7 @@ fn help_flag_lists_subcommands() {
     assert!(out.status.success(), "help failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
     for cmd in [
-        "init", "join", "whoami", "peers", "send", "tail", "verify", "mcp",
+        "init", "dial", "whoami", "peers", "send", "tail", "verify", "mcp",
     ] {
         assert!(s.contains(cmd), "missing subcommand {cmd} in help: {s}");
     }
@@ -279,7 +279,7 @@ fn write_pending_inbound_fixture(home: &std::path::Path, peer_handle: &str) {
 #[test]
 fn pair_list_inbound_surfaces_pending_v0_5_14() {
     // v0.5.14: zero-paste pair_drops from strangers land in pending-inbound
-    // and surface programmatically via `wire pair-list-inbound --json`.
+    // and surface programmatically via `wire pending --json`.
     // Receiver auto-pin was the v0.5.13 spam vector; this test asserts the
     // record is enumerable + the back-compat `pair-list --json` shape is
     // preserved for existing scripts.
@@ -300,9 +300,9 @@ fn pair_list_inbound_surfaces_pending_v0_5_14() {
 
 #[test]
 fn status_reports_pending_inbound_count_v0_5_14() {
-    // `wire status --json` must surface inbound_count separately from
-    // SPAKE2 pending_pairs.total so monitoring + dashboards can distinguish
-    // "stranger requests awaiting accept" from "active SPAKE2 sessions".
+    // `wire status --json` must surface pending_pairs.inbound_count — the
+    // count of stranger requests awaiting an operator accept — so monitoring
+    // + dashboards can see who's waiting.
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
     write_pending_inbound_fixture(&home, "alice");
@@ -324,8 +324,8 @@ fn status_reports_pending_inbound_count_v0_5_14() {
 
 #[test]
 fn pair_reject_deletes_pending_inbound_v0_5_14() {
-    // `wire pair-reject <peer>` removes the pending record. After reject,
-    // pair-list MUST NOT show the peer and the on-disk file MUST be gone.
+    // `wire reject <peer>` removes the pending record. After reject,
+    // the pending list MUST NOT show the peer and the on-disk file MUST be gone.
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
     write_pending_inbound_fixture(&home, "spammer");
@@ -478,23 +478,31 @@ fn session_destroy_requires_force_flag_v0_5_16() {
 }
 
 #[test]
-fn legacy_pair_verbs_still_callable_but_hidden_v0_10() {
-    // v0.10: legacy pair-* verbs stay callable for back-compat (v1.0
-    // removes them). They're hidden from --help (v0.9.1) and fire a
-    // deprecation banner on use (v0.9.2). This test asserts the
-    // back-compat contract: direct invocation still resolves.
+fn legacy_pair_verbs_removed_from_dispatch_v0_10() {
+    // RFC-005 / Phase 3: pair-accept, pair-reject, pair-list-inbound, and
+    // the `pair` megacommand are removed. RFC-005 follow-on: the SAS
+    // code-phrase flow (pair-host / pair-join / pair-confirm / pair-list /
+    // pair-cancel / pair-watch / pair-abandon, plus the `join` alias) is
+    // removed too. All must be unknown subcommands (clap exits nonzero).
     let home = fresh_home();
     for verb in [
-        "pair-host",
-        "pair-join",
         "pair-accept",
         "pair-reject",
         "pair-list-inbound",
+        "pair",
+        "pair-host",
+        "pair-join",
+        "pair-confirm",
+        "pair-list",
+        "pair-cancel",
+        "pair-watch",
+        "pair-abandon",
+        "join",
     ] {
         let out = run(&home, &[verb, "--help"]);
         assert!(
-            out.status.success(),
-            "v0.10 must keep `{verb}` callable for back-compat (v1.0 removes)"
+            !out.status.success(),
+            "`{verb}` should be an unknown subcommand after SAS removal — got success"
         );
     }
 }
@@ -512,20 +520,20 @@ fn send_no_auto_pair_flag_exists_v0_10() {
 }
 
 #[test]
-fn pair_hidden_from_help_v0_10() {
+fn pair_removed_from_dispatch_v0_10() {
+    // RFC-005 Phase 3: `wire pair` (megacommand) is removed entirely.
+    // It must not appear in --help and must exit nonzero as an unknown subcommand.
     let home = fresh_home();
     let out = run(&home, &["--help"]);
     let stdout = String::from_utf8(out.stdout).unwrap();
-    // `pair` was the megacommand — now hidden.
     assert!(
         !stdout.contains("  pair  ") && !stdout.contains("  pair\n"),
-        "v0.10 should hide `pair` from --help — got: {stdout}"
+        "RFC-005: `pair` must not appear in --help — got: {stdout}"
     );
-    // Still callable directly.
     let out = run(&home, &["pair", "--help"]);
     assert!(
-        out.status.success(),
-        "wire pair --help should still work (back-compat): {out:?}"
+        !out.status.success(),
+        "RFC-005: `wire pair` must be unknown subcommand — got success: {out:?}"
     );
 }
 
@@ -624,10 +632,9 @@ fn accept_invite_verb_exists_v0_9_4() {
 }
 
 #[test]
-fn accept_with_url_emits_deprecation_banner_v0_9_4() {
-    // v0.9.4: `wire accept wire://pair?...` still works (back-compat
-    // with v0.9 smart-dispatch) but emits a deprecation banner
-    // pointing operators at the explicit `wire accept-invite` verb.
+fn accept_with_url_errors_and_redirects_v0_10() {
+    // RFC-005 Phase 3: `wire accept wire://pair?...` is no longer silently
+    // forwarded — it exits nonzero with a clear redirect to `wire accept-invite`.
     let home = fresh_home();
     let out = std::process::Command::new(wire_bin())
         .args(["accept", "wire://pair?v=1&inv=bogus"])
@@ -635,10 +642,14 @@ fn accept_with_url_emits_deprecation_banner_v0_9_4() {
         .env("WIRE_NO_AUTO_JSON", "1")
         .output()
         .expect("spawn wire");
+    assert!(
+        !out.status.success(),
+        "accept <url> should now exit nonzero (RFC-005): {out:?}"
+    );
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("DEPRECATED") && stderr.contains("accept-invite"),
-        "accept-with-url should fire deprecation banner — got: {stderr}"
+        stderr.contains("accept-invite"),
+        "error message should redirect to `accept-invite` — got: {stderr}"
     );
 }
 
@@ -806,19 +817,16 @@ fn whois_typo_returns_json_success_with_candidates_v0_9_2() {
     );
 }
 
-// v0.10: pair-accept verb removed entirely, so the v0.9.2 deprecation-
-// banner tests (which exercised pair-accept) are obsolete. The
-// deprecation_warn helper is still exercised by the `accept <URL>`
-// back-compat path — covered by accept_with_url_emits_deprecation_banner_v0_9_4.
+// RFC-005 Phase 3: pair-accept, pair-reject, pair-list-inbound, and the `pair`
+// megacommand are removed from dispatch entirely (not merely hidden). The tests
+// that asserted they were "still callable" are replaced by
+// legacy_pair_verbs_removed_from_dispatch_v0_10.
 
 #[test]
 fn deprecated_verbs_hidden_from_help_v0_9_1() {
-    // v0.9.1: --help should not list the deprecated pair-* + invite
-    // verbs as their own subcommand entries (lines starting with two
-    // spaces + the verb name + whitespace, which is clap's subcommand-
-    // list format). They MAY still appear inside other commands'
-    // description text (e.g. `pin` mentions pair-host); the test
-    // checks subcommand-listing position, not arbitrary substring.
+    // v0.9.1+: --help must not list the SAS-legacy pair-* verbs or invite
+    // as subcommand entries. RFC-005: pair-accept/reject/list-inbound/pair
+    // are now fully removed (not just hidden), so they must also not appear.
     let home = fresh_home();
     let out = run(&home, &["--help"]);
     assert!(out.status.success(), "--help failed: {out:?}");
@@ -829,11 +837,12 @@ fn deprecated_verbs_hidden_from_help_v0_9_1() {
         "pair-accept",
         "pair-reject",
         "pair-list-inbound",
+        "pair",
     ] {
         let leading_pattern = format!("  {hidden} ");
         assert!(
             !stdout.contains(&leading_pattern),
-            "--help should hide `{hidden}` from subcommand list (v0.9.1)"
+            "--help must not list `{hidden}` (RFC-005 removed or SAS-hidden)"
         );
     }
     for visible in ["dial", "send", "pending", "accept", "reject", "whois"] {
@@ -844,10 +853,6 @@ fn deprecated_verbs_hidden_from_help_v0_9_1() {
         );
     }
 }
-
-// v0.10: pair-accept removed entirely. The v0.9.1 "still callable
-// via direct invocation" guarantee is no longer applicable;
-// legacy_pair_verbs_removed_from_dispatch_v0_10 asserts the new contract.
 
 #[test]
 fn init_offline_creates_keypair_without_slot_v0_9_1() {
@@ -1151,7 +1156,7 @@ fn accept_errors_cleanly_when_no_pending_request_v0_5_14() {
 
 #[test]
 fn reject_idempotent_on_missing_peer_v0_5_14() {
-    // v0.10: migrated from `wire pair-reject` to `wire reject`. Idempotent.
+    // v0.10+: `wire reject` is idempotent — succeeds even if no pending record.
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
     let out = run(&home, &["reject", "ghost", "--json"]);
@@ -1319,27 +1324,6 @@ fn verify_rejects_tampered_event() {
 }
 
 #[test]
-fn join_alias_resolves_to_pair_join() {
-    // `wire join` is a clap alias for `wire pair-join`. Without a relay it
-    // should fail at the not-initialized check (we haven't run init in this
-    // home), but the failure must come from pair-join's logic, not from clap
-    // saying "unknown subcommand".
-    let home = fresh_home();
-    let out = run(
-        &home,
-        &["join", "12-ABCDEF", "--relay", "http://127.0.0.1:1"],
-    );
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    // Either "not initialized" (uninited home) or relay healthz failure —
-    // both prove the alias dispatched into pair_orchestrate.
-    assert!(
-        stderr.contains("not initialized") || stderr.contains("healthz"),
-        "join alias didn't dispatch to pair-join (stderr: {stderr})"
-    );
-}
-
-#[test]
 fn mcp_initialize_then_tools_list_round_trip() {
     use std::io::Write as _;
     use std::process::Stdio;
@@ -1394,17 +1378,23 @@ fn mcp_initialize_then_tools_list_round_trip() {
     // Always-safe messaging tools
     assert!(names.contains(&"wire_whoami"));
     assert!(names.contains(&"wire_send"));
-    // Goal 1: pairing tools now exposed (with SAS-digit type-back as the gate)
+    // Canonical pairing tools.
     assert!(names.contains(&"wire_init"));
-    assert!(names.contains(&"wire_pair_initiate"));
-    assert!(names.contains(&"wire_pair_join"));
-    assert!(names.contains(&"wire_pair_check"));
-    assert!(names.contains(&"wire_pair_confirm"));
-    // Legacy wire_join is not advertised — superseded by wire_pair_join
-    assert!(
-        !names.contains(&"wire_join"),
-        "wire_join is the deprecated alias; surface wire_pair_join instead"
-    );
+    assert!(names.contains(&"wire_dial"));
+    // SAS code-phrase pair tools were removed (RFC-005 follow-on) — must NOT
+    // be advertised.
+    for removed in [
+        "wire_pair_initiate",
+        "wire_pair_join",
+        "wire_pair_check",
+        "wire_pair_confirm",
+        "wire_join",
+    ] {
+        assert!(
+            !names.contains(&removed),
+            "removed SAS pair tool {removed} must not be advertised"
+        );
+    }
 }
 
 #[test]

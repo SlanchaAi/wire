@@ -228,7 +228,7 @@ async fn pair_two_homes_with_local_endpoints(
 
     let alice_has_pending = wait_until(Instant::now() + Duration::from_secs(15), || {
         let _ = wire(&alice, &["pull", "--json"]);
-        let p = wire(&alice, &["pair-list-inbound", "--json"]);
+        let p = wire(&alice, &["pending", "--json"]);
         // v0.11: pending-inbound record carries bob's CARD HANDLE
         // (bob_h, character), not the operator-typed bob_name.
         String::from_utf8_lossy(&p.stdout).contains(bob_h.as_str())
@@ -237,11 +237,7 @@ async fn pair_two_homes_with_local_endpoints(
         alice_has_pending,
         "alice never received pending-inbound from {bob_h}"
     );
-    assert!(
-        wire(&alice, &["pair-accept", &bob_h, "--json"])
-            .status
-            .success()
-    );
+    assert!(wire(&alice, &["accept", &bob_h, "--json"]).status.success());
 
     let bob_pinned = wait_until(Instant::now() + Duration::from_secs(15), || {
         let _ = wire(&bob, &["pull", "--json"]);

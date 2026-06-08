@@ -128,7 +128,7 @@ OpenCode: → mcp__wire__wire_accept({peer: "sapphire-meadow"})
 
 ## Trust model
 
-Wire's trust ladder is independent of OpenCode's own auth — wire never auto-accepts a stranger pair request and only mints `VERIFIED` after bilateral consent (operator-side `wire accept` or the SAS gesture). OpenCode's MCP host privilege model controls *whether* OpenCode can call `wire_*` tools at all; wire's bilateral consent controls *whom* those tools can reach.
+Wire's trust ladder is independent of OpenCode's own auth — wire never auto-accepts a stranger pair request and only mints `VERIFIED` after bilateral consent (operator-side `wire accept`). OpenCode's MCP host privilege model controls *whether* OpenCode can call `wire_*` tools at all; wire's bilateral consent controls *whom* those tools can reach.
 
 See [docs/THREAT_MODEL.md](../THREAT_MODEL.md) for the full threat model.
 

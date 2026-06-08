@@ -32,7 +32,7 @@ Two AI agents that need to coordinate without a shared vendor. The agents may be
 - A hosted multi-agent SaaS (vendor lock-in, OAuth flows, opaque billing)
 - Rolling Redis pub/sub + custom auth + custom signing (high-effort, brittle, not an upgrade path)
 
-Wire's answer: each agent picks a handle (`coffee-ghost@wireup.net`), runs `wire add tide-pool@wireup.net`, the other side runs `wire pair-accept`, done. Mailbox-federated like Mastodon (`nick@domain` resolves via `.well-known/wire/agent`), Ed25519-signed events, bilateral pair gate (receiver must consent before write-access), single Rust binary, AGPL relay you can self-host.
+Wire's answer: each agent picks a handle (`coffee-ghost@wireup.net`), runs `wire add tide-pool@wireup.net`, the other side runs `wire accept`, done. Mailbox-federated like Mastodon (`nick@domain` resolves via `.well-known/wire/agent`), Ed25519-signed events, bilateral pair gate (receiver must consent before write-access), single Rust binary, AGPL relay you can self-host.
 
 ### Who it's for
 

@@ -169,15 +169,12 @@ struct HandleRecord {
     /// `/v1/handles` directory listing — operator opted out of bulk
     /// discovery. The `.well-known/wire/agent?handle=X` direct lookup
     /// still resolves so existing peers + out-of-band sharing continue
-    /// to work. Default `None` = discoverable (back-compat for records
-    /// claimed pre-v0.5.19).
+    /// to work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discoverable: Option<bool>,
 }
 
 impl HandleRecord {
-    /// Effective discoverability: defaults to true when the field is
-    /// absent (pre-v0.5.19 records).
     fn is_discoverable(&self) -> bool {
         self.discoverable.unwrap_or(true)
     }
@@ -1144,9 +1141,8 @@ pub struct HandleClaimRequest {
     /// optional profile).
     pub card: Value,
     /// v0.5.19 (#9.1): set false to opt out of `/v1/handles` bulk listing.
-    /// Direct `.well-known/wire/agent` lookup by handle still works. The
-    /// default (None / absent) is discoverable, for back-compat with
-    /// pre-v0.5.19 clients.
+    /// Direct `.well-known/wire/agent` lookup by handle still works.
+    /// Omitted on first claim defaults to discoverable=true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discoverable: Option<bool>,
 }
@@ -1240,12 +1236,12 @@ async fn handle_claim(
     // v0.5.19 (#9.1): preserve `discoverable` across re-claims. If the
     // request doesn't set it explicitly, keep whatever the existing
     // record had so a profile-update re-claim doesn't accidentally
-    // re-publish a hidden handle. Default for first-time claim is None
-    // (= discoverable, back-compat).
+    // re-publish a hidden handle. New first-time claims default to
+    // discoverable=true explicitly.
     let discoverable = match (req.discoverable, &prior_record) {
         (Some(d), _) => Some(d),
         (None, Some(prev)) => prev.discoverable,
-        (None, None) => None,
+        (None, None) => Some(true),
     };
     let record = HandleRecord {
         nick: req.nick.clone(),

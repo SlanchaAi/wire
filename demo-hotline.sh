@@ -96,10 +96,10 @@ for adder in "${HANDLES[@]}"; do
     done
 done
 
-# Drain pair_drops into pending_inbound, pair-accept each to finalize the
+# Drain pair_drops into pending_inbound, accept each to finalize the
 # bilateral pin, then drain pair_drop_acks so both sides record each other's
 # slot_token. v0.5.14 removed receiver auto-promote on pull (phonebook-scrape
-# mitigation): a stashed pair_drop now requires explicit `wire pair-accept`
+# mitigation): a stashed pair_drop now requires explicit `wire accept`
 # before the slot_token flows back via pair_drop_ack. Without this step,
 # `wire push` later reports `no reachable endpoint pinned for peer` and the
 # ring-send phase silently drops every message. v0.11: accept by character.

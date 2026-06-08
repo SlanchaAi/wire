@@ -3,7 +3,7 @@
 //! v0.1 surface (this crate):
 //!   - [`canonical`] — sorted-key, no-whitespace JSON; the wire-byte form.
 //!   - [`signing`] — Ed25519 sign-over-event_id (Nostr NIP-01 style).
-//!   - [`agent_card`] — DID-anchored agent identity + bilateral SAS.
+//!   - [`agent_card`] — DID-anchored agent identity.
 //!   - [`trust`] — per-peer tier state machine (UNTRUSTED → VERIFIED).
 //!
 //! v0.2+ (NOT in this crate yet, see `BACKLOG.md`):
@@ -25,6 +25,7 @@ pub mod ensure_up;
 pub mod group;
 pub mod identity;
 pub mod inbox_watch;
+pub mod init;
 pub mod macaroon;
 pub mod mcp;
 pub mod nuke;
@@ -34,14 +35,11 @@ pub mod os_notify;
 pub mod pair_decision;
 pub mod pair_invite;
 pub mod pair_profile;
-pub mod pair_session;
 pub mod pending_inbound_pair;
-pub mod pending_pair;
 pub mod platform;
 pub mod pull;
 pub mod relay_client;
 pub mod relay_server;
-pub mod sas;
 pub mod send;
 pub mod service;
 pub mod session;
@@ -59,7 +57,7 @@ pub use signing::{
 
 pub use agent_card::{
     AgentCard, CARD_SCHEMA_VERSION, CardError, DID_METHOD, build_agent_card, card_canonical,
-    compute_sas, did_for, sign_agent_card, verify_agent_card,
+    compute_sas, sign_agent_card, verify_agent_card,
 };
 
 pub use trust::{

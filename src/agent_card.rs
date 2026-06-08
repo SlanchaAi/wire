@@ -44,12 +44,6 @@ pub const LONG_FINGERPRINT_HEX_LEN: usize = 32;
 ///
 /// Pass-through for any string already starting with `did:*` (so callers
 /// can be lazy with mixed inputs).
-///
-/// Backward-compat: legacy DIDs of the form `did:wire:<handle>` (no
-/// pubkey suffix) shipped pre-v0.5.7. They still verify because signature
-/// verification reads the pubkey from `verify_keys`, not from the DID
-/// string. They're just non-unique across operators picking the same
-/// handle — the v0.5.7 cohort onward gets uniqueness by construction.
 pub fn did_for_with_key(handle: &str, public_key: &[u8]) -> String {
     if handle.starts_with("did:") {
         return handle.to_string();
@@ -115,18 +109,6 @@ fn has_long_hex_suffix(s: &str) -> bool {
     };
     let suffix = &s[idx + 1..];
     suffix.len() == LONG_FINGERPRINT_HEX_LEN && suffix.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-/// suffix. Pre-v0.5.7 model. Kept for backward-compat in code paths
-/// that don't have the pubkey on hand (display helpers, test fixtures)
-/// and for tests that pin specific DID strings. NEW callers should use
-/// `did_for_with_key`.
-pub fn did_for(handle: &str) -> String {
-    if handle.starts_with("did:") {
-        handle.to_string()
-    } else {
-        format!("{DID_METHOD}:{handle}")
-    }
 }
 
 /// Strip the federation suffix (`@relay.example`) from a handle, returning
@@ -512,17 +494,6 @@ mod tests {
     use crate::signing::generate_keypair;
 
     #[test]
-    fn did_for_handle() {
-        assert_eq!(did_for("paul"), "did:wire:paul");
-    }
-
-    #[test]
-    fn did_for_already_did_passthrough() {
-        assert_eq!(did_for("did:wire:paul"), "did:wire:paul");
-        assert_eq!(did_for("did:key:abc"), "did:key:abc");
-    }
-
-    #[test]
     fn did_method_constant() {
         assert_eq!(DID_METHOD, "did:wire");
     }
@@ -811,19 +782,6 @@ mod tests {
         };
         let err = with_identity_claims(&card, &claims).unwrap_err();
         assert!(matches!(err, ClaimError::InvalidOrgDid(_)));
-    }
-
-    #[test]
-    fn v3_1_card_remains_verifiable_under_v3_2_code() {
-        // Backward-compat: a v3.1-shaped card (no identity claims, schema
-        // string literally "v3.1") still round-trips signing and verify.
-        // This is the wire-compat invariant — peers on the network mid-
-        // upgrade keep talking.
-        let (sk, pk) = generate_keypair();
-        let mut card = build_agent_card("paul", &pk, None, None, None);
-        card["schema_version"] = json!("v3.1");
-        let signed = sign_agent_card(&card, &sk);
-        verify_agent_card(&signed).unwrap();
     }
 
     #[test]

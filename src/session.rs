@@ -572,19 +572,11 @@ fn read_card_identity(card_path: &Path) -> (Option<String>, Option<String>) {
 pub fn session_daemon_pid(session_home: &Path) -> Option<u32> {
     let pidfile = session_home.join("state").join("wire").join("daemon.pid");
     let bytes = std::fs::read(&pidfile).ok()?;
-    // Pidfile is either JSON `{"pid": <n>, ...}` (v0.5.11+) or a bare
-    // integer (legacy). Try JSON-with-pid-field first; if that yields
-    // None (parse failed OR JSON parsed successfully as a bare Number
-    // with no `.pid` field), fall through to the bare-int path.
-    // Pre-fix: a legacy bare-integer pidfile silently returned None
-    // here because `serde_json::from_slice("67890")` succeeds as
-    // Value::Number, then `v.get("pid")` is None, and the else
-    // branch never ran. Caused legitimate pre-v0.5.11 sessions to
-    // read as "no daemon" in list-local and orphan-detection paths.
+    // Pidfile is the JSON `{"pid": <n>, ...}` form (v0.5.11+). Anything
+    // else reads as "no daemon".
     serde_json::from_slice::<serde_json::Value>(&bytes)
         .ok()
         .and_then(|v| v.get("pid").and_then(|p| p.as_u64()))
-        .or_else(|| String::from_utf8_lossy(&bytes).trim().parse::<u64>().ok())
         .map(|p| p as u32)
 }
 
@@ -966,11 +958,8 @@ pub fn session_home_for_key(key: &str) -> Result<PathBuf> {
 /// Keep this list in sync with [`warn_on_identity_collision`]'s pgrep
 /// predicate and the call-site list in `cli::run` / `mcp::run`.
 ///
-/// `pair-host*` is intentionally absent: it works against the
-/// per-pair relay slot, not the shared inbox cursor, and is meant
-/// to coexist with a `wire daemon` that advances the queued pair —
-/// warning there would be a false positive for the documented
-/// "queue + daemon" pattern.
+/// Note: `pair-host` (and the rest of the SAS code-phrase flow) was removed
+/// in RFC-005 follow-on, so it is naturally absent from this list.
 ///
 /// Short-lived commands (`whoami`, `status`, `send`, `peers`, …) are
 /// intentionally absent — they write atomically and don't race, and
@@ -1131,8 +1120,8 @@ fn read_wire_home_from_pid(pid: u32) -> Option<String> {
 /// use. Noop when `WIRE_HOME` is already set (explicit override wins).
 ///
 /// `label` distinguishes the caller in the stderr line (`mcp` vs
-/// `cli`). Set `WIRE_QUIET_AUTOSESSION=1` to suppress the stderr line
-/// while keeping the env-var application active.
+/// `cli`). Output only appears on interactive TTYs; set `WIRE_VERBOSE=1`
+/// to force it on in non-interactive contexts.
 ///
 /// MUST be called BEFORE any worker thread or async task spawns —
 /// `env::set_var` is unsafe in Rust 2024 because of thread-safety
@@ -1228,13 +1217,11 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
     // Bash tool, scripts, daemons), the auto-detect line is captured
     // alongside command output and pollutes both — wasting agent
     // context tokens and breaking JSON parsers that read combined
-    // streams. WIRE_VERBOSE=1 forces the line on; WIRE_QUIET_AUTOSESSION
-    // still forces it off for back-compat with v0.9 scripts.
+    // streams. WIRE_VERBOSE=1 forces the line on.
     use std::io::IsTerminal;
-    let quiet_env = std::env::var("WIRE_QUIET_AUTOSESSION").is_ok();
     let verbose_env = std::env::var("WIRE_VERBOSE").is_ok();
     let interactive = std::io::stderr().is_terminal();
-    if !quiet_env && (interactive || verbose_env) {
+    if interactive || verbose_env {
         eprintln!(
             "wire {label}: adopted {why} → WIRE_HOME=`{}`",
             home.display()
@@ -1765,14 +1752,13 @@ mod tests {
         let h1 = mk_session("abc123def4567890", "alpha-aurora");
         let h2 = mk_session("def456abc7890123", "beta-blossom");
         let _h3 = mk_session("0000aaaabbbbcccc", "gamma-gorge");
-        // h1 / h2 get pidfiles (JSON form + legacy-int form for coverage);
-        // h3 gets none.
+        // h1 / h2 get JSON pidfiles; h3 gets none.
         let state1 = h1.join("state").join("wire");
         let state2 = h2.join("state").join("wire");
         std::fs::create_dir_all(&state1).unwrap();
         std::fs::create_dir_all(&state2).unwrap();
         std::fs::write(state1.join("daemon.pid"), r#"{"pid": 12345}"#).unwrap();
-        std::fs::write(state2.join("daemon.pid"), "67890").unwrap();
+        std::fs::write(state2.join("daemon.pid"), r#"{"pid": 67890}"#).unwrap();
 
         // SAFETY: ENV_LOCK is held, serializing all env access.
         unsafe { std::env::set_var("WIRE_HOME", &h1) };
@@ -1794,7 +1780,7 @@ mod tests {
         assert_eq!(
             map.get(&67890).map(String::as_str),
             Some("beta-blossom"),
-            "pid 67890 should map (legacy-int pidfile form, handle for h2)"
+            "pid 67890 should map (JSON pidfile form, handle for h2)"
         );
         // Sanity: no entry for an unrelated pid.
         assert!(
@@ -2096,9 +2082,8 @@ mod tests {
         assert!(INBOX_OWNING_SUBCOMMANDS.contains(&"daemon"));
         assert!(INBOX_OWNING_SUBCOMMANDS.contains(&"monitor"));
         assert!(INBOX_OWNING_SUBCOMMANDS.contains(&"notify"));
-        // Pair-host is documented-coexist with daemon — must NOT be in
-        // the list or operators get a false positive on every queued
-        // pair flow.
+        // pair-host (SAS code-phrase flow) was removed in RFC-005 follow-on
+        // and must not appear in the list.
         assert!(!INBOX_OWNING_SUBCOMMANDS.contains(&"pair-host"));
     }
 

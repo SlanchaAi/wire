@@ -8,6 +8,39 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.15.0] — 2026-06-07
+
+**v0.15.0 — the de-deprecation: every backwards-compatibility surface removed. `wire dial` is now the sole pairing path; agents only ever see canonical verbs. BREAKING — old on-disk state is incompatible; `wire nuke` resets a machine.**
+
+The deprecated surface was actively confusing agents — the MCP tool list advertised legacy `wire_pair_*` tools alongside the canonical verbs, so an LLM picked the wrong one. This release rips out **all** backwards compatibility (RFC-005 + follow-on). No production users, so it breaks freely; the new `wire nuke` is the clean-slate reset.
+
+### New: `wire nuke` (the clean-slate command)
+
+- **`wire nuke`** — hard machine reset: kills daemons + the `--all-sessions` supervisor, removes the launchd/systemd/schtasks service units, **de-registers the `wire` MCP entry from every host config** (Claude Code / Cursor / Copilot / VS Code / OpenCode — so a "fresh" machine doesn't show the agent a dead `wire` server), and wipes all wire dirs. Keeps the binary. `wire nuke --purge` also removes the binary + scrubs shell PATH/env lines (Windows prints the manual `del`). Safety: `--dry-run` → typed-`nuke` confirm → `--force`/`--yes`. New `install-smoke` CI (Linux + Windows) + a reproducible Rust `test-env` container.
+
+### Removed: the deprecated agent + operator surface
+
+- **Deprecated MCP alias tools** — `wire_pair_accept` / `wire_pair_reject` / `wire_pair_list_inbound` (pure aliases of canonical `wire_accept` / `wire_reject` / `wire_pending`) gone from `tools/list`. Old names return a helpful "use `wire_accept`" redirect; canonical verbs are the only thing advertised.
+- **Deprecated CLI alias verbs** — `wire pair` (→ `wire dial`), `wire pair-accept` / `pair-reject` / `pair-list-inbound` (→ `accept` / `reject` / `pending`), and the `deprecation_warn` shim. `wire accept <url>` no longer silent-forwards an invite URL — use `wire accept-invite <url>`.
+
+### Removed: the SAS code-phrase pairing flow (the big one)
+
+- The entire **SAS / SPAKE2 / code-phrase / SAS-digit** pairing flow is gone — modules `sas.rs`, `pending_pair.rs`, `pair_session.rs`; CLI `pair-host` / `pair-join` / `pair-confirm` / `pair-list` / `pair-cancel` / `pair-watch` / `pair-abandon`; MCP `wire_pair_initiate` / `join` / `confirm` / `check` + the `_detached` variants. **`wire dial` (relay pair-drop) + bilateral `wire accept` is now the sole canonical pairing path.** Shared identity-bootstrap (`init_self_idempotent`) relocated to `src/init.rs`; the daemon pidfile write relocated to `ensure_up`.
+
+### Removed: dead legacy on-disk formats
+
+- Legacy **bare-integer pidfile** (`PidRecord::LegacyInt`) and the pre-v0.5.7 **no-suffix DID** builder. Version-tolerance shims with no current reader: **v3.1 agent-card** read path, **pre-v0.5.19 relay "discoverable default"**, **v0.4-card profile** default. The redundant `WIRE_QUIET_AUTOSESSION` session.rs check (the TTY check subsumes it).
+
+### Kept (live, not old — see RFC-006)
+
+- The **v0.6 named-session layout** (`wire session new/list/env/destroy` use it; `by-key/<hash>` is a *parallel* agent-resolution layout, not a replacement) and the **flat peer-endpoint fields** (the live invite flow reads/writes them) are current code, not dead shims. Consolidating them to a single representation is a deliberate redesign with the #170/#174 fork-storm risk — tracked in **[RFC-006](docs/rfc/0006-consolidate-dual-representations.md)**, not forced here.
+
+### Operator notes
+
+- **BREAKING:** pre-v0.15 on-disk state (old pidfiles, no-suffix DIDs, v3.1 cards) is no longer read. Run **`wire nuke`** to reset, then `wire up`. Old SAS pairings can't be resumed — re-pair with `wire dial`.
+- Full per-PR detail: Phase 1 #220, Phase 2 #231, Phase 3 #232, Phase 4 #233, SAS removal #236. Design: `docs/rfc/0005-remove-backwards-compat.md`.
+
+
 ## [v0.14.2] — 2026-06-05
 
 **v0.14.2 — the multi-session ops batch + the queue collapse: silent-send class closed, `--all-sessions` supervisor architecture lands, four hotfixes caught by live dogfood, send + pull both become synchronous verdict-on-demand verbs.**

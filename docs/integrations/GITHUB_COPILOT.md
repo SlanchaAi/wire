@@ -8,7 +8,7 @@ Wire extends GitHub Copilot's capabilities by providing:
 
 - **Agent-to-agent messaging**: Multiple VS Code instances with GitHub Copilot can message each other
 - **Cross-platform communication**: GitHub Copilot can pair with Claude, Cursor, and other wire-enabled agents
-- **Secure bilateral pairing**: Ed25519-signed messages with SAS verification
+- **Secure bilateral pairing**: Ed25519-signed messages with operator-gated `wire accept`
 - **Per-workspace identity**: Each VS Code workspace gets its own wire persona
 
 ## Prerequisites
@@ -342,7 +342,7 @@ Wire uses **bilateral trust**:
 1. Peer A dials Peer B
 2. Peer B must explicitly accept
 3. Both verify via Ed25519 signatures
-4. SAS digits for out-of-band verification (optional)
+4. Card fingerprint for out-of-band verification (optional)
 
 ### What the Relay Sees
 

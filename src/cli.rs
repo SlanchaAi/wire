@@ -7,11 +7,9 @@
 //! Subcommand split:
 //!   - **agent-safe**: `whoami`, `peers`, `verify`, `send`, `tail` — pure
 //!     message-layer ops, no trust establishment.
-//!   - **trust-establishing**: `init`, `pair-host`, `pair-join`. The CLI
-//!     uses interactive `y/N` prompts here. The MCP equivalents
-//!     (`wire_init`, `wire_pair_initiate`, `wire_pair_join`, `wire_pair_check`,
-//!     `wire_pair_confirm`) preserve the human gate by requiring the user to
-//!     type the 6 SAS digits back into chat — see `docs/THREAT_MODEL.md` T10/T14.
+//!   - **trust-establishing**: `init`, `dial`, `accept`/`reject`,
+//!     `invite`/`accept-invite`. The bilateral gate (operator-side `accept`)
+//!     preserves the human-in-loop step — see `docs/THREAT_MODEL.md` T10/T14.
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
@@ -72,8 +70,6 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    // (Old `Join` stub removed in iter 11 — superseded by `pair-join` with
-    // `join` alias. See PairJoin below.)
     /// Print this agent's identity (DID, fingerprint, mailbox slot).
     Whoami {
         #[arg(long)]
@@ -119,9 +115,8 @@ pub enum Command {
         json: bool,
     },
     /// v0.9 canonical surface: list pending-inbound pair requests waiting
-    /// for your consent. Aliases the legacy `pair-list-inbound` verb
-    /// but with the shorter, intent-first name. Operators reach for
-    /// "what's pending?" not "what's in my pair-list-inbound table?"
+    /// for your consent. Operators reach for "what's pending?" not a
+    /// longer table-dump verb.
     Pending {
         #[arg(long)]
         json: bool,
@@ -357,7 +352,7 @@ pub enum Command {
         command: ResponderCommand,
     },
     /// Pin a peer's signed agent-card from a file. (Manual out-of-band pairing
-    /// — fallback path; the magic-wormhole flow is `pair-host` / `pair-join`.)
+    /// — fallback path; the canonical flow is `wire dial <handle>@<relay>`.)
     Pin {
         /// Path to peer's signed agent-card JSON.
         card_file: String,
@@ -435,205 +430,6 @@ pub enum Command {
         /// foreground daemon outside the supervisor.
         #[arg(long)]
         session: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Host a SAS-confirmed pairing. Generates a code phrase, prints it, waits
-    /// for a peer to `pair-join`, exchanges signed agent-cards via SPAKE2 +
-    /// ChaCha20-Poly1305. Auto-pins on success. (HUMAN-ONLY — operator must
-    /// read the SAS digits aloud and confirm.)
-    #[command(hide = true)] // v0.9 deprecated
-    PairHost {
-        /// Relay base URL.
-        #[arg(long)]
-        relay: String,
-        /// Skip the SAS confirmation prompt. ONLY use when piping under
-        /// automated tests or when the SAS has already been verified by
-        /// another channel. Documented as test-only.
-        #[arg(long)]
-        yes: bool,
-        /// How long (seconds) to wait for the peer to join before timing out.
-        #[arg(long, default_value_t = 300)]
-        timeout: u64,
-        /// Detach: write a pending-pair file, print the code phrase, and exit
-        /// immediately. The running `wire daemon` does the handshake in the
-        /// background; confirm SAS later via `wire pair-confirm <code> <digits>`.
-        /// `wire pair-list` shows pending sessions. Default is foreground
-        /// blocking behavior for backward compat.
-        #[arg(long)]
-        detach: bool,
-        /// Emit JSON instead of text. Currently only meaningful with --detach.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Join a pair-slot using a code phrase from the host. (HUMAN-ONLY.)
-    ///
-    /// Aliased as `wire join <code>` for magic-wormhole muscle-memory.
-    #[command(alias = "join")]
-    #[command(hide = true)] // v0.9 deprecated
-    PairJoin {
-        /// Code phrase from the host's `pair-host` output (e.g. `73-2QXC4P`).
-        code_phrase: String,
-        /// Relay base URL (must match the host's relay).
-        #[arg(long)]
-        relay: String,
-        #[arg(long)]
-        yes: bool,
-        #[arg(long, default_value_t = 300)]
-        timeout: u64,
-        /// Detach: see `pair-host --detach`.
-        #[arg(long)]
-        detach: bool,
-        /// Emit JSON instead of text. Currently only meaningful with --detach.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Confirm SAS digits for a detached pending pair. The daemon must be
-    /// running for this to do anything — it picks up the confirmation on its
-    /// next tick. Mismatch aborts the pair.
-    #[command(hide = true)] // v0.9 deprecated
-    PairConfirm {
-        /// The code phrase the original `wire pair-host --detach` printed.
-        code_phrase: String,
-        /// 6 digits as displayed by `wire pair-list` (dashes/spaces stripped).
-        digits: String,
-        /// Emit JSON instead of human-readable text.
-        #[arg(long)]
-        json: bool,
-    },
-    /// List all pending detached pair sessions and their state.
-    #[command(hide = true)] // v0.9 deprecated
-    PairList {
-        /// Emit JSON instead of the table.
-        #[arg(long)]
-        json: bool,
-        /// Stream mode: never exit; print one JSON line per status transition
-        /// (creation, status change, deletion) across all pending pairs.
-        /// Compose with bash `while read` to react in shell. Implies --json.
-        #[arg(long)]
-        watch: bool,
-        /// Poll interval in seconds for --watch.
-        #[arg(long, default_value_t = 1)]
-        watch_interval: u64,
-    },
-    /// Cancel a pending pair. Releases the relay slot and removes the pending file.
-    #[command(hide = true)] // v0.9 deprecated
-    PairCancel {
-        code_phrase: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Block until a pending pair reaches a target status (default sas_ready),
-    /// or terminates (finalized = file removed, aborted, aborted_restart), or
-    /// the timeout expires. Useful for shell scripts that want to drive the
-    /// detached flow without polling pair-list themselves.
-    ///
-    /// Exit codes:
-    ///   0 — reached target status (or finalized, if target was sas_ready)
-    ///   1 — terminated abnormally (aborted, aborted_restart, no such code)
-    ///   2 — timeout
-    #[command(hide = true)] // v0.9 deprecated
-    PairWatch {
-        code_phrase: String,
-        /// Target status to wait for. Default: sas_ready.
-        #[arg(long, default_value = "sas_ready")]
-        status: String,
-        /// Max seconds to wait.
-        #[arg(long, default_value_t = 300)]
-        timeout: u64,
-        /// Emit JSON on each status change (one per line) instead of just on exit.
-        #[arg(long)]
-        json: bool,
-    },
-    /// One-shot bootstrap. Inits identity (idempotent), opens pair-host or
-    /// pair-join, then registers wire as an MCP server. Single command from
-    /// nothing to paired and ready — no separate init/pair-host/setup steps.
-    /// Operator still must confirm SAS digits.
-    ///
-    /// Examples:
-    ///   wire pair paul                          # host a new pair on default relay
-    ///   wire pair willard --code 58-NMTY7A      # join paul's pair
-    ///
-    /// v0.10: hidden from --help. Federation pair flow is now
-    /// `wire dial <handle>@<relay>` + `wire accept-invite <URL>`.
-    /// `wire pair` stays callable for back-compat scripts; v1.0 removes.
-    #[command(hide = true)] // v0.10 deprecated — use `wire dial <h>@<relay>`
-    Pair {
-        /// Short handle for this agent (becomes did:wire:<handle>). Used by init
-        /// step if no identity exists; ignored if already initialized.
-        handle: String,
-        /// Code phrase from peer's pair-host output. Omit to be the host
-        /// (this command will print one for you to share).
-        #[arg(long)]
-        code: Option<String>,
-        /// Relay base URL. Defaults to the laulpogan public-good relay.
-        #[arg(long, default_value = "https://wireup.net")]
-        relay: String,
-        /// Skip SAS prompt. Test-only.
-        #[arg(long)]
-        yes: bool,
-        /// Pair-step timeout in seconds.
-        #[arg(long, default_value_t = 300)]
-        timeout: u64,
-        /// Skip the post-pair `setup --apply` step (don't register wire as
-        /// an MCP server in detected client configs).
-        #[arg(long)]
-        no_setup: bool,
-        /// Run via the daemon-orchestrated detached path (auto-starts daemon,
-        /// exits immediately, daemon does the handshake). Confirm via
-        /// `wire pair-confirm <code> <digits>` from any terminal. See
-        /// `pair-host --detach` for details.
-        #[arg(long)]
-        detach: bool,
-    },
-    /// Forget a half-finished pair-slot on the relay. Use this if `pair-host`
-    /// or `pair-join` crashed (process killed, network blip, OOM) before SAS
-    /// confirmation, leaving the relay-side slot stuck with "guest already
-    /// registered" or "host already registered" until the 5-minute TTL expires.
-    /// Either side can call. Idempotent.
-    #[command(hide = true)] // v0.9 deprecated
-    PairAbandon {
-        /// The code phrase from the original pair-host (e.g. `58-NMTY7A`).
-        code_phrase: String,
-        /// Relay base URL.
-        #[arg(long, default_value = "https://wireup.net")]
-        relay: String,
-    },
-    /// Accept a pending-inbound pair request (v0.5.14). Explicit alias for
-    /// the bilateral-completion path that `wire add <peer>@<relay>` also
-    /// drives — but doesn't require remembering the peer's relay domain
-    /// (the relay coords come from the stored pair_drop). Errors if no
-    /// pending-inbound record exists for that peer.
-    #[command(hide = true)] // v0.9 deprecated
-    PairAccept {
-        /// Bare peer handle (without `@<relay>`).
-        peer: String,
-        /// Emit JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Reject a pending pair request (v0.5.14). When someone runs `wire add
-    /// you@<your-relay>` against your handle, their signed pair_drop lands
-    /// in pending-inbound — visible via `wire pair-list`. Run `wire pair-reject
-    /// <peer>` to delete the record without pairing. The peer never receives
-    /// our slot_token; from their side the pair stays pending until they
-    /// time out.
-    #[command(hide = true)] // v0.9 deprecated
-    PairReject {
-        /// Bare peer handle (without `@<relay>`).
-        peer: String,
-        /// Emit JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Programmatic-shape list of pending-inbound pair requests (v0.5.14).
-    /// `--json` returns a flat array (matching the v0.5.13-and-earlier
-    /// `pair-list --json` shape but for inbound). Use this in scripts that
-    /// need to enumerate inbound pair requests without parsing the SPAKE2
-    /// table format from `wire pair-list`.
-    #[command(hide = true)] // v0.9 deprecated
-    PairListInbound {
-        /// Emit JSON.
         #[arg(long)]
         json: bool,
     },
@@ -921,8 +717,7 @@ pub enum Command {
         json: bool,
     },
     /// v0.9: accept a pending-inbound pair request by character
-    /// nickname or card handle. Replaces the verbose `wire pair-accept
-    /// <peer>`.
+    /// nickname or card handle.
     ///
     /// v0.9.4: the URL-vs-name smart-dispatch from v0.9 is gone. To
     /// accept a federation invite URL use `wire accept-invite <URL>`
@@ -951,8 +746,7 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// v0.9: refuse a pending-inbound pair request without pairing. Aliases
-    /// the legacy `wire pair-reject <peer>`.
+    /// v0.9: refuse a pending-inbound pair request without pairing.
     Reject {
         /// Peer name (character nickname or handle) from `wire pending`.
         peer: String,
@@ -995,7 +789,7 @@ pub enum Command {
 #[derive(Subcommand, Debug)]
 pub enum QuietAction {
     /// Touch `<config_dir>/quiet` — silences every wire desktop toast
-    /// (pair_drop, pending_pair, monitor, inbox). Idempotent.
+    /// (pair_drop, monitor, inbox). Idempotent.
     On,
     /// Remove `<config_dir>/quiet` — re-enables toasts. Idempotent (no
     /// error if already off / file absent).
@@ -1312,7 +1106,7 @@ pub enum SessionCommand {
     /// v0.6.0 (issue #12): mesh-pair every sister session against every
     /// other in O(N²) handshakes. For each unordered pair (A, B) that
     /// is not already paired, drives the bilateral flow end-to-end:
-    /// `wire add` from A → B (queued + pushed), `wire pair-accept` on
+    /// `wire add` from A → B (queued + pushed), `wire accept` on
     /// B's side, then a final pull on A so the ack lands. Idempotent —
     /// re-running skips pairs already in `state.peers`.
     ///
@@ -1842,89 +1636,6 @@ pub fn run() -> Result<()> {
             session,
             json,
         } => cmd_daemon(interval, once, all_sessions, session, json),
-        Command::PairHost {
-            relay,
-            yes,
-            timeout,
-            detach,
-            json,
-        } => {
-            if detach {
-                cmd_pair_host_detach(&relay, json)
-            } else {
-                cmd_pair_host(&relay, yes, timeout)
-            }
-        }
-        Command::PairJoin {
-            code_phrase,
-            relay,
-            yes,
-            timeout,
-            detach,
-            json,
-        } => {
-            if detach {
-                cmd_pair_join_detach(&code_phrase, &relay, json)
-            } else {
-                cmd_pair_join(&code_phrase, &relay, yes, timeout)
-            }
-        }
-        Command::PairConfirm {
-            code_phrase,
-            digits,
-            json,
-        } => cmd_pair_confirm(&code_phrase, &digits, json),
-        Command::PairList {
-            json,
-            watch,
-            watch_interval,
-        } => cmd_pair_list(json, watch, watch_interval),
-        Command::PairCancel { code_phrase, json } => cmd_pair_cancel(&code_phrase, json),
-        Command::PairWatch {
-            code_phrase,
-            status,
-            timeout,
-            json,
-        } => cmd_pair_watch(&code_phrase, &status, timeout, json),
-        Command::Pair {
-            handle,
-            code,
-            relay,
-            yes,
-            timeout,
-            no_setup,
-            detach,
-        } => {
-            // P0.P (0.5.11): if the handle is in `nick@domain` form, route to
-            // the zero-paste megacommand path — `wire pair slancha-spark@
-            // wireup.net` does add + poll-for-ack + verify in one shot. The
-            // SAS / code-based pair flow stays available for handles without
-            // `@` (bootstrap pairing between two boxes that don't yet share a
-            // relay directory).
-            if handle.contains('@') && code.is_none() {
-                cmd_pair_megacommand(&handle, Some(&relay), timeout, false)
-            } else if detach {
-                cmd_pair_detach(&handle, code.as_deref(), &relay)
-            } else {
-                cmd_pair(&handle, code.as_deref(), &relay, yes, timeout, no_setup)
-            }
-        }
-        Command::PairAbandon { code_phrase, relay } => cmd_pair_abandon(&code_phrase, &relay),
-        Command::PairAccept { peer, json } => {
-            let j = json_default(json);
-            deprecation_warn("pair-accept", &format!("accept {peer}"), j);
-            cmd_pair_accept(&peer, j)
-        }
-        Command::PairReject { peer, json } => {
-            let j = json_default(json);
-            deprecation_warn("pair-reject", &format!("reject {peer}"), j);
-            cmd_pair_reject(&peer, j)
-        }
-        Command::PairListInbound { json } => {
-            let j = json_default(json);
-            deprecation_warn("pair-list-inbound", "pending", j);
-            cmd_pair_list_inbound(j)
-        }
         Command::Session(cmd) => cmd_session(cmd),
         Command::Identity { cmd } => cmd_identity(cmd),
         Command::Mesh(cmd) => cmd_mesh(cmd),
@@ -1938,15 +1649,14 @@ pub fn run() -> Result<()> {
             json,
         } => cmd_invite(&relay, ttl, uses, share, json),
         Command::Accept { target, json } => {
-            // v0.9.4: smart-dispatch retired. `wire accept` always means
-            // pair-accept by name. URL-shaped input gets a deprecation
-            // banner pointing at `wire accept-invite <URL>` and then
-            // (for back-compat with v0.9 scripts) routes to the invite
-            // accept path one last time. v1.0 will reject URLs here.
+            // `wire accept <name>` — canonical pending-pair consent step.
+            // URL-shaped input is no longer accepted here; use `wire accept-invite <url>`.
             let j = json_default(json);
-            if target.starts_with("wire://pair?") {
-                deprecation_warn("accept-url", "accept-invite <url>", j);
-                cmd_accept(&target, j)
+            if target.starts_with("wire://pair?") || target.starts_with("http") {
+                anyhow::bail!(
+                    "`wire accept` takes a peer name, not a URL. \
+                     Use `wire accept-invite {target}` to accept an invite URL."
+                );
             } else {
                 cmd_pair_accept(&target, j)
             }
@@ -2510,14 +2220,10 @@ fn cmd_init(
         if let Some((url, slot_id)) = &relay_info {
             println!("bound to relay {url} (slot {slot_id})");
             println!();
-            println!(
-                "next step: `wire pair-host --relay {url}` to print a code phrase for a peer."
-            );
+            println!("next step: `wire dial <handle>@{url}` to pair with a peer.");
         } else {
             println!();
-            println!(
-                "next step: `wire pair-host --relay <url>` to bind a relay + open a pair-slot."
-            );
+            println!("next step: `wire dial <handle>@<relay>` to bind a relay + pair with a peer.");
         }
     }
     Ok(())
@@ -2631,12 +2337,6 @@ fn cmd_status(as_json: bool) -> Result<()> {
                     "cli": env!("CARGO_PKG_VERSION"),
                 });
             }
-        } else if matches!(snap.record, crate::ensure_up::PidRecord::LegacyInt(_)) {
-            daemon["pidfile_form"] = json!("legacy-int");
-            daemon["version_mismatch"] = json!({
-                "daemon": "<pre-0.5.11>",
-                "cli": env!("CARGO_PKG_VERSION"),
-            });
         }
         // v0.14.2 (#162): surface "is the sync loop actually running RIGHT NOW?"
         // distinct from "is there a process named `wire daemon` somewhere?".
@@ -2710,12 +2410,6 @@ fn cmd_status(as_json: bool) -> Result<()> {
         daemon["orphans_detail"] = json!(orphans_detail);
         summary["daemon"] = daemon;
 
-        // Pending pair sessions — counts by status.
-        let pending = crate::pending_pair::list_pending().unwrap_or_default();
-        let mut counts: std::collections::BTreeMap<String, u32> = Default::default();
-        for p in &pending {
-            *counts.entry(p.status.clone()).or_default() += 1;
-        }
         // v0.5.14: pending-inbound zero-paste pair_drops awaiting accept.
         // v0.14.2: filter out records whose peer is already pinned at
         // VERIFIED+ tier (i.e., bilateral completed via some other
@@ -2723,9 +2417,9 @@ fn cmd_status(as_json: bool) -> Result<()> {
         // pending_inbound on receipt of the peer's ack; operators
         // with pre-#171 data on disk see their VERIFIED peers show
         // up in `inbound pair requests`, prompting a misleading
-        // `wire pair-accept` suggestion. The stale records still
-        // exist on disk (operator can clear via `wire reject` if
-        // they care); the status surface just stops showing them.
+        // `wire accept` suggestion. The stale records still exist on
+        // disk (operator can clear via `wire reject` if they care);
+        // the status surface just stops showing them.
         // Records for genuinely-not-pinned peers — or peers at
         // UNTRUSTED/PENDING_ACK — surface normally.
         let pinned_verified_handles: std::collections::HashSet<String> =
@@ -2762,8 +2456,6 @@ fn cmd_status(as_json: bool) -> Result<()> {
             .map(|p| p.peer_handle.as_str())
             .collect();
         summary["pending_pairs"] = json!({
-            "total": pending.len(),
-            "by_status": counts,
             "inbound_count": pending_inbound.len(),
             "inbound_handles": inbound_handles,
             // Surface the filtered-as-stale set so operators with
@@ -2792,7 +2484,7 @@ fn cmd_status(as_json: bool) -> Result<()> {
                 summary["self_relay"]["slot_id"].as_str().unwrap_or("?")
             );
         } else {
-            println!("self relay:    (not bound — run `wire pair-host --relay <url>` to bind)");
+            println!("self relay:    (not bound — run `wire bind-relay <url>` to bind)");
         }
         println!(
             "peers:         {}",
@@ -2940,7 +2632,7 @@ fn cmd_status(as_json: bool) -> Result<()> {
                         .unwrap_or("UNKNOWN");
                     let count = entry.get("count").and_then(Value::as_u64).unwrap_or(0);
                     // Tier-specific hint. PENDING_ACK = wedged
-                    // pair (operator action: `wire pair-accept`
+                    // pair (operator action: `wire accept`
                     // or `wire reject`). UNTRUSTED = peer not yet
                     // pinned (rare but possible if trust file
                     // was hand-edited). VERIFIED + queued =
@@ -2981,23 +2673,10 @@ fn cmd_status(as_json: bool) -> Result<()> {
                 );
             }
         }
-        let pending_total = summary["pending_pairs"]["total"].as_u64().unwrap_or(0);
         let inbound_count = summary["pending_pairs"]["inbound_count"]
             .as_u64()
             .unwrap_or(0);
-        if pending_total > 0 {
-            print!("pending pairs: {pending_total}");
-            if let Some(obj) = summary["pending_pairs"]["by_status"].as_object() {
-                let parts: Vec<String> = obj
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, v.as_u64().unwrap_or(0)))
-                    .collect();
-                if !parts.is_empty() {
-                    print!(" ({})", parts.join(", "));
-                }
-            }
-            println!();
-        } else if inbound_count == 0 {
+        if inbound_count == 0 {
             println!("pending pairs: none");
         }
         // v0.5.14: separate line for pending-inbound zero-paste requests.
@@ -3013,7 +2692,7 @@ fn cmd_status(as_json: bool) -> Result<()> {
                 })
                 .unwrap_or_default();
             println!(
-                "inbound pair requests ({inbound_count}): {} — `wire pair-list` to inspect, `wire pair-accept <peer>` to accept, `wire pair-reject <peer>` to refuse",
+                "inbound pair requests ({inbound_count}): {} — `wire pending` to inspect, `wire accept <peer>` to accept, `wire reject <peer>` to refuse",
                 handles.join(", "),
             );
         }
@@ -3389,7 +3068,7 @@ fn cmd_status_peer(peer: &str, as_json: bool) -> Result<()> {
     Ok(())
 }
 
-// (Old cmd_join stub removed — superseded by cmd_pair_join below.)
+// (Old cmd_join stub removed — superseded by wire_dial / cmd_pair_accept.)
 
 // ---------- whoami ----------
 
@@ -4484,30 +4163,12 @@ fn cmd_send(
         .map(|a| a.contains_key(peer))
         .unwrap_or(false);
     if !peer_pinned_in_trust && !peer_is_pinned {
-        // Check both directions: outbound (we dialed, daemon
-        // hasn't completed the pair yet — peer_did may be set if
-        // the relay returned it) and inbound (we received an
-        // invite drop awaiting accept — explicit peer_handle).
-        let pending_outbound = crate::pending_pair::list_pending()
-            .ok()
-            .map(|v| {
-                v.iter().any(|p| {
-                    p.peer_did
-                        .as_deref()
-                        .map(|d| {
-                            crate::agent_card::display_handle_from_did(d)
-                                .to_string()
-                                .eq(peer)
-                        })
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
+        // We received an invite drop awaiting accept (explicit peer_handle).
         let pending_inbound = crate::pending_inbound_pair::list_pending_inbound()
             .ok()
             .map(|v| v.iter().any(|p| p.peer_handle == peer))
             .unwrap_or(false);
-        if !pending_outbound && !pending_inbound {
+        if !pending_inbound {
             eprintln!(
                 "wire send: WARN — `{peer}` is not pinned and has no pending pair. \
                  The event will sit in outbox forever unless you pair first \
@@ -6538,7 +6199,7 @@ fn cmd_rotate_slot(no_announce: bool, as_json: bool) -> Result<()> {
         println!(
             "  - paired peers must re-issue: tell them to run `wire add-peer-slot {handle} {url} {new_slot_id} <new-token>`"
         );
-        println!("    (or full re-pair via `wire pair-host`/`wire join`)");
+        println!("    (or full re-pair via `wire dial <handle>@<relay>`)");
         println!("  - until they do, you'll receive but they won't be able to reach you");
         // Suppress unused warning
         let _ = old_slot_token;
@@ -6729,11 +6390,11 @@ fn cmd_daemon(
         }
     }
 
-    // Recover from prior crash: any pending pair in transient state had its
-    // in-memory SPAKE2 secret lost when the previous daemon exited. Release
-    // the relay slots and mark the files so the operator can re-issue.
-    if let Err(e) = crate::pending_pair::cleanup_on_startup() {
-        eprintln!("daemon: pending-pair cleanup_on_startup error: {e:#}");
+    // Claim the daemon pidfile for this process so `wire status` / doctor /
+    // the singleton guard can see us when started directly (not via
+    // ensure_background). Best-effort.
+    if let Err(e) = crate::ensure_up::write_self_daemon_pid() {
+        eprintln!("daemon: pidfile write error: {e:#}");
     }
 
     // R1 phase 2: spawn the SSE stream subscriber. On every event pushed
@@ -6754,10 +6415,6 @@ fn cmd_daemon(
         let pulled = run_sync_pull().unwrap_or_else(|e| {
             eprintln!("daemon: pull error: {e:#}");
             json!({"written": [], "rejected": [], "total_seen": 0, "error": e.to_string()})
-        });
-        let pairs = crate::pending_pair::tick().unwrap_or_else(|e| {
-            eprintln!("daemon: pending-pair tick error: {e:#}");
-            json!({"transitions": []})
         });
 
         // v0.14.2 (#162): persist a `last_sync.json` record after every
@@ -6780,41 +6437,12 @@ fn cmd_daemon(
                         .unwrap_or_default(),
                     "push": pushed,
                     "pull": pulled,
-                    "pairs": pairs,
                 }))?
             );
-        } else {
-            let pair_transitions = pairs["transitions"]
-                .as_array()
-                .map(|a| a.len())
-                .unwrap_or(0);
-            if cycle_push_n > 0 || cycle_pull_n > 0 || cycle_rejected_n > 0 || pair_transitions > 0
-            {
-                eprintln!(
-                    "daemon: pushed={cycle_push_n} pulled={cycle_pull_n} rejected={cycle_rejected_n} pair-transitions={pair_transitions}"
-                );
-            }
-            // Loud per-transition logging so operator sees pair progress live.
-            if let Some(arr) = pairs["transitions"].as_array() {
-                for t in arr {
-                    eprintln!(
-                        "  pair {} : {} → {}",
-                        t.get("code").and_then(Value::as_str).unwrap_or("?"),
-                        t.get("from").and_then(Value::as_str).unwrap_or("?"),
-                        t.get("to").and_then(Value::as_str).unwrap_or("?")
-                    );
-                    if let Some(sas) = t.get("sas").and_then(Value::as_str)
-                        && t.get("to").and_then(Value::as_str) == Some("sas_ready")
-                    {
-                        eprintln!("    SAS digits: {}-{}", &sas[..3], &sas[3..]);
-                        eprintln!(
-                            "    Run: wire pair-confirm {} {}",
-                            t.get("code").and_then(Value::as_str).unwrap_or("?"),
-                            sas
-                        );
-                    }
-                }
-            }
+        } else if cycle_push_n > 0 || cycle_pull_n > 0 || cycle_rejected_n > 0 {
+            eprintln!(
+                "daemon: pushed={cycle_push_n} pulled={cycle_pull_n} rejected={cycle_rejected_n}"
+            );
         }
 
         if once {
@@ -7098,645 +6726,6 @@ fn cmd_pin(card_file: &str, as_json: bool) -> Result<()> {
     } else {
         println!("pinned {handle} ({did}) at tier VERIFIED");
     }
-    Ok(())
-}
-
-// ---------- pair-host / pair-join (the magic-wormhole flow) ----------
-
-fn cmd_pair_host(relay_url: &str, auto_yes: bool, timeout_secs: u64) -> Result<()> {
-    pair_orchestrate(relay_url, None, "host", auto_yes, timeout_secs)
-}
-
-fn cmd_pair_join(
-    code_phrase: &str,
-    relay_url: &str,
-    auto_yes: bool,
-    timeout_secs: u64,
-) -> Result<()> {
-    pair_orchestrate(
-        relay_url,
-        Some(code_phrase),
-        "guest",
-        auto_yes,
-        timeout_secs,
-    )
-}
-
-/// Shared orchestration for both sides of the SAS pairing.
-///
-/// Now thin: delegates to `pair_session::pair_session_open` / `_try_sas` /
-/// `_finalize`. CLI keeps its interactive y/N prompt; MCP uses
-/// `pair_session_confirm_sas` instead.
-fn pair_orchestrate(
-    relay_url: &str,
-    code_in: Option<&str>,
-    role: &str,
-    auto_yes: bool,
-    timeout_secs: u64,
-) -> Result<()> {
-    use crate::pair_session::{pair_session_finalize, pair_session_open, pair_session_try_sas};
-
-    let mut s = pair_session_open(role, relay_url, code_in)?;
-
-    if role == "host" {
-        eprintln!();
-        eprintln!("share this code phrase with your peer:");
-        eprintln!();
-        eprintln!("    {}", s.code);
-        eprintln!();
-        eprintln!(
-            "waiting for peer to run `wire pair-join {} --relay {relay_url}` ...",
-            s.code
-        );
-    } else {
-        eprintln!();
-        eprintln!("joined pair-slot on {relay_url} — waiting for host's SPAKE2 message ...");
-    }
-
-    // Stage 2 — poll for SAS-ready with periodic progress heartbeat. The bare
-    // pair_session_wait_for_sas helper is silent; the CLI wraps it in a loop
-    // that emits a "waiting (Ns / Ts)" line every HEARTBEAT_SECS so operators
-    // see the process is alive while the other side connects.
-    const HEARTBEAT_SECS: u64 = 10;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    let started = std::time::Instant::now();
-    let mut last_heartbeat = started;
-    let formatted = loop {
-        if let Some(sas) = pair_session_try_sas(&mut s)? {
-            break sas;
-        }
-        let now = std::time::Instant::now();
-        if now >= deadline {
-            return Err(anyhow!(
-                "timeout after {timeout_secs}s waiting for peer's SPAKE2 message"
-            ));
-        }
-        if now.duration_since(last_heartbeat).as_secs() >= HEARTBEAT_SECS {
-            let elapsed = now.duration_since(started).as_secs();
-            eprintln!("  ... still waiting ({elapsed}s / {timeout_secs}s)");
-            last_heartbeat = now;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    };
-
-    eprintln!();
-    eprintln!("SAS digits (must match peer's terminal):");
-    eprintln!();
-    eprintln!("    {formatted}");
-    eprintln!();
-
-    // Stage 3 — operator confirmation. CLI uses interactive y/N for backward
-    // compatibility; MCP uses pair_session_confirm_sas with the typed digits.
-    if !auto_yes {
-        eprint!("does this match your peer's terminal? [y/N]: ");
-        use std::io::Write;
-        std::io::stderr().flush().ok();
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        let trimmed = input.trim().to_lowercase();
-        if trimmed != "y" && trimmed != "yes" {
-            bail!("SAS confirmation declined — aborting pairing");
-        }
-    }
-    s.sas_confirmed = true;
-
-    // Stage 4 — seal+exchange bootstrap, pin peer.
-    let result = pair_session_finalize(&mut s, timeout_secs)?;
-
-    let peer_did = result["paired_with"].as_str().unwrap_or("");
-    let peer_role = if role == "host" { "guest" } else { "host" };
-    eprintln!("paired with {peer_did} (peer role: {peer_role})");
-    eprintln!("peer card pinned at tier VERIFIED");
-    eprintln!(
-        "peer relay slot saved to {}",
-        config::relay_state_path()?.display()
-    );
-
-    println!("{}", serde_json::to_string(&result)?);
-    Ok(())
-}
-
-// (poll_until helper removed — pair flow now uses pair_session::pair_session_wait_for_sas
-// and pair_session_finalize, both of which inline their own deadline loops.)
-
-// ---------- pair — single-shot init + pair-* + setup ----------
-
-fn cmd_pair(
-    handle: &str,
-    code: Option<&str>,
-    relay: &str,
-    auto_yes: bool,
-    timeout_secs: u64,
-    no_setup: bool,
-) -> Result<()> {
-    // Step 1 — idempotent identity. Safe if already initialized with the SAME handle;
-    // bails loudly if a different handle is already set (operator must explicitly delete).
-    let init_result = crate::pair_session::init_self_idempotent(handle, None, None)?;
-    let did = init_result
-        .get("did")
-        .and_then(|v| v.as_str())
-        .unwrap_or("(unknown)")
-        .to_string();
-    let already = init_result
-        .get("already_initialized")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if already {
-        println!("(identity {did} already initialized — reusing)");
-    } else {
-        println!("initialized {did}");
-    }
-    println!();
-
-    // Step 2 — pair-host or pair-join based on code presence.
-    match code {
-        None => {
-            println!("hosting pair on {relay} (no code = host) ...");
-            cmd_pair_host(relay, auto_yes, timeout_secs)?;
-        }
-        Some(c) => {
-            println!("joining pair with code {c} on {relay} ...");
-            cmd_pair_join(c, relay, auto_yes, timeout_secs)?;
-        }
-    }
-
-    // Step 3 — register wire as MCP server in detected client configs (idempotent).
-    if !no_setup {
-        println!();
-        println!("registering wire as MCP server in detected client configs ...");
-        if let Err(e) = cmd_setup(true) {
-            // Non-fatal — pair succeeded, just print the warning.
-            eprintln!("warn: setup --apply failed: {e}");
-            eprintln!("      pair succeeded; you can re-run `wire setup --apply` manually.");
-        }
-    }
-
-    println!();
-    println!("pair complete. Next steps:");
-    println!("  wire daemon start              # background sync of inbox/outbox vs relay");
-    println!("  wire send <peer> claim <msg>   # send your peer something");
-    println!("  wire tail                      # watch incoming events");
-    Ok(())
-}
-
-// ---------- detached pair (daemon-orchestrated) ----------
-
-/// `wire pair <handle> [--code <phrase>] --detach` — wraps init + detach
-/// pair-host/-join into a single command. The non-detached variant lives in
-/// `cmd_pair`; this one short-circuits to the daemon-orchestrated path.
-fn cmd_pair_detach(handle: &str, code: Option<&str>, relay: &str) -> Result<()> {
-    let init_result = crate::pair_session::init_self_idempotent(handle, None, None)?;
-    let did = init_result
-        .get("did")
-        .and_then(|v| v.as_str())
-        .unwrap_or("(unknown)")
-        .to_string();
-    let already = init_result
-        .get("already_initialized")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if already {
-        println!("(identity {did} already initialized — reusing)");
-    } else {
-        println!("initialized {did}");
-    }
-    println!();
-    match code {
-        None => cmd_pair_host_detach(relay, false),
-        Some(c) => cmd_pair_join_detach(c, relay, false),
-    }
-}
-
-fn cmd_pair_host_detach(relay_url: &str, as_json: bool) -> Result<()> {
-    if !config::is_initialized()? {
-        bail!("not initialized — run `wire init <handle>` first");
-    }
-    let daemon_spawned = match crate::ensure_up::ensure_daemon_running() {
-        Ok(b) => b,
-        Err(e) => {
-            if !as_json {
-                eprintln!(
-                    "warn: could not auto-start daemon: {e}; pair will queue but not advance"
-                );
-            }
-            false
-        }
-    };
-    let code = crate::sas::generate_code_phrase();
-    let code_hash = crate::pair_session::derive_code_hash(&code);
-    let now = time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default();
-    let p = crate::pending_pair::PendingPair {
-        code: code.clone(),
-        code_hash,
-        role: "host".to_string(),
-        relay_url: relay_url.to_string(),
-        status: "request_host".to_string(),
-        sas: None,
-        peer_did: None,
-        created_at: now,
-        last_error: None,
-        pair_id: None,
-        our_slot_id: None,
-        our_slot_token: None,
-        spake2_seed_b64: None,
-    };
-    crate::pending_pair::write_pending(&p)?;
-    if as_json {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "state": "queued",
-                "code_phrase": code,
-                "relay_url": relay_url,
-                "role": "host",
-                "daemon_spawned": daemon_spawned,
-            }))?
-        );
-    } else {
-        if daemon_spawned {
-            println!("(started wire daemon in background)");
-        }
-        println!("detached pair-host queued. Share this code with your peer:\n");
-        println!("    {code}\n");
-        println!("Next steps:");
-        println!("  wire pair-list                                # check status");
-        println!("  wire pair-confirm {code} <digits>   # when SAS shows up");
-        println!("  wire pair-cancel  {code}            # to abort");
-    }
-    Ok(())
-}
-
-fn cmd_pair_join_detach(code_phrase: &str, relay_url: &str, as_json: bool) -> Result<()> {
-    if !config::is_initialized()? {
-        bail!("not initialized — run `wire init <handle>` first");
-    }
-    let daemon_spawned = match crate::ensure_up::ensure_daemon_running() {
-        Ok(b) => b,
-        Err(e) => {
-            if !as_json {
-                eprintln!(
-                    "warn: could not auto-start daemon: {e}; pair will queue but not advance"
-                );
-            }
-            false
-        }
-    };
-    let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
-    let code_hash = crate::pair_session::derive_code_hash(&code);
-    let now = time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default();
-    let p = crate::pending_pair::PendingPair {
-        code: code.clone(),
-        code_hash,
-        role: "guest".to_string(),
-        relay_url: relay_url.to_string(),
-        status: "request_guest".to_string(),
-        sas: None,
-        peer_did: None,
-        created_at: now,
-        last_error: None,
-        pair_id: None,
-        our_slot_id: None,
-        our_slot_token: None,
-        spake2_seed_b64: None,
-    };
-    crate::pending_pair::write_pending(&p)?;
-    if as_json {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "state": "queued",
-                "code_phrase": code,
-                "relay_url": relay_url,
-                "role": "guest",
-                "daemon_spawned": daemon_spawned,
-            }))?
-        );
-    } else {
-        if daemon_spawned {
-            println!("(started wire daemon in background)");
-        }
-        println!("detached pair-join queued for code {code}.");
-        println!(
-            "Run `wire pair-list` to watch for SAS, then `wire pair-confirm {code} <digits>`."
-        );
-    }
-    Ok(())
-}
-
-fn cmd_pair_confirm(code_phrase: &str, typed_digits: &str, as_json: bool) -> Result<()> {
-    let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
-    let typed: String = typed_digits
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .collect();
-    if typed.len() != 6 {
-        bail!(
-            "expected 6 digits (got {} after stripping non-digits)",
-            typed.len()
-        );
-    }
-    let mut p = crate::pending_pair::read_pending(&code)?
-        .ok_or_else(|| anyhow!("no pending pair found for code {code}"))?;
-    if p.status != "sas_ready" {
-        bail!(
-            "pair {code} not in sas_ready state (current: {}). Run `wire pair-list` to see what's going on.",
-            p.status
-        );
-    }
-    let stored = p
-        .sas
-        .as_ref()
-        .ok_or_else(|| anyhow!("pending file has status=sas_ready but no sas field"))?
-        .clone();
-    if stored == typed {
-        p.status = "confirmed".to_string();
-        crate::pending_pair::write_pending(&p)?;
-        if as_json {
-            println!(
-                "{}",
-                serde_json::to_string(&json!({
-                    "state": "confirmed",
-                    "code_phrase": code,
-                }))?
-            );
-        } else {
-            println!("digits match. Daemon will finalize the handshake on its next tick.");
-            println!("Run `wire peers` after a few seconds to confirm.");
-        }
-    } else {
-        p.status = "aborted".to_string();
-        p.last_error = Some(format!(
-            "SAS digit mismatch (typed {typed}, expected {stored})"
-        ));
-        let client = crate::relay_client::RelayClient::new(&p.relay_url);
-        let _ = client.pair_abandon(&p.code_hash);
-        crate::pending_pair::write_pending(&p)?;
-        crate::os_notify::toast(
-            &format!("wire — pair aborted ({})", p.code),
-            p.last_error.as_deref().unwrap_or("digits mismatch"),
-        );
-        if as_json {
-            println!(
-                "{}",
-                serde_json::to_string(&json!({
-                    "state": "aborted",
-                    "code_phrase": code,
-                    "error": "digits mismatch",
-                }))?
-            );
-        }
-        bail!("digits mismatch — pair aborted. Re-issue with a fresh `wire pair-host --detach`.");
-    }
-    Ok(())
-}
-
-fn cmd_pair_list(as_json: bool, watch: bool, watch_interval_secs: u64) -> Result<()> {
-    if watch {
-        return cmd_pair_list_watch(watch_interval_secs);
-    }
-    let spake2_items = crate::pending_pair::list_pending()?;
-    let inbound_items = crate::pending_inbound_pair::list_pending_inbound()?;
-    if as_json {
-        // Backwards-compat: flat SPAKE2 array (the shape every existing
-        // script + e2e test parses since v0.5.x). v0.5.14 inbound items
-        // surface programmatically via `wire pair-list-inbound --json`
-        // and via `wire status --json` `pending_pairs.inbound_*` fields.
-        println!("{}", serde_json::to_string(&spake2_items)?);
-        return Ok(());
-    }
-    if spake2_items.is_empty() && inbound_items.is_empty() {
-        println!("no pending pair sessions.");
-        return Ok(());
-    }
-    // v0.5.14: inbound section first — these need operator action right now.
-    // SPAKE2 sessions are typically already mid-flow.
-    if !inbound_items.is_empty() {
-        println!("PENDING INBOUND (v0.5.14 zero-paste pair_drop awaiting your accept)");
-        println!(
-            "{:<20} {:<35} {:<25} NEXT STEP",
-            "PEER", "RELAY", "RECEIVED"
-        );
-        for p in &inbound_items {
-            println!(
-                "{:<20} {:<35} {:<25} `wire pair-accept {peer}` to accept; `wire pair-reject {peer}` to refuse",
-                p.peer_handle,
-                p.peer_relay_url,
-                p.received_at,
-                peer = p.peer_handle,
-            );
-        }
-        println!();
-    }
-    if !spake2_items.is_empty() {
-        println!("SPAKE2 SESSIONS");
-        println!(
-            "{:<15} {:<8} {:<18} {:<10} NOTE",
-            "CODE", "ROLE", "STATUS", "SAS"
-        );
-        for p in spake2_items {
-            let sas = p
-                .sas
-                .as_ref()
-                .map(|d| format!("{}-{}", &d[..3], &d[3..]))
-                .unwrap_or_else(|| "—".to_string());
-            let note = p
-                .last_error
-                .as_deref()
-                .or(p.peer_did.as_deref())
-                .unwrap_or("");
-            println!(
-                "{:<15} {:<8} {:<18} {:<10} {}",
-                p.code, p.role, p.status, sas, note
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Stream-mode pair-list: never exits. Diffs per-code state every
-/// `interval_secs` and prints one JSON line per transition (creation,
-/// status flip, deletion). Useful for shell pipelines:
-///
-/// ```text
-/// wire pair-list --watch | while read line; do
-///     CODE=$(echo "$line" | jq -r .code)
-///     STATUS=$(echo "$line" | jq -r .status)
-///     ...
-/// done
-/// ```
-fn cmd_pair_list_watch(interval_secs: u64) -> Result<()> {
-    use std::collections::HashMap;
-    use std::io::Write;
-    let interval = std::time::Duration::from_secs(interval_secs.max(1));
-    // Emit a snapshot synthetic event for every currently-pending pair on
-    // startup so a consumer that arrives mid-flight sees the current state.
-    let mut prev: HashMap<String, String> = HashMap::new();
-    {
-        let items = crate::pending_pair::list_pending()?;
-        for p in &items {
-            println!("{}", serde_json::to_string(&p)?);
-            prev.insert(p.code.clone(), p.status.clone());
-        }
-        // Flush so the consumer's `while read` gets the snapshot promptly.
-        let _ = std::io::stdout().flush();
-    }
-    loop {
-        std::thread::sleep(interval);
-        let items = match crate::pending_pair::list_pending() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let mut cur: HashMap<String, String> = HashMap::new();
-        for p in &items {
-            cur.insert(p.code.clone(), p.status.clone());
-            match prev.get(&p.code) {
-                None => {
-                    // New code appeared.
-                    println!("{}", serde_json::to_string(&p)?);
-                }
-                Some(prev_status) if prev_status != &p.status => {
-                    // Status flipped.
-                    println!("{}", serde_json::to_string(&p)?);
-                }
-                _ => {}
-            }
-        }
-        for code in prev.keys() {
-            if !cur.contains_key(code) {
-                // File disappeared → finalized or cancelled. Emit a synthetic
-                // "removed" marker so the consumer sees the terminal event.
-                println!(
-                    "{}",
-                    serde_json::to_string(&json!({
-                        "code": code,
-                        "status": "removed",
-                        "_synthetic": true,
-                    }))?
-                );
-            }
-        }
-        let _ = std::io::stdout().flush();
-        prev = cur;
-    }
-}
-
-/// Block until a pending pair reaches `target_status` or terminates. Process
-/// exit code carries the outcome (0 success, 1 terminated abnormally, 2
-/// timeout) so shell scripts can branch directly.
-fn cmd_pair_watch(
-    code_phrase: &str,
-    target_status: &str,
-    timeout_secs: u64,
-    as_json: bool,
-) -> Result<()> {
-    let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    let mut last_seen_status: Option<String> = None;
-    loop {
-        let p_opt = crate::pending_pair::read_pending(&code)?;
-        let now = std::time::Instant::now();
-        match p_opt {
-            None => {
-                // File gone — either finalized (success if target=sas_ready
-                // since finalization implies it passed sas_ready) or never
-                // existed. Distinguish by whether we ever saw it.
-                if last_seen_status.is_some() {
-                    if as_json {
-                        println!(
-                            "{}",
-                            serde_json::to_string(&json!({"state": "finalized", "code": code}))?
-                        );
-                    } else {
-                        println!("pair {code} finalized (file removed)");
-                    }
-                    return Ok(());
-                } else {
-                    if as_json {
-                        println!(
-                            "{}",
-                            serde_json::to_string(&json!({"error": "no such pair", "code": code}))?
-                        );
-                    }
-                    std::process::exit(1);
-                }
-            }
-            Some(p) => {
-                let cur = p.status.clone();
-                if Some(cur.clone()) != last_seen_status {
-                    if as_json {
-                        // Emit per-transition line so scripts can stream.
-                        println!("{}", serde_json::to_string(&p)?);
-                    }
-                    last_seen_status = Some(cur.clone());
-                }
-                if cur == target_status {
-                    if !as_json {
-                        let sas_str = p
-                            .sas
-                            .as_ref()
-                            .map(|s| format!("{}-{}", &s[..3], &s[3..]))
-                            .unwrap_or_else(|| "—".to_string());
-                        println!("pair {code} reached {target_status} (SAS: {sas_str})");
-                    }
-                    return Ok(());
-                }
-                if cur == "aborted" || cur == "aborted_restart" {
-                    if !as_json {
-                        let err = p.last_error.as_deref().unwrap_or("(no detail)");
-                        eprintln!("pair {code} {cur}: {err}");
-                    }
-                    std::process::exit(1);
-                }
-            }
-        }
-        if now >= deadline {
-            if !as_json {
-                eprintln!(
-                    "timeout after {timeout_secs}s waiting for pair {code} to reach {target_status}"
-                );
-            }
-            std::process::exit(2);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-}
-
-fn cmd_pair_cancel(code_phrase: &str, as_json: bool) -> Result<()> {
-    let code = crate::sas::parse_code_phrase(code_phrase)?.to_string();
-    let p = crate::pending_pair::read_pending(&code)?
-        .ok_or_else(|| anyhow!("no pending pair for code {code}"))?;
-    let client = crate::relay_client::RelayClient::new(&p.relay_url);
-    let _ = client.pair_abandon(&p.code_hash);
-    crate::pending_pair::delete_pending(&code)?;
-    if as_json {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "state": "cancelled",
-                "code_phrase": code,
-            }))?
-        );
-    } else {
-        println!("cancelled pending pair {code} (relay slot released, file removed).");
-    }
-    Ok(())
-}
-
-// ---------- pair-abandon — release stuck pair-slot ----------
-
-fn cmd_pair_abandon(code_phrase: &str, relay_url: &str) -> Result<()> {
-    // Accept either the raw phrase (e.g. "53-CKWIA5") or whatever the user
-    // typed — normalize via the existing parser.
-    let code = crate::sas::parse_code_phrase(code_phrase)?;
-    let code_hash = crate::pair_session::derive_code_hash(code);
-    let client = crate::relay_client::RelayClient::new(relay_url);
-    client.pair_abandon(&code_hash)?;
-    println!("abandoned pair-slot for code {code_phrase} on {relay_url}");
-    println!("host can now issue a fresh code; guest can re-join.");
     Ok(())
 }
 
@@ -8612,17 +7601,17 @@ fn cmd_add_accept_pending(
     Ok(())
 }
 
-/// v0.5.14: explicit `wire pair-accept <peer>` — bilateral-completion path
-/// for a pending-inbound pair request. Pin trust, write relay_state from the
-/// stored pair_drop, send `pair_drop_ack` with our slot_token, delete the
-/// pending record. Equivalent to running `wire add <peer>@<their-relay>`
-/// when a pending-inbound record exists, but without needing to remember
-/// the peer's relay domain.
+/// `wire accept <peer>` (v0.9+) — bilateral-completion path for a
+/// pending-inbound pair request. Pin trust, write relay_state from the stored
+/// pair_drop, send `pair_drop_ack` with our slot_token, delete the pending
+/// record. Equivalent to running `wire add <peer>@<their-relay>` when a
+/// pending-inbound record exists, but without needing to remember the peer's
+/// relay domain.
 fn cmd_pair_accept(peer_nick: &str, as_json: bool) -> Result<()> {
     let nick = crate::agent_card::bare_handle(peer_nick);
     let pending = crate::pending_inbound_pair::read_pending_inbound(nick)?.ok_or_else(|| {
         anyhow!(
-            "no pending pair request from {nick}. Run `wire pair-list-inbound` to see who is waiting, \
+            "no pending pair request from {nick}. Run `wire pending` to see who is waiting, \
              or use `wire add <peer>@<relay>` to send a fresh outbound pair request."
         )
     })?;
@@ -8640,8 +7629,8 @@ fn cmd_pair_accept(peer_nick: &str, as_json: bool) -> Result<()> {
     )
 }
 
-/// v0.5.14: programmatic access to pending-inbound for scripts.
-/// `wire pair-list-inbound --json` returns a flat array of records.
+/// `wire pending --json` — programmatic access to pending-inbound for scripts.
+/// Returns a flat array of records sorted oldest-first.
 fn cmd_pair_list_inbound(as_json: bool) -> Result<()> {
     let items = crate::pending_inbound_pair::list_pending_inbound()?;
     if as_json {
@@ -8686,9 +7675,9 @@ fn cmd_pair_list_inbound(as_json: bool) -> Result<()> {
     Ok(())
 }
 
-/// v0.5.14: `wire pair-reject <peer>` — drop a pending-inbound record
-/// without pairing. No event is sent back to the peer; their side stays
-/// pending until they time out or the operator-side data ages out.
+/// `wire reject <peer>` (v0.9+) — drop a pending-inbound record without
+/// pairing. No event is sent back to the peer; their side stays pending
+/// until they time out or the operator-side data ages out.
 fn cmd_pair_reject(peer_nick: &str, as_json: bool) -> Result<()> {
     let nick = crate::agent_card::bare_handle(peer_nick);
     let existed = crate::pending_inbound_pair::read_pending_inbound(nick)?;
@@ -9995,7 +8984,9 @@ fn cmd_mesh_broadcast(
     let state = config::read_relay_state()?;
     let peers = state["peers"].as_object().cloned().unwrap_or_default();
     if peers.is_empty() {
-        bail!("no peers pinned — run `wire accept <invite-url>` or `wire pair-accept` first");
+        bail!(
+            "no peers pinned — run `wire accept-invite <invite-url>` or `wire dial <peer>@<relay>` first"
+        );
     }
 
     let exclude_set: std::collections::HashSet<&str> = exclude.iter().map(String::as_str).collect();
@@ -10885,7 +9876,7 @@ fn try_allocate_local_slot(
     // ensure_self_with_relay fallback, v0.5.16-era back-compat readers)
     // still find a valid slot. Pre-v0.6.6 this branch wrote
     // `relay_url: federation_relay` with no slot_id, which produced
-    // half-populated self state that broke pair-accept on local-only
+    // half-populated self state that broke wire-accept on local-only
     // sessions.
     let (legacy_relay, legacy_slot_id, legacy_slot_token) = match fed_endpoint.clone() {
         Some(f) => (f.relay_url, f.slot_id, f.slot_token),
@@ -11381,7 +10372,7 @@ fn cmd_session_list_local(as_json: bool) -> Result<()> {
 ///   2. WIRE_HOME=A wire push --json            (sends pair_drop to relay)
 ///   3. sleep settle_secs                       (pair_drop reaches B)
 ///   4. WIRE_HOME=B wire pull --json            (B receives pair_drop)
-///   5. WIRE_HOME=B wire pair-accept <A-bare>   (B pins A, sends ack)
+///   5. WIRE_HOME=B wire accept <A-bare>   (B pins A, sends ack)
 ///   6. WIRE_HOME=B wire push --json            (sends pair_drop_ack)
 ///   7. sleep settle_secs                       (ack reaches A)
 ///   8. WIRE_HOME=A wire pull --json            (A pins B)
@@ -11944,7 +10935,7 @@ fn drive_bilateral_pair(
     };
 
     // v0.11: each session's agent-card.handle is the DID-derived
-    // character, not the session name. pair-accept lookups key on the
+    // character, not the session name. wire-accept lookups key on the
     // CARD HANDLE, so we discover each side's canonical handle from
     // its agent-card on disk before driving the pair flow.
     let read_card_handle = |home: &std::path::Path| -> Result<String> {
@@ -11971,11 +10962,11 @@ fn drive_bilateral_pair(
     // 3. settle so pair_drop reaches B's slot
     std::thread::sleep(Duration::from_secs(settle_secs));
 
-    // 4. B pulls pair_drop → 5. B pair-accept (pins A by CARD HANDLE,
+    // 4. B pulls pair_drop → 5. B accept (pins A by CARD HANDLE,
     // not by session name — under v0.11 these differ) → 6. B push ack
     run(b_home, &["pull", "--json"]).with_context(|| format!("step 4/8: {b_name} `wire pull`"))?;
-    run(b_home, &["pair-accept", &a_handle, "--json"]).with_context(|| {
-        format!("step 5/8: {b_name} `wire pair-accept {a_handle}` (a session={a_name})")
+    run(b_home, &["accept", &a_handle, "--json"]).with_context(|| {
+        format!("step 5/8: {b_name} `wire accept {a_handle}` (a session={a_name})")
     })?;
     run(b_home, &["push", "--json"]).with_context(|| format!("step 6/8: {b_name} `wire push`"))?;
 
@@ -12945,7 +11936,6 @@ fn cmd_upgrade(
     let record = crate::ensure_up::read_pid_record("daemon");
     let recorded_version: Option<String> = match &record {
         crate::ensure_up::PidRecord::Json(d) => Some(d.version.clone()),
-        crate::ensure_up::PidRecord::LegacyInt(_) => Some("<pre-0.5.11>".to_string()),
         _ => None,
     };
     let cli_version = env!("CARGO_PKG_VERSION").to_string();
@@ -13727,42 +12717,6 @@ fn known_local_names() -> Vec<String> {
     names
 }
 
-/// v0.9.2 deprecation banner with two ergonomic guards:
-/// 1. Suppress in JSON mode (the caller is expected to fold the
-///    deprecation note into its JSON output instead).
-/// 2. Cache once-per-shell-session via a marker env var; subsequent
-///    invocations in the same shell stay silent.
-///
-/// `verb` is the legacy verb name, `replacement` is the canonical one.
-fn deprecation_warn(verb: &str, replacement: &str, json_mode: bool) {
-    if json_mode {
-        return;
-    }
-    // Pull a marker from environment of THIS process. Persistent across
-    // multiple wire invocations only when the shell sets and exports
-    // WIRE_DEPRECATION_NAGGED — operators rarely do, so practically
-    // this nags once per `wire foo` invocation. The single-process
-    // dedup matters most for scripts that call multiple deprecated
-    // verbs in one wire run, which is currently impossible (one verb
-    // per process) but documented for future loop-style wire shells.
-    let key = format!("WIRE_DEPRECATION_NAGGED_{}", verb.replace('-', "_"));
-    if std::env::var(&key).is_ok() {
-        return;
-    }
-    // SAFETY: deprecation_warn is called from sync dispatcher code paths
-    // before any worker thread spawns; env::set_var in Rust 2024 is
-    // safe at that point. Pattern matches maybe_adopt_session_wire_home.
-    unsafe {
-        std::env::set_var(&key, "1");
-    }
-    eprintln!(
-        "wire {verb}: DEPRECATED in v0.9 — use `wire {replacement}`. \
-         Will be removed in v1.0 (target 2026-Q3). \
-         Suppress: set WIRE_DEPRECATION_NAGGED_{}=1.",
-        verb.replace('-', "_")
-    );
-}
-
 // ---------- doctor (single-command diagnostic) ----------
 
 /// One DoctorCheck = one verdict on one health dimension.
@@ -13998,30 +12952,6 @@ fn check_daemon_pid_consistency() -> DoctorCheck {
             format!("daemon.pid is corrupt: {reason}"),
             "delete state/wire/daemon.pid; next `wire daemon &` will rewrite",
         ),
-        crate::ensure_up::PidRecord::LegacyInt(pid) => {
-            // Legacy pidfile: still surface liveness so a dead legacy pid
-            // doesn't quietly PASS this check while status says DOWN.
-            let pid = *pid;
-            if !crate::ensure_up::pid_is_alive(pid) {
-                return DoctorCheck::warn(
-                    "daemon_pid_consistency",
-                    format!(
-                        "daemon.pid (legacy-int) points at pid {pid} which is not running. \
-                         Stale pidfile from a crashed pre-0.5.11 daemon. \
-                         (Issue #2: this surface used to PASS while `wire status` said DOWN.)"
-                    ),
-                    "`wire upgrade` (kills any orphan + spawns a fresh daemon with JSON pidfile)",
-                );
-            }
-            DoctorCheck::warn(
-                "daemon_pid_consistency",
-                format!(
-                    "daemon.pid is legacy-int form (pid={pid}, no version/bin_path metadata). \
-                     Daemon was started by a pre-0.5.11 binary."
-                ),
-                "run `wire upgrade` to kill the old daemon and start a fresh one with the JSON pidfile",
-            )
-        }
         crate::ensure_up::PidRecord::Json(d) => {
             // v0.5.19 liveness gate: if the recorded pid is dead, the
             // pidfile is stale and the rest of the content drift checks
@@ -15461,103 +14391,6 @@ fn assert_relay_url_clean_for_publish(url: &str) -> Result<()> {
         );
     }
     Ok(())
-}
-
-// ---------- pair megacommand (zero-paste handle-based) ----------
-
-/// `wire pair <nick@domain>` zero-shot. Dispatched from Command::Pair when
-/// the handle is in `nick@domain` form. Wraps:
-///
-///   1. cmd_add — resolve, pin, drop intro
-///   2. Wait up to `timeout_secs` for the peer's `pair_drop_ack` to arrive
-///      (signalled by `peers.<handle>.slot_token` populating in relay state)
-///   3. Verify bilateral pin: trust contains peer + relay state has token
-///   4. Print final state — both sides VERIFIED + can `wire send`
-///
-/// On timeout: hard-errors with the specific stuck step so the operator
-/// knows which side to chase. No silent partial success.
-fn cmd_pair_megacommand(
-    handle_arg: &str,
-    relay_override: Option<&str>,
-    timeout_secs: u64,
-    _as_json: bool,
-) -> Result<()> {
-    let parsed = crate::pair_profile::parse_handle(handle_arg)?;
-    let peer_handle = parsed.nick.clone();
-
-    eprintln!("wire pair: resolving {handle_arg}...");
-    cmd_add(
-        handle_arg,
-        relay_override,
-        /* local_sister */ false,
-        /* as_json */ false,
-    )?;
-
-    eprintln!(
-        "wire pair: intro delivered. waiting up to {timeout_secs}s for {peer_handle} \
-         to ack (their daemon must be running + pulling)..."
-    );
-
-    // Trigger an immediate daemon-style pull so we don't wait the full daemon
-    // interval. Best-effort — if it fails, we still fall through to the
-    // polling loop.
-    let _ = run_sync_pull();
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    let poll_interval = std::time::Duration::from_millis(500);
-
-    loop {
-        // Drain anything new from the relay (e.g. our pair_drop_ack landing).
-        let _ = run_sync_pull();
-        let relay_state = config::read_relay_state()?;
-        let peer_entry = relay_state
-            .get("peers")
-            .and_then(|p| p.get(&peer_handle))
-            .cloned();
-        let token = peer_entry
-            .as_ref()
-            .and_then(|e| e.get("slot_token"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-
-        if !token.is_empty() {
-            // Bilateral pin complete — we have their slot_token, we can send.
-            let trust = config::read_trust()?;
-            let pinned_in_trust = trust
-                .get("agents")
-                .and_then(|a| a.get(&peer_handle))
-                .is_some();
-            println!(
-                "wire pair: paired with {peer_handle}.\n  trust: {}  bilateral: yes (slot_token recorded)\n  next: `wire send {peer_handle} \"<msg>\"`",
-                if pinned_in_trust {
-                    "VERIFIED"
-                } else {
-                    "MISSING (bug)"
-                }
-            );
-            return Ok(());
-        }
-
-        if std::time::Instant::now() >= deadline {
-            // Timeout — surface the EXACT stuck step. Likely culprits:
-            //   - peer daemon not running on their box
-            //   - peer's relay slot is offline
-            //   - their daemon is on an older binary that doesn't know
-            //     pair_drop kind=1100 (the P0.1 class — now visible via
-            //     wire pull --json on their side as a blocking rejection)
-            bail!(
-                "wire pair: timed out after {timeout_secs}s. \
-                 peer {peer_handle} never sent pair_drop_ack. \
-                 likely causes: (a) their daemon is down — ask them to run \
-                 `wire status` and `wire daemon &`; (b) their binary is older \
-                 than 0.5.x and doesn't understand pair_drop events — ask \
-                 them to `wire upgrade`; (c) network / relay blip — re-run \
-                 `wire pair {handle_arg}` to retry."
-            );
-        }
-
-        std::thread::sleep(poll_interval);
-    }
 }
 
 fn cmd_claim(
