@@ -1,24 +1,23 @@
 //! Group-chat end-to-end test (v0.13.3, increment I2 — bidirectional room).
 //!
 //! Three agents: a creator (alice) and two members (bob, carol). Alice pairs
-//! bilaterally with each member ONLY (SAS → VERIFIED; star topology — bob and
-//! carol never pair with each other). Alice creates a group (allocating a
-//! shared relay-room slot), adds both verified members, and the signed roster
-//! (room coords + every member's key) is distributed as group_invite events.
+//! bilaterally with each member ONLY (canonical handle-dial → VERIFIED; star
+//! topology — bob and carol never pair with each other). Alice creates a group
+//! (allocating a shared relay-room slot), adds both verified members, and the
+//! signed roster (room coords + every member's key) is distributed as
+//! group_invite events.
 //!
 //! Each member posts to the ONE shared room slot; everyone pulls it. The proof
 //! is the cross-member read: bob reads carol's message (and vice-versa) with a
 //! VERIFIED signature, via the key introduce-pinned from the creator's signed
-//! roster — neither ever paired with the other. Reuses the relay + SAS-pairing
+//! roster — neither ever paired with the other. Reuses the relay + pairing
 //! harness shape from `e2e_mesh.rs`.
 
 use serde_json::Value;
-use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -58,89 +57,83 @@ fn read_handle(home: &PathBuf) -> String {
     card["handle"].as_str().unwrap().to_string()
 }
 
-/// Drive a single SAS pairing between two homes against a relay (host runs
-/// `pair-host`, guest runs `pair-join` with the captured code). Lifted from
-/// `e2e_mesh.rs`.
+fn wait_until<F: Fn() -> bool>(deadline: Instant, f: F) -> bool {
+    while Instant::now() < deadline {
+        if f() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    false
+}
+
+/// Drive a single canonical (zero-paste, handle-dial) pairing between two
+/// homes already bound to `relay_url`. `host_home` is the *target* — it
+/// claims its handle, the guest runs `wire add <host_handle>@<relay-domain>`
+/// (resolving via the relay's well-known), the host pulls the inbound
+/// pair_drop, accepts it (bilateral gate), and the guest pulls the
+/// pair_drop_ack. Both ends end up pinned VERIFIED.
 fn drive_pairing(host_home: &PathBuf, guest_home: &PathBuf, relay_url: &str) {
-    let mut host_proc = Command::new(wire_bin())
-        .args([
-            "pair-host",
-            "--relay",
-            relay_url,
-            "--yes",
-            "--timeout",
-            "30",
-        ])
-        .env("WIRE_HOME", host_home)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn pair-host");
+    let host_handle = read_handle(host_home);
+    let guest_handle = read_handle(guest_home);
+    let domain = relay_url
+        .trim_start_matches("http://")
+        .split(':')
+        .next()
+        .unwrap()
+        .to_string();
+    let target = format!("{host_handle}@{domain}");
 
-    let stderr_pipe = host_proc.stderr.take().unwrap();
-    let (tx, rx) = mpsc::channel::<String>();
-    let stderr_capture = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let stderr_clone = stderr_capture.clone();
-    std::thread::spawn(move || {
-        let reader = BufReader::new(stderr_pipe);
-        let mut found = false;
-        for line in reader.lines().map_while(Result::ok) {
-            stderr_clone.lock().unwrap().push_str(&line);
-            stderr_clone.lock().unwrap().push('\n');
-            let trimmed = line.trim();
-            if !found && trimmed.len() == 9 && trimmed.chars().nth(2) == Some('-') {
-                tx.send(trimmed.to_string()).ok();
-                found = true;
-            }
-        }
-    });
-
-    let code = rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("never received code from pair-host");
-
-    let guest_handle = std::thread::spawn({
-        let guest_home = guest_home.clone();
-        let relay_url = relay_url.to_string();
-        let code = code.clone();
-        move || {
-            wire(
-                &guest_home,
-                &[
-                    "pair-join",
-                    &code,
-                    "--relay",
-                    &relay_url,
-                    "--yes",
-                    "--timeout",
-                    "30",
-                ],
-            )
-        }
-    });
-    let guest_out = guest_handle.join().expect("guest panicked");
+    let claim = wire(
+        host_home,
+        &["claim", &host_handle, "--public-url", relay_url, "--json"],
+    );
     assert!(
-        guest_out.status.success(),
-        "pair-join failed: stderr={}",
-        String::from_utf8_lossy(&guest_out.stderr)
+        claim.status.success(),
+        "host claim {host_handle} failed: stderr={}",
+        String::from_utf8_lossy(&claim.stderr)
     );
 
-    let host_out = host_proc.wait_with_output().expect("host wait failed");
+    let dial = wire(
+        guest_home,
+        &["add", &target, "--relay", relay_url, "--json"],
+    );
     assert!(
-        host_out.status.success(),
-        "pair-host failed; captured stderr=\n{}",
-        stderr_capture.lock().unwrap()
+        dial.status.success(),
+        "guest add {target} failed: stderr={}",
+        String::from_utf8_lossy(&dial.stderr)
     );
 
-    let host_stdout = String::from_utf8(host_out.stdout).unwrap();
-    let guest_stdout = String::from_utf8(guest_out.stdout).unwrap();
-    let host_final: Value =
-        serde_json::from_str(host_stdout.trim().lines().last().unwrap()).unwrap();
-    let guest_final: Value =
-        serde_json::from_str(guest_stdout.trim().lines().last().unwrap()).unwrap();
-    assert_eq!(
-        host_final["sas"], guest_final["sas"],
-        "SAS mismatch between {host_home:?} and {guest_home:?}"
+    let host_sees_guest = wait_until(Instant::now() + Duration::from_secs(15), || {
+        let _ = wire(host_home, &["pull", "--json"]);
+        let p = wire(host_home, &["pending", "--json"]);
+        String::from_utf8_lossy(&p.stdout).contains(guest_handle.as_str())
+    });
+    assert!(
+        host_sees_guest,
+        "{host_home:?} never received pending-inbound pair from {guest_handle}"
+    );
+    let accept = wire(host_home, &["accept", &guest_handle, "--json"]);
+    assert!(
+        accept.status.success(),
+        "accept {guest_handle} failed: stderr={}",
+        String::from_utf8_lossy(&accept.stderr)
+    );
+
+    let host_pinned = wait_until(Instant::now() + Duration::from_secs(5), || {
+        let p = wire(host_home, &["peers", "--json"]);
+        String::from_utf8_lossy(&p.stdout).contains(guest_handle.as_str())
+    });
+    assert!(host_pinned, "{host_home:?} never pinned {guest_handle}");
+
+    let guest_pinned = wait_until(Instant::now() + Duration::from_secs(15), || {
+        let _ = wire(guest_home, &["pull", "--json"]);
+        let p = wire(guest_home, &["peers", "--json"]);
+        String::from_utf8_lossy(&p.stdout).contains(host_handle.as_str())
+    });
+    assert!(
+        guest_pinned,
+        "{guest_home:?} never pinned {host_handle} via pair_drop_ack"
     );
 }
 
@@ -162,9 +155,17 @@ async fn group_join_code_admits_unpaired_member() {
     let alice = fresh_dir("jc-alice");
     let bob = fresh_dir("jc-bob");
     let dave = fresh_dir("jc-dave");
-    for (h, n) in [(&alice, "alice"), (&bob, "bob"), (&dave, "dave")] {
-        assert!(wire(h, &["init", n, "--offline"]).status.success());
+    // alice + bob bind the relay (the canonical dial flow needs published
+    // slots on both pairing ends); dave joins by group code and never pairs,
+    // so it stays offline.
+    for (h, n) in [(&alice, "alice"), (&bob, "bob")] {
+        assert!(
+            wire(h, &["init", n, "--relay", &relay_url])
+                .status
+                .success()
+        );
     }
+    assert!(wire(&dave, &["init", "dave", "--offline"]).status.success());
     let bob_h = read_handle(&bob);
     let dave_h = read_handle(&dave);
 
@@ -259,14 +260,20 @@ async fn group_bidirectional_room_with_introduce_pin() {
     let alice = fresh_dir("alice");
     let bob = fresh_dir("bob");
     let carol = fresh_dir("carol");
+    // All three bind the relay — alice pairs (dials) bilaterally with each
+    // member via the canonical handle-dial flow, which needs published slots.
     assert!(
-        wire(&alice, &["init", "alice", "--offline"])
+        wire(&alice, &["init", "alice", "--relay", &relay_url])
             .status
             .success()
     );
-    assert!(wire(&bob, &["init", "bob", "--offline"]).status.success());
     assert!(
-        wire(&carol, &["init", "carol", "--offline"])
+        wire(&bob, &["init", "bob", "--relay", &relay_url])
+            .status
+            .success()
+    );
+    assert!(
+        wire(&carol, &["init", "carol", "--relay", &relay_url])
             .status
             .success()
     );

@@ -1,7 +1,7 @@
 //! Background-process bootstrapper for the MCP path.
 //!
 //! Post-pair, an agent shouldn't have to ask the user "start the daemon?" —
-//! `wire_pair_confirm` invokes [`ensure_daemon_running`] + [`ensure_notify_running`]
+//! the MCP accept/dial tools invoke [`ensure_daemon_running`] + [`ensure_notify_running`]
 //! so push/pull and OS toasts are already armed by the time the agent surfaces
 //! "paired ✓" back to chat.
 //!
@@ -47,7 +47,7 @@
 //! inherit no TTY → no SIGHUP arrives when the parent exits, so they
 //! survive a Claude Code restart cycle. PIDs are reaped by init.
 //!
-//! Worst case: a child dies; the next `wire_pair_confirm` call respawns it.
+//! Worst case: a child dies; the next accept/dial call respawns it.
 //! No data is lost (outbox/inbox is on disk, content-addressed dedupe).
 
 use std::path::PathBuf;
@@ -239,6 +239,31 @@ fn write_pid_record(name: &str, record: &DaemonPid) -> Result<()> {
     let body = serde_json::to_vec_pretty(record)?;
     std::fs::write(&path, body)?;
     Ok(())
+}
+
+/// Daemon-startup: claim the `daemon.pid` file for THIS process.
+///
+/// A daemon started directly (`wire daemon`, not via `ensure_background`)
+/// must write its own versioned-JSON pidfile so `wire status` / doctor /
+/// the singleton guard can see it. Idempotent: if the pidfile already
+/// records our PID we leave it untouched. (Historically this lived in
+/// `pending_pair::cleanup_on_startup` alongside the now-removed SAS
+/// pending-pair recovery; the pidfile write was never SAS-specific.)
+pub fn write_self_daemon_pid() -> Result<()> {
+    let path = pid_file("daemon")?;
+    let my_pid = std::process::id();
+    if path.exists()
+        && let Ok(s) = std::fs::read_to_string(&path)
+        && let Ok(rec) = serde_json::from_str::<DaemonPid>(s.trim())
+        && rec.pid == my_pid
+    {
+        // We already own this pidfile — nothing to do.
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    write_pid_record("daemon", &build_pid_record(my_pid))
 }
 
 /// Schema string written into every JSON last-sync file. Bumped if the
@@ -443,7 +468,7 @@ fn wait_until_alive(pid: u32, budget: Duration) -> bool {
 
 fn ensure_background(name: &str, args: &[&str]) -> Result<bool> {
     // Test escape hatch — tests/mcp_pair.rs spawns wire mcp with this env
-    // var set so wire_pair_confirm doesn't fork persistent daemon/notify
+    // var set so wire_accept/wire_dial don't fork persistent daemon/notify
     // processes that survive the test's temp WIRE_HOME.
     if std::env::var("WIRE_MCP_SKIP_AUTO_UP").is_ok() {
         return Ok(false);

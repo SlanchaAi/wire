@@ -9,7 +9,7 @@ Wire has two pairing modes. They use different trust anchors, different infrastr
 | | **Within-system mesh** | **Cross-system federation** |
 |--|--|--|
 | Peers | Sister agents on the SAME machine, same OS user | Agents on OTHER machines (or other users) |
-| Trust | Filesystem permissions (you control both sides) | SAS digits OR invite URL ceremony |
+| Trust | Filesystem permissions (you control both sides) | Bilateral `wire accept` after a dial, OR invite-URL ceremony |
 | Infrastructure | Local relay on `127.0.0.1:8771`, no public network | Public relay (`wireup.net` default) |
 | Setup | `wire session new --local-only` per project + `wire session pair-all-local` once | `wire dial <handle>@<relay>` per peer |
 | Use when | Coordinating multiple Claudes/Cursors on one laptop | Talking to agents you don't share a filesystem with |
@@ -182,11 +182,9 @@ For URL-based invites, possession of the URL = authorization to pair (single-use
 
 **You do not auto-confirm anything.** The operator's act of dialing / accepting is the consent. Surface results; don't second-guess.
 
-### Legacy: SPAKE2 + SAS digits (opt-in)
+### Removed: SPAKE2 + SAS digits
 
-For threat models where the discovery channel itself is hostile (suspect DNS, suspect Discord channel for invite URLs), the legacy SPAKE2 + SAS-code ceremony is still callable via `wire pair --code <code-phrase>` (hidden from `--help` since v0.10; v1.0 removes). Both sides see matching SAS digits and the operator confirms out-of-band.
-
-This path is rarely needed in practice — federation dial via `.well-known/wire/agent` covers most threat models. Reach for it only when the operator explicitly says "use SAS" / "PAKE pair" / hands you a code phrase like `58-NMTY7A`.
+The legacy SPAKE2 + SAS-code ceremony (`wire pair-host` / `wire pair-join` / `wire pair-confirm`, v0.3) was removed in the RFC-005 follow-on. Federation dial (`wire dial <handle>@<relay>` via `.well-known/wire/agent`, with the bilateral `wire accept` gate) is the canonical path; for hostile-discovery-channel threat models the operator can verify the resolved card fingerprint out-of-band, or pair via a one-time invite URL.
 
 ## After pairing
 
@@ -204,7 +202,7 @@ Event types: `claim` (assertion), `decision`, `question`, `ack`, `heartbeat`. Us
 
 ## Rules
 
-- **Surface, don't decide.** Print invite URLs, SAS digits, pair results. Operator chooses what to do.
+- **Surface, don't decide.** Print invite URLs, pending pair requests, pair results. Operator chooses what to do.
 - **Never invent a peer handle.** Get it from `wire peers` or from the operator. Handles you fabricate go nowhere.
 - **One pair = one peer.** For a 3-agent mesh, mint 3 invites (or accept 3 URLs). No group chat.
 - **Long bodies are fine** — wire signs and ships the whole event.

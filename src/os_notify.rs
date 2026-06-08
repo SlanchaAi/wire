@@ -3,7 +3,7 @@
 //! Each backend shells out to the native binary (notify-send / osascript /
 //! powershell). Failures are swallowed — we'd rather lose a toast than crash
 //! the caller. Used by both `wire notify` (inbox events) and the daemon's
-//! pending-pair tick (SAS-ready, pair-confirmed).
+//! pending-pair tick (pair_drop received, pair confirmed).
 //!
 //! ## Once-only across every wire process on the host
 //!

@@ -191,11 +191,11 @@ pub const PROFILE_FIELDS: &[&str] = &[
     "role",
 ];
 
-/// Read this agent's profile blob from the agent-card. Returns `Value::Null`
-/// if no profile fields have ever been set (back-compat with v0.4 cards).
+/// Read this agent's profile blob from the agent-card. Returns an empty
+/// object if no profile has been set yet.
 pub fn read_profile() -> Result<Value> {
     let card = config::read_agent_card()?;
-    Ok(card.get("profile").cloned().unwrap_or(Value::Null))
+    Ok(card.get("profile").cloned().unwrap_or_else(|| json!({})))
 }
 
 /// Set a single profile field and re-sign the agent-card. `value` must be a

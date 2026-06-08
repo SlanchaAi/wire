@@ -22,15 +22,15 @@ The trust model in one sentence: **operators trust their own machines and each o
 
 **Status:** v0.1 events are plaintext-on-the-wire. Operators handling sensitive content MUST treat the relay as observable. Per-event encryption (NIP-44 v2 or DIDComm authcrypt) is a v0.2+ candidate; see `BACKLOG.md`.
 
-## Threat T2 — active MITM during pairing
+## Threat T2 — active MITM during pairing *(SAS path removed in RFC-005 follow-on; `wire dial` path below)*
 
-**Threat:** attacker sits between operator A and operator B during the SPAKE2 handshake, intercepting and modifying messages, with the intent of pairing each side with itself.
+**Historical (SAS path):** attacker sits between operator A and operator B during the SPAKE2 handshake, intercepting and modifying messages, with the intent of pairing each side with itself. The SAS digit check was the trust-establishment moment — SPAKE2's math means a MITM derives a different shared secret from each side so operators discover the mismatch when they read aloud.
 
-**Mitigation:** the SAS digit check is the trust-establishment moment. SPAKE2's mathematical property: an attacker who doesn't know the code phrase derives a different shared secret from each side, so each side computes a different 6-digit SAS. When operators read aloud and discover digits don't match, they refuse confirmation. The implementation MUST NOT proceed past unconfirmed SAS.
+The SPAKE2 + SAS code-phrase ceremony (`wire pair-host` / `wire pair-join` / `wire pair-confirm`) was **removed in the RFC-005 follow-on**. The SAS MITM surface no longer exists.
 
-A degraded MITM that guesses the code phrase has at best ~1-in-2^36 probability per attempt. Per-pairing slots are ephemeral and the host can only register once per `code_hash`, so an attacker gets one shot.
+**Current (`wire dial` path):** pairing now proceeds by `wire dial <handle>@<relay>`, which resolves the peer's card via `.well-known/wire/agent` and sends a signed `pair_drop`. The residual MITM surface is the discovery step: a network attacker who controls DNS or the relay can serve a forged card. Mitigation: operators who need MITM-resistance verify the peer's card fingerprint (`wire whois <peer>`) out-of-band before exchanging messages, or pair via a one-time invite URL (`wire invite` + `wire accept-invite`) which embeds a signed card inline.
 
-**Status:** **strong**. Treat the SAS prompt as load-bearing. The CLI `--yes` flag is documented as test-only. The MCP equivalent (`wire_pair_confirm`) requires the user to type the 6 SAS digits back into chat — accepting only a `y/n` would defeat the gate. See Threats T10 and T14 for the MCP-host trust model.
+**Status:** invite-URL pairing is **strong** (card is embedded, no DNS dependency). Dial-based pairing is as strong as the DNS/relay trust anchor. Out-of-band fingerprint verification is the operator's responsibility.
 
 ## Threat T3 — relay operator turning malicious
 
@@ -61,23 +61,17 @@ The leaked tokens DO let an attacker GET (read) any slot's stored events. This i
 
 **Status:** v0.1 explicitly does NOT defend against host compromise. Operators with stronger requirements should run `wire` inside a hardware-security-module-backed enclave or signing-only daemon (v0.3+ candidate). 0600 file permissions on `private.key` and `relay.json` are a baseline hygiene gate, not a security boundary.
 
-## Threat T6 — code phrase brute force
+## Threat T6 — code phrase brute force *(REMOVED — SAS flow removed in RFC-005 follow-on)*
 
 **Threat:** an active attacker who can pose as one side of the pairing tries every code phrase to derive the SPAKE2 secret.
 
-**Mitigation:** SPAKE2 is online-only. Every guess requires a live handshake with the relay, and the host registers exactly once per `code_hash`. After the legitimate pairing completes, the pair-slot is consumed. Brute force at 36 bits requires ~2^36 ≈ 68B online attempts before the slot is used; legitimate pairings complete in seconds. Operators SHOULD pair promptly after `wire pair-host` prints the code.
+**Status (historical):** the SPAKE2 + SAS code-phrase pairing ceremony (`wire pair-host` / `wire pair-join` / `wire pair-confirm`, v0.3) was removed in the RFC-005 follow-on. This threat no longer applies. `wire dial <handle>@<relay>` with out-of-band card-fingerprint verification is the replacement; see Threat T2 for the residual MITM surface.
 
-The relay SHOULD rate-limit `/v1/pair` and time out idle pair-slots. The reference implementation does not (BACKLOG: pair-slot TTL of 5 minutes).
-
-**Status:** strong in practice given the speed of legitimate pairings. v0.1 lacks server-side rate limiting; operator-side awareness ("don't leave a printed code phrase open for hours") is the current control.
-
-## Threat T7 — code phrase intercepted on the side channel
+## Threat T7 — code phrase intercepted on the side channel *(REMOVED — SAS flow removed in RFC-005 follow-on)*
 
 **Threat:** operator A texts the code phrase to B over a compromised channel. Attacker sees the code.
 
-**Mitigation:** see Threat T2 — the SAS visual check catches this even if the attacker has the code, because they still can't intercept BOTH operators' SPAKE2 messages, derive the shared secret each side derived, AND get the SAS to match. The ~36 bits of SAS entropy committed to the SPAKE2 secret + sorted pubkeys is what makes this work.
-
-**Status:** strong. Operators MAY use a low-trust side channel (SMS, IRC) for the code phrase as long as the SAS readout uses a higher-trust channel (voice call, in-person).
+**Status (historical):** the SAS visual-check defense described here depended on the SPAKE2 code-phrase ceremony that was removed in the RFC-005 follow-on. This threat surface no longer exists. See Threat T2 for the residual pairing-time MITM surface applicable to `wire dial`.
 
 ## Threat T8 — long-term key rotation
 
@@ -135,101 +129,70 @@ That's a significant redesign — BACKLOG'd.
 
 **Status:** roster **integrity** is strong; group **confidentiality** + **cryptographic eviction** are by-design absent pre-MLS, mirroring the DM posture in T1. Operators MUST treat group content as relay-observable and a kicked member as retaining pre-kick plaintext until MLS lands. (This entry closes the documentation parity gap RFC-006 flagged: the DM-plaintext deferral was written in T1; the group case was implicit until now.)
 
-## Threat T10 — MCP-host compromise (revised v0.2 of this threat, Goal 1)
+## Threat T10 — MCP-host compromise *(SAS gate removed; dial/accept gate is the current model)*
 
 **Threat:** a malicious MCP host (compromised Claude Desktop, evil VS Code
 extension, prompt-injected agent runtime) calls wire tools to either (a) send
 destructive content under the operator's identity, or (b) silently establish
 trust with a peer the operator didn't intend.
 
-**Mitigation v0.1 (initial):** the original v0.1 strategy was to refuse all
-pairing tools (`wire_init`, `wire_join`) over MCP entirely — the operator had
-to run those from a terminal. This kept (b) airtight at the cost of every
-pairing requiring a context switch out of the agent's chat.
+**Historical SAS gate (v0.2, removed):** the original mitigation required the
+operator to type 6 SAS digits back into chat as proof of human presence during
+`wire_pair_confirm`. The SPAKE2 + SAS ceremony was removed in the RFC-005
+follow-on; this gate no longer exists in that form.
 
-**Mitigation v0.2 (Goal 1, current):** pairing tools ARE exposed via MCP, but
-the SAS confirmation gate is preserved by requiring the user to type the
-**6 SAS digits back into chat** as the only way to finalize:
+**Current gate (`wire_accept` / `wire dial` model):** trust finalization now
+requires the operator to explicitly run `wire accept <peer>` (CLI) or call
+`wire_accept` (MCP). The MCP tool description requires the agent to surface the
+pending request to the operator before accepting; acceptance grants the peer
+authenticated write access to this agent's inbox. A compromised MCP host that
+calls `wire_accept` without showing the request to the operator is the residual
+(b) vector — the gate is consent-UI enforcement in the host, not a
+cryptographic digit-typeback.
 
 | Tool | Trust step performed | Human required? |
 |---|---|---|
 | `wire_init(handle)` | Generates self-keypair, writes self-card. Idempotent. | No — local-only, no peer trust |
-| `wire_pair_initiate(relay_url)` | Opens host pair-slot, returns code phrase + session_id | No |
-| `wire_pair_join(code_phrase)` | Guest SPAKE2 against code phrase, returns SAS + session_id | No |
-| `wire_pair_check(session_id)` | Polls for SAS-ready | No |
-| `wire_pair_confirm(session_id, user_typed_digits)` | Validates typed digits vs cached SAS, then finalizes (AEAD bootstrap + pin) | **YES — user types the 6 SAS digits into chat** |
+| `wire_dial(handle@relay)` | Sends signed pair_drop to peer's slot | No — peer must `wire accept` to complete |
+| `wire_accept(peer)` | Pins peer VERIFIED, sends pair_drop_ack, deletes pending record | **YES — operator must consent before calling** |
+| `wire_reject(peer)` | Deletes pending record without pairing | **YES — operator must consent before calling** |
 
-**Why the digit-typeback is the load-bearing step.** Today's `--yes` in CLI
-just consumes a `y` keystroke. An MCP host that auto-confirmed via a `y`
-boolean would defeat the gate entirely. By requiring the user to type the
-**actual SAS digits the user reads from their peer over a side channel**:
+**Status:** (a) send-under-operator-identity is **unchanged** — the MCP host
+has full send authority once paired, mitigated only by the operator's choice of
+host (same as v0.1). (b) silent-trust is gated on `wire_accept` requiring
+explicit operator consent per the tool description; enforcement is the host's
+responsibility.
 
-1. The agent has no access to the side-channel SAS — only the user does.
-2. A malicious agent that shows fabricated digits in chat fails because the
-   user's peer's agent shows different (real) digits over voice/text.
-3. `wire_pair_confirm` validates digit equality server-side, mismatch aborts
-   the session permanently (no retry — forces fresh `pair_initiate`).
+## Threat T14 — prompt-injected agent bypasses pair-consent gate *(SAS digit-typeback removed; residual below)*
 
-**Status:** comparable to CLI `--yes` security for messaging (Threat T9
-unchanged); pairing trust is gated on the user typing the correct out-of-band
-SAS, which a compromised MCP host cannot fabricate without breaking the
-SPAKE2 + AEAD primitives. See Threat T14 for the residual risk.
+**Historical SAS vector (removed):** the original T14 described an agent
+auto-filling the 6 SAS digits to `wire_pair_confirm` without routing them
+through the human. The SPAKE2 + SAS ceremony was removed in the RFC-005
+follow-on; this specific vector no longer exists.
 
-The integration tests under `tests/mcp_pair.rs` verify each leg:
-`wire_init_via_mcp_is_idempotent_for_same_handle`,
-`pair_initiate_returns_distinct_session_ids_for_concurrent_calls`,
-`full_pair_flow_via_mcp_with_correct_sas_finalizes`,
-`pair_confirm_with_wrong_digits_aborts_session`.
+**Residual vector (current):** a compromised or prompt-injected agent calls
+`wire_accept <peer>` without surfacing the pending request to the operator.
+The tool description instructs the agent to obtain explicit operator consent
+first, but wire cannot enforce this from inside the MCP server — the gate is
+in the host.
 
-## Threat T14 — prompt-injected agent auto-fills SAS digits
-
-**Threat:** an MCP host implementation auto-types the 6 SAS digits to
-`wire_pair_confirm` WITHOUT routing the request through the human, defeating
-the typeback gate. Concretely:
-
-- A prompt-injected agent in Claude Desktop reads the SAS from `wire_pair_check`'s
-  tool result, then calls `wire_pair_confirm` itself with those same digits,
-  never showing them to the user.
-- A poorly-implemented agent UI auto-fills the digit field from the previous
-  tool's output.
-- A test harness or "headless" agent flag bypasses user confirmation.
-
-**Wire's enforcement boundary stops at the MCP server.** Wire CANNOT inspect
-the user's terminal/UI to verify a human actually typed the digits — by the
-time `wire_pair_confirm(session_id, "384217")` arrives over JSON-RPC, the
-digits are a string, period.
+**Wire's enforcement boundary stops at the MCP server.** Wire CANNOT verify
+that a human saw the `wire_pending` output before `wire_accept` was called.
 
 **Mitigations available to host implementations (NOT to wire):**
 
-1. **Treat `wire_pair_confirm`'s `user_typed_digits` field as user-input-only.**
-   The MCP host (Claude Desktop / VS Code MCP / custom agent runtime) should
-   require the SAS to come from the user's input field, not from a previous
-   tool's output. Today no MCP host has a primitive that enforces this.
+1. **Require `wire_pending` output to be shown before `wire_accept` is called.**
+   The MCP host should not allow `wire_accept` to execute if the pending
+   request was not surfaced to the user first.
 
-2. **Display SAS via a `display_to_user_verbatim` channel.** Future MCP
-   capability: a structured output field hosts MUST render to user before
-   the agent can call the next tool. v0.2 wire MCP could surface this once
-   the spec includes it.
+2. **OS toast on pair_drop receipt.** Wire fires a native desktop notification
+   when a `pair_drop` lands (v0.14.2+), so the operator sees an unexpected
+   pairing attempt even if the chat-UI was silent.
 
-3. **Two-step confirm in chat.** v0.2 candidate: split confirm into
-   `wire_pair_request_user_input` (returns a token; agent posts message to
-   user) + `wire_pair_submit_user_input(token, digits)`. The host's chat
-   transport guarantees the token's lifecycle — agent cannot replay its own
-   tool output.
-
-**Wire-side hardening today:**
-- The tool description for `wire_pair_confirm` instructs the host that
-  digits MUST come from the user typing in chat, not auto-fill.
-- Mismatch on first call aborts the session permanently (no brute-force
-  window). Tools `wire_pair_check`/`_initiate`/`_join` return prose `next:`
-  fields telling the agent to ask the user out loud.
-- Goal-2 OS notifications (when shipped) will fire a native toast on
-  every `wire_pair_initiate`/`_join` so the user notices unexpected
-  pair attempts even if the chat-UI was silent.
-
-**Status:** un-mitigated at the wire layer. Documented as host
-responsibility. Operators choosing an MCP host should prefer one with
-explicit user-confirmation primitives.
+**Status:** residual un-mitigated at the wire layer for prompt-injected agents
+in hostile-host scenarios. Documented as host responsibility. Operators
+choosing an MCP host should prefer one with explicit user-confirmation
+primitives for trust-mutating tools.
 
 ## Threat T13 — relay process compromise leaks to other host workloads
 
@@ -304,7 +267,7 @@ Wire's HTTPS surface (relay POST/GET, `/stream` long-poll, well-known fetches) c
 
 ### What the local relay assumes
 
-- **Same-machine processes are mutually trusted at OS level.** Any process on the box that can `connect(127.0.0.1, 8771)` can attempt to deposit a pair_drop. This is mitigated by the v0.5.14 bilateral-pair gate (no auto-pin, no auto-ack — operator consent is still required on both sides), so a malicious local process can deposit one pending-inbound request per session but can't get authenticated write capability without the operator's `wire pair-accept`. Same defense surface as the federation path; the attack is just cheaper to attempt.
+- **Same-machine processes are mutually trusted at OS level.** Any process on the box that can `connect(127.0.0.1, 8771)` can attempt to deposit a pair_drop. This is mitigated by the v0.5.14 bilateral-pair gate (no auto-pin, no auto-ack — operator consent is still required on both sides), so a malicious local process can deposit one pending-inbound request per session but can't get authenticated write capability without the operator's `wire accept`. Same defense surface as the federation path; the attack is just cheaper to attempt.
 - **Loopback ≠ secret on a multi-user box.** Other users on the same machine can also bind 127.0.0.1 sockets and probe / connect. On a shared box you'd want socket-permission hardening (Unix-domain socket with `0600` mode, or per-user firewall rules). v0.5.17 ships HTTP-over-loopback only; Unix-socket transport is a v0.5.18+ open follow-up.
 - **No TLS on the local relay.** Bytes travel cleartext over loopback. Acceptable on single-user laptops (same as every other localhost HTTP service); document explicitly so operators don't extrapolate "wire uses TLS everywhere" to the local case. Event integrity is still protected by Ed25519 signatures on every envelope.
 
@@ -328,11 +291,11 @@ The pieces that compose:
 
 1. **Ed25519 over canonical JSON** — message integrity per event.
 2. **Sign-over-event_id** — stable references to events without re-canonicalizing.
-3. **SPAKE2** — promotes ~36 bits of human-memorable code into 256 bits of shared key.
-4. **6-digit SAS readout** — human-in-loop catches MITM that survived SPAKE2 (e.g. guessed-code attacker).
-5. **ChaCha20-Poly1305 AEAD** — bootstrap payload confidentiality + authenticity.
+3. ~~**SPAKE2** — promotes ~36 bits of human-memorable code into 256 bits of shared key.~~ *(removed in RFC-005 follow-on)*
+4. ~~**6-digit SAS readout** — human-in-loop catches MITM that survived SPAKE2.~~ *(removed in RFC-005 follow-on)*
+5. **Bilateral `wire accept` gate** — trust finalization requires explicit operator consent; a `pair_drop` from a stranger lands in `pending-inbound` and cannot promote to VERIFIED without the operator running `wire accept`.
 6. **Per-key tier state machine** — promotion is one-way, demotion impossible without key removal.
 7. **Recipient-side verification** — relay is a dumb pipe; trust never lives on the relay.
-8. **MCP human-in-loop gate** — pairing tools are agent-callable, but trust finalization requires the user to type the 6-digit SAS back into chat (`wire_pair_confirm`). The user-typed digits are compared server-side against the SPAKE2-derived SAS; mismatch aborts permanently (T10). Host-level enforcement of "digits came from human, not from prior tool output" remains the host's responsibility (T14).
+8. **MCP human-in-loop gate** — `wire_accept` tool description requires the agent to surface the pending request to the operator before accepting; host-level enforcement of the consent gesture remains the host's responsibility (T10, T14).
 
-Each layer fails independently. An attacker has to break SPAKE2 AND fool a human reading SAS digits aloud AND forge an Ed25519 signature to land a single malicious event in someone's inbox. v0.1 stops there; v0.2+ adds per-event encryption and key rotation to compose more layers.
+Each layer fails independently. An attacker has to forge an Ed25519 signature AND get the operator to `wire accept` the forged peer AND land a verified event in the inbox. v0.1 stops there; v0.2+ adds per-event encryption and key rotation to compose more layers.

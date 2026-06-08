@@ -958,11 +958,8 @@ pub fn session_home_for_key(key: &str) -> Result<PathBuf> {
 /// Keep this list in sync with [`warn_on_identity_collision`]'s pgrep
 /// predicate and the call-site list in `cli::run` / `mcp::run`.
 ///
-/// `pair-host*` is intentionally absent: it works against the
-/// per-pair relay slot, not the shared inbox cursor, and is meant
-/// to coexist with a `wire daemon` that advances the queued pair —
-/// warning there would be a false positive for the documented
-/// "queue + daemon" pattern.
+/// Note: `pair-host` (and the rest of the SAS code-phrase flow) was removed
+/// in RFC-005 follow-on, so it is naturally absent from this list.
 ///
 /// Short-lived commands (`whoami`, `status`, `send`, `peers`, …) are
 /// intentionally absent — they write atomically and don't race, and
@@ -1123,8 +1120,8 @@ fn read_wire_home_from_pid(pid: u32) -> Option<String> {
 /// use. Noop when `WIRE_HOME` is already set (explicit override wins).
 ///
 /// `label` distinguishes the caller in the stderr line (`mcp` vs
-/// `cli`). Set `WIRE_QUIET_AUTOSESSION=1` to suppress the stderr line
-/// while keeping the env-var application active.
+/// `cli`). Output only appears on interactive TTYs; set `WIRE_VERBOSE=1`
+/// to force it on in non-interactive contexts.
 ///
 /// MUST be called BEFORE any worker thread or async task spawns —
 /// `env::set_var` is unsafe in Rust 2024 because of thread-safety
@@ -1220,13 +1217,11 @@ pub fn maybe_adopt_session_wire_home(label: &str) {
     // Bash tool, scripts, daemons), the auto-detect line is captured
     // alongside command output and pollutes both — wasting agent
     // context tokens and breaking JSON parsers that read combined
-    // streams. WIRE_VERBOSE=1 forces the line on; WIRE_QUIET_AUTOSESSION
-    // still forces it off for back-compat with v0.9 scripts.
+    // streams. WIRE_VERBOSE=1 forces the line on.
     use std::io::IsTerminal;
-    let quiet_env = std::env::var("WIRE_QUIET_AUTOSESSION").is_ok();
     let verbose_env = std::env::var("WIRE_VERBOSE").is_ok();
     let interactive = std::io::stderr().is_terminal();
-    if !quiet_env && (interactive || verbose_env) {
+    if interactive || verbose_env {
         eprintln!(
             "wire {label}: adopted {why} → WIRE_HOME=`{}`",
             home.display()
@@ -2087,9 +2082,8 @@ mod tests {
         assert!(INBOX_OWNING_SUBCOMMANDS.contains(&"daemon"));
         assert!(INBOX_OWNING_SUBCOMMANDS.contains(&"monitor"));
         assert!(INBOX_OWNING_SUBCOMMANDS.contains(&"notify"));
-        // Pair-host is documented-coexist with daemon — must NOT be in
-        // the list or operators get a false positive on every queued
-        // pair flow.
+        // pair-host (SAS code-phrase flow) was removed in RFC-005 follow-on
+        // and must not appear in the list.
         assert!(!INBOX_OWNING_SUBCOMMANDS.contains(&"pair-host"));
     }
 

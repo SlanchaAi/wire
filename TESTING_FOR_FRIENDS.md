@@ -202,19 +202,21 @@ wire notify --once --json     # one sweep, JSONL to stdout (no toast)
 
 ### Agent-driven setup (alternative to CLI pair flow)
 
-v0.2.0 ships MCP tools so your AI agent can drive the entire pair flow — you only confirm by typing the 6 SAS digits back into chat:
+v0.9+ ships MCP tools so your AI agent can drive the entire pair flow — you only consent once when the inbound request arrives:
 
 ```
-[agent]  → wire_pair_initiate
-         → "Share code 73-2QXC4P with willard. When his agent shows SAS,
-           type the 6 digits back to confirm."
-[you]    *texts willard the code, gets SAS from willard via voice*
-[you]    384217
-[agent]  → wire_pair_confirm(session_id, "384217")
-         → "paired with did:wire:willard ✓"
+[agent A] → wire_dial("willard@wireup.net")
+          → "Pair request sent to willard. Waiting for them to accept."
+
+[willard's agent]
+          ← wire_pending  →  ["alice" pending]
+          ← surfaces request to willard
+[willard] accepts
+[willard's agent] → wire_accept("alice")
+          → "paired with did:wire:alice ✓"
 ```
 
-This is the same SPAKE2+SAS security as the CLI flow — you still read SAS aloud with your peer over a side channel. The difference: confirmation is typing the digits in chat instead of typing `y` in a terminal. Mismatch on confirm aborts the session permanently. See [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) T10/T14.
+The SAS code-phrase ceremony (`wire_pair_initiate` / `wire_pair_confirm`) was removed in RFC-005. Pairing now requires bilateral `wire accept` — each side consents explicitly. See [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) T10/T14.
 
 Less common:
 ```bash

@@ -15,7 +15,7 @@
 - One **per-org policy table** (declarative, first-match-wins, immutable default-deny floor) governs both receiver decisions: **inbound** ease-of-pair gating and **outbound** project fan-out.
 - The bilateral `Tier` enum is **not** forked by attestation provenance. A single `ORG_VERIFIED` tier plus a separate filterable `peer.org_attestation` field (`sso` | `dns`) answers swift-harbor's SL-Q1.
 - **Project fork ruled (A):** `project` stays unsigned routing metadata; all trust lives at the org tier. Fan-out gates on the org tier; the project tag is the addressing selector, never a trust grant.
-- An `inbound=auto` row **is** the per-org Option-A consent record — so editing the table is a consent-gated action (`wire_org_set_policy` gated like `wire_pair_confirm`).
+- An `inbound=auto` row **is** the per-org Option-A consent record — so editing the table is a consent-gated action (`wire_org_set_policy` gated like `wire_accept`).
 - A T21 IdP-compromise alarm **degrades one notch** (auto→notify→manual), per-org, for attestations minted inside the alarm window — never hard-deny, never UNTRUSTED.
 
 ---
@@ -107,7 +107,7 @@ Rationale: an attestation minted *just after* an IdP-compromise alarm is the hig
   - `wire org policy list` — renders the table.
   - `wire org policy set <org_did> --inbound auto|notify|manual --attestation sso|dns|any --alarm-window 24h --fanout-projects print-shop,lora --fanout-min-tier ORG_VERIFIED`
   - `wire org policy rm <org_did>` — drops the row (peer reverts to default/manual).
-- **MCP:** `wire_org_set_policy` — **requires explicit user consent**, gated identically to `wire_pair_confirm`. A tool call that can flip a row to `inbound=auto` is granting standing eased-pair write-access to every current and future member of that org; it must never execute unattended. (Consistent with the standing directive: never grant authenticated inbox write-access without operator consent.)
+- **MCP:** `wire_org_set_policy` — **requires explicit user consent**, gated identically to `wire_accept`. A tool call that can flip a row to `inbound=auto` is granting standing eased-pair write-access to every current and future member of that org; it must never execute unattended. (Consistent with the standing directive: never grant authenticated inbox write-access without operator consent.)
 
 ---
 

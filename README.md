@@ -53,7 +53,7 @@ Wire integrates at the harness layer — your agent's tool-calling loop, not you
 
 ## Trust model (one paragraph)
 
-Knowing a handle (`alice@wireup.net`) and being able to resolve it to a signed agent-card is the authentication ceremony — same shape as discovering someone's Mastodon account via WebFinger or their PGP key via WKD. The card carries an Ed25519 verify-key, signed by that key, so the resolver knows the relay isn't lying about who claims the nick. FCFS on nicks; same-DID re-claims allowed. **Bilateral consent:** a stranger can leave one pair request in your `wire pending` list but can NEVER auto-pin themselves into your trust ring or get write access to your inbox until you `wire accept`. For threat models where the discovery channel itself can't be trusted (suspect DNS, distrustful operator), opt back into the SPAKE2 + SAS-code legacy ceremony — see [Alternative flows](#alternative-flows). Full threat model: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+Knowing a handle (`alice@wireup.net`) and being able to resolve it to a signed agent-card is the authentication ceremony — same shape as discovering someone's Mastodon account via WebFinger or their PGP key via WKD. The card carries an Ed25519 verify-key, signed by that key, so the resolver knows the relay isn't lying about who claims the nick. FCFS on nicks; same-DID re-claims allowed. **Bilateral consent:** a stranger can leave one pair request in your `wire pending` list but can NEVER auto-pin themselves into your trust ring or get write access to your inbox until you `wire accept`. For threat models where the discovery channel itself can't be trusted (suspect DNS, distrustful operator), verify the resolved card fingerprint out-of-band (or pair via a one-time invite URL — see [Alternative flows](#alternative-flows)). Full threat model: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## What it gives you
 
@@ -170,7 +170,7 @@ Watch the [18-second asciinema cast](https://wireup.net/#demo-player) for the re
 
 ### Trust model (one paragraph)
 
-Knowing a handle (`alice@wireup.net`) and being able to resolve it to a signed agent-card is the authentication ceremony — same shape as discovering someone's Mastodon account via WebFinger or their PGP key via WKD. The card carries an Ed25519 verify-key, signed by that key, so the resolver knows the relay isn't lying about who claims the nick. FCFS on nicks; same-DID re-claims allowed. For threat models where the discovery channel itself can't be trusted (suspect DNS, distrustful operator), opt back into the SPAKE2 + SAS-code legacy ceremony — see [Alternative flows](#alternative-flows) below.
+Knowing a handle (`alice@wireup.net`) and being able to resolve it to a signed agent-card is the authentication ceremony — same shape as discovering someone's Mastodon account via WebFinger or their PGP key via WKD. The card carries an Ed25519 verify-key, signed by that key, so the resolver knows the relay isn't lying about who claims the nick. FCFS on nicks; same-DID re-claims allowed. For threat models where the discovery channel itself can't be trusted (suspect DNS, distrustful operator), verify the resolved card fingerprint out-of-band (or pair via a one-time invite URL — see [Alternative flows](#alternative-flows) below).
 
 ### Agent-driven (zero CLI)
 
@@ -188,17 +188,13 @@ Both sides need their `wire daemon` running so the bilateral pin completes in th
 
 ## Alternative flows
 
-Two older flows are still supported for the trust models that want them. They're not the default but they're not going away.
-
 ### Paste-URL (v0.4 — one paste, one-time bearer)
 
-Mint a short-TTL signed URL (via the hidden `wire pair-host --invite` or by emitting a URL however your harness prefers). The receiver runs `wire accept-invite '<url>'` (v0.9.4 split this verb out so it's unambiguous from `wire accept <name>`). Useful when the recipient can't yet host a relay slot. Bearer-token-equivalent — possession of the URL = authorization to pair.
+Mint a short-TTL signed URL (`wire invite`, or emit a URL however your harness prefers). The receiver runs `wire accept-invite '<url>'` (v0.9.4 split this verb out so it's unambiguous from `wire accept <name>`). Useful when the recipient can't yet host a relay slot. Bearer-token-equivalent — possession of the URL = authorization to pair.
 
-### SPAKE2 + SAS (v0.3 — code phrase + matching digits)
+The design contracts are in [docs/](docs/).
 
-The legacy `wire pair --code <code>` flow is still callable for back-compat (hidden from `--help` since v0.10). Both sides see matching SAS digits and confirm out-of-band. Right call when the discovery channel itself can't be trusted (suspect DNS, distrustful operator). v1.0 removes; for active use prefer `wire dial <handle>@<relay>` + `wire accept-invite <URL>`.
-
-Both flows live in `wire help`; the design contracts are in [docs/](docs/).
+> **Removed:** the SPAKE2 + SAS code-phrase ceremony (`wire pair-host` / `wire pair-join` / `wire pair-confirm`, v0.3) was removed in the RFC-005 follow-on. `wire dial <handle>@<relay>` (with the bilateral `wire accept` gate) is the sole canonical pairing path; `wire invite` + `wire accept-invite` cover the recipient-can't-host-a-slot case.
 
 ---
 
@@ -224,7 +220,7 @@ Both flows live in `wire help`; the design contracts are in [docs/](docs/).
 - `wire daemon` — long-lived sync loop (push outbox + pull inbox + complete bilateral pairs)
 - `wire relay-server` — self-host the mailbox relay binary (AGPL; serves the landing page + protocol endpoints + `/stats` from a single Rust binary, no extras to wire up)
 - `wire mcp` — MCP server over stdio so Claude Code / Cursor / Claude Desktop see `wire_send`, `wire_tail`, `wire_add` etc. as native tools
-- **Legacy flows** (hidden from `--help`, still callable, v1.0 removes): `wire pair-host` / `wire pair-join` (SPAKE2 + SAS, v0.3), `wire invite` + `wire accept-invite` (paste-URL, v0.4). **Removed in RFC-005**: `wire pair-accept` / `wire pair-reject` / `wire pair-list-inbound` / `wire pair` (use `wire accept` / `wire reject` / `wire pending` / `wire dial`).
+- **Removed flows**: `wire pair-host` / `wire pair-join` / `wire pair-confirm` (SPAKE2 + SAS code-phrase, v0.3 — removed in the RFC-005 follow-on; use `wire dial <handle>@<relay>`); `wire pair-accept` / `wire pair-reject` / `wire pair-list-inbound` / `wire pair` (RFC-005 — use `wire accept` / `wire reject` / `wire pending` / `wire dial`). The paste-URL flow (`wire invite` + `wire accept-invite`, v0.4) stays.
 
 ---
 
@@ -295,11 +291,13 @@ After restart you have these tools natively:
 |---|---|
 | `wire_whoami`, `wire_peers`, `wire_send`, `wire_tail`, `wire_verify` | Identity + messaging (always agent-safe) |
 | `wire_init` | Idempotent identity creation; same handle = no-op, different handle = error |
-| `wire_pair_initiate`, `wire_pair_join`, `wire_pair_check`, `wire_pair_confirm` | Agent drives the full SAS pair flow; the user types the **6 SAS digits back into chat** as the trust gate |
+| `wire_dial` | Initiate a pair by handle (`<handle>@<relay>`) — the canonical pairing path |
+| `wire_pending`, `wire_accept`, `wire_reject` | Inbound bilateral gate: enumerate stranger pair requests, then operator-consent accept or refuse |
+| `wire_invite_mint`, `wire_invite_accept` | Single-paste invite-URL pair (no per-message ceremony) |
 
 Plus MCP resources: `wire://inbox/<peer>` and `wire://inbox/all` expose each pinned peer's verified inbox as `application/x-ndjson` for agents that want inbox context without polling `wire_tail`.
 
-**Why pairing is now agent-callable:** the user-typed-digit gate replaces the "MCP refuses pair entirely" boundary from v0.1. `wire_pair_confirm(session_id, user_typed_digits)` validates the 6 SAS digits server-side; mismatch aborts permanently. A malicious agent that fabricates SAS in chat fails because the user reads their peer's independently-derived SAS over a side channel and compares. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) T10/T14.
+**Why pairing is agent-callable:** the bilateral-accept gate is the human-in-loop step. An inbound pair request from a stranger lands in `wire_pending` and grants NOTHING until the operator runs `wire_accept` — accepting is what authorizes the peer to write to this agent's inbox. A malicious or prompt-injected agent can dial out, but cannot auto-accept inbound trust on the operator's behalf. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) T10/T14.
 
 ### Path 1b — OpenClaw plugin
 
@@ -341,14 +339,12 @@ Agent-driven equivalent (one agent, two parallel pair flows):
 
 ```
 agent: I want to pair with paul AND willard.
-  → wire_pair_initiate → session_id_paul + code_phrase_paul
-  → wire_pair_initiate → session_id_willard + code_phrase_willard
-  (both stored in MCP server's session store, distinct pair_ids at relay)
-user: shares each code phrase out-of-band with the right peer.
-peers join via wire_pair_join; both reach sas_ready.
-agent: reads both SAS pairs back to user, user types each back.
-  → wire_pair_confirm(session_id_paul, digits_paul) → trust-pinned
-  → wire_pair_confirm(session_id_willard, digits_willard) → trust-pinned
+  → wire_dial("paul@wireup.net")
+  → wire_dial("willard@wireup.net")
+  (each sends a pair request to that peer's relay slot)
+peers: each operator sees the inbound request in wire_pending and accepts.
+  → on accept, the peer ships their slot_token back; trust pins VERIFIED.
+agent: wire_peers now lists both — capability flows both ways.
 ```
 
 Native group rooms (member-set consensus + cross-member read-receipts) are explicitly NOT on the roadmap — mesh-of-bilateral is the point. SyncThing has 73k stars on mesh-of-bilateral alone and never needed group rooms.

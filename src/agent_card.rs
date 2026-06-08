@@ -785,19 +785,6 @@ mod tests {
     }
 
     #[test]
-    fn v3_1_card_remains_verifiable_under_v3_2_code() {
-        // Backward-compat: a v3.1-shaped card (no identity claims, schema
-        // string literally "v3.1") still round-trips signing and verify.
-        // This is the wire-compat invariant — peers on the network mid-
-        // upgrade keep talking.
-        let (sk, pk) = generate_keypair();
-        let mut card = build_agent_card("paul", &pk, None, None, None);
-        card["schema_version"] = json!("v3.1");
-        let signed = sign_agent_card(&card, &sk);
-        verify_agent_card(&signed).unwrap();
-    }
-
-    #[test]
     fn build_agent_card_default_capability_advertises_v3_2() {
         let (_, pk) = generate_keypair();
         let card = build_agent_card("paul", &pk, None, None, None);
