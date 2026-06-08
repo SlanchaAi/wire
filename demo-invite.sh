@@ -101,8 +101,10 @@ WIRE_HOME="$PAUL_HOME" "$WIRE" send "$WILL_H" decision "hello via v0.4.0 invite"
 WIRE_HOME="$PAUL_HOME" "$WIRE" push --json | jq -r '.pushed | length' | xargs -I{} echo "    pushed {} event(s)"
 WIRE_HOME="$WILLARD_HOME" "$WIRE" pull --json | jq -r '.written | length' | xargs -I{} echo "    willard pulled {} event(s)"
 
-grep -q "hello via v0.4.0 invite" "$WILLARD_HOME/state/wire/inbox/$PAUL_H.jsonl" \
-    || { echo "    FAIL: message not in willard inbox $WILLARD_HOME/state/wire/inbox/$PAUL_H.jsonl"; exit 1; }
+# D1: messages between paired peers are encrypted at rest — read via `tail`
+# (which decrypts for display), not the raw ciphertext inbox JSONL.
+WIRE_HOME="$WILLARD_HOME" "$WIRE" tail "$PAUL_H" --json | grep -q "hello via v0.4.0 invite" \
+    || { echo "    FAIL: message not in willard inbox (tail $PAUL_H)"; exit 1; }
 echo "    paul → willard verified"
 
 echo "→ willard → paul ack"
@@ -110,8 +112,8 @@ WIRE_HOME="$WILLARD_HOME" "$WIRE" send "$PAUL_H" decision "ack from willard" >/d
 WIRE_HOME="$WILLARD_HOME" "$WIRE" push --json | jq -r '.pushed | length' | xargs -I{} echo "    pushed {} event(s)"
 WIRE_HOME="$PAUL_HOME" "$WIRE" pull --json | jq -r '.written | length' | xargs -I{} echo "    paul pulled {} event(s)"
 
-grep -q "ack from willard" "$PAUL_HOME/state/wire/inbox/$WILL_H.jsonl" \
-    || { echo "    FAIL: ack not in paul inbox $PAUL_HOME/state/wire/inbox/$WILL_H.jsonl"; exit 1; }
+WIRE_HOME="$PAUL_HOME" "$WIRE" tail "$WILL_H" --json | grep -q "ack from willard" \
+    || { echo "    FAIL: ack not in paul inbox (tail $WILL_H)"; exit 1; }
 echo "    willard → paul verified"
 
 echo
