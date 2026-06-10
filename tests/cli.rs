@@ -1241,6 +1241,85 @@ fn send_deadline_writes_signed_time_sensitive_until() {
 }
 
 #[test]
+fn send_deadline_multibyte_final_char_errors_instead_of_panicking() {
+    // Regression: parse_deadline_until split the unit suffix off with a
+    // byte-index split_at, so a multi-byte final char ("30分", "5µ")
+    // panicked mid-send instead of returning a parse error.
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul", "--offline"]);
+    for bad in ["30分", "5µ", "日"] {
+        let out = run(
+            &home,
+            &[
+                "send",
+                "--queue",
+                "willard",
+                "decision",
+                "hello",
+                "--deadline",
+                bad,
+                "--json",
+            ],
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "send --deadline {bad} unexpectedly succeeded"
+        );
+        assert!(
+            !stderr.contains("panicked"),
+            "send --deadline {bad} panicked: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn send_deadline_garbage_errors_cleanly() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul", "--offline"]);
+    let out = run(
+        &home,
+        &[
+            "send",
+            "--queue",
+            "willard",
+            "decision",
+            "hello",
+            "--deadline",
+            "soonish",
+            "--json",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "garbage deadline accepted");
+    assert!(
+        !stderr.contains("panicked"),
+        "panicked on garbage: {stderr}"
+    );
+}
+
+#[test]
+fn group_list_empty_reports_no_groups() {
+    // First tests/cli.rs coverage for the group family: empty-state list,
+    // both human and --json shapes (e2e_group.rs covers the live flows).
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul", "--offline"]);
+    let out = run(&home, &["group", "list"]);
+    assert!(out.status.success(), "group list failed: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no groups yet"),
+        "unexpected empty-state output: {stdout}"
+    );
+
+    let out = run(&home, &["group", "list", "--json"]);
+    assert!(out.status.success(), "group list --json failed: {out:?}");
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v["groups"], serde_json::json!([]));
+}
+
+#[test]
 fn send_idempotent_under_identical_body() {
     // The same body produces the same event_id (content-addressed).
     let home = fresh_home();
