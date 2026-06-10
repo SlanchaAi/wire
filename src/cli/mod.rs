@@ -14813,7 +14813,7 @@ fn cmd_setup(apply: bool) -> Result<()> {
 /// Bundled Claude Code statusLine renderer (persona emoji + nickname + cwd,
 /// pidfile+tasklist liveness). Embedded at compile time; written to the
 /// Claude config dir on `wire setup --statusline --apply`.
-const STATUSLINE_RENDERER: &str = include_str!("../assets/wire-statusline.sh");
+const STATUSLINE_RENDERER: &str = include_str!("../../assets/wire-statusline.sh");
 
 /// `wire setup --statusline [--apply] [--remove]` — install/remove a Claude
 /// Code statusLine that renders this session's wire persona. Honors
