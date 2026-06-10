@@ -858,8 +858,34 @@ mod uds_tests {
         let listener = UnixListener::bind(&socket_path).expect("bind canned UDS");
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept canned UDS");
-            let mut req_buf = [0u8; 4096];
-            let _ = stream.read(&mut req_buf);
+            // Read the FULL request (headers + Content-Length body), not a
+            // single read(). `uds_request` writes headers and body in two
+            // syscalls; a single read can wake between them, after which
+            // responding + dropping the stream resets the client mid-write —
+            // the `uds_request_round_trips_200_with_body` flake (4 hits).
+            let mut req: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                req.extend_from_slice(&chunk[..n]);
+                if let Some(split) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&req[..split]);
+                    let content_length: usize = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if req.len() >= split + 4 + content_length {
+                        break;
+                    }
+                }
+            }
             let body_bytes = body.as_bytes();
             let status_text = match status {
                 200 => "OK",

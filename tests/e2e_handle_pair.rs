@@ -31,6 +31,7 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
     let out = Command::new(wire_bin())
         .args(args)
         .env("WIRE_HOME", home)
+        .env("WIRE_HOME_FORCE", "1")
         .output()
         .expect("spawn wire");
     if !out.status.success() {

@@ -30,6 +30,7 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
     let out = Command::new(wire_bin())
         .args(args)
         .env("WIRE_HOME", home)
+        .env("WIRE_HOME_FORCE", "1")
         .output()
         .expect("spawn wire");
     if !out.status.success() {
@@ -65,6 +66,7 @@ fn spawn_daemon(home: &PathBuf) -> DaemonGuard {
     let child = Command::new(wire_bin())
         .args(["daemon", "--interval", "1"])
         .env("WIRE_HOME", home)
+        .env("WIRE_HOME_FORCE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())

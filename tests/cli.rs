@@ -27,6 +27,7 @@ fn run(home: &PathBuf, args: &[&str]) -> std::process::Output {
     Command::new(wire_bin())
         .args(args)
         .env("WIRE_HOME", home)
+        .env("WIRE_HOME_FORCE", "1")
         .env_remove("RUST_LOG")
         .output()
         .expect("failed to spawn wire")
@@ -121,9 +122,12 @@ fn whoami_json_after_init_marks_initialized_true() {
 #[test]
 fn whoami_json_surfaces_session_source() {
     // RFC-008 §A: `wire whoami --json` reports WHICH signal won session/home
-    // resolution. The test harness pins `WIRE_HOME` explicitly (see `run`), so
-    // the winning source is the explicit-override path. This is the field an
-    // operator reads to diagnose a wrong/shared identity in one command.
+    // resolution. The test harness pins `WIRE_HOME` + `WIRE_HOME_FORCE=1`
+    // (see `run` — the force keeps the legacy-shape temp home winning over
+    // any ambient session key when tests run inside an agent host, per
+    // RFC-008 §C), so the winning source is the forced-override path. This
+    // is the field an operator reads to diagnose a wrong/shared identity in
+    // one command.
     let home = fresh_home();
     let _ = run(&home, &["init", "paul", "--offline"]);
     let out = run(&home, &["whoami", "--json"]);
@@ -131,8 +135,8 @@ fn whoami_json_surfaces_session_source() {
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         parsed["session_source"],
-        serde_json::json!("env:WIRE_HOME"),
-        "harness sets WIRE_HOME, so session_source must report the explicit override: {parsed}"
+        serde_json::json!("env:WIRE_HOME_FORCE"),
+        "harness sets WIRE_HOME + WIRE_HOME_FORCE, so session_source must report the forced override: {parsed}"
     );
 }
 
@@ -595,6 +599,7 @@ fn init_interactive_skipped_when_non_tty_v0_9_5() {
     let out = std::process::Command::new(wire_bin())
         .args(["init", "alice"])
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         .env("WIRE_NO_AUTO_JSON", "1")
         // Force the smart-default to fail (port that won't resolve) so we
         // hit the no-local-relay branch where interactive prompt MIGHT
@@ -639,6 +644,7 @@ fn accept_with_url_errors_and_redirects_v0_10() {
     let out = std::process::Command::new(wire_bin())
         .args(["accept", "wire://pair?v=1&inv=bogus"])
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         .env("WIRE_NO_AUTO_JSON", "1")
         .output()
         .expect("spawn wire");
@@ -661,6 +667,7 @@ fn accept_with_name_does_not_emit_deprecation_v0_9_4() {
     let out = std::process::Command::new(wire_bin())
         .args(["accept", "nonexistent-peer"])
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         .env("WIRE_NO_AUTO_JSON", "1")
         .output()
         .expect("spawn wire");
@@ -684,6 +691,7 @@ fn here_prints_self_when_no_neighbors_v0_9_3() {
     let out = std::process::Command::new(wire_bin())
         .args(["here"])
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         .env("WIRE_NO_AUTO_JSON", "1")
         .env("WIRE_EMOJI", "off") // deterministic in CI
         .output()
@@ -707,6 +715,7 @@ fn here_json_includes_self_sisters_peers_v0_9_3() {
     let out = std::process::Command::new(wire_bin())
         .args(["here", "--json"])
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         .output()
         .expect("spawn wire");
     assert!(out.status.success(), "here --json failed: {out:?}");
@@ -737,6 +746,7 @@ fn emoji_fallback_returns_ascii_tag_when_terminal_off_v0_9_3() {
     let out = std::process::Command::new(wire_bin())
         .args(["here"])
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         .env("WIRE_NO_AUTO_JSON", "1")
         .env("WIRE_EMOJI", "off")
         .output()
@@ -773,6 +783,7 @@ fn whois_typo_returns_did_you_mean_v0_9_2() {
     let out = std::process::Command::new(wire_bin())
         .args(["whois", typo])
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         .env("WIRE_NO_AUTO_JSON", "1")
         .output()
         .expect("spawn wire");
@@ -800,6 +811,7 @@ fn whois_typo_returns_json_success_with_candidates_v0_9_2() {
     let out = std::process::Command::new(wire_bin())
         .args(["whois", typo, "--json"])
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         .output()
         .expect("spawn wire");
     assert!(
@@ -892,6 +904,7 @@ fn json_auto_can_be_opted_out_v0_9_1() {
     let out = std::process::Command::new(wire_bin())
         .args(["whoami"])
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         .env("WIRE_NO_AUTO_JSON", "1")
         .output()
         .expect("spawn wire");
@@ -931,6 +944,7 @@ fn session_bind_attaches_existing_session_to_cwd_v0_7_1() {
     let out = Command::new(wire_bin())
         .args(["session", "bind", "wire", "--json"])
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         .env_remove("RUST_LOG")
         .current_dir(project_cwd.path())
         .output()
@@ -970,6 +984,7 @@ fn session_bind_errors_on_unknown_session_v0_7_1() {
     let out = Command::new(wire_bin())
         .args(["session", "bind", "ghost"])
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         .env_remove("RUST_LOG")
         .current_dir(project_cwd.path())
         .output()
@@ -996,6 +1011,7 @@ fn session_bind_is_idempotent_when_already_bound_v0_7_1() {
     let _ = Command::new(wire_bin())
         .args(["session", "bind", "wire", "--json"])
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         .current_dir(project_cwd.path())
         .output()
         .expect("first bind");
@@ -1004,6 +1020,7 @@ fn session_bind_is_idempotent_when_already_bound_v0_7_1() {
     let out = Command::new(wire_bin())
         .args(["session", "bind", "wire", "--json"])
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         .current_dir(project_cwd.path())
         .output()
         .expect("second bind");
@@ -1241,6 +1258,85 @@ fn send_deadline_writes_signed_time_sensitive_until() {
 }
 
 #[test]
+fn send_deadline_multibyte_final_char_errors_instead_of_panicking() {
+    // Regression: parse_deadline_until split the unit suffix off with a
+    // byte-index split_at, so a multi-byte final char ("30分", "5µ")
+    // panicked mid-send instead of returning a parse error.
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul", "--offline"]);
+    for bad in ["30分", "5µ", "日"] {
+        let out = run(
+            &home,
+            &[
+                "send",
+                "--queue",
+                "willard",
+                "decision",
+                "hello",
+                "--deadline",
+                bad,
+                "--json",
+            ],
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "send --deadline {bad} unexpectedly succeeded"
+        );
+        assert!(
+            !stderr.contains("panicked"),
+            "send --deadline {bad} panicked: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn send_deadline_garbage_errors_cleanly() {
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul", "--offline"]);
+    let out = run(
+        &home,
+        &[
+            "send",
+            "--queue",
+            "willard",
+            "decision",
+            "hello",
+            "--deadline",
+            "soonish",
+            "--json",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "garbage deadline accepted");
+    assert!(
+        !stderr.contains("panicked"),
+        "panicked on garbage: {stderr}"
+    );
+}
+
+#[test]
+fn group_list_empty_reports_no_groups() {
+    // First tests/cli.rs coverage for the group family: empty-state list,
+    // both human and --json shapes (e2e_group.rs covers the live flows).
+    let home = fresh_home();
+    let _ = run(&home, &["init", "paul", "--offline"]);
+    let out = run(&home, &["group", "list"]);
+    assert!(out.status.success(), "group list failed: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no groups yet"),
+        "unexpected empty-state output: {stdout}"
+    );
+
+    let out = run(&home, &["group", "list", "--json"]);
+    assert!(out.status.success(), "group list --json failed: {out:?}");
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(v["groups"], serde_json::json!([]));
+}
+
+#[test]
 fn send_idempotent_under_identical_body() {
     // The same body produces the same event_id (content-addressed).
     let home = fresh_home();
@@ -1334,6 +1430,7 @@ fn mcp_initialize_then_tools_list_round_trip() {
     let mut child = Command::new(wire_bin())
         .arg("mcp")
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         // v0.13: skip auto-bootstrap (which would hit the real federation
         // relay) — these tests drive identity/tools manually.
         .env("WIRE_MCP_SKIP_AUTO_UP", "1")
@@ -1408,6 +1505,7 @@ fn mcp_tools_call_wire_whoami() {
     let mut child = Command::new(wire_bin())
         .arg("mcp")
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         // v0.13: skip auto-bootstrap (which would hit the real federation
         // relay) — these tests drive identity/tools manually.
         .env("WIRE_MCP_SKIP_AUTO_UP", "1")
@@ -1469,6 +1567,7 @@ fn mcp_tools_call_wire_init_idempotent_on_repeat() {
     let mut child = Command::new(wire_bin())
         .arg("mcp")
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         // v0.13: skip auto-bootstrap (which would hit the real federation
         // relay) — these tests drive identity/tools manually.
         .env("WIRE_MCP_SKIP_AUTO_UP", "1")
