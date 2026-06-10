@@ -33,6 +33,7 @@ pub(crate) use comms::parse_deadline_until;
 pub(crate) use relay::cmd_bind_relay;
 pub use relay::error_smells_like_slot_4xx;
 pub use relay::run_sync_pull;
+pub use relay::run_sync_push;
 
 /// Top-level CLI.
 #[derive(Parser, Debug)]

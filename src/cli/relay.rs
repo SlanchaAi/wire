@@ -1236,7 +1236,7 @@ pub(super) fn cmd_daemon(
 
 /// Programmatic push (no stdout, no exit on errors). Returns the same JSON
 /// shape `wire push --json` emits.
-fn run_sync_push() -> Result<Value> {
+pub fn run_sync_push() -> Result<Value> {
     let state = config::read_relay_state()?;
     let peers = state["peers"].as_object().cloned().unwrap_or_default();
     if peers.is_empty() {
