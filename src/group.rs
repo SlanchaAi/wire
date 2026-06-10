@@ -242,7 +242,29 @@ pub fn groups_dir() -> Result<PathBuf> {
     Ok(crate::config::config_dir()?.join("groups"))
 }
 
+/// Reject a group id that isn't a safe single filename component before it is
+/// interpolated into a path. A group id arrives attacker-controlled inside a
+/// join code (`cmd_group_join` deserializes the `Group` and TOFU-verifies it
+/// against the creator key carried IN the roster — so the crafter signs their
+/// own roster and `id` is fully attacker-chosen yet signature-valid). Without
+/// this guard, `id = "../trust"` writes `<config>/wire/trust.json`, an
+/// arbitrary-relative-path write / identity-store clobber. Legit ids are
+/// `g<16hex>` (see `cmd_group_create`); allow `[A-Za-z0-9_-]{1,64}`, which
+/// excludes `.`, `/`, `\`, and `..` by construction.
+fn validate_group_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        bail!("invalid group id {id:?} (must be 1-64 chars of [A-Za-z0-9_-])");
+    }
+    Ok(())
+}
+
 fn group_path(id: &str) -> Result<PathBuf> {
+    validate_group_id(id)?;
     Ok(groups_dir()?.join(format!("{id}.json")))
 }
 
@@ -464,5 +486,34 @@ mod tests {
         .unwrap();
         let targets = g.other_member_handles("did:wire:creator-aaaaaaaa");
         assert_eq!(targets, vec!["bob".to_string()], "fan-out excludes self");
+    }
+
+    #[test]
+    fn group_id_path_traversal_is_rejected() {
+        // A malicious join code carries an attacker-chosen `group.id` that is
+        // signature-valid (self-signed roster). The path boundary MUST reject
+        // anything that isn't a safe filename component, BEFORE any FS op — so
+        // `id = "../trust"` can't clobber `<config>/wire/trust.json`.
+        for bad in [
+            "../trust",
+            "../../config/wire/agent-card",
+            "a/b",
+            "a\\b",
+            "..",
+            ".",
+            "a.b",
+            "",
+            &"x".repeat(65),
+        ] {
+            assert!(
+                group_path(bad).is_err(),
+                "path traversal not rejected: {bad:?}"
+            );
+            assert!(validate_group_id(bad).is_err(), "id not rejected: {bad:?}");
+        }
+        // Legit ids (the `g<16hex>` form from cmd_group_create) pass.
+        for ok in ["g0123456789abcdef", "my-group_1", "G9"] {
+            assert!(group_path(ok).is_ok(), "legit id rejected: {ok:?}");
+        }
     }
 }
