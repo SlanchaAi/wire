@@ -2706,6 +2706,91 @@ pub(super) fn effective_peer_tier(trust: &Value, relay_state: &Value, handle: &s
     crate::trust::effective_tier(trust, relay_state, handle)
 }
 
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn trust_with(handle: &str, tier: &str) -> Value {
+        json!({
+            "version": 1,
+            "agents": {
+                handle: {
+                    "tier": tier,
+                    "did": format!("did:wire:{handle}"),
+                    "card": {"capabilities": ["wire/v3.1"]}
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn pending_ack_when_verified_but_no_slot_token() {
+        // P0.Y rule: after `wire add`, trust says VERIFIED but the peer's
+        // slot_token hasn't arrived yet. Display PENDING_ACK so the
+        // operator knows wire send won't work yet.
+        let trust = trust_with("willard", "VERIFIED");
+        let relay_state = json!({
+            "peers": {
+                "willard": {
+                    "relay_url": "https://relay",
+                    "slot_id": "abc",
+                    "slot_token": "",
+                }
+            }
+        });
+        assert_eq!(
+            effective_peer_tier(&trust, &relay_state, "willard"),
+            "PENDING_ACK"
+        );
+    }
+
+    #[test]
+    fn verified_when_slot_token_present() {
+        let trust = trust_with("willard", "VERIFIED");
+        let relay_state = json!({
+            "peers": {
+                "willard": {
+                    "relay_url": "https://relay",
+                    "slot_id": "abc",
+                    "slot_token": "tok123",
+                }
+            }
+        });
+        assert_eq!(
+            effective_peer_tier(&trust, &relay_state, "willard"),
+            "VERIFIED"
+        );
+    }
+
+    #[test]
+    fn raw_tier_passes_through_for_non_verified() {
+        // PENDING_ACK should ONLY decorate VERIFIED. UNTRUSTED stays
+        // UNTRUSTED regardless of slot_token state.
+        let trust = trust_with("willard", "UNTRUSTED");
+        let relay_state = json!({
+            "peers": {"willard": {"slot_token": ""}}
+        });
+        assert_eq!(
+            effective_peer_tier(&trust, &relay_state, "willard"),
+            "UNTRUSTED"
+        );
+    }
+
+    #[test]
+    fn pending_ack_when_relay_state_missing_peer() {
+        // After wire add, trust gets updated BEFORE relay_state.peers does.
+        // If relay_state has no entry for the peer at all, the operator
+        // still hasn't completed the bilateral pin — show PENDING_ACK.
+        let trust = trust_with("willard", "VERIFIED");
+        let relay_state = json!({"peers": {}});
+        assert_eq!(
+            effective_peer_tier(&trust, &relay_state, "willard"),
+            "PENDING_ACK"
+        );
+    }
+}
+
 pub(super) fn parse_kind(s: &str) -> Result<u32> {
     if let Ok(n) = s.parse::<u32>() {
         return Ok(n);
