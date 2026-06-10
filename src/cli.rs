@@ -3933,7 +3933,10 @@ pub(crate) fn parse_deadline_until(input: &str) -> Result<String> {
     {
         return Ok(trimmed.to_string());
     }
-    let (amount, unit) = trimmed.split_at(trimmed.len().saturating_sub(1));
+    // Split before the LAST CHAR, not the last byte — a multi-byte final
+    // char (`30分`) would land `split_at` mid-char and panic.
+    let unit_start = trimmed.char_indices().next_back().map_or(0, |(i, _)| i);
+    let (amount, unit) = trimmed.split_at(unit_start);
     let n: i64 = amount
         .parse()
         .with_context(|| format!("deadline must be `30m`, `2h`, `1d`, or RFC3339: {input:?}"))?;
@@ -3949,6 +3952,43 @@ pub(crate) fn parse_deadline_until(input: &str) -> Result<String> {
     Ok((time::OffsetDateTime::now_utc() + duration)
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string()))
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn duration_shorthand_parses() {
+        assert!(parse_deadline_until("30m").is_ok());
+        assert!(parse_deadline_until("2h").is_ok());
+        assert!(parse_deadline_until("1d").is_ok());
+    }
+
+    #[test]
+    fn rfc3339_passes_through() {
+        assert_eq!(
+            parse_deadline_until("2030-01-02T03:04:05Z").unwrap(),
+            "2030-01-02T03:04:05Z"
+        );
+    }
+
+    #[test]
+    fn garbage_is_an_error_not_a_panic() {
+        assert!(parse_deadline_until("soon").is_err());
+        assert!(parse_deadline_until("").is_err());
+        assert!(parse_deadline_until("-5m").is_err());
+        assert!(parse_deadline_until("0h").is_err());
+    }
+
+    #[test]
+    fn multibyte_final_char_is_an_error_not_a_panic() {
+        // Regression: `split_at(len - 1)` used a byte index; a multi-byte
+        // final char (`分`, `µ`, `日`) landed mid-char and panicked.
+        assert!(parse_deadline_until("30分").is_err());
+        assert!(parse_deadline_until("5µ").is_err());
+        assert!(parse_deadline_until("日").is_err());
+    }
 }
 
 fn cmd_send(
@@ -7833,9 +7873,14 @@ fn introduce_pin(
     let now = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
+    // Tolerate a corrupt trust.json whose root is valid JSON but not an
+    // object (`[]`, `"x"`) — coerce instead of panicking mid-`group tail`.
+    if !trust.is_object() {
+        *trust = json!({});
+    }
     let agents = trust
         .as_object_mut()
-        .expect("trust is an object")
+        .expect("trust root coerced to object above")
         .entry("agents")
         .or_insert_with(|| json!({}));
     let key_rec = json!({"key_id": key_id, "key": key, "added_at": now, "active": true});
@@ -7868,6 +7913,46 @@ fn introduce_pin(
                 "pinned_at": now,
             });
             true
+        }
+    }
+}
+
+#[cfg(test)]
+mod introduce_pin_tests {
+    use super::*;
+
+    #[test]
+    fn pins_new_member_at_untrusted() {
+        let mut trust = json!({"version": 1, "agents": {}});
+        let changed = introduce_pin(&mut trust, "willard", "did:wire:willard", "k1", "PK", "g1");
+        assert!(changed);
+        let agent = &trust["agents"]["willard"];
+        assert_eq!(agent["tier"], "UNTRUSTED");
+        assert_eq!(agent["public_keys"][0]["key_id"], "k1");
+    }
+
+    #[test]
+    fn never_touches_existing_tier() {
+        let mut trust = json!({
+            "agents": {"willard": {"tier": "VERIFIED", "public_keys": [
+                {"key_id": "k1", "key": "PK", "active": true}
+            ]}}
+        });
+        let changed = introduce_pin(&mut trust, "willard", "did:wire:willard", "k1", "PK", "g1");
+        assert!(!changed);
+        assert_eq!(trust["agents"]["willard"]["tier"], "VERIFIED");
+    }
+
+    #[test]
+    fn non_object_trust_root_is_coerced_not_a_panic() {
+        // Regression: a corrupt trust.json whose root is valid JSON but not an
+        // object (`[]`, `"x"`) hit `.expect("trust is an object")` and panicked
+        // in `wire group tail` / `wire group join`.
+        for mut trust in [json!([]), json!("corrupt"), json!(42), Value::Null] {
+            let changed =
+                introduce_pin(&mut trust, "willard", "did:wire:willard", "k1", "PK", "g1");
+            assert!(changed, "coerced root should accept the pin");
+            assert_eq!(trust["agents"]["willard"]["tier"], "UNTRUSTED");
         }
     }
 }
@@ -8067,7 +8152,16 @@ fn cmd_group_add(group_ref: &str, peer: &str, as_json: bool) -> Result<()> {
     crate::group::save_group(&group)?;
     // Distribute the refreshed signed roster (room coords + everyone's keys) to
     // ALL members so each can post + verify the others.
-    let delivered = distribute_group_invite(&group, &self_did).unwrap_or(0);
+    let delivered = match distribute_group_invite(&group, &self_did) {
+        Ok(n) => n,
+        Err(e) => {
+            // Non-fatal: the member IS added (group saved above); warn so the
+            // operator knows no roster invites were queued instead of reading
+            // "invites_queued: 0" as a successful no-op.
+            eprintln!("wire group add: member added but roster distribution failed: {e:#}");
+            0
+        }
+    };
     if as_json {
         println!(
             "{}",
@@ -8195,8 +8289,10 @@ fn cmd_group_tail(group_ref: &str, limit: usize, as_json: bool) -> Result<()> {
             trust_changed = true;
         }
     }
-    if trust_changed {
-        let _ = config::write_trust(&trust);
+    if trust_changed && let Err(e) = config::write_trust(&trust) {
+        // Non-fatal: the in-memory trust still verifies this tail; warn so
+        // the operator knows the introduced keys didn't persist for next run.
+        eprintln!("wire group tail: failed to persist introduced member keys: {e:#}");
     }
 
     // Pass 2: build the timeline — group messages (verified against the
@@ -9548,6 +9644,44 @@ fn cmd_session_new(
     emit_session_new_result(&info, "created", as_json)
 }
 
+/// Coerce a JSON document whose root is valid JSON but not an object
+/// (`[]`, `"x"`, `42`, `null`) back to `{}` so callers can mutate it
+/// with `as_object_mut()` without panicking. The slot-allocation paths
+/// load `relay.json` with a parse-failure fallback to `{}`, but a file
+/// holding valid non-object JSON sailed past that fallback and hit the
+/// `expect("relay_state root is an object")` below.
+fn coerce_object_root(v: &mut serde_json::Value) {
+    if !v.is_object() {
+        *v = serde_json::json!({});
+    }
+}
+
+#[cfg(test)]
+mod coerce_object_root_tests {
+    use super::coerce_object_root;
+    use serde_json::json;
+
+    #[test]
+    fn non_object_roots_are_coerced_to_empty_object() {
+        for mut corrupt in [
+            json!([]),
+            json!("corrupt"),
+            json!(42),
+            serde_json::Value::Null,
+        ] {
+            coerce_object_root(&mut corrupt);
+            assert!(corrupt.is_object(), "root not coerced: {corrupt}");
+        }
+    }
+
+    #[test]
+    fn object_root_is_left_untouched() {
+        let mut state = json!({"self": {"endpoints": [1, 2]}});
+        coerce_object_root(&mut state);
+        assert_eq!(state, json!({"self": {"endpoints": [1, 2]}}));
+    }
+}
+
 /// v0.7.0-alpha.18: probe + allocate against a UDS-bound relay, then
 /// merge the resulting Uds endpoint into `self.endpoints[]` so paired
 /// sister sessions can route over the local socket instead of loopback
@@ -9642,9 +9776,10 @@ fn try_allocate_uds_slot(
         alloc.slot_token.clone(),
     ));
 
+    coerce_object_root(&mut state);
     let self_obj = state
         .as_object_mut()
-        .expect("relay_state root is an object")
+        .expect("relay_state root coerced to object above")
         .entry("self")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     if !self_obj.is_object() {
@@ -9757,9 +9892,10 @@ fn try_allocate_lan_slot(session_home: &std::path::Path, handle: &str, lan_relay
         alloc.slot_token.clone(),
     ));
 
+    coerce_object_root(&mut state);
     let self_obj = state
         .as_object_mut()
-        .expect("relay_state root is an object")
+        .expect("relay_state root coerced to object above")
         .entry("self")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     if !self_obj.is_object() {
@@ -9901,9 +10037,10 @@ fn try_allocate_local_slot(
             alloc.slot_token.clone(),
         ),
     };
+    coerce_object_root(&mut state);
     let self_obj = state
         .as_object_mut()
-        .expect("relay_state root is an object")
+        .expect("relay_state root coerced to object above")
         .entry("self")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     // The entry might be Value::Null (left by read_relay_state's default
