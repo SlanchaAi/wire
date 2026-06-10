@@ -8152,7 +8152,16 @@ fn cmd_group_add(group_ref: &str, peer: &str, as_json: bool) -> Result<()> {
     crate::group::save_group(&group)?;
     // Distribute the refreshed signed roster (room coords + everyone's keys) to
     // ALL members so each can post + verify the others.
-    let delivered = distribute_group_invite(&group, &self_did).unwrap_or(0);
+    let delivered = match distribute_group_invite(&group, &self_did) {
+        Ok(n) => n,
+        Err(e) => {
+            // Non-fatal: the member IS added (group saved above); warn so the
+            // operator knows no roster invites were queued instead of reading
+            // "invites_queued: 0" as a successful no-op.
+            eprintln!("wire group add: member added but roster distribution failed: {e:#}");
+            0
+        }
+    };
     if as_json {
         println!(
             "{}",
@@ -8280,8 +8289,10 @@ fn cmd_group_tail(group_ref: &str, limit: usize, as_json: bool) -> Result<()> {
             trust_changed = true;
         }
     }
-    if trust_changed {
-        let _ = config::write_trust(&trust);
+    if trust_changed && let Err(e) = config::write_trust(&trust) {
+        // Non-fatal: the in-memory trust still verifies this tail; warn so
+        // the operator knows the introduced keys didn't persist for next run.
+        eprintln!("wire group tail: failed to persist introduced member keys: {e:#}");
     }
 
     // Pass 2: build the timeline — group messages (verified against the
