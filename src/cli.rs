@@ -9633,6 +9633,44 @@ fn cmd_session_new(
     emit_session_new_result(&info, "created", as_json)
 }
 
+/// Coerce a JSON document whose root is valid JSON but not an object
+/// (`[]`, `"x"`, `42`, `null`) back to `{}` so callers can mutate it
+/// with `as_object_mut()` without panicking. The slot-allocation paths
+/// load `relay.json` with a parse-failure fallback to `{}`, but a file
+/// holding valid non-object JSON sailed past that fallback and hit the
+/// `expect("relay_state root is an object")` below.
+fn coerce_object_root(v: &mut serde_json::Value) {
+    if !v.is_object() {
+        *v = serde_json::json!({});
+    }
+}
+
+#[cfg(test)]
+mod coerce_object_root_tests {
+    use super::coerce_object_root;
+    use serde_json::json;
+
+    #[test]
+    fn non_object_roots_are_coerced_to_empty_object() {
+        for mut corrupt in [
+            json!([]),
+            json!("corrupt"),
+            json!(42),
+            serde_json::Value::Null,
+        ] {
+            coerce_object_root(&mut corrupt);
+            assert!(corrupt.is_object(), "root not coerced: {corrupt}");
+        }
+    }
+
+    #[test]
+    fn object_root_is_left_untouched() {
+        let mut state = json!({"self": {"endpoints": [1, 2]}});
+        coerce_object_root(&mut state);
+        assert_eq!(state, json!({"self": {"endpoints": [1, 2]}}));
+    }
+}
+
 /// v0.7.0-alpha.18: probe + allocate against a UDS-bound relay, then
 /// merge the resulting Uds endpoint into `self.endpoints[]` so paired
 /// sister sessions can route over the local socket instead of loopback
@@ -9727,9 +9765,10 @@ fn try_allocate_uds_slot(
         alloc.slot_token.clone(),
     ));
 
+    coerce_object_root(&mut state);
     let self_obj = state
         .as_object_mut()
-        .expect("relay_state root is an object")
+        .expect("relay_state root coerced to object above")
         .entry("self")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     if !self_obj.is_object() {
@@ -9842,9 +9881,10 @@ fn try_allocate_lan_slot(session_home: &std::path::Path, handle: &str, lan_relay
         alloc.slot_token.clone(),
     ));
 
+    coerce_object_root(&mut state);
     let self_obj = state
         .as_object_mut()
-        .expect("relay_state root is an object")
+        .expect("relay_state root coerced to object above")
         .entry("self")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     if !self_obj.is_object() {
@@ -9986,9 +10026,10 @@ fn try_allocate_local_slot(
             alloc.slot_token.clone(),
         ),
     };
+    coerce_object_root(&mut state);
     let self_obj = state
         .as_object_mut()
-        .expect("relay_state root is an object")
+        .expect("relay_state root coerced to object above")
         .entry("self")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     // The entry might be Value::Null (left by read_relay_state's default
