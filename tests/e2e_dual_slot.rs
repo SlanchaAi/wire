@@ -43,6 +43,7 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
     let out = Command::new(wire_bin())
         .args(args)
         .env("WIRE_HOME", home)
+        .env("WIRE_HOME_FORCE", "1")
         .output()
         .expect("spawn wire");
     if !out.status.success() {
@@ -216,6 +217,7 @@ async fn up_opportunistically_dual_binds_local_relay() {
     let out = Command::new(wire_bin())
         .args(["up", &fed, "--with-local", &local, "--json"])
         .env("WIRE_HOME", &home)
+        .env("WIRE_HOME_FORCE", "1")
         .env("WIRE_MCP_SKIP_AUTO_UP", "1")
         .output()
         .expect("spawn wire up");
