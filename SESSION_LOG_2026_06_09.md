@@ -41,9 +41,13 @@ Every PR carries container-gate evidence (`test-env/run.sh`, full `--all-targets
 
 9 unit (with fixes, #239) + 3 integration (#241): deadline multi-byte CLI regression, deadline garbage, group list empty-state (first tests/cli.rs group coverage).
 
-## Known host flake (pre-existing, not introduced)
+## Two long-standing flakes root-caused + fixed (follow-up commits on #241)
 
-`send_deadline_writes_signed_time_sensitive_until` fails on THIS host (passes in container): send exits 0 but outbox lands outside `WIRE_HOME` when cwd has live `wire session` registry state. Matches the known shared-host-state flake category (see memory `feedback_run_wire_tests_isolated_env`). Flagged in #241 body. Candidate real bug: WIRE_HOME should probably beat session-registry cwd resolution in spawned subprocesses — worth a scoped look, NOT bundled into this stack.
+**1. "wire tests flake on dev hosts" — RFC-008 §C precedence flip (06e14c6).**
+Test harnesses spawn `wire` with a legacy-shape temp `WIRE_HOME`; under an agent host the child inherits a session key (`CLAUDE_CODE_SESSION_ID`, or the `~/.claude/sessions/<pid>.json` parent-walk in `session.rs`), and `maybe_adopt_session_wire_home` (§C) drops `WIRE_HOME` — wire writes to the real `sessions/by-key/<hash>`. send exits 0, the test's outbox read hits NotFound. Deterministic on any `cargo test` inside a Claude Code terminal; invisible in containers. Fix: `WIRE_HOME_FORCE=1` (the documented §C escape — returns before both the env chain and the pidfile walk) pinned at all 28 spawn sites across 10 test files. Proof: tests/cli.rs 71/71 green on host, previously deterministic-fail. `whoami_json_surfaces_session_source` updated to expect `env:WIRE_HOME_FORCE`.
+
+**2. `uds_request_round_trips_200_with_body` ECONNRESET flake — canned-server single-read race (8c6a1d3).**
+4th hit graduated it per the flake memory's rule. `uds_request` writes headers and body in TWO syscalls; `spawn_canned_uds_server` did ONE read() then responded and dropped the stream — wake between the writes → reset mid-request. Fix: canned server reads headers through Content-Length bytes before responding. Production untouched. 50 serial runs green. Future flakes of this test = new cause; investigate fresh.
 
 ## Artifacts
 
