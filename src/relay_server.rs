@@ -1193,6 +1193,26 @@ async fn handle_claim(
         }
     };
 
+    // ONE-NAME rule, enforced server-side. The claimed nick MUST equal
+    // the card's DID-derived persona. The client coerces this before
+    // POSTing, but that's courtesy — a raw HTTP claim could otherwise
+    // map an arbitrary nick (e.g. a well-known handle) onto a foreign
+    // DID, so `wire dial <nick>@relay` would resolve to the impostor.
+    // `verify_agent_card` above already proved the DID commits to the
+    // card's key, so this binds nick → key transitively.
+    let canonical_nick = crate::agent_card::display_handle_from_did(&did);
+    if req.nick != canonical_nick {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "phyllis: that nick doesn't match your DID — wire publishes one name, and it's the one your key spells out",
+                "nick": req.nick,
+                "expected": canonical_nick,
+            })),
+        )
+            .into_response();
+    }
+
     // FCFS check. Also snapshot the existing record (clone) so the
     // re-claim path below can preserve fields the client didn't include
     // in the request (notably `discoverable` from v0.5.19, so an old
