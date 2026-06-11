@@ -194,14 +194,29 @@ pub fn daemon_liveness() -> DaemonLiveness {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| s.trim().parse::<u32>().ok())
         .filter(|p| pid_is_alive(*p));
+    // v0.15.1: scope the orphan check to daemons that serve OUR WIRE_HOME.
+    // `pgrep "wire daemon"` is machine-global, but a daemon only "races
+    // our relay cursor" if it points at the SAME state tree. Pre-fix, a
+    // fresh install / any non-default WIRE_HOME ran the global scan but
+    // built its exclusion set (known_session_pids, supervisor) from the
+    // CURRENT home's sessions_root — so the operator's real default-home
+    // daemons all showed up as "orphan daemon process(es)... Multiple
+    // daemons race the relay cursor" on the very first `wire status`,
+    // even though they touch a completely different home.
+    let our_home = std::env::var("WIRE_HOME").ok();
     let orphan_pids: Vec<u32> = pgrep_pids
         .iter()
-        .filter(|p| {
-            Some(**p) != pidfile_pid
-                && !known_session_pids.contains(*p)
-                && Some(**p) != supervisor_pid
-        })
         .copied()
+        .filter(|p| {
+            is_orphan_for_home(
+                *p,
+                pidfile_pid,
+                &known_session_pids,
+                supervisor_pid,
+                our_home.as_deref(),
+                crate::session::read_wire_home_from_pid(*p).as_deref(),
+            )
+        })
         .collect();
     DaemonLiveness {
         pidfile_pid,
@@ -210,6 +225,37 @@ pub fn daemon_liveness() -> DaemonLiveness {
         orphan_pids,
         record,
     }
+}
+
+/// Pure orphan predicate (pid-home reader injected for testability).
+///
+/// `pid` is a true orphan — a `wire daemon` racing OUR relay cursor with
+/// no legitimate owner — iff ALL hold:
+/// - it is not our own pidfile pid,
+/// - it is not any registered session's daemon pid,
+/// - it is not the `--all-sessions` supervisor,
+/// - AND it serves the SAME WIRE_HOME as us (`pid_home == our_home`,
+///   where `None == None` means both serve the default home).
+///
+/// The home check is the v0.15.1 fix: it is strictly subtractive (only
+/// ever removes a candidate), so it can never invent an orphan — it just
+/// stops a daemon for a *different* home (the operator's real install,
+/// seen by the machine-global `pgrep` from inside a fresh/temp home) from
+/// being mislabeled as racing our cursor. A pid whose home can't be read
+/// on this platform (`pid_home == None` on Windows) only matches when our
+/// home is also unreadable/default — the safe direction for the noise.
+fn is_orphan_for_home(
+    pid: u32,
+    pidfile_pid: Option<u32>,
+    known_session_pids: &std::collections::HashSet<u32>,
+    supervisor_pid: Option<u32>,
+    our_home: Option<&str>,
+    pid_home: Option<&str>,
+) -> bool {
+    Some(pid) != pidfile_pid
+        && !known_session_pids.contains(&pid)
+        && Some(pid) != supervisor_pid
+        && pid_home == our_home
 }
 
 /// Read a pid file. Only the JSON `DaemonPid` form is supported; any
@@ -544,6 +590,69 @@ mod tests {
     #[test]
     fn process_alive_self() {
         assert!(process_alive(std::process::id()));
+    }
+
+    #[test]
+    fn orphan_excludes_daemon_serving_a_different_home() {
+        // The v0.15.1 regression: a fresh install (our_home = temp) runs
+        // a machine-global pgrep that sees the operator's real default-home
+        // daemon (pid_home = None). It must NOT be flagged as an orphan
+        // racing our cursor.
+        let empty = std::collections::HashSet::new();
+        assert!(!is_orphan_for_home(
+            42,
+            None,
+            &empty,
+            None,
+            Some("/tmp/fresh/home"), // we run under a temp WIRE_HOME
+            None,                    // the real daemon serves the default home
+        ));
+        // A foreign Some-home daemon is likewise not ours.
+        assert!(!is_orphan_for_home(
+            42,
+            None,
+            &empty,
+            None,
+            Some("/tmp/fresh/home"),
+            Some("/Users/op/other/home"),
+        ));
+    }
+
+    #[test]
+    fn orphan_flags_unowned_daemon_on_same_home() {
+        // A genuine orphan: same home as us, not our pidfile, not a known
+        // session, not the supervisor → still flagged (feature preserved).
+        let empty = std::collections::HashSet::new();
+        // Both default home (None == None).
+        assert!(is_orphan_for_home(42, Some(7), &empty, Some(9), None, None));
+        // Both the same explicit home.
+        assert!(is_orphan_for_home(
+            42,
+            None,
+            &empty,
+            None,
+            Some("/h"),
+            Some("/h")
+        ));
+    }
+
+    #[test]
+    fn orphan_excludes_self_session_and_supervisor_even_on_same_home() {
+        let mut known = std::collections::HashSet::new();
+        known.insert(100u32);
+        // our own pidfile pid
+        assert!(!is_orphan_for_home(7, Some(7), &known, Some(9), None, None));
+        // a registered session daemon
+        assert!(!is_orphan_for_home(
+            100,
+            Some(7),
+            &known,
+            Some(9),
+            None,
+            None
+        ));
+        // the supervisor
+        assert!(!is_orphan_for_home(9, Some(7), &known, Some(9), None, None));
     }
 
     #[test]
