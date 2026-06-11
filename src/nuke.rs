@@ -62,6 +62,21 @@ impl NukePlan {
     /// half-aborts leaves a confusing machine — the whole point is to
     /// finish the job; cf. rustup #1072).
     pub fn execute(&self) -> Result<NukeReport> {
+        self.execute_with(|kind| crate::service::uninstall_kind(kind).map(|rep| rep.platform))
+    }
+
+    /// `execute` with the service-unit teardown injected. The unit
+    /// uninstall is the ONE machine-global step that no temp `WIRE_HOME`
+    /// can scope — calling the real thing from a unit test boots the
+    /// operator's live launchd daemon out from under them (it did,
+    /// 2026-06-11: every host `cargo test --lib` removed the dev box's
+    /// `sh.slancha.wire.daemon` unit and killed its process tree — THE
+    /// recurring "wire is mysteriously down" engine). Tests pass a stub;
+    /// only `execute()` reaches launchctl/systemd/schtasks.
+    fn execute_with<U>(&self, uninstall_unit: U) -> Result<NukeReport>
+    where
+        U: Fn(crate::service::ServiceKind) -> Result<String>,
+    {
         let mut r = NukeReport::default();
 
         // 1. Service units (cross-platform via existing impl).
@@ -69,8 +84,8 @@ impl NukePlan {
             crate::service::ServiceKind::Daemon,
             crate::service::ServiceKind::LocalRelay,
         ] {
-            match crate::service::uninstall_kind(kind) {
-                Ok(rep) => r.removed_units.push(format!("{kind:?}: {}", rep.platform)),
+            match uninstall_unit(kind) {
+                Ok(platform) => r.removed_units.push(format!("{kind:?}: {platform}")),
                 Err(e) => r.warnings.push(format!("uninstall {kind:?}: {e:#}")),
             }
         }
@@ -120,6 +135,63 @@ pub fn should_proceed(force: bool, is_tty: bool, read_line: impl FnOnce() -> Str
         return false;
     }
     read_line().trim() == "nuke"
+}
+
+/// Parse `(cwd, session-name)` bindings out of a session registry's raw
+/// bytes. Malformed/empty input → no bindings (the guard then stays
+/// silent, matching a machine with no operator install).
+pub fn parse_registry_bindings(bytes: &[u8]) -> Vec<(String, String)> {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
+    let Some(by_cwd) = v.get("by_cwd").and_then(|m| m.as_object()) else {
+        return Vec::new();
+    };
+    by_cwd
+        .iter()
+        .filter_map(|(cwd, name)| name.as_str().map(|n| (cwd.clone(), n.to_string())))
+        .collect()
+}
+
+/// Read the cwd→session bindings of the machine's DEFAULT registry —
+/// `WIRE_HOME` deliberately ignored, because nuke's unit/process/MCP
+/// teardown is machine-global no matter what home the caller resolved.
+/// Any read failure → empty (no install worth guarding).
+pub fn default_registry_bindings() -> Vec<(String, String)> {
+    let Ok(root) = crate::session::default_sessions_root() else {
+        return Vec::new();
+    };
+    match std::fs::read(root.join("registry.json")) {
+        Ok(bytes) => parse_registry_bindings(&bytes),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Operator-machine guard. `wire nuke` tears down MACHINE-GLOBAL
+/// surfaces — launchd/systemd units, host MCP configs, every running
+/// wire daemon — regardless of `WIRE_HOME`, so an agent or test harness
+/// invoking it under a temp home still takes the operator's live
+/// install down with it (this killed a dev box's daemon during v0.15
+/// testing). Registry cwd bindings only exist when an operator
+/// deliberately bound sessions, so they are the "live install" signal.
+/// Returns the refusal message, or `None` to proceed.
+pub fn host_guard_refusal(bound: &[(String, String)], really: bool) -> Option<String> {
+    if really || bound.is_empty() {
+        return None;
+    }
+    let mut msg = format!(
+        "refusing to nuke: this machine has a live wire install ({} registry-bound session(s)):\n",
+        bound.len()
+    );
+    for (cwd, name) in bound {
+        msg.push_str(&format!("  {name}  ←  {cwd}\n"));
+    }
+    msg.push_str(
+        "nuke removes launchd/systemd units, MCP registrations, and kills every wire daemon \
+         machine-wide — even when WIRE_HOME points elsewhere.\n\
+         If you really mean this machine, re-run with --really-this-machine.",
+    );
+    Some(msg)
 }
 
 /// What a nuke actually did (for --json + operator output).
@@ -197,7 +269,11 @@ mod tests {
                 mcp_files: vec![mcp.clone()],
                 purge_binary: false,
             };
-            let report = plan.execute().unwrap();
+            // Stub the unit teardown — NEVER call `execute()` (the real
+            // launchctl path) from a test; it boots the host's live
+            // daemon out. See `execute_with`'s doc.
+            let report = plan.execute_with(|_kind| Ok("stub".to_string())).unwrap();
+            assert_eq!(report.removed_units.len(), 2, "both unit kinds attempted");
             assert!(!state.exists(), "state dir deleted");
             let v: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&mcp).unwrap()).unwrap();
@@ -205,5 +281,58 @@ mod tests {
             assert!(report.removed_paths.contains(&state));
             assert!(report.removed_mcp_entries.contains(&mcp));
         });
+    }
+
+    // ---- host guard ----
+
+    #[test]
+    fn host_guard_silent_with_no_bindings() {
+        // Fresh machine / CI runner: default registry empty → no guard.
+        assert_eq!(host_guard_refusal(&[], false), None);
+        assert_eq!(host_guard_refusal(&[], true), None);
+    }
+
+    #[test]
+    fn host_guard_refuses_bound_machine_without_flag() {
+        let bound = vec![(
+            "/Users/op/Source/wire".to_string(),
+            "slancha-wire".to_string(),
+        )];
+        let msg = host_guard_refusal(&bound, false).expect("guard must refuse");
+        // The refusal must name what it's protecting and the override.
+        assert!(msg.contains("slancha-wire"));
+        assert!(msg.contains("/Users/op/Source/wire"));
+        assert!(msg.contains("--really-this-machine"));
+    }
+
+    #[test]
+    fn host_guard_passes_with_explicit_flag() {
+        let bound = vec![("/x".to_string(), "s".to_string())];
+        assert_eq!(host_guard_refusal(&bound, true), None);
+    }
+
+    #[test]
+    fn registry_bindings_parse_shapes() {
+        // Real shape.
+        let bytes = br#"{"by_cwd":{"/a":"one","/b":"two"}}"#;
+        let mut got = parse_registry_bindings(bytes);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("/a".to_string(), "one".to_string()),
+                ("/b".to_string(), "two".to_string())
+            ]
+        );
+        // Empty map, missing key, non-object, garbage → no bindings.
+        assert!(parse_registry_bindings(br#"{"by_cwd":{}}"#).is_empty());
+        assert!(parse_registry_bindings(br"{}").is_empty());
+        assert!(parse_registry_bindings(br#"{"by_cwd":42}"#).is_empty());
+        assert!(parse_registry_bindings(b"not json").is_empty());
+        // Non-string values are skipped, string ones kept.
+        assert_eq!(
+            parse_registry_bindings(br#"{"by_cwd":{"/a":1,"/b":"two"}}"#),
+            vec![("/b".to_string(), "two".to_string())]
+        );
     }
 }

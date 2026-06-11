@@ -93,7 +93,13 @@ pub(crate) fn cmd_quiet(action: QuietAction) -> Result<()> {
 
 // ---------- nuke ----------
 
-pub(crate) fn cmd_nuke(force: bool, purge: bool, dry_run: bool, as_json: bool) -> Result<()> {
+pub(crate) fn cmd_nuke(
+    force: bool,
+    purge: bool,
+    dry_run: bool,
+    really_this_machine: bool,
+    as_json: bool,
+) -> Result<()> {
     use std::io::{IsTerminal, Write};
     let plan = crate::nuke::NukePlan::compute(purge)?;
 
@@ -118,6 +124,16 @@ pub(crate) fn cmd_nuke(force: bool, purge: bool, dry_run: bool, as_json: bool) -
     }
     if dry_run {
         return Ok(());
+    }
+
+    // Host guard: a registry-bound DEFAULT home (WIRE_HOME ignored)
+    // means a live operator install — refuse the machine-global
+    // teardown without --really-this-machine. Applies even with
+    // --force: --force answers "skip the typed confirmation", not
+    // "yes, this operator machine".
+    let bound = crate::nuke::default_registry_bindings();
+    if let Some(msg) = crate::nuke::host_guard_refusal(&bound, really_this_machine) {
+        anyhow::bail!(msg);
     }
 
     // Gate.

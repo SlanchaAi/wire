@@ -169,6 +169,126 @@ where
         .collect()
 }
 
+// ---- husk reaper (the 175-dir by-key accumulation fix) ----
+
+/// Default age below which a husk is left alone, in hours. Generous on
+/// purpose: a brand-new agent session may mint its by-key home minutes
+/// before it first inits/sends. Two days is far past any plausible
+/// "about to become real" window while still draining the backlog
+/// (honey-pine regrew 9 husks in one minute; 175 over two weeks).
+const DEFAULT_HUSK_REAP_MAX_AGE_HOURS: u64 = 48;
+
+/// How often the supervisor sweeps for husks. The reap is cheap (one
+/// readdir + a few stats per entry) but there's no reason to run it on
+/// every 10s registry poll — husks age in days, not seconds.
+const HUSK_REAP_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// Parse the husk reap cutoff. `None` raw → default; a `0` value →
+/// `None` (reaper disabled); any other integer → that many hours;
+/// unparseable → default. Pure, mirrors `parse_max_idle`.
+fn parse_husk_reap_max_age(raw: Option<&str>) -> Option<Duration> {
+    match raw {
+        Some(v) => {
+            let hours: u64 = v.trim().parse().unwrap_or(DEFAULT_HUSK_REAP_MAX_AGE_HOURS);
+            (hours != 0).then(|| Duration::from_secs(hours * 3600))
+        }
+        None => Some(Duration::from_secs(DEFAULT_HUSK_REAP_MAX_AGE_HOURS * 3600)),
+    }
+}
+
+/// Read the husk reap cutoff from the environment.
+/// `WIRE_HUSK_REAP_MAX_AGE_HOURS=0` disables the reaper entirely.
+fn husk_reap_max_age_from_env() -> Option<Duration> {
+    parse_husk_reap_max_age(
+        std::env::var("WIRE_HUSK_REAP_MAX_AGE_HOURS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Delete husk session homes under `by_key_root` and return what was
+/// removed.
+///
+/// Every wire invocation inside an agent terminal mints a
+/// `sessions/by-key/<hash>/` home via session adoption (RFC-008), even
+/// for read-only commands, and nothing ever deleted them — a dev box
+/// accumulated 175 empty dirs in two weeks. The idle filter
+/// (`supervisor_eligible`) stops the daemon fork-storm but leaves the
+/// dirs. This is the complement: the filter hides, the reaper removes.
+///
+/// A dir is reaped only if ALL of these hold:
+/// - its name has the by-key shape (exactly 16 lowercase hex chars,
+///   `session_home_for_key`'s output) — named sessions are
+///   operator-created and never touched;
+/// - it holds NO identity (`config/wire/private.key` absent);
+/// - it has never synced (`fs_last_active` → None);
+/// - it is not registry-bound (`bound_names`);
+/// - no live daemon owns it (`daemon_live`, injected for testability);
+/// - it is older than `max_age` (top-dir mtime; future mtimes count as
+///   young — clock-skew never deletes).
+///
+/// Failures are per-entry best-effort (warn + continue): one undeletable
+/// dir must not stop the sweep.
+fn reap_husks<F>(
+    by_key_root: &Path,
+    max_age: Duration,
+    now: SystemTime,
+    bound_names: &std::collections::HashSet<String>,
+    daemon_live: F,
+) -> Vec<PathBuf>
+where
+    F: Fn(&Path) -> bool,
+{
+    let mut reaped = Vec::new();
+    let Ok(entries) = std::fs::read_dir(by_key_root) else {
+        return reaped; // no by-key dir yet — nothing to do
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let is_by_key_shape =
+            name.len() == 16 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if !is_by_key_shape {
+            continue;
+        }
+        if bound_names.contains(name) {
+            continue;
+        }
+        if path
+            .join("config")
+            .join("wire")
+            .join("private.key")
+            .exists()
+        {
+            continue;
+        }
+        if fs_last_active(&path).is_some() {
+            continue;
+        }
+        if daemon_live(&path) {
+            continue;
+        }
+        let old_enough = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age >= max_age);
+        if !old_enough {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => reaped.push(path),
+            Err(e) => eprintln!("supervisor: husk reap failed for {}: {e:#}", path.display()),
+        }
+    }
+    reaped
+}
+
 /// State the supervisor tracks per session it has spawned a child for.
 struct ChildState {
     child: Child,
@@ -227,6 +347,17 @@ pub fn run_supervisor(interval_secs: u64, as_json: bool) -> Result<()> {
         }
     );
 
+    // Husk reap cutoff — also read once at startup.
+    let husk_max_age = husk_reap_max_age_from_env();
+    eprintln!(
+        "supervisor: husk reap cutoff = {}",
+        match husk_max_age {
+            Some(d) => format!("{} hours", d.as_secs() / 3600),
+            None => "disabled".to_string(),
+        }
+    );
+    let mut last_husk_reap: Option<Instant> = None;
+
     let mut children: HashMap<String, ChildState> = HashMap::new();
     // Per-session backoff that survives a child's reap → respawn → reap
     // cycle. Distinguishes "session crashes hard repeatedly" from
@@ -279,6 +410,44 @@ pub fn run_supervisor(interval_secs: u64, as_json: bool) -> Result<()> {
                 total_sessions,
                 total_sessions - wanted.len()
             );
+        }
+
+        // 2b. Hourly husk sweep: delete by-key homes that were minted
+        //     by session adoption but never grew an identity or synced.
+        //     Runs on the first loop iteration, then once per
+        //     HUSK_REAP_INTERVAL.
+        if let Some(max_age) = husk_max_age
+            && last_husk_reap.is_none_or(|t| t.elapsed() >= HUSK_REAP_INTERVAL)
+        {
+            last_husk_reap = Some(Instant::now());
+            let bound: std::collections::HashSet<String> = crate::session::read_registry()
+                .unwrap_or_default()
+                .by_cwd
+                .values()
+                .cloned()
+                .collect();
+            if let Ok(root) = crate::session::sessions_root() {
+                let reaped = reap_husks(
+                    &root.join("by-key"),
+                    max_age,
+                    SystemTime::now(),
+                    &bound,
+                    // On a liveness-probe error assume live — never
+                    // delete a home we couldn't safely inspect.
+                    |home| existing_daemon_for_session(home).unwrap_or(true),
+                );
+                if !reaped.is_empty() {
+                    eprintln!(
+                        "supervisor: reaped {} husk session home(s): {}",
+                        reaped.len(),
+                        reaped
+                            .iter()
+                            .filter_map(|p| p.file_name().and_then(|s| s.to_str()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+            }
         }
 
         // 3. Kill children whose session has been removed from the
@@ -896,5 +1065,169 @@ mod tests {
         let sessions = vec![mk_session("husk", None), mk_session("agate-nimbus", None)];
         let out = supervisor_eligible(sessions, None, now, |_| Some(ancient));
         assert_eq!(out.len(), 2);
+    }
+
+    // ---- husk reaper ----
+
+    use std::collections::HashSet;
+
+    /// Make a by-key-shaped husk home (`state/wire` only, no identity)
+    /// under `root` and return its path. The dir's real mtime is "now",
+    /// so tests control age by passing a future `now` to `reap_husks`.
+    fn mk_husk(root: &Path, name: &str) -> PathBuf {
+        let home = root.join(name);
+        std::fs::create_dir_all(home.join("state").join("wire")).unwrap();
+        home
+    }
+
+    /// `now` far enough in the future that any just-created dir is past
+    /// the default 48h cutoff.
+    fn far_future() -> SystemTime {
+        SystemTime::now() + Duration::from_secs(100 * 3600)
+    }
+
+    const CUTOFF_48H: Duration = Duration::from_secs(48 * 3600);
+
+    #[test]
+    fn reap_removes_old_identityless_unsynced_husk() {
+        let tmp = tempdir().unwrap();
+        let home = mk_husk(tmp.path(), "abcdef0123456789");
+        let reaped = reap_husks(
+            tmp.path(),
+            CUTOFF_48H,
+            far_future(),
+            &HashSet::new(),
+            |_| false,
+        );
+        assert_eq!(reaped, vec![home.clone()]);
+        assert!(!home.exists(), "husk dir should be gone");
+    }
+
+    #[test]
+    fn reap_keeps_identity_homes_regardless_of_age() {
+        let tmp = tempdir().unwrap();
+        let home = mk_husk(tmp.path(), "abcdef0123456789");
+        let cfg = home.join("config").join("wire");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(cfg.join("private.key"), "k").unwrap();
+        let reaped = reap_husks(
+            tmp.path(),
+            CUTOFF_48H,
+            far_future(),
+            &HashSet::new(),
+            |_| false,
+        );
+        assert!(reaped.is_empty());
+        assert!(home.exists(), "identity-bearing home must never be reaped");
+    }
+
+    #[test]
+    fn reap_keeps_homes_that_ever_synced() {
+        let tmp = tempdir().unwrap();
+        let home = mk_husk(tmp.path(), "abcdef0123456789");
+        std::fs::write(home.join("state").join("wire").join("last_sync.json"), "{}").unwrap();
+        let reaped = reap_husks(
+            tmp.path(),
+            CUTOFF_48H,
+            far_future(),
+            &HashSet::new(),
+            |_| false,
+        );
+        assert!(reaped.is_empty());
+        assert!(home.exists(), "synced home must never be reaped");
+    }
+
+    #[test]
+    fn reap_keeps_young_husks() {
+        let tmp = tempdir().unwrap();
+        let home = mk_husk(tmp.path(), "abcdef0123456789");
+        // `now` = actual now → dir age ≈ 0 < 48h.
+        let reaped = reap_husks(
+            tmp.path(),
+            CUTOFF_48H,
+            SystemTime::now(),
+            &HashSet::new(),
+            |_| false,
+        );
+        assert!(reaped.is_empty());
+        assert!(home.exists(), "young husk must get its grace window");
+    }
+
+    #[test]
+    fn reap_keeps_registry_bound_names() {
+        let tmp = tempdir().unwrap();
+        let home = mk_husk(tmp.path(), "abcdef0123456789");
+        let bound: HashSet<String> = ["abcdef0123456789".to_string()].into();
+        let reaped = reap_husks(tmp.path(), CUTOFF_48H, far_future(), &bound, |_| false);
+        assert!(reaped.is_empty());
+        assert!(home.exists(), "operator-bound home must never be reaped");
+    }
+
+    #[test]
+    fn reap_keeps_homes_with_live_daemon() {
+        let tmp = tempdir().unwrap();
+        let home = mk_husk(tmp.path(), "abcdef0123456789");
+        let reaped = reap_husks(
+            tmp.path(),
+            CUTOFF_48H,
+            far_future(),
+            &HashSet::new(),
+            |_| true,
+        );
+        assert!(reaped.is_empty());
+        assert!(home.exists(), "daemon-owned home must never be reaped");
+    }
+
+    #[test]
+    fn reap_ignores_non_by_key_shaped_names() {
+        let tmp = tempdir().unwrap();
+        // Named session, uppercase hex, and wrong-length hex — all
+        // outside the by-key shape, all untouchable.
+        let named = mk_husk(tmp.path(), "my-session");
+        let upper = mk_husk(tmp.path(), "ABCDEF0123456789");
+        let short = mk_husk(tmp.path(), "abcdef012345678");
+        let reaped = reap_husks(
+            tmp.path(),
+            CUTOFF_48H,
+            far_future(),
+            &HashSet::new(),
+            |_| false,
+        );
+        assert!(reaped.is_empty());
+        assert!(named.exists() && upper.exists() && short.exists());
+    }
+
+    #[test]
+    fn reap_missing_root_is_a_noop() {
+        let tmp = tempdir().unwrap();
+        let reaped = reap_husks(
+            &tmp.path().join("no-such-by-key"),
+            CUTOFF_48H,
+            far_future(),
+            &HashSet::new(),
+            |_| false,
+        );
+        assert!(reaped.is_empty());
+    }
+
+    #[test]
+    fn husk_reap_max_age_parsing() {
+        // Unset → 48h default.
+        assert_eq!(
+            parse_husk_reap_max_age(None),
+            Some(Duration::from_secs(48 * 3600))
+        );
+        // 0 → disabled.
+        assert_eq!(parse_husk_reap_max_age(Some("0")), None);
+        // Explicit hours.
+        assert_eq!(
+            parse_husk_reap_max_age(Some("12")),
+            Some(Duration::from_secs(12 * 3600))
+        );
+        // Garbage → default, not disabled.
+        assert_eq!(
+            parse_husk_reap_max_age(Some("soon")),
+            Some(Duration::from_secs(48 * 3600))
+        );
     }
 }

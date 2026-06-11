@@ -649,6 +649,12 @@ pub enum Command {
         /// Print what would be removed and exit without changing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Confirm nuking a machine with a LIVE operator install
+        /// (registry-bound sessions). The unit/process/MCP teardown is
+        /// machine-global even under a temp WIRE_HOME, so a bound
+        /// default registry refuses without this flag.
+        #[arg(long)]
+        really_this_machine: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1765,8 +1771,9 @@ pub fn run() -> Result<()> {
             force,
             purge,
             dry_run,
+            really_this_machine,
             json,
-        } => lifecycle::cmd_nuke(force, purge, dry_run, json),
+        } => lifecycle::cmd_nuke(force, purge, dry_run, really_this_machine, json),
         Command::Quiet { action } => lifecycle::cmd_quiet(action),
     }
 }
