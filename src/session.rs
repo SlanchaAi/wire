@@ -81,6 +81,16 @@ pub fn sessions_root() -> Result<PathBuf> {
         }
         return Ok(direct);
     }
+    default_sessions_root()
+}
+
+/// The machine's DEFAULT sessions root — `sessions_root()` with the
+/// `WIRE_HOME` override deliberately ignored. This is where the real
+/// operator install lives even when the calling process runs under a
+/// temp/test `WIRE_HOME`. Used by `wire nuke`'s host guard, whose whole
+/// point is to see past the caller's env to what the machine-global
+/// teardown would actually hit.
+pub fn default_sessions_root() -> Result<PathBuf> {
     let state = dirs::state_dir()
         .or_else(dirs::data_local_dir)
         .ok_or_else(|| {
