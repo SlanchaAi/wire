@@ -528,6 +528,11 @@ fn tool_defs() -> Vec<Value> {
             "inputSchema": {"type": "object", "properties": {}, "required": []}
         }),
         json!({
+            "name": "wire_here",
+            "description": "\"Who am I and who can I talk to?\" — the cold-start orientation tool. Returns {self: {handle, did, persona, cwd, wire_home}, sister_sessions: [...], pinned_peers: [...]}. Sister sessions are other agents on THIS machine you can reach with wire_dial by their `session` name (no relay round-trip); pinned_peers are already-paired contacts. Call this first when wire_peers is empty and you need to find a dial target. Read-only.",
+            "inputSchema": {"type": "object", "properties": {}, "required": []}
+        }),
+        json!({
             "name": "wire_status",
             "description": "v0.14.2 — daemon + sync-loop health check. Returns: daemon_running (pidfile pid alive), all_running_pids (pgrep for `wire daemon`), last_sync_age_seconds (age of the most recent successful daemon cycle; null if no cycle ever recorded), outbox_count, inbox_count, peer count. The daemon is auto-started for you on MCP launch; a healthy session shows daemon_running:true + last_sync_age_seconds < 60. Default `wire_send` is synchronous (its own status is the delivery verdict); only `queue:true` sends depend on the daemon to drain — a nonzero outbox_count with a stale last_sync means those are stuck. Read-only.",
             "inputSchema": {"type": "object", "properties": {}, "required": []}
@@ -796,6 +801,7 @@ fn handle_tools_call(id: &Value, params: &Value, _state: &McpState) -> Value {
         "wire_whoami" => tool_whoami(),
         "wire_status" => tool_status(),
         "wire_peers" => tool_peers(),
+        "wire_here" => tool_here(),
         "wire_send" => tool_send(&args),
         "wire_pull" => tool_pull(),
         "wire_tail" => tool_tail(&args),
@@ -1513,6 +1519,14 @@ fn tool_invite_accept(args: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .ok_or("missing 'url'")?;
     crate::pair_invite::accept_invite(url).map_err(|e| format!("{e:#}"))
+}
+
+/// wire_here (MCP): the cold-agent orientation answer — self + same-machine
+/// sister sessions + pinned peers. Mirrors `wire here --json` exactly (shares
+/// `cli::comms::here_summary`), so an MCP-only agent with an empty wire_peers
+/// can discover a dial target instead of dead-ending.
+fn tool_here() -> Result<Value, String> {
+    crate::cli::here_summary().map_err(|e| format!("{e:#}"))
 }
 
 // ---------- v0.5 — agentic hotline tools ----------

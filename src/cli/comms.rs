@@ -484,7 +484,12 @@ pub(super) fn cmd_send(
 /// `wire here` — one-screen "you are this session, your neighbors are
 /// these." Combines what `wire whoami`, `wire peers`, and `wire session
 /// list-local` would otherwise force the operator to call separately.
-pub(super) fn cmd_here(as_json: bool) -> Result<()> {
+/// Gather the `wire here` view — self identity, same-machine sister sessions,
+/// and pinned peers — as the JSON value `wire here --json` prints AND the
+/// `wire_here` MCP tool returns. Pure (read-only). Single source of truth so
+/// the CLI and the MCP surface can never drift (the cold-agent "who can I
+/// talk to?" answer must match what the operator sees).
+pub(crate) fn here_summary() -> Result<Value> {
     let initialized = config::is_initialized().unwrap_or(false);
 
     // Self identity.
@@ -572,29 +577,38 @@ pub(super) fn cmd_here(as_json: bool) -> Result<()> {
         }
     }
 
+    Ok(json!({
+        "self": {
+            "handle": self_handle,
+            "did": self_did,
+            "persona": self_character,
+            "cwd": cwd,
+            "wire_home": wire_home,
+        },
+        "sister_sessions": sisters,
+        "pinned_peers": peers,
+    }))
+}
+
+pub(super) fn cmd_here(as_json: bool) -> Result<()> {
+    let summary = here_summary()?;
+
     if as_json {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "self": {
-                    "handle": self_handle,
-                    "did": self_did,
-                    "persona": self_character,
-                    "cwd": cwd,
-                    "wire_home": wire_home,
-                },
-                "sister_sessions": sisters,
-                "pinned_peers": peers,
-            }))?
-        );
+        println!("{}", serde_json::to_string(&summary)?);
         return Ok(());
     }
 
     // Human format.
-    if !initialized {
+    let self_handle = summary["self"]["handle"].as_str().unwrap_or("");
+    if self_handle.is_empty() {
         println!("not initialized — run `wire up` to bootstrap.");
         return Ok(());
     }
+    let self_persona = &summary["self"]["persona"];
+    // Reconstruct the Character for self's glyph so output stays identical to
+    // the pre-extraction path (emoji_with_fallback over the typed Character).
+    let self_character: Option<crate::character::Character> =
+        serde_json::from_value(self_persona.clone()).ok();
     let glyph = self_character
         .as_ref()
         .map(crate::character::emoji_with_fallback)
@@ -604,13 +618,14 @@ pub(super) fn cmd_here(as_json: bool) -> Result<()> {
         .map(|c| c.nickname.clone())
         .unwrap_or_default();
     println!("you are {glyph} {nick}  ({self_handle})");
+    let cwd = summary["self"]["cwd"].as_str().unwrap_or("");
     if !cwd.is_empty() {
         println!("  cwd:    {cwd}");
     }
     // Helper closure that mirrors emoji_with_fallback over a JSON-encoded
-    // character object (because we already collected sisters/peers into
-    // Value rows above). Looks up the canonical emoji-name and falls
-    // back to that — never repeats the nickname inside the brackets.
+    // character object (sisters/peers personas are Value rows). Looks up the
+    // canonical emoji-name and falls back to that — never repeats the
+    // nickname inside the brackets.
     let render_glyph = |character: &Value| -> String {
         let emoji = character
             .get("emoji")
@@ -637,10 +652,13 @@ pub(super) fn cmd_here(as_json: bool) -> Result<()> {
         };
         crate::character::emoji_with_fallback(&synth)
     };
+    let empty = Vec::new();
+    let sisters = summary["sister_sessions"].as_array().unwrap_or(&empty);
+    let peers = summary["pinned_peers"].as_array().unwrap_or(&empty);
     if !sisters.is_empty() {
         println!();
         println!("sister sessions on this machine:");
-        for s in &sisters {
+        for s in sisters {
             let session = s["session"].as_str().unwrap_or("?");
             let ch_nick = s["persona"]["nickname"].as_str().unwrap_or("?");
             let glyph = render_glyph(&s["persona"]);
@@ -650,7 +668,7 @@ pub(super) fn cmd_here(as_json: bool) -> Result<()> {
     if !peers.is_empty() {
         println!();
         println!("pinned peers:");
-        for p in &peers {
+        for p in peers {
             let handle = p["handle"].as_str().unwrap_or("?");
             let tier = p["tier"].as_str().unwrap_or("");
             let ch_nick = p["persona"]["nickname"].as_str().unwrap_or("?");
