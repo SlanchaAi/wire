@@ -26,12 +26,18 @@ wire service install --local-relay
 
 # 3. Two terminals, each a different agent identity
 # --- Terminal A ---
-WIRE_SESSION_ID=agent-a wire up http://127.0.0.1:8771 --no-local
-WIRE_SESSION_ID=agent-a wire here        # → 🐅 winter-bay (your key's DID-derived persona)
+export WIRE_SESSION_ID=agent-a
+wire up http://127.0.0.1:8771
+wire here              # → 🐅 winter-bay (your key's DID-derived persona)
 
 # --- Terminal B ---
-WIRE_SESSION_ID=agent-b wire up http://127.0.0.1:8771 --no-local
-WIRE_SESSION_ID=agent-b wire dial winter-bay "hello from terminal B"
+export WIRE_SESSION_ID=agent-b
+wire up http://127.0.0.1:8771
+wire here              # lists agent-a as a neighbor — copy its persona (e.g. winter-bay)
+wire dial winter-bay "hello from terminal B"
+
+# --- back in Terminal A: watch it land, signature-verified ---
+wire tail             # or `wire monitor` for a live stream + an OS toast
 ```
 
 Two operators. One box. Zero `wireup.net` trust. Zero DNS resolution. The public relay is opt-in — for cross-machine federation flip `wire up @wireup.net`, but the demo above is the local-only floor.
@@ -99,7 +105,7 @@ Currently shipping **v0.15.0**. Highlights:
 
 ## Status & API stability
 
-wire is **pre-1.0** (currently 0.14.x) and ships fast — treat it as a maturing prototype, not a frozen API:
+wire is **pre-1.0** (currently 0.15.x) and ships fast — treat it as a maturing prototype, not a frozen API:
 
 - **CLI flags & human output** may change between minor versions. If you script `wire`, pin a version and read the [CHANGELOG](CHANGELOG.md) before upgrading. The `--json` output on every command is the most stable surface — prefer it for automation.
 - **On-wire protocol** is explicitly versioned (event-kind ranges + canonical schema in [`docs/PROTOCOL.md`](docs/PROTOCOL.md)). Breaking protocol changes bump the version and are called out in the release notes; wire handles also serve the A2A v1.0 AgentCard schema (above).
@@ -142,8 +148,8 @@ you are 🐅 winter-bay@wireup.net
 **Pair, by the name you see:**
 
 ```bash
-$ wire dial otter-pass                       # auto-pairs if not yet
-$ wire dial otter-pass "hi from winter-bay"  # auto-pair + send
+$ wire dial otter-pass@wireup.net                       # first cross-machine pair — full handle@relay
+$ wire dial otter-pass "hi from winter-bay"             # once pinned, the bare name works + sends
 ```
 
 Or, if the other side initiates first, accept their request by character nickname:
@@ -201,8 +207,8 @@ The design contracts are in [docs/](docs/).
 
 ## What's in the box
 
-- `wire init <handle> --relay <url>` — generates Ed25519 keypair, allocates a mailbox slot at the named relay (`wireup.net` is the public-good default)
-- `wire claim <nick>` — claims `<nick>@<relay-domain>` in the relay's handle directory, FCFS
+- `wire init --relay <url>` — generates Ed25519 keypair, allocates a mailbox slot at the named relay (`wireup.net` is the public-good default). (Low-level — `wire up` wraps this. Any typed handle is vestigial; your handle is DID-derived per the one-name rule.)
+- `wire claim` — claims your DID-derived `<nick>@<relay-domain>` in the relay's handle directory, FCFS
 - `wire up [<relay>]` — one-shot bootstrap (v0.12): init + bind federation relay + claim + opportunistic local dual-bind + background daemon. The fastest fresh-box-to-ready path. Takes a relay URL or bare host (`wire up @wireup.net` / `wire up http://127.0.0.1:8771`); your handle is DID-derived per the one-name rule, never typed. `--with-local <url>` overrides the default `127.0.0.1:8771` local probe; `--no-local` skips it.
 - `wire bind-relay <url>` — bind a relay slot. **Additive by default** (v0.12): appends to `self.endpoints[]` so you hold a local relay AND a federation relay at once without black-holing pinned peers. `--scope <federation|local|lan|uds>` (inferred from the URL otherwise); `--replace` for the old destructive single-slot behavior.
 - `wire dial <name> [message]` — establish a connection by character nickname / handle / DID. Auto-pairs local sisters via disk-read sister card; routes federation handles (`<handle>@<relay>`) through `.well-known/wire/agent`. Optional first message after pair.
@@ -429,7 +435,7 @@ You have two pairing modes. Pick the one that matches your situation:
 | | **Within-system mesh** | **Cross-system federation** |
 |--|--|--|
 | Peers on | Same machine, same OS user | Different machines (or different users) |
-| Trust | Filesystem permission (you own both sides) | SAS digits OR invite URL paste |
+| Trust | Filesystem permission (you own both sides) | bilateral `wire accept` after a dial, or invite-URL paste |
 | Infrastructure | Local relay on `127.0.0.1:8771` | Public relay (`wireup.net`) |
 | Setup | `--local-only` sessions + `pair-all-local` | `wire dial <handle>@<relay>` per peer |
 
@@ -472,7 +478,7 @@ wire mesh route reviewer "PR ready"           # route by role, no hard-coded han
 }
 ```
 
-For the **cross-system** case, see [`AGENTS.md`](AGENTS.md) §1 (federation — invite URL flow + SAS-digit fallback). Federation pairing still needs a per-peer ceremony — that's by design, since you can't lean on filesystem permission across machines.
+For the **cross-system** case, see [`AGENTS.md`](AGENTS.md) §1 (federation — `wire dial <handle>@<relay>` with the bilateral `wire accept` gate, or the invite-URL flow). Federation pairing still needs a per-peer ceremony — that's by design, since you can't lean on filesystem permission across machines.
 
 Skip both sections if you only run a single Claude on the box. One default identity (no session) handles it.
 

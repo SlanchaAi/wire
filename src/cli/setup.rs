@@ -180,11 +180,15 @@ pub(crate) fn cmd_up(
         ),
     }
 
-    // 5. Final summary — point operator at the next commands.
-    let summary =
-        "ready. `wire pair <peer>@<relay>` to pair, `wire send <peer> \"<msg>\"` to send, \
-         `wire monitor` to watch incoming events."
-            .to_string();
+    // 5. Final summary — point operator at the next commands. Covers the
+    // first connection (dial), the day-2 retention surfaces (statusline face,
+    // reboot survival) and the "which Claude is this?" disambiguator — the
+    // three things a fresh `wire up` previously left undiscoverable.
+    let summary = "ready. `wire dial <name> \"<msg>\"` to reach a peer, \
+         `wire here` to see who's around. \
+         Keep it alive across reboots: `wire service install`. \
+         See your face in Claude Code: `wire setup --statusline --apply`."
+        .to_string();
     step("ready", summary.clone());
 
     if as_json {

@@ -1,9 +1,11 @@
 //! Background-process bootstrapper for the MCP path.
 //!
 //! Post-pair, an agent shouldn't have to ask the user "start the daemon?" —
-//! the MCP accept/dial tools invoke [`ensure_daemon_running`] + [`ensure_notify_running`]
-//! so push/pull and OS toasts are already armed by the time the agent surfaces
-//! "paired ✓" back to chat.
+//! the MCP accept/dial tools invoke [`ensure_daemon_running`] so push/pull is
+//! already armed by the time the agent surfaces "paired ✓" back to chat. OS
+//! toasts for inbound messages are folded into the daemon's own sync loop
+//! (see `cli::comms::notify_sweep_new_events`), so arming the daemon arms
+//! toasts too — no separate notify process.
 //!
 //! ## Idempotency
 //!
@@ -109,12 +111,6 @@ impl PidRecord {
 /// if a fresh process was spawned, `Ok(false)` if one was already running.
 pub fn ensure_daemon_running() -> Result<bool> {
     ensure_background("daemon", &["daemon", "--interval", "5"])
-}
-
-/// Ensure a `wire notify --interval 2` process is alive (OS toasts on
-/// every new verified inbox event). Returns true if newly spawned.
-pub fn ensure_notify_running() -> Result<bool> {
-    ensure_background("notify", &["notify", "--interval", "2"])
 }
 
 fn pid_file(name: &str) -> Result<PathBuf> {
