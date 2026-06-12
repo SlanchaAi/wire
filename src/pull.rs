@@ -204,22 +204,58 @@ pub fn process_events(
                 false
             }
         };
-        if let Err(e) = pair_invite::maybe_consume_pair_drop_ack(event) {
-            let peer_handle = event
-                .get("from")
-                .and_then(Value::as_str)
-                .map(|s| crate::agent_card::display_handle_from_did(s).to_string())
-                .unwrap_or_else(|| "<unknown>".to_string());
-            eprintln!(
-                "wire pull: pair_drop_ack from {peer_handle} consume FAILED: {e}. \
-                 their slot_token NOT recorded; we cannot `wire send` to them \
-                 until they retry."
-            );
-            pair_invite::record_pair_rejection(
-                &peer_handle,
-                "pair_drop_ack_consume_failed",
-                &e.to_string(),
-            );
+        // pair_drop_ack carries the peer's relay coordinates (relay_url /
+        // slot_id / slot_token) and, on consume, OVERWRITES our pinned
+        // endpoints for that peer + stamps the durable bilateral marker.
+        // Those are machine-trusting side effects, so they must not run on
+        // an unverified event: a forged kind=1101 claiming `from: <peer>`
+        // with attacker relay coords would otherwise redirect all our
+        // outbound traffic to that peer into the attacker's relay. We pin
+        // the peer in trust at dial time (`cmd_add`), so a legitimate ack's
+        // sender is always already pinned and verifies here; an ack we
+        // can't verify (forged, or for a peer we never dialed) is dropped
+        // before it can touch relay state. Verify against fresh trust so an
+        // earlier pair_drop in this same batch that pinned the sender is
+        // visible.
+        if event.get("kind").and_then(Value::as_u64) == Some(1101) {
+            let ack_trust = config::read_trust()?;
+            match signing::verify_message_v31(event, &ack_trust) {
+                Ok(()) => {
+                    if let Err(e) = pair_invite::maybe_consume_pair_drop_ack(event) {
+                        let peer_handle = event
+                            .get("from")
+                            .and_then(Value::as_str)
+                            .map(|s| crate::agent_card::display_handle_from_did(s).to_string())
+                            .unwrap_or_else(|| "<unknown>".to_string());
+                        eprintln!(
+                            "wire pull: pair_drop_ack from {peer_handle} consume FAILED: {e}. \
+                             their slot_token NOT recorded; we cannot `wire send` to them \
+                             until they retry."
+                        );
+                        pair_invite::record_pair_rejection(
+                            &peer_handle,
+                            "pair_drop_ack_consume_failed",
+                            &e.to_string(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    let peer_handle = event
+                        .get("from")
+                        .and_then(Value::as_str)
+                        .map(|s| crate::agent_card::display_handle_from_did(s).to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    eprintln!(
+                        "wire pull: DROPPING unverified pair_drop_ack from {peer_handle}: {e}. \
+                         relay endpoints NOT updated (sender not pinned, or signature forged)."
+                    );
+                    pair_invite::record_pair_rejection(
+                        &peer_handle,
+                        "pair_drop_ack_unverified",
+                        &e.to_string(),
+                    );
+                }
+            }
         }
         let active_trust = if drop_paired {
             config::read_trust()?
@@ -469,6 +505,39 @@ mod tests {
             let result = process_events(&[event], Some("prior".to_string()), &inbox).unwrap();
             let reason = result.rejected[0]["reason"].as_str().unwrap();
             assert!(!reason.contains("schema_mismatch"));
+        });
+    }
+
+    #[test]
+    fn forged_pair_drop_ack_does_not_mutate_relay_endpoints() {
+        // Security regression: a kind=1101 pair_drop_ack from a sender we
+        // never pinned (forged `from`, attacker relay coords) must NOT
+        // overwrite our relay endpoints. Pre-fix, the ack was consumed
+        // before signature verification, letting an attacker redirect our
+        // outbound traffic for the impersonated peer to their own relay.
+        crate::config::test_support::with_temp_home(|| {
+            crate::config::ensure_dirs().unwrap();
+            let inbox = crate::config::inbox_dir().unwrap();
+            let forged = json!({
+                "event_id": "forged-ack-0001",
+                "kind": 1101u32,
+                "type": "pair_drop_ack",
+                "from": "did:wire:victimpeer-deadbeef",
+                "body": {
+                    "relay_url": "https://attacker.example",
+                    "slot_id": "attackerslot",
+                    "slot_token": "attackertoken",
+                },
+            });
+            // Sender is NOT in trust → verify must fail → no mutation.
+            let _ = process_events(&[forged], Some("c".to_string()), &inbox).unwrap();
+            let relay_state = crate::config::read_relay_state().unwrap();
+            let peers = relay_state.get("peers").and_then(Value::as_object);
+            assert!(
+                peers.is_none_or(|m| !m.contains_key("victimpeer")),
+                "forged ack must not pin endpoints for the impersonated peer; \
+                 relay_state.peers = {peers:?}"
+            );
         });
     }
 

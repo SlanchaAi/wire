@@ -1017,3 +1017,46 @@ async fn handle_reclaim_preserves_discoverable_when_omitted_v0_5_19() {
         "ghost should remain hidden after re-claim that omitted `discoverable`: {nicks:?}"
     );
 }
+
+#[tokio::test]
+async fn claim_rejects_nick_not_matching_did_persona() {
+    // ONE-NAME server enforcement: a raw claim mapping an arbitrary nick
+    // onto a foreign DID must be refused even with a valid card. The
+    // card is built (and self-signed) for persona `alice`, but the claim
+    // asks for nick `paul`.
+    let dir = fresh_state_dir();
+    let base = spawn_relay(dir).await;
+    let client = reqwest::Client::new();
+    let alloc: serde_json::Value = client
+        .post(format!("{base}/v1/slot/allocate"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let slot_id = alloc["slot_id"].as_str().unwrap();
+    let slot_token = alloc["slot_token"].as_str().unwrap();
+    let (sk, pk) = wire::signing::generate_keypair();
+    let card = wire::agent_card::sign_agent_card(
+        &wire::agent_card::build_agent_card("alice", &pk, None, None, None),
+        &sk,
+    );
+
+    let resp = client
+        .post(format!("{base}/v1/handle/claim"))
+        .bearer_auth(slot_token)
+        .json(&serde_json::json!({
+            "nick": "paul",            // does NOT match the card's `alice` DID
+            "slot_id": slot_id,
+            "relay_url": base,
+            "card": card,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "mismatched nick must be rejected");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["expected"], "alice");
+}

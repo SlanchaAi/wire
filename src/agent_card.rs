@@ -111,6 +111,34 @@ fn has_long_hex_suffix(s: &str) -> bool {
     suffix.len() == LONG_FINGERPRINT_HEX_LEN && suffix.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// True iff a session `did:wire:<handle>-<8hex>` actually commits to
+/// `public_key` — i.e. its trailing 8-hex fingerprint equals
+/// `signing::fingerprint(public_key)`.
+///
+/// This is the binding that makes a session DID self-certifying: without
+/// it, `verify_agent_card` only proves "this card is self-signed by
+/// SOME key", not "this card's DID belongs to that key". An attacker
+/// could otherwise self-sign a card claiming any victim's DID with an
+/// attacker-controlled key (the 32-bit suffix is brute-forceable for a
+/// targeted second-preimage; this check raises forgery from "free" to
+/// "must collide the fingerprint"). op/org DIDs use the wider
+/// `commits_to` (org_membership.rs); this is the session-DID analog.
+pub fn did_commits_to_key(did: &str, public_key: &[u8]) -> bool {
+    // Session DIDs are `did:wire:<handle>-<8hex>`. Reject op/org method
+    // prefixes here — those carry a 32-hex suffix and are bound elsewhere.
+    let Some(rest) = did.strip_prefix(&format!("{DID_METHOD}:")) else {
+        return false;
+    };
+    if rest.starts_with("op:") || rest.starts_with("org:") {
+        return false;
+    }
+    let Some(idx) = rest.rfind('-') else {
+        return false;
+    };
+    let suffix = &rest[idx + 1..];
+    suffix == crate::signing::fingerprint(public_key)
+}
+
 /// Strip the federation suffix (`@relay.example`) from a handle, returning
 /// the bare local-part. This is the canonical on-disk form: outbox/inbox
 /// files are keyed by bare handle (`paul-mac.jsonl`), and the pinned-peers
@@ -156,6 +184,8 @@ pub enum CardError {
     BadSignature,
     #[error("signature did not verify")]
     SignatureRejected,
+    #[error("card DID does not commit to its verify key (suffix mismatch)")]
+    DidKeyMismatch,
 }
 
 /// Build an unsigned agent card for `handle` with one verify key.
@@ -480,7 +510,23 @@ pub fn verify_agent_card(card: &AgentCard) -> Result<(), CardError> {
     let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
 
     vk.verify(&card_canonical(card), &sig)
-        .map_err(|_| CardError::SignatureRejected)
+        .map_err(|_| CardError::SignatureRejected)?;
+
+    // Binding: the card's session DID must commit to the key we just
+    // verified the signature with. A valid self-signature alone only
+    // proves the card was signed by SOME key — without this, an attacker
+    // can self-sign a card claiming any victim's DID under their own key.
+    // (op/org DIDs are bound separately via org_membership::commits_to;
+    // `did_commits_to_key` returns false for those prefixes, so a card
+    // whose top-level `did` is an op/org DID is correctly rejected here.)
+    let did = card
+        .get("did")
+        .and_then(Value::as_str)
+        .ok_or(CardError::MissingField("did"))?;
+    if !did_commits_to_key(did, &pk_arr) {
+        return Err(CardError::DidKeyMismatch);
+    }
+    Ok(())
 }
 
 /// 6-digit bilateral SAS over two raw 32-byte public keys.
@@ -609,6 +655,53 @@ mod tests {
         let signed = sign_agent_card(&card, &sk);
         let err = verify_agent_card(&signed).unwrap_err();
         assert!(matches!(err, CardError::NoVerifyKeys));
+    }
+
+    #[test]
+    fn verify_rejects_did_claiming_foreign_key() {
+        // Attacker self-signs a card with their OWN key but claims a DID
+        // whose fingerprint suffix belongs to a victim's key. The
+        // signature verifies (it's the attacker's key over their own
+        // bytes) but the DID no longer commits to that key → reject.
+        let (victim_sk, victim_pk) = generate_keypair();
+        let (attacker_sk, attacker_pk) = generate_keypair();
+        assert_ne!(victim_pk, attacker_pk);
+        let victim_did = did_for_with_key("paul", &victim_pk);
+        // Build the attacker's card (their key in verify_keys) then
+        // overwrite the DID to claim the victim's, and re-sign so the
+        // self-signature is valid over the tampered bytes.
+        let mut card = build_agent_card("paul", &attacker_pk, None, None, None);
+        card["did"] = json!(victim_did);
+        let signed = sign_agent_card(&card, &attacker_sk);
+        // Sanity: the signature itself is valid (attacker signed it).
+        let err = verify_agent_card(&signed).unwrap_err();
+        assert!(
+            matches!(err, CardError::DidKeyMismatch),
+            "expected DidKeyMismatch, got {err:?}"
+        );
+        // And the genuine victim card (DID bound to victim key) verifies.
+        let real = sign_agent_card(
+            &build_agent_card("paul", &victim_pk, None, None, None),
+            &victim_sk,
+        );
+        verify_agent_card(&real).unwrap();
+    }
+
+    #[test]
+    fn did_commits_to_key_basic() {
+        let (_, pk) = generate_keypair();
+        let (_, other) = generate_keypair();
+        let did = did_for_with_key("alice", &pk);
+        assert!(did_commits_to_key(&did, &pk));
+        assert!(!did_commits_to_key(&did, &other));
+        // Handles containing hyphens still bind on the final segment.
+        let hdid = did_for_with_key("alice-bob", &pk);
+        assert!(did_commits_to_key(&hdid, &pk));
+        // op/org DIDs are bound elsewhere → not accepted by this helper.
+        assert!(!did_commits_to_key(&did_for_op("acme", &pk), &pk));
+        assert!(!did_commits_to_key(&did_for_org("acme", &pk), &pk));
+        // Suffix-less legacy DID → no binding.
+        assert!(!did_commits_to_key("did:wire:alice", &pk));
     }
 
     #[test]
