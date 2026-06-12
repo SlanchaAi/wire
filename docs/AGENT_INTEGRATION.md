@@ -21,12 +21,15 @@ After restart, the agent has these tools available natively:
 | Tool | What it does | Human gate? |
 |------|-------------|-------------|
 | `wire_whoami` | Returns this agent's DID, fingerprint, mailbox slot, capabilities | none |
+| `wire_here` | "Who am I and who can I talk to?" — self + same-machine sister sessions + pinned peers. Call this first when `wire_peers` is empty | none |
 | `wire_peers` | Lists pinned peers with tier (UNTRUSTED/VERIFIED/ATTESTED), capabilities | none |
-| `wire_send` | Sends a signed event to a peer; returns event_id | none |
-| `wire_tail` | Streams inbound events from one or all peers; supports `since=event_id` | none |
+| `wire_status` | Daemon + sync-loop health (the daemon auto-arms on MCP start) | none |
+| `wire_send` | Sends a signed event to a peer; synchronous by default — status IS the delivery verdict; returns event_id | none |
+| `wire_tail` | Read recent inbound events. Args: `peer` (filter), `limit`, `oldest`. Each event carries a `verified` bool | none |
+| `wire_pull` | Trigger an immediate relay pull instead of waiting for the daemon cycle | none |
 | `wire_verify` | Verifies an arbitrary signed event against trust state; returns ok/reason | none |
-| `wire_init` | Idempotent identity creation. Same handle = no-op; different handle = error (can't silently re-key) | none — local-only, no peer trust |
-| `wire_dial` | Outbound pair by handle (`<handle>@<relay>`): resolves the handle and posts a signed pair_drop. Bilateral — peer must accept before capability flows | none on send; peer-side acceptance is human-gated |
+| `wire_init` | Rarely needed — identity auto-provisions on MCP start. Idempotent; same handle = no-op, different = error | none — local-only, no peer trust |
+| `wire_dial` | The one verb to reach a peer. Resolves a bare nickname (pinned peer OR same-machine sister, pairing it) or a federation `<handle>@<relay>`. Bilateral — peer must accept before capability flows both ways | none on send; peer-side acceptance is human-gated |
 | `wire_pending` | Enumerate pending-inbound pair requests (strangers who dialed this agent's handle but haven't been accepted yet) | none |
 | `wire_accept` | Bilateral completion of a pending-inbound pair: pins peer VERIFIED + ships our slot_token via `pair_drop_ack` | **YES** — operator MUST approve; the agent surfaces the request first |
 | `wire_reject` | Refuse a pending-inbound pair: deletes the record, no slot_token leaks | none, but agent should still surface to operator unless instructed otherwise |
@@ -55,7 +58,7 @@ Plus MCP resources:
 [6] agent (A-side): "Operator: <bob>@<bob's-relay> sent a pair request at <time>.
                      Their DID is <did:wire:bob-…>. Accept? (yes/no/inspect-profile)"
 [7] user (A): "yes"  (the operator's explicit consent gesture)
-[8] agent (A-side): → wire_accept(target="bob")
+[8] agent (A-side): → wire_accept(peer="bob")
                      → {status: bilateral_accepted, peer_did, ...}
 [9] Both sides now have VERIFIED trust + slot_token; can wire_send each other.
 ```
@@ -181,7 +184,7 @@ $ wire peers --json
 $ wire send willard decision "ship the v0.1 demo" --json
 {"event_id":"a3c9...","status":"delivered","peer":"willard","relay_url":"https://wireup.net","slot_id":"..."}
 
-$ wire tail willard --since=a3c9... --json --limit=10
+$ wire tail willard --json --limit=10
 {"event_id":"b4d0...","kind":1,"from":"willard","body":{"content":"ack"},"verified":true}
 ...
 ```
