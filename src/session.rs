@@ -1083,7 +1083,10 @@ pub(crate) fn emit_collision_warning(role: &str, our_wire_home: &str, colliders:
 /// Linux: parses `/proc/<pid>/environ` (NUL-separated KEY=VAL).
 /// macOS: `ps -E -p <pid>` (whitespace-separated KEY=VAL prefix).
 /// Windows / other: returns `None` (collision detection no-ops).
-fn read_wire_home_from_pid(pid: u32) -> Option<String> {
+///
+/// Also used by `ensure_up::daemon_liveness` to scope the orphan-daemon
+/// check to processes serving the same WIRE_HOME.
+pub(crate) fn read_wire_home_from_pid(pid: u32) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
         let path = format!("/proc/{pid}/environ");
