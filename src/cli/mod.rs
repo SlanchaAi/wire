@@ -46,7 +46,20 @@ pub(super) use identity::{cmd_claim, cmd_init};
 
 /// Top-level CLI.
 #[derive(Parser, Debug)]
-#[command(name = "wire", version, about = "Magic-wormhole for AI agents — bilateral signed-message bus", long_about = None)]
+#[command(
+    name = "wire",
+    version,
+    about = "Magic-wormhole for AI agents — bilateral signed-message bus",
+    long_about = None,
+    after_help = "\x1b[1mStart here:\x1b[0m\n  \
+        wire up                     come online (one command)\n  \
+        wire dial <name> \"hi\"       reach a peer and send\n  \
+        wire tail                   read replies\n  \
+        wire here                   who am I, who's around?\n  \
+        wire doctor                 something off? full health check\n\
+        \nThe ~40 verbs below are mostly plumbing — the five above cover daily use.\n\
+        Guide: https://github.com/SlanchaAi/wire"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -110,9 +123,10 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// v0.9.5: emit shell completion script to stdout. Pipe to your
-    /// shell's completion dir to enable tab-completion of wire verbs
-    /// + handles + flags.
+    /// Emit a shell completion script to stdout.
+    ///
+    /// Pipe to your shell's completion dir to enable tab-completion of
+    /// wire verbs + handles + flags.
     ///
     /// Example installs:
     ///   bash:       `wire completions bash > /etc/bash_completion.d/wire`
@@ -125,9 +139,10 @@ pub enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
-    /// v0.9.3: one-screen "you are here" view. Prints the current
-    /// session's character + handle + cwd, plus a short list of
-    /// neighbors (sister sessions on the local relay, pinned peers).
+    /// One-screen "you are here" — your character, handle, cwd, and neighbors.
+    ///
+    /// Prints the current session's character + handle + cwd, plus a short
+    /// list of neighbors (sister sessions on the local relay, pinned peers).
     /// Designed for the operator's quick "wait which Claude is this,
     /// and who's around?" question — no `--json` shuffling, no
     /// remembering `wire whoami` vs `wire peers` vs `wire session
@@ -136,9 +151,9 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// v0.9 canonical surface: list pending-inbound pair requests waiting
-    /// for your consent. Operators reach for "what's pending?" not a
-    /// longer table-dump verb.
+    /// List pending-inbound pair requests waiting for your consent.
+    ///
+    /// Operators reach for "what's pending?" not a longer table-dump verb.
     Pending {
         #[arg(long)]
         json: bool,
@@ -184,7 +199,7 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// v0.8 — "go talk to this name." The one verb operators reach for.
+    /// "Go talk to this name." The one verb operators reach for.
     ///
     /// `wire dial <name>` accepts a character nickname (`noble-slate`),
     /// a session name (`slancha-api`), a card handle, or a DID — whichever
@@ -333,8 +348,8 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Manually pin a peer's relay slot. (Replaces SAS pairing for v0.1 bootstrap;
-    /// real `wire join` lands in the SPAKE2 iter.)
+    /// Manually pin a peer's relay slot from out-of-band coordinates.
+    /// Plumbing — prefer `wire dial` (which resolves + pairs for you).
     AddPeerSlot {
         /// Peer handle (becomes did:wire:<handle>).
         handle: String,
@@ -411,13 +426,12 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// v0.14.2 (#170): multi-session topology view — supervisor
-    /// liveness + per-session daemon liveness + unmanaged `wire daemon`
-    /// pids. `wire status` answers "is THIS session syncing?";
+    /// Multi-session topology: supervisor + every session's daemon liveness.
+    ///
+    /// Supervisor liveness + per-session daemon liveness + unmanaged
+    /// `wire daemon` pids. `wire status` answers "is THIS session syncing?";
     /// `wire supervisor` answers "what is the supervisor (and every
-    /// session's daemon) doing across the box?". Replaces the manual
-    /// `pgrep -fl 'wire daemon' | cross-ref each per-session pidfile`
-    /// dance honey-pine ran during her launchd diagnosis.
+    /// session's daemon) doing across the box?".
     Supervisor {
         /// Emit JSON instead of human-readable text. The shape matches
         /// the `SupervisorState` struct in `daemon_supervisor.rs`.
@@ -474,7 +488,7 @@ pub enum Command {
         #[command(subcommand)]
         cmd: IdentityCommand,
     },
-    /// v0.6.3 (issues #18 / #19 / #20 / #21): orchestration verbs for the
+    /// Orchestration verbs for the
     /// sister-session mesh. `wire mesh status` is the live view of every
     /// paired sister (alias for `wire session mesh-status`); `wire mesh
     /// broadcast` fans one signed event to every pinned peer.
@@ -522,7 +536,9 @@ pub enum Command {
         #[arg(long)]
         relay: Option<String>,
     },
-    /// Zero-paste pair with a known handle. Resolves `nick@domain` via that
+    /// Federation backend of `wire dial` — prefer `wire dial`.
+    ///
+    /// Zero-paste pair with a known handle: resolves `nick@domain` via that
     /// domain's `.well-known/wire/agent`, then delivers a signed pair-intro
     /// to the peer's slot via `/v1/handle/intro`. Peer's daemon completes
     /// the bilateral pin on its next pull (sends back pair_drop_ack carrying
@@ -744,7 +760,7 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// v0.9: accept a pending-inbound pair request by character
+    /// Accept a pending-inbound pair request by character
     /// nickname or card handle.
     ///
     /// v0.9.4: the URL-vs-name smart-dispatch from v0.9 is gone. To
@@ -759,7 +775,7 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// v0.9.4: accept a federation invite URL minted by `wire invite`.
+    /// Accept a federation invite URL minted by `wire invite`.
     /// Pins issuer, sends signed card to issuer's slot. Auto-inits +
     /// auto-allocates as needed.
     ///
@@ -774,7 +790,7 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// v0.9: refuse a pending-inbound pair request without pairing.
+    /// Refuse a pending-inbound pair request without pairing.
     Reject {
         /// Peer name (character nickname or handle) from `wire pending`.
         peer: String,
