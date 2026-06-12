@@ -55,6 +55,19 @@ jobs:
       - run: cargo build --release --bin wire
       - run: WIRE=./target/release/wire bash demo-invite.sh
 
+  demo-command:
+    # Runs the shipped `wire demo` verb end-to-end: it self-execs to boot an
+    # ephemeral local relay, mint two identities, pair them, and verify a
+    # signed round-trip — then tears it all down. Guards the one-command
+    # try-before-you-install path (and its self-exec orchestration).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --bin wire
+      - run: ./target/release/wire demo --json | tee /dev/stderr | grep -q '"ok":true'
+
   demo-hotline:
     # Runs demo-hotline.sh end-to-end: local relay + 5 agents with vibes +
     # full mesh via `wire add` + signed ring-send. Validates the v0.5
