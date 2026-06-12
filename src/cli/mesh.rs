@@ -19,7 +19,7 @@ pub(super) fn cmd_mesh_route(
     use std::time::Instant;
 
     if !config::is_initialized()? {
-        bail!("not initialized — run `wire init <handle>` first");
+        bail!("not initialized — run `wire up` first");
     }
     let strategy = strategy.to_ascii_lowercase();
     if !matches!(strategy.as_str(), "round-robin" | "first" | "random") {
@@ -446,7 +446,7 @@ pub(super) fn cmd_mesh_broadcast(
     use std::time::Instant;
 
     if !config::is_initialized()? {
-        bail!("not initialized — run `wire init <handle>` first");
+        bail!("not initialized — run `wire up` first");
     }
 
     let scope = match scope_str {

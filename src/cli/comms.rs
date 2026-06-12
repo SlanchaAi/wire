@@ -773,9 +773,7 @@ pub(super) fn cmd_tail(
                 }
             }
             _ => {
-                let scope = peer
-                    .map(|p| format!(" from '{p}'"))
-                    .unwrap_or_default();
+                let scope = peer.map(|p| format!(" from '{p}'")).unwrap_or_default();
                 eprintln!("0 events{scope} ({total} matched). {synced}.");
                 eprintln!("  expected a message? check sync: `wire doctor` / `wire status`.");
             }
@@ -1299,7 +1297,9 @@ mod notify_sweep_tests {
         // file sees nothing — the event does NOT re-toast next cycle.
         let mut w2 = InboxWatcher::from_dir_and_cursor(inbox.clone(), &cursor).unwrap();
         assert!(
-            notify_sweep_new_events(&mut w2, &cursor).unwrap().is_empty(),
+            notify_sweep_new_events(&mut w2, &cursor)
+                .unwrap()
+                .is_empty(),
             "persisted cursor prevents re-firing the same event"
         );
 

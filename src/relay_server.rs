@@ -1226,7 +1226,7 @@ async fn handle_claim(
                 return (
                     StatusCode::CONFLICT,
                     Json(json!({
-                        "error": "phyllis: this line's already taken by someone else — pick another handle or buzz the rightful owner",
+                        "error": "phyllis: this line's already taken by a different identity (persona collision). Your handle is fixed to your key, so claim on another relay (`wire up @<other-relay>`) or mint a fresh identity (`wire nuke` then `wire up`).",
                         "nick": req.nick,
                         "claimed_by": existing.did,
                     })),

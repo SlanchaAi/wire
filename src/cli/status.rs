@@ -1019,7 +1019,9 @@ fn sync_freshness_verdict(last_sync_age: Option<u64>, pending_total: u64) -> Doc
         ),
         Some(age) if age > 60 => DoctorCheck::warn(
             "sync_freshness",
-            format!("daemon last synced {age}s ago (stale, >60s) — nothing queued, but the loop may be wedged"),
+            format!(
+                "daemon last synced {age}s ago (stale, >60s) — nothing queued, but the loop may be wedged"
+            ),
             "`wire status` for detail; `wire up` to restart the daemon",
         ),
         Some(age) => DoctorCheck::pass("sync_freshness", format!("synced {age}s ago")),

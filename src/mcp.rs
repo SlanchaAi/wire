@@ -864,7 +864,7 @@ fn tool_whoami() -> Result<Value, String> {
     use crate::signing::{b64decode, fingerprint, make_key_id};
 
     if !config::is_initialized().map_err(|e| e.to_string())? {
-        return Err("not initialized — operator must run `wire init <handle>` first".into());
+        return Err("not initialized — operator must run `wire up` first".into());
     }
     let card = config::read_agent_card().map_err(|e| e.to_string())?;
     let did = card
@@ -1202,7 +1202,7 @@ fn tool_send(args: &Value) -> Result<Value, String> {
     let queue = args.get("queue").and_then(Value::as_bool).unwrap_or(false);
 
     if !config::is_initialized().map_err(|e| e.to_string())? {
-        return Err("not initialized — operator must run `wire init <handle>` first".into());
+        return Err("not initialized — operator must run `wire up` first".into());
     }
     let sk_seed = config::read_private_key().map_err(|e| e.to_string())?;
     let card = config::read_agent_card().map_err(|e| e.to_string())?;

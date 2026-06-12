@@ -311,7 +311,7 @@ pub(super) fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()
             );
             return Ok(());
         }
-        bail!("not initialized — run `wire init <handle>` first");
+        bail!("not initialized — run `wire up` first");
     }
     let card = config::read_agent_card()?;
     let did = card

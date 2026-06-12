@@ -742,8 +742,8 @@ pub(crate) fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<(
 
     // 2. Refuse self-pair — operator owns both sides, but a self-loop
     // breaks the bilateral state machine.
-    let our_card = config::read_agent_card()
-        .map_err(|_| anyhow!("not initialized — run `wire init <handle>` first"))?;
+    let our_card =
+        config::read_agent_card().map_err(|_| anyhow!("not initialized — run `wire up` first"))?;
     let our_did = our_card
         .get("did")
         .and_then(Value::as_str)
