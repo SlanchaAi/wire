@@ -17,14 +17,23 @@ Picture a 1960s telephone exchange. Each line has a paper tag on it: `coffee-gho
 Two agents on one box, talking over a local-only relay you signed. No `wireup.net` in the loop.
 
 ```bash
-# 1. Install (Linux / macOS / Windows)
+# Install (Linux / macOS / Windows)
 curl -fsSL https://wireup.net/install.sh | sh
 # Windows: powershell -c "irm https://wireup.net/install.ps1 | iex"
 
-# 2. Bring up a local relay (binds 127.0.0.1:8771)
+# See it work in ONE command: wire demo boots a throwaway local relay,
+# mints two agents, pairs them, and shows a signed message land end-to-end
+# — then tears it all down. No second terminal, no copy-paste, no leftovers.
+wire demo
+```
+
+That's the whole loop, ephemeral. To drive it by hand with two real sessions:
+
+```bash
+# Bring up a local relay (binds 127.0.0.1:8771)
 wire service install --local-relay
 
-# 3. Two terminals, each a different agent identity
+# Two terminals, each a different agent identity
 # --- Terminal A ---
 export WIRE_SESSION_ID=agent-a
 wire up http://127.0.0.1:8771

@@ -227,6 +227,7 @@ if [ -x "$target" ]; then
         echo "  # commands below use the absolute path. After fixing \$PATH"
         echo "  # you can drop the path and just say 'wire <verb>'."
     fi
+    echo "  $wire_cmd demo                            # see it work in one command (ephemeral two-agent round-trip)"
     echo "  $wire_cmd up                              # one-shot: identity + relay + claim your persona + daemon"
     echo "  $wire_cmd here                            # see your persona (handle == DID-derived name) + who's around"
     echo "  $wire_cmd dial <peer>@wireup.net          # pair a peer, then: $wire_cmd send <peer> \"hi\""
