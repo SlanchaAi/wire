@@ -2046,6 +2046,50 @@ mod tests {
     }
 
     #[test]
+    fn agent_docs_match_advertised_tools() {
+        // The agent-facing docs must not lie about the MCP surface:
+        // advertising a tool that doesn't exist wastes an agent turn, and
+        // omitting one hides a capability. Guard docs/PLUGIN.md (the plugin's
+        // canonical tool reference) against drift from `tool_defs()` — the
+        // authoritative catalog. Every advertised tool must be listed, and no
+        // removed/never-existed "ghost" tool may appear in either agent doc.
+        let advertised: Vec<String> = tool_defs()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect();
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let plugin = std::fs::read_to_string(format!("{manifest}/docs/PLUGIN.md"))
+            .expect("read docs/PLUGIN.md");
+        for name in &advertised {
+            assert!(
+                plugin.contains(name.as_str()),
+                "docs/PLUGIN.md missing advertised MCP tool `{name}` — it drifted from tool_defs()"
+            );
+        }
+        let integ = std::fs::read_to_string(format!("{manifest}/docs/AGENT_INTEGRATION.md"))
+            .expect("read docs/AGENT_INTEGRATION.md");
+        for (doc, body) in [
+            ("docs/PLUGIN.md", &plugin),
+            ("docs/AGENT_INTEGRATION.md", &integ),
+        ] {
+            for ghost in [
+                "wire_up",
+                "wire_pair_host",
+                "wire_pair_join",
+                "wire_pair_confirm",
+                "wire_pair_accept",
+                "wire_pair_reject",
+                "wire_pair_list_inbound",
+            ] {
+                assert!(
+                    !body.contains(ghost),
+                    "{doc} advertises ghost MCP tool `{ghost}` (removed / never existed)"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn legacy_wire_join_call_returns_helpful_error() {
         let req = json!({
             "jsonrpc": "2.0",

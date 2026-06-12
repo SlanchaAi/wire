@@ -31,13 +31,15 @@ The plugin ships six skills, all namespaced under `/wire:`:
 
 ### MCP server tools
 
-Claude Code auto-starts `wire mcp` on session start (declared in `.mcp.json`). Available tools:
+Claude Code auto-starts `wire mcp` on session start (declared in `.mcp.json`). Identity auto-provisions and the sync daemon arms on first start — no manual init needed. Tools (all prefixed `mcp__wire__` over MCP):
 
-- `mcp__wire__wire_init`, `wire_up`, `wire_dial`, `wire_pending`, `wire_accept`, `wire_reject`
-- `mcp__wire__wire_send`, `wire_tail`, `wire_peers`, `wire_whoami`, `wire_whois`
-- `mcp__wire__wire_pair_*` (deprecated; canonical verbs are the bare-named ones above)
-- `mcp__wire__wire_group_*` (group chat; v0.13.3+)
-- `mcp__wire__wire_invite_mint`, `wire_invite_accept` (SPAKE2 invite path)
+- **Orient / read** — `wire_whoami`, `wire_here` (who am I, who's around?), `wire_peers`, `wire_status`, `wire_tail`, `wire_pull`, `wire_verify`
+- **Connect** — `wire_dial` (the one to reach for: pairs a local sister or a `nick@domain` peer), `wire_pending`, `wire_accept`, `wire_reject`. `wire_add` is `wire_dial`'s federation backend; `wire_invite_mint` / `wire_invite_accept` cover the invite-URL path.
+- **Talk** — `wire_send`
+- **Identity (rarely needed — auto-provisioned)** — `wire_init`, `wire_claim`, `wire_whois`, `wire_profile_set`, `wire_profile_get`
+- **Group chat** — `wire_group_create`, `wire_group_add`, `wire_group_invite`, `wire_group_join`, `wire_group_list`, `wire_group_send`, `wire_group_tail`
+
+This list is verified against the live catalog by a test (`agent_docs_match_advertised_tools`) — it fails CI if a tool is added/removed without updating these docs.
 
 Resource: `wire://inbox/<peer>` exposes each pinned peer's verified inbox as JSONL.
 
