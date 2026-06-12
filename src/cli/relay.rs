@@ -162,7 +162,7 @@ pub(crate) fn cmd_bind_relay(
     use crate::endpoints::{Endpoint, self_endpoints};
 
     if !config::is_initialized()? {
-        bail!("not initialized — run `wire init <handle>` first");
+        bail!("not initialized — run `wire up` first");
     }
     let card = config::read_agent_card()?;
     let did = card.get("did").and_then(Value::as_str).unwrap_or("");
@@ -818,7 +818,7 @@ fn endpoint_cursor_key(scope: crate::endpoints::EndpointScope) -> String {
 
 pub(super) fn cmd_rotate_slot(no_announce: bool, as_json: bool) -> Result<()> {
     if !config::is_initialized()? {
-        bail!("not initialized — run `wire init <handle>` first");
+        bail!("not initialized — run `wire up` first");
     }
     let mut state = config::read_relay_state()?;
     let self_state = state.get("self").cloned().unwrap_or(Value::Null);
@@ -1104,7 +1104,7 @@ pub(super) fn cmd_daemon(
         }
     }
     if !config::is_initialized()? {
-        bail!("not initialized — run `wire init <handle>` first");
+        bail!("not initialized — run `wire up` first");
     }
     // v0.14.2 (#162): pidfile singleton on the persistent daemon. If
     // another live `wire daemon` already owns the pidfile, exit 0 with a
@@ -1171,6 +1171,26 @@ pub(super) fn cmd_daemon(
         crate::daemon_stream::spawn_stream_subscriber(wake_tx);
     }
 
+    // Arm inbound-message OS toasts inside the always-on daemon: fold the
+    // `wire notify` sweep into the sync loop so the default `wire up` path
+    // delivers toasts for incoming messages (previously nothing ever started
+    // a notify sweep — inbound messages arrived silently). `--once` is a
+    // single atomic cycle that doesn't own the cursor, so it stays opt-out.
+    let mut notify_state: Option<(crate::inbox_watch::InboxWatcher, std::path::PathBuf)> = if once {
+        None
+    } else {
+        let cursor_path = config::state_dir()?.join("notify.cursor");
+        match crate::inbox_watch::InboxWatcher::from_cursor_file(&cursor_path) {
+            Ok(w) => Some((w, cursor_path)),
+            Err(e) => {
+                // Non-fatal: the sync loop is the daemon's core job; toasts
+                // are a side channel. Degrade to no toasts, keep syncing.
+                eprintln!("daemon: notify watcher init failed, toasts disabled: {e:#}");
+                None
+            }
+        }
+    };
+
     loop {
         let pushed = run_sync_push().unwrap_or_else(|e| {
             eprintln!("daemon: push error: {e:#}");
@@ -1180,6 +1200,14 @@ pub(super) fn cmd_daemon(
             eprintln!("daemon: pull error: {e:#}");
             json!({"written": [], "rejected": [], "total_seen": 0, "error": e.to_string()})
         });
+
+        // Toast any newly-arrived inbox events (folded-in `wire notify`).
+        if let Some((ref mut watcher, ref cursor_path)) = notify_state {
+            match super::comms::notify_sweep_new_events(watcher, cursor_path) {
+                Ok(events) => super::comms::toast_inbox_events(&events),
+                Err(e) => eprintln!("daemon: notify sweep error: {e:#}"),
+            }
+        }
 
         // v0.14.2 (#162): persist a `last_sync.json` record after every
         // cycle (including --once + cycles that pushed/pulled zero events

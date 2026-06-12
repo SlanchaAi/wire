@@ -242,7 +242,7 @@ pub(super) fn cmd_send(
     as_json: bool,
 ) -> Result<()> {
     if !config::is_initialized()? {
-        bail!("not initialized — run `wire init <handle>` first");
+        bail!("not initialized — run `wire up` first");
     }
     let peer_in = crate::agent_card::bare_handle(peer).to_string();
     // v0.7.0-alpha.2/.5: nickname-as-handle resolution. Exact handle
@@ -592,7 +592,7 @@ pub(super) fn cmd_here(as_json: bool) -> Result<()> {
 
     // Human format.
     if !initialized {
-        println!("not initialized — run `wire init <handle>` to bootstrap.");
+        println!("not initialized — run `wire up` to bootstrap.");
         return Ok(());
     }
     let glyph = self_character
@@ -1148,6 +1148,35 @@ pub(super) fn cmd_notify(
     }
 }
 
+/// Poll the inbox for new verified events past `cursor_path` and advance the
+/// persisted cursor. Pure mechanism — the caller decides what to do with the
+/// returned events.
+///
+/// The daemon calls this every sync cycle and toasts the result (see
+/// [`toast_inbox_events`]), folding `wire notify` into the always-on loop so
+/// the default `wire up` path delivers inbound-message OS toasts. Previously
+/// nothing ever started a notify sweep — `ensure_notify_running` had zero
+/// callers — so an armed daemon toasted pair events but inbound *messages*
+/// arrived silently. Shares `notify.cursor` with `wire notify`; running both
+/// at once is the documented identity-collision case (each warns).
+pub(super) fn notify_sweep_new_events(
+    watcher: &mut crate::inbox_watch::InboxWatcher,
+    cursor_path: &std::path::Path,
+) -> Result<Vec<crate::inbox_watch::InboxEvent>> {
+    let events = watcher.poll()?;
+    watcher.save_cursors(cursor_path)?;
+    Ok(events)
+}
+
+/// Toast a batch of inbox events (daemon-side). Thin wrapper so the daemon
+/// loop body stays readable and the dedup/quiet machinery in
+/// [`os_notify_inbox_event`] is reused verbatim.
+pub(super) fn toast_inbox_events(events: &[crate::inbox_watch::InboxEvent]) {
+    for ev in events {
+        os_notify_inbox_event(ev);
+    }
+}
+
 fn os_notify_inbox_event(ev: &crate::inbox_watch::InboxEvent) {
     let who = persona_label(&ev.peer);
     let title = if ev.verified {
@@ -1173,4 +1202,74 @@ fn os_notify_inbox_event(ev: &crate::inbox_watch::InboxEvent) {
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn os_toast(title: &str, body: &str) {
     eprintln!("[wire notify] {title}\n  {body}");
+}
+
+#[cfg(test)]
+mod notify_sweep_tests {
+    use super::*;
+    use crate::inbox_watch::InboxWatcher;
+    use std::io::Write;
+
+    fn tmp_base(tag: &str) -> std::path::PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        std::env::temp_dir().join(format!("wire-{tag}-{}-{n}", std::process::id()))
+    }
+
+    fn append_event(inbox: &std::path::Path, peer: &str, body: &str) {
+        std::fs::create_dir_all(inbox).unwrap();
+        let p = inbox.join(format!("{peer}.jsonl"));
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&p)
+            .unwrap();
+        let e = serde_json::json!({
+            "event_id": format!("evt-{body}"),
+            "from": format!("did:wire:{peer}"),
+            "to": "did:wire:self",
+            "type": "decision",
+            "kind": 1,
+            "timestamp": "2026-06-11T00:00:00Z",
+            "body": body,
+            "sig": "x",
+        });
+        writeln!(f, "{}", serde_json::to_string(&e).unwrap()).unwrap();
+    }
+
+    // The daemon's folded-in notify sweep must report each new inbox event
+    // exactly once and persist the cursor — otherwise it either misses
+    // inbound toasts (the original bug: nothing ever swept) or re-fires the
+    // same toast every sync cycle (a torn/non-advancing cursor).
+    #[test]
+    fn notify_sweep_reports_new_events_once_and_persists_cursor() {
+        let base = tmp_base("notifysweep");
+        let inbox = base.join("inbox");
+        let cursor = base.join("notify.cursor");
+
+        append_event(&inbox, "paul", "first");
+        let mut w = InboxWatcher::from_dir_and_cursor(inbox.clone(), &cursor).unwrap();
+        let got = notify_sweep_new_events(&mut w, &cursor).unwrap();
+        assert_eq!(got.len(), 1, "first sweep sees the one new event");
+        assert!(got[0].body_preview.contains("first"));
+
+        // Cursor was persisted: a brand-new watcher from the same cursor
+        // file sees nothing — the event does NOT re-toast next cycle.
+        let mut w2 = InboxWatcher::from_dir_and_cursor(inbox.clone(), &cursor).unwrap();
+        assert!(
+            notify_sweep_new_events(&mut w2, &cursor).unwrap().is_empty(),
+            "persisted cursor prevents re-firing the same event"
+        );
+
+        // A later event past the cursor is picked up.
+        append_event(&inbox, "paul", "second");
+        let mut w3 = InboxWatcher::from_dir_and_cursor(inbox, &cursor).unwrap();
+        let third = notify_sweep_new_events(&mut w3, &cursor).unwrap();
+        assert_eq!(third.len(), 1);
+        assert!(third[0].body_preview.contains("second"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
