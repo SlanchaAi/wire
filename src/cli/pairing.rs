@@ -715,7 +715,27 @@ pub(crate) fn resolve_peer_handle(input: &str) -> Result<Option<String>, Resolve
     }
 }
 
-pub(crate) fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<()> {
+/// Outcome of a local-sister pair_drop — the fields both the CLI renderer and
+/// the MCP `wire_dial` surface need.
+pub(crate) struct LocalSisterDrop {
+    /// Session we actually resolved to (may differ from input if matched by
+    /// nickname). The CLI prints a "resolved nickname → session" note when it
+    /// differs from the operator's typed name.
+    pub resolved_session: String,
+    pub paired_with_did: String,
+    pub peer_handle: String,
+    pub event_id: String,
+    pub delivered_via: String,
+    pub delivery_relay_url: String,
+}
+
+/// Core of the local-sister pair: resolve the sister, pin them VERIFIED,
+/// deliver a signed pair_drop to their local slot, and return the outcome.
+/// No stdout — `cmd_add_local_sister` renders for the CLI, `tool_dial` returns
+/// JSON for MCP (where stdout is the JSON-RPC channel, so a stray println
+/// corrupts the protocol). This is what lets an MCP agent dial a bare
+/// nickname / local sister instead of hitting the old circular dead-end.
+pub(crate) fn add_local_sister_core(sister_name: &str) -> Result<LocalSisterDrop> {
     // 1. Locate sister session by name OR character nickname.
     let sessions = crate::session::list_sessions()?;
     let sister = match resolve_local_session(&sessions, sister_name) {
@@ -731,14 +751,6 @@ pub(crate) fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<(
             candidates.join(", ")
         ),
     };
-    // If we matched via nickname (not exact name), surface that so the
-    // operator sees what we resolved to. Quiet when names match exactly.
-    if sister.name != sister_name {
-        eprintln!(
-            "wire add: resolved nickname `{sister_name}` → session `{}`",
-            sister.name
-        );
-    }
 
     // 2. Refuse self-pair — operator owns both sides, but a self-loop
     // breaks the bilateral state machine.
@@ -875,33 +887,51 @@ pub(crate) fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<(
         )
         .with_context(|| format!("delivering pair_drop to `{sister_name}`'s local slot"))?;
 
+    let delivered_via = match delivery_endpoint.scope {
+        crate::endpoints::EndpointScope::Local => "local",
+        crate::endpoints::EndpointScope::Lan => "lan",
+        crate::endpoints::EndpointScope::Uds => "uds",
+        crate::endpoints::EndpointScope::Federation => "federation",
+    }
+    .to_string();
+    Ok(LocalSisterDrop {
+        resolved_session: sister.name.clone(),
+        paired_with_did: sister_did,
+        peer_handle: sister_handle,
+        event_id,
+        delivered_via,
+        delivery_relay_url: delivery_endpoint.relay_url.clone(),
+    })
+}
+
+/// CLI renderer over [`add_local_sister_core`]. Output byte-identical to the
+/// pre-extraction path (the within-system e2e suite guards it).
+pub(crate) fn cmd_add_local_sister(sister_name: &str, as_json: bool) -> Result<()> {
+    let drop = add_local_sister_core(sister_name)?;
+    // If we matched via nickname (not exact name), surface that so the
+    // operator sees what we resolved to. Quiet when names match exactly.
+    if drop.resolved_session != sister_name {
+        eprintln!(
+            "wire add: resolved nickname `{sister_name}` → session `{}`",
+            drop.resolved_session
+        );
+    }
     if as_json {
         println!(
             "{}",
             serde_json::to_string(&json!({
                 "handle": sister_name,
-                "paired_with": sister_did,
-                "peer_handle": sister_handle,
-                "event_id": event_id,
-                "delivered_via": match delivery_endpoint.scope {
-                    crate::endpoints::EndpointScope::Local => "local",
-                    crate::endpoints::EndpointScope::Lan => "lan",
-                    crate::endpoints::EndpointScope::Uds => "uds",
-                    crate::endpoints::EndpointScope::Federation => "federation",
-                },
+                "paired_with": drop.paired_with_did,
+                "peer_handle": drop.peer_handle,
+                "event_id": drop.event_id,
+                "delivered_via": drop.delivered_via,
                 "status": "drop_sent",
             }))?
         );
     } else {
-        let scope = match delivery_endpoint.scope {
-            crate::endpoints::EndpointScope::Local => "local",
-            crate::endpoints::EndpointScope::Lan => "lan",
-            crate::endpoints::EndpointScope::Uds => "uds",
-            crate::endpoints::EndpointScope::Federation => "federation",
-        };
         println!(
-            "→ found sister `{sister_name}` (did={sister_did})\n→ pinned peer locally\n→ pair_drop delivered to {scope} slot on {}\nawaiting pair_drop_ack from {sister_handle} to complete bilateral pin.",
-            delivery_endpoint.relay_url
+            "→ found sister `{sister_name}` (did={})\n→ pinned peer locally\n→ pair_drop delivered to {} slot on {}\nawaiting pair_drop_ack from {} to complete bilateral pin.",
+            drop.paired_with_did, drop.delivered_via, drop.delivery_relay_url, drop.peer_handle
         );
     }
     Ok(())

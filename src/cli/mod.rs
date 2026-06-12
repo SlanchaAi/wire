@@ -39,7 +39,9 @@ pub use session::maybe_auto_init_cwd_session;
 
 // Re-exports for cross-module callers (comms.rs, mcp.rs, etc.).
 pub(crate) use pairing::{DialTarget, resolve_name_to_target};
-pub(crate) use pairing::{ResolveError, cmd_add_local_sister, resolve_peer_handle};
+pub(crate) use pairing::{
+    ResolveError, add_local_sister_core, cmd_add_local_sister, resolve_peer_handle,
+};
 // Re-exports for identity family: setup.rs calls super::cmd_init / super::cmd_claim;
 // comms.rs + pairing.rs call super::op_claims_from_card; mcp.rs calls crate::cli::op_claims_from_card.
 pub(crate) use identity::op_claims_from_card;

@@ -1556,25 +1556,36 @@ fn tool_dial(args: &Value) -> Result<Value, String> {
         return tool_add(&a);
     }
 
-    let relay_state = crate::config::read_relay_state().map_err(|e| e.to_string())?;
-    let pinned = relay_state
-        .get("peers")
-        .and_then(Value::as_object)
-        .map(|m| m.contains_key(name))
-        .unwrap_or(false);
-    if pinned {
-        return Ok(json!({
+    // Bare nick: mirror the CLI `wire dial` resolution ladder via the shared
+    // resolver — pinned peer (already reachable) or local sister (pair now).
+    // Previously this dead-ended ("use wire_send, it auto-pairs") which is
+    // circular — wire_send returns peer_unknown telling you to wire_dial.
+    match crate::cli::resolve_name_to_target(name) {
+        Ok(crate::cli::DialTarget::PinnedPeer {
+            handle, did, tier, ..
+        }) => Ok(json!({
             "name_input": name,
             "status": "already_pinned",
-            "peer_handle": name,
-        }));
+            "peer_handle": handle,
+            "did": did,
+            "tier": tier,
+        })),
+        Ok(crate::cli::DialTarget::LocalSister { session_name, .. }) => {
+            let drop =
+                crate::cli::add_local_sister_core(&session_name).map_err(|e| format!("{e:#}"))?;
+            Ok(json!({
+                "name_input": name,
+                "status": "paired_local_sister",
+                "peer_handle": drop.peer_handle,
+                "paired_with": drop.paired_with_did,
+                "event_id": drop.event_id,
+                "delivered_via": drop.delivered_via,
+            }))
+        }
+        // Unresolvable: surface the resolver's own did-you-mean message
+        // (names pinned peers + sisters + the handle@relay federation form).
+        Err(e) => Err(format!("{e:#}")),
     }
-
-    Err(format!(
-        "cannot resolve `{name}` over MCP: bare-nickname / local-sister dialling is not yet \
-         wired into the MCP surface. Use a federation handle `{name}@<relay>`, or `wire_send` \
-         (it auto-pairs on miss)."
-    ))
 }
 
 fn tool_add(args: &Value) -> Result<Value, String> {
