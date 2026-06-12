@@ -14,6 +14,17 @@
 
 set -uo pipefail
 
+# Claude Code passes session_id on STDIN, but `wire` keys each session's
+# identity off $WIRE_SESSION_ID. Without bridging stdin->env, `wire whoami`
+# below probes the cwd-default home and reports "NOT initialized" for a session
+# whose MCP server auto-bootstraps a different by-key identity seconds later —
+# the hook's first impression is then wrong twice. Bridge it (same grep/sed,
+# jq-free pattern as assets/wire-statusline.sh so this runs anywhere bash does).
+input="$(cat 2>/dev/null || true)"
+field() { printf '%s' "$1" | grep -o "\"$2\":\"[^\"]*\"" | head -1 | sed "s/.*\"$2\":\"//; s/\"$//"; }
+sid="$(field "$input" session_id)"
+[ -n "$sid" ] && export WIRE_SESSION_ID="$sid"
+
 # 1. Is the wire binary on PATH?
 if ! command -v wire >/dev/null 2>&1; then
   cat <<EOF
@@ -29,8 +40,8 @@ WIRE_VERSION=$(wire --version 2>/dev/null | awk '{print $2}' || echo "?")
 # 2. Is wire initialized?
 if ! wire whoami --short >/dev/null 2>&1; then
   cat <<EOF
-wire-plugin: wire ${WIRE_VERSION} installed, NOT initialized for this session.
-  Run: /wire:wire-init  (or:  wire up  for the public-relay default)
+wire-plugin: wire ${WIRE_VERSION} installed. Identity auto-provisions when the
+  wire MCP server starts — no action needed. To bootstrap manually now: wire up
 EOF
   exit 0
 fi

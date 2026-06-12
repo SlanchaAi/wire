@@ -105,6 +105,18 @@ pub fn run() -> Result<()> {
     // WIRE_MCP_SKIP_AUTO_UP (tests + manual-identity operators).
     ensure_session_bootstrapped();
 
+    // v0.15.x: minting an identity isn't enough — without a running sync loop
+    // the session is "born deaf" (never pulls inbound, never pushes outbound),
+    // the #1 MCP first-run failure. `ensure_session_bootstrapped` only creates
+    // identity (and early-returns for already-initialized homes), so arm the
+    // daemon unconditionally here. Idempotent (singleton-guarded) and gated on
+    // an existing identity + the same skip env bootstrap honors.
+    if std::env::var("WIRE_MCP_SKIP_AUTO_UP").is_err()
+        && crate::config::is_initialized().unwrap_or(false)
+    {
+        let _ = crate::ensure_up::ensure_daemon_running();
+    }
+
     // v0.6.10: surface multi-agent identity collisions explicitly.
     // Two Claudes (or any MCP-host pair) launched in the same cwd
     // auto-detect into the same wire session and silently share an
@@ -488,7 +500,7 @@ fn handle_initialize(id: &Value) -> Value {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION,
             },
-            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity), wire_status (daemon + sync health). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). ON SESSION START, DO THIS IMMEDIATELY (every wire session): (1) call wire_status to confirm the `wire daemon` sync loop is running — `daemon_running:true` + `last_sync_age_seconds < 60`; if not, the session won't push outbound or pull inbound and the operator must start a daemon (`wire daemon --interval 5` in a background shell, or systemd/launchd). (2) arm a PERSISTENT stream-watcher on `wire monitor --json` — in Claude Code, the Monitor tool with persistent:true — so peer messages surface live mid-session. The monitor does NOT sync the relay; it only tails the inbox the daemon writes. Both are required. WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you; this is how paired agents collaborate immediately. (Default filter strips pair_drop/pair_drop_ack/heartbeat noise.) v0.14.2: wire_send POSTs synchronously by default — response `status` is the actual relay verdict: `delivered` (event landed on peer's slot), `duplicate` (same event_id already on slot; peer can still pull), `peer_unknown` (peer not pinned — run wire_dial first), `slot_stale` (peer's slot rotated — run wire_dial to re-pair), or `transport_error` (TLS/DNS/relay-5xx; check `reason` field). Pass `queue:true` to opt back into the legacy outbox→daemon-push path for offline-buffer / pre-pair queueing. wire_pull is the symmetric receive primitive — call it to trigger an immediate relay GET instead of waiting for the daemon's 5s pull cycle; returns written[]/rejected[]/total_seen the same way `wire pull --json` does. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
+            "instructions": "wire — agent-to-agent comms. Canonical verbs (v0.9+): wire_dial (initiate pair), wire_send (talk; auto-pairs on miss), wire_pending (see inbound requests), wire_accept (consent to a pending pair), wire_reject (refuse), wire_whois (inspect identity), wire_status (daemon + sync health). For cross-machine pairing pass `<handle>@<relay>` to wire_dial. Bilateral: the peer must also accept (wire_accept or wire_dial back) before capability flows in both directions. INBOUND pair requests from strangers land in pending-inbound: call wire_pending to enumerate, surface to operator, then wire_accept or wire_reject. NEVER auto-accept inbound pair requests without operator consent — accepting grants the peer authenticated write access to this agent's inbox. Resources: 'wire://inbox/<peer>' exposes each pinned peer's verified inbox (JSONL). ON SESSION START, DO THIS IMMEDIATELY (every wire session): (1) call wire_status to confirm the sync loop is healthy — `daemon_running:true` + `last_sync_age_seconds < 60`. The daemon is auto-started for you when this MCP server launches, so this is normally already true; if daemon_running is false, run `wire up` (or `wire service install` for a reboot-durable daemon). (2) arm a PERSISTENT stream-watcher on `wire monitor --json` — in Claude Code, the Monitor tool with persistent:true — so peer messages surface live mid-session. The monitor does NOT sync the relay; it only tails the inbox the daemon writes. Both are required. WHEN A PEER MESSAGE ARRIVES, reply to it in your own live context WITHOUT waiting for the operator to prompt you; this is how paired agents collaborate immediately. (Default filter strips pair_drop/pair_drop_ack/heartbeat noise.) v0.14.2: wire_send POSTs synchronously by default — response `status` is the actual relay verdict: `delivered` (event landed on peer's slot), `duplicate` (same event_id already on slot; peer can still pull), `peer_unknown` (peer not pinned — run wire_dial first), `slot_stale` (peer's slot rotated — run wire_dial to re-pair), or `transport_error` (TLS/DNS/relay-5xx; check `reason` field). Pass `queue:true` to opt back into the legacy outbox→daemon-push path for offline-buffer / pre-pair queueing. wire_pull is the symmetric receive primitive — call it to trigger an immediate relay GET instead of waiting for the daemon's 5s pull cycle; returns written[]/rejected[]/total_seen the same way `wire pull --json` does. See docs/AGENT_INTEGRATION.md for the full monitor recipe and THREAT_MODEL.md (T10/T14)."
         }
     })
 }
@@ -516,13 +528,18 @@ fn tool_defs() -> Vec<Value> {
             "inputSchema": {"type": "object", "properties": {}, "required": []}
         }),
         json!({
+            "name": "wire_here",
+            "description": "\"Who am I and who can I talk to?\" — the cold-start orientation tool. Returns {self: {handle, did, persona, cwd, wire_home}, sister_sessions: [...], pinned_peers: [...]}. Sister sessions are other agents on THIS machine you can reach with wire_dial by their `session` name (no relay round-trip); pinned_peers are already-paired contacts. Call this first when wire_peers is empty and you need to find a dial target. Read-only.",
+            "inputSchema": {"type": "object", "properties": {}, "required": []}
+        }),
+        json!({
             "name": "wire_status",
-            "description": "v0.14.2 — daemon + sync-loop health check. Returns: daemon_running (pidfile pid alive), all_running_pids (pgrep for `wire daemon`), last_sync_age_seconds (age of the most recent successful daemon cycle; null if no cycle ever recorded), outbox_count, inbox_count, peer count. **Call this BEFORE assuming wire_send actually delivered** — `wire_send` returns `status:\"queued\"` even if no daemon is running to push the queued event. A nonzero `outbox_count` with no recent `last_sync` means events are queued into the void. Read-only.",
+            "description": "v0.14.2 — daemon + sync-loop health check. Returns: daemon_running (pidfile pid alive), all_running_pids (pgrep for `wire daemon`), last_sync_age_seconds (age of the most recent successful daemon cycle; null if no cycle ever recorded), outbox_count, inbox_count, peer count. The daemon is auto-started for you on MCP launch; a healthy session shows daemon_running:true + last_sync_age_seconds < 60. Default `wire_send` is synchronous (its own status is the delivery verdict); only `queue:true` sends depend on the daemon to drain — a nonzero outbox_count with a stale last_sync means those are stuck. Read-only.",
             "inputSchema": {"type": "object", "properties": {}, "required": []}
         }),
         json!({
             "name": "wire_send",
-            "description": "Sign and queue an event to a peer. Returns event_id (SHA-256 of canonical body — content-addressed, so identical bodies produce identical event_ids and the daemon dedupes). Body may be plain text or a JSON-encoded structured value. Concurrent sends to multiple peers are safe (per-peer outbox files); concurrent sends to the same peer are serialized via a per-path lock.",
+            "description": "Sign and send an event to a peer. Synchronous by default (v0.14.2): the response `status` is the actual relay verdict — `delivered`, `duplicate`, `peer_unknown` (run wire_dial first), `slot_stale` (run wire_dial to re-pair), or `transport_error` (see `reason`). Pass `queue:true` to opt into the legacy outbox→daemon-push path (offline buffer / pre-pair). Returns event_id (SHA-256 of canonical body — content-addressed, so identical bodies dedupe). Body may be plain text or JSON. Concurrent sends to different peers are safe; same-peer sends serialize via a per-path lock.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -565,7 +582,7 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "wire_init",
-            "description": "Idempotent identity creation. If already initialized with the same handle: returns the existing identity (no-op). If initialized with a different handle: errors — operator must explicitly delete config to re-key. If --relay is passed and not yet bound, also allocates a relay slot in one step.",
+            "description": "Rarely needed — identity auto-bootstraps when this MCP server starts. Idempotent manual identity creation: already initialized → returns the existing identity (no-op); different handle → errors (delete config to re-key). The typed handle is vestigial under the one-name rule (your handle is DID-derived). If relay_url is passed and not yet bound, also allocates a relay slot.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -784,6 +801,7 @@ fn handle_tools_call(id: &Value, params: &Value, _state: &McpState) -> Value {
         "wire_whoami" => tool_whoami(),
         "wire_status" => tool_status(),
         "wire_peers" => tool_peers(),
+        "wire_here" => tool_here(),
         "wire_send" => tool_send(&args),
         "wire_pull" => tool_pull(),
         "wire_tail" => tool_tail(&args),
@@ -1503,6 +1521,14 @@ fn tool_invite_accept(args: &Value) -> Result<Value, String> {
     crate::pair_invite::accept_invite(url).map_err(|e| format!("{e:#}"))
 }
 
+/// wire_here (MCP): the cold-agent orientation answer — self + same-machine
+/// sister sessions + pinned peers. Mirrors `wire here --json` exactly (shares
+/// `cli::comms::here_summary`), so an MCP-only agent with an empty wire_peers
+/// can discover a dial target instead of dead-ending.
+fn tool_here() -> Result<Value, String> {
+    crate::cli::here_summary().map_err(|e| format!("{e:#}"))
+}
+
 // ---------- v0.5 — agentic hotline tools ----------
 
 /// wire_dial (MCP): mirror the CLI `dial` resolution ladder. The prior
@@ -1530,25 +1556,36 @@ fn tool_dial(args: &Value) -> Result<Value, String> {
         return tool_add(&a);
     }
 
-    let relay_state = crate::config::read_relay_state().map_err(|e| e.to_string())?;
-    let pinned = relay_state
-        .get("peers")
-        .and_then(Value::as_object)
-        .map(|m| m.contains_key(name))
-        .unwrap_or(false);
-    if pinned {
-        return Ok(json!({
+    // Bare nick: mirror the CLI `wire dial` resolution ladder via the shared
+    // resolver — pinned peer (already reachable) or local sister (pair now).
+    // Previously this dead-ended ("use wire_send, it auto-pairs") which is
+    // circular — wire_send returns peer_unknown telling you to wire_dial.
+    match crate::cli::resolve_name_to_target(name) {
+        Ok(crate::cli::DialTarget::PinnedPeer {
+            handle, did, tier, ..
+        }) => Ok(json!({
             "name_input": name,
             "status": "already_pinned",
-            "peer_handle": name,
-        }));
+            "peer_handle": handle,
+            "did": did,
+            "tier": tier,
+        })),
+        Ok(crate::cli::DialTarget::LocalSister { session_name, .. }) => {
+            let drop =
+                crate::cli::add_local_sister_core(&session_name).map_err(|e| format!("{e:#}"))?;
+            Ok(json!({
+                "name_input": name,
+                "status": "paired_local_sister",
+                "peer_handle": drop.peer_handle,
+                "paired_with": drop.paired_with_did,
+                "event_id": drop.event_id,
+                "delivered_via": drop.delivered_via,
+            }))
+        }
+        // Unresolvable: surface the resolver's own did-you-mean message
+        // (names pinned peers + sisters + the handle@relay federation form).
+        Err(e) => Err(format!("{e:#}")),
     }
-
-    Err(format!(
-        "cannot resolve `{name}` over MCP: bare-nickname / local-sister dialling is not yet \
-         wired into the MCP surface. Use a federation handle `{name}@<relay>`, or `wire_send` \
-         (it auto-pairs on miss)."
-    ))
 }
 
 fn tool_add(args: &Value) -> Result<Value, String> {
