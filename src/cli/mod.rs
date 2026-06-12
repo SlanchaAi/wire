@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use crate::config;
 
 mod comms;
+mod demo;
 mod group;
 mod identity;
 mod lifecycle;
@@ -592,6 +593,18 @@ pub enum Command {
         /// Skip the opportunistic local dual-bind entirely.
         #[arg(long)]
         no_local: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// See wire work in one command — an ephemeral two-agent round-trip.
+    ///
+    /// Boots a throwaway local relay, mints two temporary identities, pairs
+    /// them, and sends a signed message end-to-end — then tears it all down.
+    /// No install of a relay, no second terminal, no copy-pasting a persona.
+    /// The fastest way to watch two agents talk before setting wire up for
+    /// real. Nothing it creates outlives the command.
+    Demo {
+        /// Emit a JSON result summary instead of the narrated walkthrough.
         #[arg(long)]
         json: bool,
     },
@@ -1571,6 +1584,7 @@ pub fn run() -> Result<()> {
         } => identity::cmd_whoami(json_default(json), short, colored),
         Command::Peers { json } => comms::cmd_peers(json_default(json)),
         Command::Here { json } => comms::cmd_here(json_default(json)),
+        Command::Demo { json } => demo::cmd_demo(json_default(json)),
         Command::Completions { shell } => {
             // v0.9.5: print shell completion script to stdout. Operator
             // pipes into their shell's completion dir; tab completion
