@@ -243,8 +243,20 @@ pub(super) fn cmd_status(as_json: bool) -> Result<()> {
     if as_json {
         println!("{}", serde_json::to_string(&summary)?);
     } else if !initialized {
-        println!("not initialized — run `wire init <handle>` first");
+        println!("not initialized — run `wire up` first");
     } else {
+        // Which identity is this status about? The "two Claudes look
+        // identical" trap extends to the diagnostics themselves — print the
+        // resolved on-disk home (and session id, if set) so an operator
+        // running status in the wrong window can tell immediately.
+        if let Ok(sd) = crate::config::state_dir() {
+            println!("home:          {}", sd.display());
+        }
+        if let Ok(sid) = std::env::var("WIRE_SESSION_ID")
+            && !sid.is_empty()
+        {
+            println!("session:       {sid}");
+        }
         println!("did:           {}", summary["did"].as_str().unwrap_or("?"));
         println!(
             "fingerprint:   {}",
@@ -298,6 +310,12 @@ pub(super) fn cmd_status(as_json: bool) -> Result<()> {
             daemon_pid,
             version_suffix,
         );
+        if !daemon_running {
+            // Don't dead-end on the #1 silent-receive cause — name the fix.
+            println!(
+                "               → run `wire up` to restart it, or `wire service install` to keep it alive across reboots"
+            );
+        }
         // P1.7: surface version mismatch + orphan procs loudly.
         if let Some(mm) = summary["daemon"].get("version_mismatch") {
             println!(
@@ -922,6 +940,7 @@ pub(super) fn cmd_doctor(as_json: bool, recent_rejections: usize) -> Result<()> 
         check_daemon_pid_consistency(),
         check_relay_reachable(),
         check_pair_rejections(recent_rejections),
+        check_sync_freshness(),
         check_cursor_progress(),
         check_peer_staleness(7),
         check_and_heal_self_userinfo_endpoints(),
@@ -943,6 +962,12 @@ pub(super) fn cmd_doctor(as_json: bool, recent_rejections: usize) -> Result<()> 
         );
     } else {
         println!("wire doctor — {} checks", checks.len());
+        // Name the home this run diagnoses — the same "which Claude?"
+        // disambiguator `wire status` prints, so a doctor run in the wrong
+        // window is self-evident.
+        if let Ok(sd) = crate::config::state_dir() {
+            println!("  home: {}", sd.display());
+        }
         for c in &checks {
             let bullet = match c.status.as_str() {
                 "PASS" => "✓",
@@ -967,6 +992,50 @@ pub(super) fn cmd_doctor(as_json: bool, recent_rejections: usize) -> Result<()> 
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Pure verdict for sync freshness given the last-sync age (seconds, None =
+/// no completed cycle recorded) and the number of events queued unsent.
+///
+/// This is the silent-send class `wire doctor` is supposed to catch but
+/// didn't: `check_daemon_health` only proves the *process* is alive — a live
+/// daemon whose sync loop is wedged (cursor not advancing, relay throwing)
+/// shows a stale `last_sync` with a growing outbox while doctor reported
+/// ALL GREEN. Split out as a pure fn so the verdict logic is unit-tested
+/// without touching the filesystem.
+fn sync_freshness_verdict(last_sync_age: Option<u64>, pending_total: u64) -> DoctorCheck {
+    match last_sync_age {
+        None => DoctorCheck::warn(
+            "sync_freshness",
+            "no completed sync cycle recorded for this home",
+            "the daemon may not be running here — `wire status` to confirm it's bound to this WIRE_HOME, `wire up` to (re)start it",
+        ),
+        Some(age) if age > 60 && pending_total > 0 => DoctorCheck::fail(
+            "sync_freshness",
+            format!(
+                "daemon last synced {age}s ago (stale) with {pending_total} event(s) queued unsent — outbound messages are silently stuck"
+            ),
+            "restart sync: `wire up`. If it recurs, `wire service install` (durable daemon) and check the relay: `wire doctor` / `wire status`",
+        ),
+        Some(age) if age > 60 => DoctorCheck::warn(
+            "sync_freshness",
+            format!("daemon last synced {age}s ago (stale, >60s) — nothing queued, but the loop may be wedged"),
+            "`wire status` for detail; `wire up` to restart the daemon",
+        ),
+        Some(age) => DoctorCheck::pass("sync_freshness", format!("synced {age}s ago")),
+    }
+}
+
+/// Check: the daemon's sync loop is actually advancing, not just alive.
+/// Reuses the same shared helpers `wire status` surfaces (last_sync age +
+/// pending-push breakdown) so the two agree by construction.
+fn check_sync_freshness() -> DoctorCheck {
+    let last_sync_age = crate::ensure_up::last_sync_age_seconds();
+    let pending_total: u64 = config::compute_pending_push_breakdown()
+        .iter()
+        .map(|p| p.count)
+        .sum();
+    sync_freshness_verdict(last_sync_age, pending_total)
 }
 
 /// Check: daemon running, exactly one instance, no orphans.
@@ -1265,7 +1334,7 @@ fn check_pair_rejections(recent_n: usize) -> DoctorCheck {
             summary.join(", ")
         ),
         format!(
-            "inspect {path:?} for full details. Each entry is a pair-flow error that previously silently dropped — re-run `wire pair <handle>@<relay>` to retry."
+            "inspect {path:?} for full details. Each entry is a pair-flow error that previously silently dropped — re-run `wire dial <handle>@<relay>` to retry."
         ),
     )
 }
@@ -1660,6 +1729,42 @@ fn check_cursor_progress() -> DoctorCheck {
 #[cfg(test)]
 mod doctor_tests {
     use super::*;
+
+    #[test]
+    fn sync_freshness_fails_when_stale_with_queued_events() {
+        // The silent-send class doctor exists to catch: the daemon process
+        // is alive (check_daemon_health PASSes) but its sync is wedged —
+        // last sync is old AND events are queued unsent. Today doctor went
+        // all-green here; this must FAIL.
+        let c = sync_freshness_verdict(Some(3600), 4);
+        assert_eq!(c.status, "FAIL");
+        assert!(c.detail.contains('4'), "names the queued count");
+        assert!(c.fix.is_some());
+    }
+
+    #[test]
+    fn sync_freshness_warns_when_stale_but_nothing_queued() {
+        // Stale sync with an empty outbox is suspicious but not a stuck
+        // message — WARN, not FAIL (don't cry wolf on an idle box).
+        let c = sync_freshness_verdict(Some(3600), 0);
+        assert_eq!(c.status, "WARN");
+    }
+
+    #[test]
+    fn sync_freshness_passes_when_recent() {
+        let c = sync_freshness_verdict(Some(5), 0);
+        assert_eq!(c.status, "PASS");
+        // A fresh sync with queued events is mid-flight, not stuck.
+        assert_eq!(sync_freshness_verdict(Some(5), 9).status, "PASS");
+    }
+
+    #[test]
+    fn sync_freshness_warns_when_never_synced() {
+        // No record at all: can't confirm freshness. WARN with a pointer at
+        // the daemon, not a scary FAIL on a fresh box.
+        let c = sync_freshness_verdict(None, 0);
+        assert_eq!(c.status, "WARN");
+    }
 
     #[test]
     fn doctor_check_constructors_set_status_correctly() {

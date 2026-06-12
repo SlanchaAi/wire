@@ -743,6 +743,46 @@ pub(super) fn cmd_tail(
         &events[start..]
     };
 
+    // Don't dead-end silently on the receive half of hello-world: an empty
+    // window today printed nothing (exit 0), leaving "is it me, the peer, or
+    // the daemon?" undiagnosed. Name what's tail-able and how fresh sync is.
+    // stderr only — never pollutes --json or a piped event capture.
+    if !as_json && window.is_empty() {
+        let channels: Vec<String> = std::fs::read_dir(&inbox)?
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let p = e.path();
+                (p.extension().map(|x| x == "jsonl").unwrap_or(false))
+                    .then(|| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+                    .flatten()
+            })
+            .collect();
+        let synced = match crate::ensure_up::last_sync_age_seconds() {
+            Some(age) => format!("daemon last synced {age}s ago"),
+            None => "daemon has not recorded a sync here yet".to_string(),
+        };
+        match peer {
+            Some(want) if !channels.iter().any(|c| c == want) => {
+                eprintln!("no inbox channel for '{want}'. {synced}.");
+                if channels.is_empty() {
+                    eprintln!(
+                        "  no peers have messaged you yet — `wire dial <name> \"hi\"` to start a line, or `wire doctor` if you expected traffic."
+                    );
+                } else {
+                    eprintln!("  channels you can tail: {}", channels.join(", "));
+                }
+            }
+            _ => {
+                let scope = peer
+                    .map(|p| format!(" from '{p}'"))
+                    .unwrap_or_default();
+                eprintln!("0 events{scope} ({total} matched). {synced}.");
+                eprintln!("  expected a message? check sync: `wire doctor` / `wire status`.");
+            }
+        }
+        return Ok(());
+    }
+
     // D1: decrypt enc-bearing bodies for display (verify-gated). On-disk JSONL
     // stays verbatim ciphertext; this only shapes the rendered output.
     let seed = crate::enc::wire_x25519::self_seed_for_read();
