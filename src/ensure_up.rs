@@ -401,8 +401,18 @@ pub fn last_sync_age_seconds() -> Option<u64> {
 /// daemons?"). The singleton helpers below let `cmd_daemon` claim
 /// the slot at startup + write its own pidfile, closing the gap.
 pub fn daemon_singleton_holder() -> Option<u32> {
+    // Exclude our OWN pid: `ensure_background` records the spawned daemon's pid
+    // in the "daemon" pidfile right after spawn (the P0.4 alive-confirmation
+    // write), and the daemon's own startup singleton check then reads that same
+    // pidfile. Without this self-exclusion the daemon sees its own pid as a live
+    // "other" holder, logs "another daemon is already running", and exits — so a
+    // freshly-`wire up`'d session ends up with NO running daemon and the first
+    // connection silently never completes (the receiver never pulls). A
+    // manually-started daemon dodged this only because nothing pre-wrote its
+    // pid. Self is never "another" daemon.
+    let me = std::process::id();
     match read_pid_record("daemon").pid() {
-        Some(pid) if pid_is_alive(pid) => Some(pid),
+        Some(pid) if pid != me && pid_is_alive(pid) => Some(pid),
         _ => None,
     }
 }
@@ -525,12 +535,28 @@ fn ensure_background(name: &str, args: &[&str]) -> Result<bool> {
 
     crate::config::ensure_dirs()?;
     let exe = std::env::current_exe()?;
-    let child = Command::new(&exe)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+    let mut cmd = Command::new(&exe);
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null());
+    // Capture the spawned daemon's stderr to a logfile instead of /dev/null so
+    // a daemon that dies on startup leaves a trace (otherwise its death is
+    // invisible — exactly the silent-fail class this guards). Best-effort: fall
+    // back to null if the log can't be opened.
+    let stderr_log = crate::config::state_dir()
+        .ok()
+        .map(|d| d.join(format!("{name}-spawn.log")));
+    match stderr_log
+        .as_ref()
+        .and_then(|p| std::fs::File::create(p).ok())
+    {
+        Some(f) => {
+            cmd.stderr(Stdio::from(f));
+        }
+        None => {
+            cmd.stderr(Stdio::null());
+        }
+    }
+
+    let child = cmd.spawn()?;
 
     // P0.4: wait until the child is actually alive before persisting the
     // pid file. Otherwise a concurrent CLI sees the file pointing at a
