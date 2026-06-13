@@ -30,6 +30,7 @@ pub mod init;
 pub mod macaroon;
 pub mod mcp;
 pub mod nuke;
+pub mod org_bind;
 pub mod org_membership;
 pub mod org_policy;
 pub mod os_notify;

@@ -1139,6 +1139,106 @@ pub(super) fn cmd_project(tag: Option<&str>, clear: bool, as_json: bool) -> Resu
     Ok(())
 }
 
+// ---------- org (RFC-001 §2 DNS-TXT trust floor) ----------
+
+/// Dispatch `wire org bind|list|forget`.
+pub(crate) fn cmd_org(cmd: super::OrgCommand) -> Result<()> {
+    match cmd {
+        super::OrgCommand::Bind { domain, mode, json } => cmd_org_bind(&domain, &mode, json),
+        super::OrgCommand::List { json } => cmd_org_list(json),
+        super::OrgCommand::Forget { org_did, json } => cmd_org_forget(&org_did, json),
+    }
+}
+
+fn parse_inbound_mode(s: &str) -> Result<crate::pair_decision::InboundMode> {
+    use crate::pair_decision::InboundMode;
+    match s {
+        "auto" => Ok(InboundMode::Auto),
+        "notify" => Ok(InboundMode::Notify),
+        other => bail!("unknown inbound mode `{other}` — use `notify` (default) or `auto`"),
+    }
+}
+
+fn mode_label(m: crate::pair_decision::InboundMode) -> &'static str {
+    match m {
+        crate::pair_decision::InboundMode::Auto => "auto",
+        crate::pair_decision::InboundMode::Notify => "notify",
+    }
+}
+
+fn cmd_org_bind(domain: &str, mode_str: &str, as_json: bool) -> Result<()> {
+    let mode = parse_inbound_mode(mode_str)?;
+    let resolver = crate::org_bind::DohResolver::new();
+    let (org_did, record) = crate::org_bind::bind_org(&resolver, domain, mode)?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "domain": domain,
+                "org_did": org_did,
+                "mode": mode_label(mode),
+                "relay": record.relay,
+                "sso_iss": record.sso_iss,
+            }))?
+        );
+    } else {
+        println!("→ bound {domain} → {org_did} (inbound={})", mode_label(mode));
+        if let Some(relay) = &record.relay {
+            println!("  org relay: {relay}");
+        }
+        println!(
+            "  members presenting a verified member_cert for this org now reach ORG_VERIFIED."
+        );
+    }
+    Ok(())
+}
+
+fn cmd_org_list(as_json: bool) -> Result<()> {
+    let pol = crate::org_policy::FileOrgPolicy::load();
+    let mut rows: Vec<(String, &'static str)> = pol
+        .entries()
+        .map(|(did, m)| (did.clone(), mode_label(*m)))
+        .collect();
+    rows.sort();
+
+    if as_json {
+        let arr: Vec<Value> = rows
+            .iter()
+            .map(|(did, m)| json!({ "org_did": did, "mode": m }))
+            .collect();
+        println!("{}", serde_json::to_string(&json!({ "orgs": arr }))?);
+    } else if rows.is_empty() {
+        println!("no organizations trusted. `wire org bind <domain>` adds one.");
+    } else {
+        println!("trusted organizations ({}):", rows.len());
+        for (did, m) in &rows {
+            println!("  {did}  (inbound={m})");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_org_forget(org_did: &str, as_json: bool) -> Result<()> {
+    use crate::pair_decision::OrgPolicy;
+    let mut pol = crate::org_policy::FileOrgPolicy::load();
+    let existed = pol.inbound_mode(org_did).is_some();
+    pol.remove(org_did);
+    pol.save()?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({ "org_did": org_did, "forgotten": existed }))?
+        );
+    } else if existed {
+        println!("→ forgot {org_did} — its members no longer reach ORG_VERIFIED via org policy.");
+    } else {
+        println!("{org_did} was not trusted — nothing to forget.");
+    }
+    Ok(())
+}
+
 fn print_profile_publish_result(published: &[String]) {
     if published.is_empty() {
         println!(
