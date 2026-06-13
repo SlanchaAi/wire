@@ -203,6 +203,49 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Fan a single signed message out to every org-mate tagged with a project
+    /// (RFC-001 §6 client-side project routing).
+    ///
+    /// Recipients = every pinned peer at effective tier **>= ORG_VERIFIED**
+    /// whose card carries `project == <project>`. The tier floor is the trust
+    /// gate; `project` is unsigned routing metadata (it picks who, never grants
+    /// trust). Delivery is N synchronous one-to-one pushes — wire has no
+    /// broadcast primitive. Zero matching peers is a no-op success.
+    ///
+    /// Set your own project tag with `wire project <tag>`; peers see it on your
+    /// card once they pin (or re-pull) it.
+    SendProject {
+        /// Project tag to fan out to (must match peers' card `project`).
+        project: String,
+        /// Event body — free-form text, `@/path/to/body.json`, or `-` for stdin.
+        body: String,
+        /// Event kind (`claim`, `decision`, … or numeric id). Default `claim`.
+        #[arg(long, default_value = "claim")]
+        kind: String,
+        /// Advisory deadline: duration (`30m`, `2h`, `1d`) or RFC3339 timestamp.
+        #[arg(long)]
+        deadline: Option<String>,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show, set, or clear this session's project routing tag (RFC-001 §6).
+    ///
+    /// `wire project` prints the current tag; `wire project <tag>` sets it;
+    /// `wire project --clear` removes it. The tag is unsigned metadata on your
+    /// agent-card — peers who pin your card use it to target
+    /// `wire send-project <tag>` fan-outs. Set it before pairing (or re-pair
+    /// after) so the change reaches peers.
+    Project {
+        /// New project tag. Omit to print the current tag.
+        tag: Option<String>,
+        /// Clear the project tag instead of setting one.
+        #[arg(long, conflicts_with = "tag")]
+        clear: bool,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// "Go talk to this name." The one verb operators reach for.
     ///
     /// `wire dial <name>` accepts a character nickname (`noble-slate`),
@@ -1667,6 +1710,22 @@ pub fn run() -> Result<()> {
                 queue,
                 json_default(json),
             )
+        }
+        Command::SendProject {
+            project,
+            body,
+            kind,
+            deadline,
+            json,
+        } => comms::cmd_send_project(
+            &project,
+            &kind,
+            &body,
+            deadline.as_deref(),
+            json_default(json),
+        ),
+        Command::Project { tag, clear, json } => {
+            identity::cmd_project(tag.as_deref(), clear, json_default(json))
         }
         Command::Dial {
             name,

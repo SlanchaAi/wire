@@ -275,6 +275,47 @@ pub fn promote_to_org_verified(trust: &mut Trust, peer_handle: &str) -> Result<(
     Ok(())
 }
 
+/// RFC-001 §6 project fan-out: the pinned peer handles eligible to receive a
+/// `wire send --project <tag>` broadcast.
+///
+/// A peer is eligible iff (a) its effective tier is **>= ORG_VERIFIED** (so we
+/// never fan out to an unverified or unreachable peer) AND (b) its pinned
+/// agent-card carries `project == <tag>`. `project` is **unsigned routing
+/// metadata** (RFC-001 §6) — it selects recipients, it never grants trust; the
+/// tier floor is the trust gate, the project tag is only the address book.
+///
+/// `self_handle` is excluded (our own ATTESTED self-pin must never be a
+/// recipient). Pure over the two state blobs so it unit-tests without any CLI
+/// or live relay. Result is sorted for deterministic output.
+pub fn project_recipients(
+    trust: &Value,
+    relay_state: &Value,
+    self_handle: &str,
+    project: &str,
+) -> Vec<String> {
+    let order = tier_order();
+    let floor = order.get("ORG_VERIFIED").copied().unwrap_or(1);
+    let mut out = Vec::new();
+    if let Some(agents) = trust.get("agents").and_then(Value::as_object) {
+        for (handle, agent) in agents {
+            if handle == self_handle {
+                continue;
+            }
+            let tier = effective_tier(trust, relay_state, handle);
+            let rank = order.get(tier.as_str()).copied().unwrap_or(0);
+            if rank < floor {
+                continue;
+            }
+            let proj = agent.get("card").and_then(crate::agent_card::card_project);
+            if proj == Some(project) {
+                out.push(handle.clone());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// Self-pin our own keypair into trust at ATTESTED. Convenience for `wire init`.
 pub fn add_self_to_trust(trust: &mut Trust, handle: &str, public_key: &[u8]) {
     let agents = trust
@@ -525,6 +566,37 @@ mod tests {
         assert_eq!(effective_tier(&trust, &relay, "a"), "UNTRUSTED");
         let trust = json!({"agents": {"a": {"tier": "ORG_VERIFIED"}}});
         assert_eq!(effective_tier(&trust, &relay, "a"), "ORG_VERIFIED");
+    }
+
+    #[test]
+    fn project_recipients_filters_by_tier_and_project() {
+        use serde_json::json;
+        let trust = json!({"agents": {
+            "alice":  {"tier": "ORG_VERIFIED", "card": {"project": "print-shop"}},
+            "bob":    {"tier": "ORG_VERIFIED", "card": {"project": "lora-training"}},
+            "carol":  {"tier": "UNTRUSTED",    "card": {"project": "print-shop"}},
+            "dave":   {"tier": "VERIFIED",     "card": {"project": "print-shop"}},
+            "selfie": {"tier": "ATTESTED",     "card": {"project": "print-shop"}},
+            "noproj": {"tier": "ORG_VERIFIED", "card": {}},
+        }});
+        // VERIFIED dave needs a relay signal to read as VERIFIED (else PENDING_ACK).
+        let relay = json!({"peers": {"dave": {"bilateral_completed_at": "t"}}});
+        let r = project_recipients(&trust, &relay, "selfie", "print-shop");
+        // alice (ORG_VERIFIED+match) and dave (VERIFIED+match) only. bob wrong
+        // project; carol below floor; selfie is self; noproj has no tag.
+        assert_eq!(r, vec!["alice".to_string(), "dave".to_string()]);
+    }
+
+    #[test]
+    fn project_recipients_excludes_unreachable_verified() {
+        use serde_json::json;
+        // VERIFIED in trust but no relay signal → effective PENDING_ACK → we
+        // can't actually deliver, so it must not be a fan-out recipient.
+        let trust = json!({"agents": {
+            "ghost": {"tier": "VERIFIED", "card": {"project": "x"}},
+        }});
+        let relay = json!({"peers": {}});
+        assert!(project_recipients(&trust, &relay, "selfie", "x").is_empty());
     }
 
     #[test]
