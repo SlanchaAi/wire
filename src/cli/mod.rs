@@ -550,6 +550,10 @@ pub enum Command {
     /// layer (RFC-001): `wire enroll op` / `org-create` / `org-add-member`.
     #[command(subcommand)]
     Enroll(EnrollCommand),
+    /// Trust an organization by its domain (RFC-001 §2 DNS-TXT floor):
+    /// `wire org bind <domain>` / `wire org list` / `wire org forget <org_did>`.
+    #[command(subcommand)]
+    Org(OrgCommand),
     /// Detect known MCP host config locations (Claude Desktop, Claude Code,
     /// Cursor, project-local) and either print or auto-merge the wire MCP
     /// server entry. Default prints; pass `--apply` to actually modify config
@@ -1039,6 +1043,43 @@ pub enum EnrollCommand {
         /// signature by `org_pubkey` over this operator's `op_did`.
         #[arg(long = "member-cert")]
         member_cert: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `wire org …` — trust organizations by their domain (RFC-001 §2 DNS-TXT
+/// floor). Binding resolves `_wire-org.<domain>` to an `org_did` and records a
+/// per-org inbound policy; a peer with a verified `member_cert` for a bound org
+/// then reaches `ORG_VERIFIED` under the chosen mode.
+#[derive(Subcommand, Debug)]
+pub enum OrgCommand {
+    /// Resolve `_wire-org.<domain>` (DNS-TXT, over DoH) and trust the org it
+    /// binds. The org's identity is now rooted in a domain it demonstrably
+    /// controls — not a bare keypair.
+    Bind {
+        /// The org's domain, e.g. `acme.com`.
+        domain: String,
+        /// Inbound mode for members: `notify` (default — one tap to
+        /// ORG_VERIFIED) or `auto` (Option A — pin ORG_VERIFIED with no tap;
+        /// amplifies a rogue-admin's blast radius, so opt in deliberately).
+        #[arg(long, default_value = "notify")]
+        mode: String,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the organizations currently trusted (org_did + inbound mode).
+    List {
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop trusting an organization (remove its per-org policy by `org_did`).
+    Forget {
+        /// The `org_did` to forget (from `wire org list`).
+        org_did: String,
+        /// Emit JSON.
         #[arg(long)]
         json: bool,
     },
@@ -1804,6 +1845,7 @@ pub fn run() -> Result<()> {
         Command::Mesh(cmd) => cmd_mesh(cmd),
         Command::Group(cmd) => cmd_group(cmd),
         Command::Enroll(cmd) => identity::cmd_enroll(cmd),
+        Command::Org(cmd) => identity::cmd_org(cmd),
         Command::Invite {
             relay,
             ttl,

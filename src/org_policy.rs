@@ -78,6 +78,12 @@ impl FileOrgPolicy {
         self.orgs.len()
     }
 
+    /// Iterate `(org_did, mode)` for `wire org list`. Order is unspecified
+    /// (HashMap); callers that need stable output should sort.
+    pub fn entries(&self) -> impl Iterator<Item = (&String, &InboundMode)> {
+        self.orgs.iter()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.orgs.is_empty()
     }
