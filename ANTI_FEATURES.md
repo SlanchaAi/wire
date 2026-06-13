@@ -12,7 +12,7 @@ Identity is an Ed25519 keypair you generate locally. Won't change.
 
 ## 3. No central trust authority
 
-No "verified" badge. No global PKI. Trust is bilateral and earned via SAS pairing + tier promotion. Won't change.
+No "verified" badge. No global PKI. Trust is bilateral and earned — `wire dial` + a bilateral accept, then one-way tier promotion (UNTRUSTED → ORG_VERIFIED → VERIFIED). Org membership *eases* pairing (DNS-TXT-rooted), never substitutes for the bilateral gesture. Won't change.
 
 ## 4. No crypto tokens, staking, or chain receipts
 
@@ -20,7 +20,7 @@ Bearer-auth on writes is the only access gate. Won't change.
 
 ## 5. No mobile-only / browser-only join
 
-CLI-first. Browser SAS replaced by in-band CLI SAS in v0.1. Reconsider only after 5+ third-party operators ask.
+CLI-first. Pairing is a CLI gesture (`wire dial` + `wire accept`), not a browser/mobile flow. Reconsider only after 5+ third-party operators ask.
 
 ## 6. No closed-source server
 
