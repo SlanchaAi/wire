@@ -432,6 +432,45 @@ pub fn read_org_key(org_did: &str) -> Result<[u8; 32]> {
     read_seed(&org_key_path(org_did)?)
 }
 
+pub fn succession_log_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("succession.jsonl"))
+}
+
+/// Append a key-rotation succession record (RFC-001 §T19/§T20 audit trail).
+/// Append-only JSONL at `config/wire/succession.jsonl`; one line per rotation
+/// carrying the `old_did → new_did` handoff + the bridging cert.
+pub fn append_succession_record(
+    kind: &str,
+    old_did: &str,
+    new_did: &str,
+    cert: &str,
+) -> Result<()> {
+    let path = succession_log_path()?;
+    if let Some(p) = path.parent() {
+        fs::create_dir_all(p)?;
+    }
+    let at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = serde_json::to_string(&serde_json::json!({
+        "kind": kind,
+        "old_did": old_did,
+        "new_did": new_did,
+        "cert": cert,
+        "at_unix": at_unix,
+    }))?;
+    use std::io::Write;
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening {path:?}"))?;
+    writeln!(f, "{line}")?;
+    set_file_mode_0600(&path)?;
+    Ok(())
+}
+
 pub fn op_meta_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("op.json"))
 }

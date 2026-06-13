@@ -534,7 +534,122 @@ pub(super) fn cmd_enroll(cmd: super::EnrollCommand) -> Result<()> {
             }
             Ok(())
         }
+        super::EnrollCommand::RotateOpKey { json } => cmd_enroll_rotate_op_key(json),
+        super::EnrollCommand::RotateOrgKey { org_did, json } => {
+            cmd_enroll_rotate_org_key(&org_did, json)
+        }
     }
+}
+
+/// `wire enroll rotate-op-key` — RFC-001 §T20 operator key rotation.
+fn cmd_enroll_rotate_op_key(as_json: bool) -> Result<()> {
+    let old_sk = crate::config::read_op_key()
+        .context("no operator key on disk — run `wire enroll op` before rotating")?;
+    let old_pk = ed25519_dalek::SigningKey::from_bytes(&old_sk)
+        .verifying_key()
+        .to_bytes();
+    let handle = crate::config::read_op_handle()?.unwrap_or_else(|| "operator".to_string());
+    let old_did = crate::agent_card::did_for_op(&handle, &old_pk);
+
+    let (new_sk, new_pk) = crate::signing::generate_keypair();
+    let new_did = crate::agent_card::did_for_op(&handle, &new_pk);
+
+    let cert = crate::identity::sign_succession_cert(&old_sk, "op", &old_did, &new_did)?;
+    // Defensive self-check: the cert we just produced must verify under the old
+    // key for exactly this handoff before we commit the new key to disk.
+    crate::identity::verify_succession_cert(&old_pk, &cert, "op", &old_did, &new_did)
+        .map_err(|e| anyhow!("internal: succession cert failed self-verify ({e})"))?;
+
+    // Record the handoff BEFORE overwriting the key (so an interruption leaves
+    // the old key intact + recoverable, never a new key with no audit trail).
+    crate::config::append_succession_record("op", &old_did, &new_did, &cert)?;
+    crate::config::write_op_key(&new_sk)?; // commit point
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "kind": "op",
+                "old_op_did": old_did,
+                "new_op_did": new_did,
+                "succession_cert": cert,
+            }))?
+        );
+    } else {
+        println!("→ operator key rotated");
+        println!("  old op_did: {old_did}");
+        println!("  new op_did: {new_did}");
+        println!("  succession cert recorded in succession.jsonl.");
+        println!("\nNext steps (manual — receiver auto-migration is deferred, T20):");
+        println!("  1. Each org you're in re-issues your member_cert against the NEW op_did:");
+        println!("       wire enroll org-add-member {new_did} --org <org_did>");
+        println!("  2. wire enroll republish   # surface the new op_did on your card");
+    }
+    Ok(())
+}
+
+/// `wire enroll rotate-org-key <org_did>` — RFC-001 §T19 org key rotation.
+fn cmd_enroll_rotate_org_key(org_did: &str, as_json: bool) -> Result<()> {
+    if !crate::agent_card::is_org_did(org_did) {
+        bail!("not a valid org DID (did:wire:org:<handle>-<32hex>): {org_did}");
+    }
+    let old_sk = crate::config::read_org_key(org_did)
+        .with_context(|| format!("no stored key for org {org_did} — nothing to rotate"))?;
+    let old_pk = ed25519_dalek::SigningKey::from_bytes(&old_sk)
+        .verifying_key()
+        .to_bytes();
+    // The on-disk key must actually commit to the named org_did (the file is
+    // keyed by org_did, but verify the binding before signing a handoff for it).
+    let derived = crate::agent_card::did_for_org(org_handle(org_did), &old_pk);
+    if derived != org_did {
+        bail!(
+            "stored key for {org_did} does not commit to it (derived {derived}) — refusing to \
+             sign a succession for a mismatched key"
+        );
+    }
+
+    let (new_sk, new_pk) = crate::signing::generate_keypair();
+    let new_did = crate::agent_card::did_for_org(org_handle(org_did), &new_pk);
+
+    let cert = crate::identity::sign_succession_cert(&old_sk, "org", org_did, &new_did)?;
+    crate::identity::verify_succession_cert(&old_pk, &cert, "org", org_did, &new_did)
+        .map_err(|e| anyhow!("internal: succession cert failed self-verify ({e})"))?;
+
+    crate::config::append_succession_record("org", org_did, &new_did, &cert)?;
+    // Store the new key under the NEW org_did; the old key file is left in place.
+    crate::config::write_org_key(&new_did, &new_sk)?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "kind": "org",
+                "old_org_did": org_did,
+                "new_org_did": new_did,
+                "succession_cert": cert,
+            }))?
+        );
+    } else {
+        println!("→ organization key rotated");
+        println!("  old org_did: {org_did}");
+        println!("  new org_did: {new_did}");
+        println!("  new key saved 0600; old key file left in place (delete when ready).");
+        println!("\nNext steps:");
+        println!("  1. Re-issue every member_cert with the new key:");
+        println!("       wire enroll org-add-member <op_did> --org {new_did}");
+        println!("  2. Republish the org's DNS-TXT binding to point at {new_did}.");
+    }
+    Ok(())
+}
+
+/// Extract the handle component of an op/org DID (`did:wire:{op,org}:<handle>-<hex>`).
+/// Falls back to the whole tail if the shape is unexpected.
+fn org_handle(did: &str) -> &str {
+    let tail = did
+        .strip_prefix("did:wire:org:")
+        .or_else(|| did.strip_prefix("did:wire:op:"))
+        .unwrap_or(did);
+    tail.rsplit_once('-').map(|(h, _)| h).unwrap_or(tail)
 }
 
 /// Implementation of `wire enroll add-membership` (closes #127).
@@ -1183,7 +1298,10 @@ fn cmd_org_bind(domain: &str, mode_str: &str, as_json: bool) -> Result<()> {
             }))?
         );
     } else {
-        println!("→ bound {domain} → {org_did} (inbound={})", mode_label(mode));
+        println!(
+            "→ bound {domain} → {org_did} (inbound={})",
+            mode_label(mode)
+        );
         if let Some(relay) = &record.relay {
             println!("  org relay: {relay}");
         }

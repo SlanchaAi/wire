@@ -1046,6 +1046,35 @@ pub enum EnrollCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Rotate the operator root key (RFC-001 §T20). Mints a fresh op keypair —
+    /// which, because the op_did commits to the key, is a NEW op_did — and
+    /// emits a succession cert: the old key signing the `old_op_did → new_op_did`
+    /// handoff. Use after a suspected op-key compromise.
+    ///
+    /// After rotating you MUST re-enroll: every org you're in re-issues your
+    /// member_cert against the new op_did (`wire enroll org-add-member
+    /// <new_op_did>`), then `wire enroll republish`. Receiver-side automatic
+    /// trust-migration from the succession cert is deferred (T20); the cert +
+    /// the new op_did are recorded in `succession.jsonl` for that follow-up.
+    RotateOpKey {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rotate an organization root key (RFC-001 §T19). Mints a fresh org keypair
+    /// (a NEW org_did) and emits a succession cert (old org key signs the
+    /// `old_org_did → new_org_did` handoff). Use after a suspected org-key
+    /// compromise.
+    ///
+    /// After rotating you re-issue every member_cert with the new key and
+    /// republish the org's DNS-TXT binding to the new org_did. The new key is
+    /// stored under the new org_did; the old key file is left in place for you
+    /// to delete.
+    RotateOrgKey {
+        /// The current `org_did` to rotate (from `wire enroll org-create`).
+        org_did: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `wire org …` — trust organizations by their domain (RFC-001 §2 DNS-TXT
