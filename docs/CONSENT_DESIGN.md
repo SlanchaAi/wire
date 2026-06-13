@@ -8,7 +8,7 @@ authority did they consent to?
 
 This design note captures the trade-space surfaced by the agent-attention
 incident report in
-[`docs/INCIDENT_REPORT_2026_05_12_AGENT_ATTENTION_LAYER.md`](INCIDENT_REPORT_2026_05_12_AGENT_ATTENTION_LAYER.md).
+[`docs/history/INCIDENT_REPORT_2026_05_12_AGENT_ATTENTION_LAYER.md`](history/INCIDENT_REPORT_2026_05_12_AGENT_ATTENTION_LAYER.md).
 It is not a claim that wire v0.5 solves consent. It documents where wire sits
 today and what would change that stance.
 

@@ -237,7 +237,7 @@ machinery.
 Re-arming a monitor on every iteration is wasteful. Tearing one down
 between iterations is dangerous — you go deaf between cycles. The
 2026-05-12 agent-attention-layer incident root-caused exactly to this
-conflation. See `docs/INCIDENT_REPORT_2026_05_12_AGENT_ATTENTION_LAYER.md`.
+conflation. See `docs/history/INCIDENT_REPORT_2026_05_12_AGENT_ATTENTION_LAYER.md`.
 
 Practical rule on wire:
 - Session start: arm the listener once, `persistent: true`.
