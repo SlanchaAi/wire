@@ -1076,6 +1076,69 @@ fn republish_card_to_phonebook() -> Vec<String> {
     published
 }
 
+/// `wire project [<tag>] [--clear]` — show, set, or clear this session's
+/// project routing tag (RFC-001 §6).
+///
+/// The tag is **unsigned** metadata on your agent-card. A peer who pins your
+/// card uses it to target `wire send-project <tag>` fan-outs at you. Because
+/// peers route off the copy they pinned, set the tag BEFORE pairing (or re-pair
+/// after changing it) for the change to reach them — setting it here re-signs
+/// the card and best-effort republishes to the phonebook so a re-pull picks it
+/// up. The tag never grants trust; the tier floor (>= ORG_VERIFIED) is the gate.
+pub(super) fn cmd_project(tag: Option<&str>, clear: bool, as_json: bool) -> Result<()> {
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire up` first");
+    }
+    let mut card = config::read_agent_card()?;
+
+    // Show mode: neither a tag nor --clear given.
+    if tag.is_none() && !clear {
+        let current = crate::agent_card::card_project(&card);
+        if as_json {
+            println!("{}", serde_json::to_string(&json!({ "project": current }))?);
+        } else {
+            match current {
+                Some(p) => println!("project = {p}"),
+                None => println!("no project tag set. `wire project <tag>` to set one."),
+            }
+        }
+        return Ok(());
+    }
+
+    // Mutate: strip the stale self-signature, apply the change, re-sign.
+    if let Some(obj) = card.as_object_mut() {
+        obj.remove("signature");
+        if clear {
+            obj.remove("project");
+        } else if let Some(t) = tag {
+            obj.insert("project".into(), json!(t));
+        }
+    }
+    let sk = config::read_private_key().context("no session key on disk — re-run `wire init`")?;
+    let signed = sign_agent_card(&card, &sk);
+    config::write_agent_card(&signed)?;
+    let published = republish_card_to_phonebook();
+
+    let now = crate::agent_card::card_project(&signed).map(str::to_string);
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "project": now,
+                "cleared": clear,
+                "published_to": published,
+            }))?
+        );
+    } else {
+        match &now {
+            Some(p) => println!("→ project set to {p}"),
+            None => println!("→ project tag cleared"),
+        }
+        print_profile_publish_result(&published);
+    }
+    Ok(())
+}
+
 fn print_profile_publish_result(published: &[String]) {
     if published.is_empty() {
         println!(

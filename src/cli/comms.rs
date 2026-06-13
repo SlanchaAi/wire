@@ -479,6 +479,159 @@ pub(super) fn cmd_send(
     Ok(())
 }
 
+/// `wire send-project <project> <body>` — RFC-001 §6 client-side project
+/// fan-out. Sends one signed event to every pinned peer that is (a) at
+/// effective tier **>= ORG_VERIFIED** and (b) tagged with `project == <project>`
+/// on its pinned card. The relay sees N individual pushes, never a broadcast
+/// primitive ("every event is to one slot"); `project` is unsigned routing
+/// metadata, the tier floor is the trust gate.
+///
+/// Each recipient is delivered synchronously (the same `send::attempt_deliver`
+/// path `wire send` uses), so the summary carries a real per-peer verdict.
+/// Zero matching recipients is a no-op success, not an error.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn cmd_send_project(
+    project: &str,
+    kind: &str,
+    body_arg: &str,
+    deadline: Option<&str>,
+    as_json: bool,
+) -> Result<()> {
+    if !config::is_initialized()? {
+        bail!("not initialized — run `wire up` first");
+    }
+    let sk_seed = config::read_private_key()?;
+    let card = config::read_agent_card()?;
+    let did = card.get("did").and_then(Value::as_str).unwrap_or("");
+    let handle = crate::agent_card::display_handle_from_did(did).to_string();
+    let pk_b64 = card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("agent-card missing verify_keys[*].key"))?;
+    let pk_bytes = crate::signing::b64decode(pk_b64)?;
+
+    let trust = config::read_trust().unwrap_or_else(|_| json!({"agents": {}}));
+    let relay_state = config::read_relay_state().unwrap_or_else(|_| json!({"peers": {}}));
+    let recipients = crate::trust::project_recipients(&trust, &relay_state, &handle, project);
+
+    if recipients.is_empty() {
+        if as_json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "project": project,
+                    "recipients": [],
+                    "delivered": 0,
+                    "note": "no peers at ORG_VERIFIED+ tagged with this project",
+                }))?
+            );
+        } else {
+            println!(
+                "no fan-out recipients: no pinned peer is at ORG_VERIFIED+ AND tagged \
+                 project={project}. Check `wire peers` (tier) and that org-mates publish \
+                 the same project tag on their card."
+            );
+        }
+        return Ok(());
+    }
+
+    // Body parsed ONCE (shared across all recipients): literal, `@file`, or `-` stdin.
+    let body_value: Value = if body_arg == "-" {
+        use std::io::Read;
+        let mut raw = String::new();
+        std::io::stdin()
+            .read_to_string(&mut raw)
+            .with_context(|| "reading body from stdin")?;
+        serde_json::from_str(raw.trim_end()).unwrap_or(Value::String(raw))
+    } else if let Some(path) = body_arg.strip_prefix('@') {
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading body file {path:?}"))?;
+        serde_json::from_str(&raw).unwrap_or(Value::String(raw))
+    } else {
+        Value::String(body_arg.to_string())
+    };
+
+    let kind_id = super::parse_kind(kind)?;
+    let deadline_until = match deadline {
+        Some(d) => Some(parse_deadline_until(d)?),
+        None => None,
+    };
+
+    let mut results: Vec<Value> = Vec::new();
+    let mut delivered = 0usize;
+    for peer in &recipients {
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+        let to_did = crate::trust::resolve_peer_did(&trust, peer);
+        let mut event = json!({
+            "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
+            "timestamp": now,
+            "from": did,
+            "to": to_did,
+            "type": kind,
+            "kind": kind_id,
+            "body": body_value.clone(),
+        });
+        if let Some(until) = &deadline_until {
+            event["time_sensitive_until"] = json!(until);
+        }
+        // Same D1 (RFC-006) seal-before-sign path as single-peer send.
+        if let Some(peer_dh) = crate::enc::wire_x25519::peer_dh_pubkey(&trust, peer) {
+            crate::enc::wire_x25519::seal_event_body(&mut event, &peer_dh, &sk_seed)?;
+        }
+        let signed = sign_message_v31(&event, &sk_seed, &pk_bytes, &handle)?;
+        let outcome = crate::send::attempt_deliver(peer, &signed)?;
+        if outcome.reached_relay() {
+            delivered += 1;
+        }
+        if !as_json {
+            use crate::send::SyncDelivery;
+            match &outcome {
+                SyncDelivery::Delivered { event_id, .. } => {
+                    println!("  delivered {event_id} → {peer}")
+                }
+                SyncDelivery::Duplicate { event_id, .. } => {
+                    println!("  duplicate {event_id} → {peer} (change body for a distinct event)")
+                }
+                other => println!(
+                    "  FAILED → {peer}: {}",
+                    crate::send::delivery_json(other, peer)
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("error")
+                ),
+            }
+        }
+        results.push(crate::send::delivery_json(&outcome, peer));
+    }
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "project": project,
+                "recipients": recipients,
+                "delivered": delivered,
+                "results": results,
+            }))?
+        );
+    } else {
+        println!(
+            "fan-out project={project}: {delivered}/{} reached the relay.",
+            recipients.len()
+        );
+    }
+    // Partial failure → non-zero exit so scripts can branch, mirroring `wire send`.
+    if delivered < recipients.len() {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
 // ---------- here (v0.9.3 you-are-here view) ----------
 
 /// `wire here` — one-screen "you are this session, your neighbors are
