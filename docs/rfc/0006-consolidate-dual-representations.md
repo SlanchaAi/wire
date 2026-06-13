@@ -66,10 +66,48 @@ and keep the dual peer-pin. The 2026-06-13 daemon-survival fix relies on
 `self_endpoints` synthesis intact, so that path is unaffected; verify this in
 the mesh/local-sister e2e before merge.
 
-> Not implemented in this pass — this is the scoped, de-risked plan. Implementing
-> it is a focused effort with the five e2e targets above as the gate, not a
-> tail-of-session bulk edit (the surface-map correction above is exactly the
-> footgun that warranted slowing down).
+### Full peer-flat READER inventory (2026-06-13 survey) — the implementation checklist
+
+"No users / free to rebuild" (operator, 2026-06-13) removes the migration
+ceremony — no `wire nuke`, no old flat-only pins to tolerate, delete freely. But
+a second survey found the blocker isn't the *write* — it's that **~10 sites read
+the peer flat fields directly**, several on the routing hot path. You cannot drop
+the flat write until every reader uses `endpoints[]`, or routing breaks. The
+collapse is therefore a **reader refactor**, ordered: migrate readers → then drop
+the write + synthesis.
+
+**Recommended:** add one canonical resolver — `peer_primary_endpoint(state,
+handle) -> Option<Endpoint>` (and/or reuse `peer_endpoints_in_priority_order`) —
+and route EVERY site below through it. Then delete the flat write in
+`pin_peer_endpoints` + the synthesis fallback in `peer_endpoints_in_priority_order`.
+
+Peer-flat reader sites to migrate (grep `get("relay_url"|"slot_id"|"slot_token")`, peer scope):
+- `src/send.rs:164` — `attempt_deliver` (SYNC send hot path) ← highest risk
+- `src/daemon_stream.rs:135` — streaming pull/subscribe path ← highest risk
+- `src/pair_invite.rs:530, 801, 913` — pairing / pair_drop handling
+- `src/cli/comms.rs:121` — `maybe_warn_peer_attentiveness`
+- `src/cli/status.rs:1223/1267/1435/1467` — `wire status`/`doctor` surface
+- `src/cli/session.rs:522`, `src/cli/identity.rs:984`, `src/cli/pairing.rs:554`
+- (self-slot readers — `"self"` scope — are Part B.2 / Part A; leave for now, the
+  #263 daemon-survival fix depends on `self_endpoints()` flat synthesis.)
+
+Writer to collapse AFTER readers are migrated:
+- `src/endpoints.rs::pin_peer_endpoints` — currently writes `endpoints[]` AND
+  fills flat `relay_url`/`slot_id`/`slot_token` (lines ~336–355). Drop the flat
+  fills; write `endpoints[]` only.
+- `src/endpoints.rs::peer_endpoints_in_priority_order` — delete the "Back-compat
+  … synthesize from top-level legacy fields" block (~173–188).
+
+Gate (kill criterion): `cargo build` + `e2e_invite_pair` / `e2e_bilateral` /
+`e2e_handle_pair` / `e2e_mesh` / `e2e_group` (`-- --ignored --test-threads=1`) +
+`hello-world-validate.sh` local-sister round-trip all green. If routing can't
+survive on `endpoints[]` alone, abandon and keep the dual peer-pin.
+
+> Status: NOT implemented — this section is the execute-ready checklist. The work
+> is a ~10-site reader refactor of the delivery/daemon/status surface, mechanical
+> but hot-path; it belongs in a focused pass with the e2e gate above. The survey
+> IS the de-risking — implementation is now "migrate these 10 sites through one
+> helper, then delete two blocks," not a discovery exercise.
 **Question this answers:** wire stores two things two ways — sessions (named dir vs by-key hash) and peer endpoints (array vs flat fields). The de-deprecation (RFC-005) removed every *dead* legacy format but had to leave these because current code actively reads/writes both. How do we collapse each to a single representation without reintroducing the #170/#174 multi-session fork-storm?
 
 ---
