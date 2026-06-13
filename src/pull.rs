@@ -110,6 +110,80 @@ fn verify_error_is_transient(err: &signing::VerifyError) -> bool {
     )
 }
 
+/// Flow-like-water mutual trust for same-machine sisters: if `event`'s signer
+/// DID matches one of THIS operator's local sister sessions, pin that sister's
+/// card into `trust` at VERIFIED and return `true`. Same machine, same uid,
+/// same disk ⇒ same operator ⇒ trusted by construction — no accept step, no
+/// SAS, no gate. Returns `false` (caller keeps the original reject) when the
+/// signer isn't a known local sister, the registry is unreadable, or the
+/// sister's card can't be loaded.
+///
+/// Matching on the full DID — not the display handle — is the safety anchor: a
+/// wire DID is a hash commitment to its key, so a remote peer cannot forge a
+/// DID that collides with a local sister's without holding that sister's key
+/// (which would mean it IS the same operator).
+fn maybe_autopin_local_sister(event: &Value, trust: &mut Value) -> bool {
+    let Some(from_did) = event.get("from").and_then(Value::as_str) else {
+        return false;
+    };
+    let Ok(sessions) = crate::session::list_sessions() else {
+        return false;
+    };
+    for s in sessions {
+        if s.did.as_deref() != Some(from_did) {
+            continue;
+        }
+        let card_path = s
+            .home_dir
+            .join("config")
+            .join("wire")
+            .join("agent-card.json");
+        let Ok(bytes) = std::fs::read(&card_path) else {
+            return false;
+        };
+        let Ok(card) = serde_json::from_slice::<Value>(&bytes) else {
+            return false;
+        };
+        crate::trust::add_agent_card_pin(trust, &card, Some("VERIFIED"));
+
+        // Mutual trust must be mutual REACHABILITY: also register the sister's
+        // relay slot so our reply has somewhere to go — otherwise the receive
+        // direction works but `wire send <sister>` back fails "peer not pinned".
+        // The authoritative source is the sister's OWN relay-state self
+        // endpoints (where their `wire up` recorded the slot — for `--no-local`
+        // federation these are flat fields `self_endpoints()` synthesizes); the
+        // on-disk card carries no endpoints. Same machine, same disk ⇒ read it
+        // directly. Best-effort; failure here doesn't undo the trust pin.
+        let sister_relay_json = s.home_dir.join("config").join("wire").join("relay.json");
+        let sister_endpoints = std::fs::read(&sister_relay_json)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .map(|rs| crate::endpoints::self_endpoints(&rs))
+            .unwrap_or_default();
+        if !sister_endpoints.is_empty() {
+            let handle = card
+                .get("handle")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    crate::agent_card::display_handle_from_did(from_did).to_string()
+                });
+            if let Ok(mut relay_state) = crate::config::read_relay_state()
+                && crate::endpoints::pin_peer_endpoints(
+                    &mut relay_state,
+                    &handle,
+                    &sister_endpoints,
+                )
+                .is_ok()
+            {
+                let _ = crate::config::write_relay_state(&relay_state);
+            }
+        }
+        return true;
+    }
+    false
+}
+
 /// Process a pulled-event batch. Mutates inbox files + relay state (via
 /// `pair_invite` side effects) but returns the new cursor target rather
 /// than writing it — caller persists.
@@ -257,13 +331,35 @@ pub fn process_events(
                 }
             }
         }
-        let active_trust = if drop_paired {
+        let mut active_trust = if drop_paired {
             config::read_trust()?
         } else {
             trust_snapshot.clone()
         };
 
-        match signing::verify_message_v31(event, &active_trust) {
+        // Flow-like-water: same-machine sister sessions are the same operator,
+        // same uid, same disk — mutually trusted by construction. If an inbound
+        // event is signed by a recognized local sister we haven't pinned yet,
+        // pin it VERIFIED and re-verify — no pending-inbound, no accept step, no
+        // gate. The match is on the signer's full DID against our own session
+        // registry (a DID commits to its key, so a remote peer cannot forge one
+        // that collides with a local sister's). This is what makes
+        // `wire dial <sister>` a frictionless mutual pairing: the dialer pins
+        // the target, and the target auto-pins the dialer the instant its first
+        // event arrives. Persisted so the pin outlives this pull.
+        let verify = match signing::verify_message_v31(event, &active_trust) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if maybe_autopin_local_sister(event, &mut active_trust) {
+                    let _ = config::write_trust(&active_trust);
+                    signing::verify_message_v31(event, &active_trust)
+                } else {
+                    Err(e)
+                }
+            }
+        };
+
+        match verify {
             Ok(()) => {
                 let from = event
                     .get("from")
