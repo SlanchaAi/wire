@@ -10,7 +10,7 @@
 //! handle, AND personality atomically — peers verifying the card get both
 //! identity and vibe in one signed blob.
 //!
-//! See `SPEC_v0_5.md` for the full design.
+//! See `docs/rfc/` for the current protocol design.
 
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
