@@ -1,10 +1,75 @@
 # RFC-006: Consolidate the dual session-layout + endpoint representations
 
-**Status:** Draft <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
+**Status:** Accepted (direction) — 2026-06-13: collapse is a **1.0 format-freeze gate** (@laulpogan, "push to 1.0" decision). Implementation gated on the surface map + kill criteria below. <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
 **Tracking:** RFC-005 follow-on (the two items its Phase 4 could not remove because they're live)
 **Author:** Claude Code agent (paired w/ @laulpogan)
-**Date:** 2026-06-07
-**Target:** v0.16 (breaking; requires a one-time `wire nuke` / re-pair, acceptable pre-GA)
+**Date:** 2026-06-07 (decision + Part-B surface map appended 2026-06-13)
+**Target:** v0.16 / pre-1.0 (breaking; requires a one-time `wire nuke` / re-pair, acceptable pre-GA)
+
+---
+
+## Decision (2026-06-13) — collapse before 1.0, Part B first, with a critical scope correction
+
+1.0 freezes the on-disk + wire formats (see `ROAD_TO_1.0.md`). You cannot 1.0 on
+the dual session resolver (the #170/#174 fork-storm class), and you cannot
+collapse *after* 1.0 without breaking the on-disk promise. So: **collapse, pre-1.0.**
+Part B (endpoints) lands first as the lower-risk half; Part A (the sessions
+resolver) follows under its kill criterion.
+
+### ⚠️ Part-B scope correction (surface map, 2026-06-13)
+
+A code survey before implementing Part B found that **`relay_url` / `slot_id` /
+`slot_token` are NOT a single thing to delete** — they appear in two distinct
+roles, and only ONE is the dual-representation hazard:
+
+- **HAZARD (collapse this):** the per-peer **routing pin** in
+  `relay.json#peers[<handle>]` carries *both* a structured `endpoints[]` array
+  AND synthesized top-level flat fields; `pin_peer_endpoints` writes both, and
+  `peer_endpoints_in_priority_order` / `self_endpoints` synthesize one from the
+  other (`endpoints.rs` ~164/240). *This* is the "stale flat field beats fresh
+  array" routing hazard. → **collapse to `endpoints[]`-only here.**
+- **LEGITIMATE WIRE FORMAT (do NOT touch — these are frozen 1.0 surfaces):**
+  - the relay's HTTP allocate/handle responses (`relay_server.rs` — `{slot_id,
+    slot_token}`, `{relay_url, …}`) — the relay API;
+  - the **invite-URL payload** (`InvitePayload { relay_url, slot_id, slot_token,
+    … }`, `pair_invite.rs`) — the invite wire format;
+  - `wire send --json` delivery output (`send.rs` `delivery_json` — `relay_url`,
+    `slot_id`) — the frozen CLI surface;
+  - the A2A interop shim (`pair_profile.rs`).
+
+  These flat coords are the actual API/format at those boundaries, not a
+  redundant copy. A naive "remove all flat fields" **breaks the protocol, the
+  invite URL, and `--json`** — the opposite of a format-freeze.
+
+### Part B implementation (scoped)
+
+1. `pin_peer_endpoints` (`endpoints.rs`) stops writing the redundant top-level
+   flat fields into `peers[<handle>]`; it writes `endpoints[]` only.
+2. The invite-accept path (`pair_invite.rs`) constructs an `endpoints[]` entry
+   for the pinned peer instead of (or in addition to, then drop) flat fields —
+   the invite *payload* keeps its flat coords (frozen format); only the pinned
+   *routing state* it produces moves to `endpoints[]`.
+3. `peer_endpoints_in_priority_order` reads `endpoints[]`; the per-peer flat
+   synthesis fallback (`endpoints.rs` ~164) is deleted. (`self_endpoints`' flat
+   synthesis is retained until Part A / a self-slot migration — self state is a
+   separate collapse with its own back-compat window.)
+4. **Migration:** breaking for peers pinned the old way → `wire nuke` + re-pair
+   (RFC-005 Phase 1 shipped `wire nuke` for exactly this).
+
+### Kill criterion for Part B (unchanged intent, made concrete)
+
+If `pin_peer_endpoints` cannot stop emitting flat fields **without** breaking
+`e2e_invite_pair` / `e2e_bilateral` / `e2e_handle_pair` / `e2e_mesh` /
+`e2e_group` (routing must survive on `endpoints[]` alone), **abandon Part B**
+and keep the dual peer-pin. The 2026-06-13 daemon-survival fix relies on
+`self_endpoints()` synthesizing the *sister's* flat fields — Part B leaves
+`self_endpoints` synthesis intact, so that path is unaffected; verify this in
+the mesh/local-sister e2e before merge.
+
+> Not implemented in this pass — this is the scoped, de-risked plan. Implementing
+> it is a focused effort with the five e2e targets above as the gate, not a
+> tail-of-session bulk edit (the surface-map correction above is exactly the
+> footgun that warranted slowing down).
 **Question this answers:** wire stores two things two ways — sessions (named dir vs by-key hash) and peer endpoints (array vs flat fields). The de-deprecation (RFC-005) removed every *dead* legacy format but had to leave these because current code actively reads/writes both. How do we collapse each to a single representation without reintroducing the #170/#174 multi-session fork-storm?
 
 ---
