@@ -18,6 +18,9 @@
 //!      bypassed the default-deny bilateral gate (the novel behavior).
 //!   4. Negative control: a plain (non-member) dialer still lands in pending —
 //!      the auto-pin is org-scoped, not a blanket open door.
+//!   5. §T16 containment: `wire block-peer <op_did>` on the receiver suppresses
+//!      the auto-pin entirely — a blocked operator never reaches ORG_VERIFIED
+//!      and never lands in pending (the pair is dropped silently).
 
 use serde_json::Value;
 use std::path::PathBuf;
@@ -220,6 +223,112 @@ async fn org_member_auto_pins_org_verified_offline() {
         !String::from_utf8_lossy(&pending.stdout).contains(a_h.as_str()),
         "A leaked into B's pending-inbound despite the org auto-pin"
     );
+}
+
+/// RFC-001 §T16 / AC4 containment, live: B auto-trusts A's org (the exact setup
+/// that auto-pins in `org_member_auto_pins_org_verified_offline`), but FIRST
+/// blocks A's operator DID via `wire block-peer`. A then dials. The block must
+/// win: A is never pinned at ORG_VERIFIED, and — because a block drops the
+/// inbound pair silently — A never even lands in B's pending-inbound. This is
+/// the local kill switch for a rogue-admin-injected peer, proven in the real
+/// binary against the live auto-pin path.
+#[ignore = "heavy live e2e — run via `-- --ignored --test-threads=1`"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn blocked_operator_is_never_org_auto_pinned() {
+    let (relay_url, host_only) = spawn_relay().await;
+
+    // ---- A: enroll operator + org + self-membership, THEN init ----
+    let a = fresh_dir("rogue-darby");
+    let op = wire_json(&a, &["enroll", "op", "--handle", "darby", "--json"]);
+    let op_did = op["op_did"].as_str().unwrap().to_string();
+    let org = wire_json(
+        &a,
+        &["enroll", "org-create", "--handle", "slanchaai", "--json"],
+    );
+    let org_did = org["org_did"].as_str().unwrap().to_string();
+    wire_json(
+        &a,
+        &[
+            "enroll",
+            "org-add-member",
+            &op_did,
+            "--org",
+            &org_did,
+            "--json",
+        ],
+    );
+    assert!(
+        wire(&a, &["init", "darby", "--relay", &relay_url])
+            .status
+            .success()
+    );
+    let a_h = read_handle(&a);
+    assert!(
+        wire(&a, &["claim", &a_h, "--public-url", &relay_url, "--json"])
+            .status
+            .success()
+    );
+
+    // ---- B: init + claim, auto-trust A's org, BUT block A's operator ----
+    let b = fresh_dir("warden");
+    assert!(
+        wire(&b, &["init", "warden", "--relay", &relay_url])
+            .status
+            .success()
+    );
+    let b_h = read_handle(&b);
+    assert!(
+        wire(&b, &["claim", &b_h, "--public-url", &relay_url, "--json"])
+            .status
+            .success()
+    );
+    let policy = serde_json::json!({ "orgs": { org_did.clone(): { "inbound": "auto" } } });
+    std::fs::write(
+        b.join("config/wire/org_policies.json"),
+        serde_json::to_vec_pretty(&policy).unwrap(),
+    )
+    .unwrap();
+    // The T16 lever: block the operator DID → mutes every session it runs.
+    let blocked = wire_json(
+        &b,
+        &[
+            "block-peer",
+            &op_did,
+            "--note",
+            "rogue-admin injected",
+            "--json",
+        ],
+    );
+    assert_eq!(blocked["blocked"].as_bool(), Some(true));
+    assert_eq!(blocked["did"].as_str(), Some(op_did.as_str()));
+
+    // ---- A dials B → A's claims-bearing card lands in B's pair_drop ----
+    let target = format!("{b_h}@{host_only}");
+    assert!(
+        wire(&a, &["add", &target, "--relay", &relay_url, "--json"])
+            .status
+            .success()
+    );
+
+    // ---- B pulls repeatedly — A must NEVER be pinned, NEVER reach pending ----
+    for _ in 0..8 {
+        let _ = wire(&b, &["pull", "--json"]);
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    assert!(
+        !peer_at_tier(&b, &a_h, "ORG_VERIFIED"),
+        "blocked operator A ({a_h}) was wrongly auto-pinned at ORG_VERIFIED — T16 block bypassed"
+    );
+    let pending = wire(&b, &["pending", "--json"]);
+    assert!(
+        !String::from_utf8_lossy(&pending.stdout).contains(a_h.as_str()),
+        "blocked operator A leaked into B's pending-inbound — a block must drop the pair silently"
+    );
+    // (Causality: `org_member_auto_pins_org_verified_offline` runs the identical
+    // setup WITHOUT the block and DOES auto-pin — so the block is what suppressed
+    // A here. A re-pin-after-unblock check is intentionally omitted: a dropped
+    // pair_drop still advances the pull cursor, so it would race the cursor, not
+    // the block logic.)
 }
 
 /// Negative control: a plain (non-member) dialer is NOT auto-pinned — it still

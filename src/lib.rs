@@ -11,6 +11,7 @@
 
 pub mod adapters;
 pub mod agent_card;
+pub mod blocklist;
 pub mod canonical;
 pub mod character;
 pub mod cli;

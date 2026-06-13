@@ -814,6 +814,42 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Block a peer DID so it can never be org-auto-paired or surface an
+    /// org-notify prompt (RFC-001 §T16 rogue-admin containment).
+    ///
+    /// Pass a **session DID** (`did:wire:<handle>-<8hex>`) to mute one session,
+    /// or an **operator DID** (`did:wire:op:<handle>-<32hex>`) to mute every
+    /// session that operator runs — the lever for cutting off a single
+    /// adversary a compromised org admin vouched into the roster, without
+    /// leaving the org. Local-only; idempotent; survives roster epoch bumps.
+    ///
+    /// A block gates the org-easing path, NOT a deliberate bilateral SAS pair:
+    /// if you knowingly `wire dial` + SAS-verify a blocked peer, that explicit
+    /// gesture wins. Unblock with `wire unblock-peer <did>`.
+    BlockPeer {
+        /// The DID to block (session `did:wire:…` or operator `did:wire:op:…`).
+        did: String,
+        /// Optional note recorded alongside the block (why / who).
+        #[arg(long)]
+        note: Option<String>,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a DID from the local block-list (undo `wire block-peer`).
+    UnblockPeer {
+        /// The DID to unblock.
+        did: String,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the DIDs on the local block-list (RFC-001 §T16).
+    Blocked {
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Watch the inbox for new verified events and fire an OS notification per
     /// event. Long-running; background under systemd / `&` / tmux. Cursor is
     /// persisted to `$WIRE_HOME/state/wire/notify.cursor` so restarts don't
@@ -1602,6 +1638,11 @@ pub fn run() -> Result<()> {
         }
         Command::Pending { json } => pairing::cmd_pair_list_inbound(json_default(json)),
         Command::Reject { peer, json } => pairing::cmd_pair_reject(&peer, json_default(json)),
+        Command::BlockPeer { did, note, json } => {
+            pairing::cmd_block_peer(&did, note, json_default(json))
+        }
+        Command::UnblockPeer { did, json } => pairing::cmd_unblock_peer(&did, json_default(json)),
+        Command::Blocked { json } => pairing::cmd_blocked(json_default(json)),
         Command::Send {
             peer,
             kind_or_body,
