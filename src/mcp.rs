@@ -1638,11 +1638,17 @@ fn tool_add(args: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_default();
-    relay_state["peers"][&peer_handle] = json!({
-        "relay_url": peer_relay,
-        "slot_id": peer_slot_id,
-        "slot_token": existing_token,
-    });
+    // RFC-006 Part B: pin as an `endpoints[]` entry (single routing source).
+    crate::endpoints::pin_peer_endpoints(
+        &mut relay_state,
+        &peer_handle,
+        &[crate::endpoints::Endpoint::federation(
+            peer_relay.clone(),
+            peer_slot_id.clone(),
+            existing_token.clone(),
+        )],
+    )
+    .map_err(|e| format!("{e:#}"))?;
     crate::config::write_relay_state(&relay_state).map_err(|e| format!("{e:#}"))?;
 
     // Build + sign pair_drop event (no nonce — open-mode handle pair).
