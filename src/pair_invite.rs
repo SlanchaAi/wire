@@ -604,6 +604,24 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
     }
 
     // ----- Handle path: stash in pending-inbound, no capability flows -----
+    // RFC-001 §T16: a locally-blocked peer is dropped before any easing. The
+    // block check keys on both the session DID and the card's `op_did`, so
+    // blocking a (possibly rogue-admin-injected) operator mutes every session
+    // it spawns. Drop silently — no pin, no pending stash, no toast, no ack
+    // (returning `Ok(None)` leaves no fingerprintable response). Bilateral SAS
+    // is out of scope: it's an explicit operator gesture that overrides a block.
+    let blocklist = crate::blocklist::Blocklist::load();
+    if let Some(blocked_did) = blocklist.blocks_card(&peer_card) {
+        record_pair_rejection(
+            &peer_handle,
+            "blocked_peer",
+            &format!(
+                "inbound pair from locally-blocked DID {blocked_did}; dropped (wire block-peer)"
+            ),
+        );
+        return Ok(None);
+    }
+
     // RFC-001 Phase 1b (Option A): if the peer's card proves org membership the
     // operator opted into auto-pairing (org_policies.json `inbound=auto`), pin
     // ORG_VERIFIED + endpoints + ack now — the per-org opt-in IS the standing

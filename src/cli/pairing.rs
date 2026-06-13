@@ -1372,6 +1372,87 @@ pub(super) fn cmd_pair_reject(peer_nick: &str, as_json: bool) -> Result<()> {
     Ok(())
 }
 
+// ---------- block-list (RFC-001 §T16 rogue-admin containment) ----------
+
+/// `wire block-peer <did> [--note ...]` — add a DID to the local block-list so
+/// it can never be org-auto-pinned or surface an org-notify prompt.
+pub(super) fn cmd_block_peer(did: &str, note: Option<String>, as_json: bool) -> Result<()> {
+    if !did.starts_with("did:wire:") {
+        bail!(
+            "`{did}` is not a wire DID. Pass a session DID (`did:wire:<handle>-<8hex>`) \
+             or an operator DID (`did:wire:op:<handle>-<32hex>`). Find a peer's DID with \
+             `wire whois <name>` or `wire peers`."
+        );
+    }
+    let mut bl = crate::blocklist::Blocklist::load();
+    let newly = bl.block(did, note.clone());
+    bl.save()?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "did": did,
+                "blocked": true,
+                "newly_added": newly,
+                "note": note,
+            }))?
+        );
+    } else if newly {
+        println!(
+            "→ blocked {did}\n→ this peer can no longer be org-auto-paired or notify-prompt you. \
+             (A deliberate `wire dial` + SAS pair still overrides the block.)"
+        );
+    } else {
+        println!("{did} was already blocked — note refreshed.");
+    }
+    Ok(())
+}
+
+/// `wire unblock-peer <did>` — remove a DID from the local block-list.
+pub(super) fn cmd_unblock_peer(did: &str, as_json: bool) -> Result<()> {
+    let mut bl = crate::blocklist::Blocklist::load();
+    let existed = bl.unblock(did);
+    bl.save()?;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({ "did": did, "unblocked": existed }))?
+        );
+    } else if existed {
+        println!("→ unblocked {did} — org-easing paths apply again per your policy.");
+    } else {
+        println!("{did} was not on the block-list — nothing to do.");
+    }
+    Ok(())
+}
+
+/// `wire blocked` — list the DIDs on the local block-list.
+pub(super) fn cmd_blocked(as_json: bool) -> Result<()> {
+    let bl = crate::blocklist::Blocklist::load();
+    if as_json {
+        let entries: Vec<Value> = bl
+            .entries()
+            .map(|(did, e)| json!({ "did": did, "at": e.at, "note": e.note }))
+            .collect();
+        println!("{}", serde_json::to_string(&json!({ "blocked": entries }))?);
+        return Ok(());
+    }
+    if bl.is_empty() {
+        println!("no peers blocked. `wire block-peer <did>` adds one (RFC-001 §T16).");
+        return Ok(());
+    }
+    println!("blocked peers ({}):", bl.len());
+    for (did, e) in bl.entries() {
+        match &e.note {
+            Some(note) => println!("  {did}  ({}; {note})", e.at),
+            None => println!("  {did}  ({})", e.at),
+        }
+    }
+    Ok(())
+}
+
 fn reject_self_pair_after_resolution(our_did: &str, peer_did: &str) -> Result<()> {
     if our_did == peer_did {
         bail!(
