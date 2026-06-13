@@ -1,0 +1,20 @@
+# Fresh-system validation image for the wire hello-world demo.
+# No build toolchain — just the prebuilt binary + runtime deps, run as a
+# non-root user, to mimic a brand-new PC after `install.sh` drops the binary.
+FROM debian:stable-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates python3 curl procps bc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user — catch any root-only assumptions in daemon spawn / setsid.
+RUN useradd -m -s /bin/bash operator
+COPY target/release/wire /usr/local/bin/wire
+COPY scripts/hello-world-validate.sh /home/operator/hello-world-validate.sh
+RUN chmod +x /usr/local/bin/wire /home/operator/hello-world-validate.sh \
+    && chown -R operator:operator /home/operator
+
+USER operator
+WORKDIR /home/operator
+ENV WIRE_BIN=/usr/local/bin/wire
+ENTRYPOINT ["/home/operator/hello-world-validate.sh"]
