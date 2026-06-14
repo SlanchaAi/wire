@@ -14,6 +14,7 @@ the PR description linked in each section.
 
 - **`wire upgrade` no longer corrupts systemd/launchd units after a `cargo install` in-place replace** (#274): the kernel marks the replaced running binary's `/proc/self/exe` with a trailing ` (deleted)`, which was written verbatim into `ExecStart=`, leaving the daemon flapping forever (`error: unrecognized subcommand '(deleted)'`). The exe path is now resolved (marker stripped) before it reaches a unit file.
 - **`wire upgrade` no longer false-warns about a PATH shadow when the active PATH entry is a symlink to the upgraded binary** (#276): the same `(deleted)` marker made `current_exe()` un-canonicalizable, so the symlink never matched and an "off-PATH / old binary" warning fired even though both PATH entries resolved to the freshly-upgraded binary.
+- **`wire upgrade --refresh-stale-children` no longer kills stale daemons the supervisor can't respawn** (#275): the flag killed every stale-binary session daemon, but the `--all-sessions` supervisor only respawns sessions it's eligible for (registry-bound OR active within the idle cutoff). A free-floating/unbound+idle session was killed and never brought back — its identity silently stopped syncing while the upgrade reported success. It now kills only the daemons the supervisor will respawn and leaves the rest running, surfacing them (in human + JSON output, `wire status`, and `--check`) as "relaunch manually."
 
 
 ## [v0.16.0] — 2026-06-14
