@@ -5,6 +5,80 @@ use crate::config;
 
 // ---------- status ----------
 
+/// Pure decision for `cmd_status_wait_daemon_running`'s polling loop.
+/// Extracted so the policy is unit-testable without spinning a real
+/// `wire daemon`. Given a liveness snapshot's `pidfile_alive` flag,
+/// the current instant, and the deadline, decide: success now, keep
+/// waiting, or time out.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WaitDecision {
+    /// `pidfile_alive == true` — break out of the poll loop and
+    /// print the full status.
+    Healthy,
+    /// Deadline already elapsed — bail with a timeout error.
+    TimedOut,
+    /// Deadline still ahead, daemon still down — sleep + retry.
+    Continue,
+}
+
+pub(crate) fn wait_step(
+    pidfile_alive: bool,
+    now: std::time::Instant,
+    deadline: std::time::Instant,
+) -> WaitDecision {
+    if pidfile_alive {
+        WaitDecision::Healthy
+    } else if now >= deadline {
+        WaitDecision::TimedOut
+    } else {
+        WaitDecision::Continue
+    }
+}
+
+/// `wire status --wait-daemon-running [--timeout <secs>]`: poll the
+/// local daemon-liveness snapshot until `daemon_running:true` (the
+/// same `pidfile_alive` truth `cmd_status` surfaces), then exit 0.
+///
+/// Behavior:
+/// - Polls every 200ms.
+/// - Bounded by `timeout_secs` (default 30s at the clap layer).
+/// - On healthy: prints the same status JSON / human surface
+///   `cmd_status` would have, then returns Ok(()).
+/// - On timeout: emits the last-seen status (so the operator knows
+///   what was wrong — daemon not started? pidfile corrupt?) and
+///   exits with a non-zero `anyhow::Error` so shell wrappers can
+///   branch.
+///
+/// #284.2: replaces fragile external loops like
+/// `until wire status … | grep daemon_running:true; do sleep 3; done`,
+/// which on a never-healthy host piled up hundreds of `wire status`
+/// invocations every few seconds (Willard's 254-`wire.exe` pile-up
+/// repro). Each poll cycle here is in-process, so there's no spawn
+/// pressure, and timeout guarantees the wrapper exits cleanly.
+pub(super) fn cmd_status_wait_daemon_running(as_json: bool, timeout_secs: u64) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        let snap = crate::ensure_up::daemon_liveness();
+        match wait_step(snap.pidfile_alive, std::time::Instant::now(), deadline) {
+            WaitDecision::Healthy => return cmd_status(as_json),
+            WaitDecision::TimedOut => {
+                if !as_json {
+                    eprintln!(
+                        "wire status: daemon not running after {timeout_secs}s. \
+                         Last seen: pidfile_pid={:?}, pgrep_pids={:?}. \
+                         Run `wire up` to start the daemon.",
+                        snap.pidfile_pid, snap.pgrep_pids
+                    );
+                }
+                bail!("daemon_running stayed false through {timeout_secs}s wait window");
+            }
+            WaitDecision::Continue => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+    }
+}
+
 pub(super) fn cmd_status(as_json: bool) -> Result<()> {
     let initialized = config::is_initialized()?;
 
@@ -2131,5 +2205,39 @@ mod doctor_tests {
                 "no-clean-fallback path must NOT mutate state (would strand operator)"
             );
         });
+    }
+
+    // ---------- #284.2: wait_step pure-logic policy ----------
+
+    #[test]
+    fn wait_step_returns_healthy_when_pidfile_alive() {
+        let now = std::time::Instant::now();
+        let deadline = now + std::time::Duration::from_secs(30);
+        assert_eq!(wait_step(true, now, deadline), WaitDecision::Healthy);
+    }
+
+    #[test]
+    fn wait_step_returns_timed_out_when_deadline_passed_and_dead() {
+        let now = std::time::Instant::now();
+        // Deadline already 1s in the past.
+        let deadline = now - std::time::Duration::from_secs(1);
+        assert_eq!(wait_step(false, now, deadline), WaitDecision::TimedOut);
+    }
+
+    #[test]
+    fn wait_step_returns_continue_when_deadline_future_and_dead() {
+        let now = std::time::Instant::now();
+        let deadline = now + std::time::Duration::from_secs(5);
+        assert_eq!(wait_step(false, now, deadline), WaitDecision::Continue);
+    }
+
+    #[test]
+    fn wait_step_healthy_wins_over_timeout() {
+        // If both conditions hold (deadline elapsed AND daemon now
+        // alive), the success path takes precedence — we don't punish
+        // an operator who just barely missed the window.
+        let now = std::time::Instant::now();
+        let deadline = now - std::time::Duration::from_secs(1);
+        assert_eq!(wait_step(true, now, deadline), WaitDecision::Healthy);
     }
 }
