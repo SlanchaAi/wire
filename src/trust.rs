@@ -116,14 +116,23 @@ pub fn effective_tier(trust: &Value, relay_state: &Value, handle: &str) -> Strin
     if bilateral_at.is_some() {
         return raw;
     }
-    let token = peer_obj
+    // A VERIFIED pin isn't effectively usable until we hold the peer's reply
+    // slot. RFC-006 Part B: the slot lives in `endpoints[]`, not a flat
+    // `slot_token` field — so check the endpoints (keeping the flat read for
+    // any legacy relay-state). Pre-Part-B this only read the flat field, which
+    // Part B emptied → every freshly-paired peer wrongly showed PENDING_ACK.
+    let has_slot = peer_obj
         .and_then(|p| p.get("slot_token"))
         .and_then(Value::as_str)
-        .unwrap_or("");
-    if token.is_empty() {
-        "PENDING_ACK".to_string()
-    } else {
+        .map(|t| !t.is_empty())
+        .unwrap_or(false)
+        || crate::endpoints::peer_endpoints_in_priority_order(relay_state, handle)
+            .iter()
+            .any(|e| !e.slot_token.is_empty());
+    if has_slot {
         raw
+    } else {
+        "PENDING_ACK".to_string()
     }
 }
 
@@ -560,6 +569,19 @@ mod tests {
         assert_eq!(effective_tier(&trust, &relay, "a"), "PENDING_ACK");
         // VERIFIED in trust + peer missing from relay.peers entirely → PENDING_ACK.
         let relay = json!({"peers": {}});
+        assert_eq!(effective_tier(&trust, &relay, "a"), "PENDING_ACK");
+        // RFC-006 Part B: the slot lives in endpoints[], not a flat field. A
+        // non-empty slot_token there must read as VERIFIED (the regression this
+        // guards: Part B emptied the flat field, so a flat-only reader wrongly
+        // downgraded every freshly-paired peer to PENDING_ACK).
+        let relay = json!({"peers": {"a": {"endpoints": [
+            {"relay_url": "https://r", "slot_id": "s", "slot_token": "tok", "scope": "federation"}
+        ]}}});
+        assert_eq!(effective_tier(&trust, &relay, "a"), "VERIFIED");
+        // endpoints[] present but its slot_token empty → still PENDING_ACK.
+        let relay = json!({"peers": {"a": {"endpoints": [
+            {"relay_url": "https://r", "slot_id": "s", "slot_token": "", "scope": "federation"}
+        ]}}});
         assert_eq!(effective_tier(&trust, &relay, "a"), "PENDING_ACK");
         // Non-VERIFIED trust tiers pass through unchanged.
         let trust = json!({"agents": {"a": {"tier": "UNTRUSTED"}}});

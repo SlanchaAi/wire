@@ -158,9 +158,13 @@ async fn wire_add_zero_paste_e2e() {
         let relay_json =
             std::fs::read_to_string(b.join("config/wire/relay.json")).unwrap_or_default();
         let v: Value = serde_json::from_str(&relay_json).unwrap_or(Value::Null);
-        v["peers"][a_h.as_str()]["slot_token"]
-            .as_str()
-            .map(|t| !t.is_empty())
+        // RFC-006 Part B: slot_token lives in endpoints[], not a flat field.
+        v["peers"][a_h.as_str()]["endpoints"]
+            .as_array()
+            .map(|eps| {
+                eps.iter()
+                    .any(|e| e["slot_token"].as_str().is_some_and(|t| !t.is_empty()))
+            })
             .unwrap_or(false)
     });
     assert!(

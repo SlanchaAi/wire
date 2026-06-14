@@ -149,89 +149,78 @@ pub fn attempt_deliver(peer_handle: &str, signed_event: &Value) -> Result<SyncDe
         .unwrap_or("")
         .to_string();
 
-    // Resolve the peer's slot coords. Missing peer / missing fields →
-    // PeerUnknown so the caller can act.
+    // RFC-006 Part B: resolve the peer's reachable endpoints from `endpoints[]`
+    // — the single peer-routing source — highest-priority first (UDS → local →
+    // LAN → federation). No pinned endpoints → PeerUnknown so the caller can
+    // act. We try each in order and return on the first that reaches the relay
+    // (priority failover — e.g. a sister's local relay first, federation as
+    // backup); if all fail, the last failure verdict is returned.
     let state = crate::config::read_relay_state().context("reading relay state")?;
-    let peer_obj = match state
-        .get("peers")
-        .and_then(Value::as_object)
-        .and_then(|m| m.get(peer_handle))
-    {
-        Some(v) => v,
-        None => return Ok(SyncDelivery::PeerUnknown { event_id }),
-    };
-    let relay_url = peer_obj
-        .get("relay_url")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let slot_id = peer_obj
-        .get("slot_id")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let slot_token = peer_obj
-        .get("slot_token")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    if relay_url.is_empty() || slot_id.is_empty() || slot_token.is_empty() {
+    let endpoints = crate::endpoints::peer_endpoints_in_priority_order(&state, peer_handle);
+    if endpoints.is_empty() {
         return Ok(SyncDelivery::PeerUnknown { event_id });
     }
 
-    // POST.
-    let client = crate::relay_client::RelayClient::new(&relay_url);
-    match client.post_event(&slot_id, &slot_token, signed_event) {
-        Ok(resp) => {
-            // Append a row to the per-peer pushed log so
-            // `pending_push_count` decrements regardless of whether
-            // the event reached the relay via sync send (this path)
-            // or via daemon push. Non-fatal on append failure.
-            let now = time::OffsetDateTime::now_utc()
-                .format(&time::format_description::well_known::Rfc3339)
-                .unwrap_or_default();
-            if let Err(e) = crate::config::append_pushed_log(peer_handle, &event_id, &now) {
-                eprintln!(
-                    "wire send: pushed-log append for {peer_handle}/{event_id} failed (non-fatal): {e:#}"
-                );
-            }
-            if resp.status == "duplicate" {
-                Ok(SyncDelivery::Duplicate {
-                    event_id,
-                    relay_url,
-                    slot_id,
-                })
-            } else {
-                Ok(SyncDelivery::Delivered {
-                    event_id,
-                    relay_url,
-                    slot_id,
-                })
-            }
+    let mut last_failure: Option<SyncDelivery> = None;
+    for ep in endpoints {
+        if ep.relay_url.is_empty() || ep.slot_id.is_empty() || ep.slot_token.is_empty() {
+            continue;
         }
-        Err(e) => {
-            let detail = crate::relay_client::format_transport_error(&e);
-            // Classify 4xx/410 (stale slot) distinctly from transport
-            // errors. The existing `cli::error_smells_like_slot_4xx`
-            // helper matches the relay's error text shape; reuse it
-            // so both code paths share the same classifier.
-            if crate::cli::error_smells_like_slot_4xx(&detail) {
-                Ok(SyncDelivery::SlotStale {
-                    event_id,
-                    relay_url,
-                    slot_id,
-                    detail,
-                })
-            } else {
-                Ok(SyncDelivery::TransportError {
-                    event_id,
-                    relay_url,
-                    slot_id,
-                    detail,
-                })
+        let client = crate::relay_client::RelayClient::new(&ep.relay_url);
+        match client.post_event(&ep.slot_id, &ep.slot_token, signed_event) {
+            Ok(resp) => {
+                // Append a row to the per-peer pushed log so
+                // `pending_push_count` decrements regardless of whether the
+                // event reached the relay via sync send (this path) or via
+                // daemon push. Non-fatal on append failure.
+                let now = time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default();
+                if let Err(e) = crate::config::append_pushed_log(peer_handle, &event_id, &now) {
+                    eprintln!(
+                        "wire send: pushed-log append for {peer_handle}/{event_id} failed (non-fatal): {e:#}"
+                    );
+                }
+                return Ok(if resp.status == "duplicate" {
+                    SyncDelivery::Duplicate {
+                        event_id,
+                        relay_url: ep.relay_url,
+                        slot_id: ep.slot_id,
+                    }
+                } else {
+                    SyncDelivery::Delivered {
+                        event_id,
+                        relay_url: ep.relay_url,
+                        slot_id: ep.slot_id,
+                    }
+                });
+            }
+            Err(e) => {
+                let detail = crate::relay_client::format_transport_error(&e);
+                // Classify 4xx/410 (stale slot) distinctly from transport
+                // errors; reuse the relay's error-text classifier so both
+                // paths agree. Keep as last_failure and try the next endpoint.
+                last_failure = Some(if crate::cli::error_smells_like_slot_4xx(&detail) {
+                    SyncDelivery::SlotStale {
+                        event_id: event_id.clone(),
+                        relay_url: ep.relay_url,
+                        slot_id: ep.slot_id,
+                        detail,
+                    }
+                } else {
+                    SyncDelivery::TransportError {
+                        event_id: event_id.clone(),
+                        relay_url: ep.relay_url,
+                        slot_id: ep.slot_id,
+                        detail,
+                    }
+                });
             }
         }
     }
+
+    // Every endpoint failed (or all carried empty coords).
+    Ok(last_failure.unwrap_or(SyncDelivery::PeerUnknown { event_id }))
 }
 
 /// Render a `SyncDelivery` as the JSON value `wire send --json` /
