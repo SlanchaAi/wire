@@ -31,4 +31,4 @@ ENV CARGO_TERM_COLOR=always
 # Non-login shell (`-c`, not `-lc`): a login shell sources /etc/profile,
 # which resets PATH and drops the rust image's /usr/local/cargo/bin —
 # `cargo: command not found`. `-c` inherits the image's ENV PATH.
-CMD ["bash", "-c", "cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test --all-targets -- --test-threads=1 && cargo build --release --bin wire && WIRE=./target/release/wire bash demo-invite.sh && WIRE=./target/release/wire bash demo-hotline.sh && ./target/release/wire demo --json | grep -q '\"ok\":true'"]
+CMD ["bash", "-c", "cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test --all-targets -- --test-threads=1 && cargo build --release --bin wire && WIRE=./target/release/wire bash demo-invite.sh && WIRE=./target/release/wire bash demo-hotline.sh && ./target/release/wire demo --json | grep -q '\"ok\":true' && WIRE=./target/release/wire tests/it/run-all.sh"]
