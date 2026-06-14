@@ -153,11 +153,7 @@ async fn org_member_auto_pins_org_verified_offline() {
     );
     assert_eq!(m["org_did"].as_str(), Some(org_did.as_str()));
 
-    assert!(
-        wire(&a, &["init", "darby", "--relay", &relay_url])
-            .status
-            .success()
-    );
+    assert!(wire(&a, &["init", "--relay", &relay_url]).status.success());
     let a_h = read_handle(&a);
     assert!(
         wire(&a, &["claim", &a_h, "--public-url", &relay_url, "--json"])
@@ -179,11 +175,7 @@ async fn org_member_auto_pins_org_verified_offline() {
 
     // ---- B: init + claim, then auto-trust A's org ----
     let b = fresh_dir("night-train");
-    assert!(
-        wire(&b, &["init", "night-train", "--relay", &relay_url])
-            .status
-            .success()
-    );
+    assert!(wire(&b, &["init", "--relay", &relay_url]).status.success());
     let b_h = read_handle(&b);
     assert!(
         wire(&b, &["claim", &b_h, "--public-url", &relay_url, "--json"])
@@ -257,11 +249,7 @@ async fn blocked_operator_is_never_org_auto_pinned() {
             "--json",
         ],
     );
-    assert!(
-        wire(&a, &["init", "darby", "--relay", &relay_url])
-            .status
-            .success()
-    );
+    assert!(wire(&a, &["init", "--relay", &relay_url]).status.success());
     let a_h = read_handle(&a);
     assert!(
         wire(&a, &["claim", &a_h, "--public-url", &relay_url, "--json"])
@@ -271,11 +259,7 @@ async fn blocked_operator_is_never_org_auto_pinned() {
 
     // ---- B: init + claim, auto-trust A's org, BUT block A's operator ----
     let b = fresh_dir("warden");
-    assert!(
-        wire(&b, &["init", "warden", "--relay", &relay_url])
-            .status
-            .success()
-    );
+    assert!(wire(&b, &["init", "--relay", &relay_url]).status.success());
     let b_h = read_handle(&b);
     assert!(
         wire(&b, &["claim", &b_h, "--public-url", &relay_url, "--json"])
@@ -341,20 +325,12 @@ async fn non_member_dialer_still_gated_to_pending() {
 
     // A: a plain agent — NO enrollment, NO org claims on its card.
     let a = fresh_dir("plain-dialer");
-    assert!(
-        wire(&a, &["init", "plain-dialer", "--relay", &relay_url])
-            .status
-            .success()
-    );
+    assert!(wire(&a, &["init", "--relay", &relay_url]).status.success());
     let a_h = read_handle(&a);
 
     // B: has a (different) org policy, but A is not a member of it.
     let b = fresh_dir("gatekeeper");
-    assert!(
-        wire(&b, &["init", "gatekeeper", "--relay", &relay_url])
-            .status
-            .success()
-    );
+    assert!(wire(&b, &["init", "--relay", &relay_url]).status.success());
     let b_h = read_handle(&b);
     assert!(
         wire(&b, &["claim", &b_h, "--public-url", &relay_url, "--json"])

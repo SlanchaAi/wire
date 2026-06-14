@@ -81,11 +81,7 @@ async fn wire_add_zero_paste_e2e() {
     // handle (DID-derived character); operator-typed "coffee-ghost" is
     // ignored at init time.
     let a = fresh_dir("coffee-ghost");
-    assert!(
-        wire(&a, &["init", "coffee-ghost", "--relay", &relay_url])
-            .status
-            .success()
-    );
+    assert!(wire(&a, &["init", "--relay", &relay_url]).status.success());
     let a_h = read_handle(&a);
     assert!(
         wire(&a, &["profile", "set", "emoji", "👻"])
@@ -108,11 +104,7 @@ async fn wire_add_zero_paste_e2e() {
 
     // B: init only. No prior knowledge of A beyond the handle.
     let b = fresh_dir("night-train");
-    assert!(
-        wire(&b, &["init", "night-train", "--relay", &relay_url])
-            .status
-            .success()
-    );
+    assert!(wire(&b, &["init", "--relay", &relay_url]).status.success());
     let b_h = read_handle(&b);
 
     // B: ONE command. wire add <a_h>@<host>.

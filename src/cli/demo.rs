@@ -139,8 +139,8 @@ pub(super) fn cmd_demo(as_json: bool) -> Result<()> {
     wait_for_relay(port)?;
 
     say("▶ minting two throwaway identities on it…");
-    wire(&bin, &a_home, &["init", "agent-a", "--relay", &relay_url])?;
-    wire(&bin, &b_home, &["init", "agent-b", "--relay", &relay_url])?;
+    wire(&bin, &a_home, &["init", "--relay", &relay_url])?;
+    wire(&bin, &b_home, &["init", "--relay", &relay_url])?;
     let a = handle_of(&bin, &a_home)?;
     let b = handle_of(&bin, &b_home)?;
     say(&format!("    agent A → {a}\n    agent B → {b}"));
