@@ -1090,6 +1090,9 @@ pub(super) fn cmd_monitor(
     // long-running poll loop; collision with another wire process under
     // the same WIRE_HOME causes "I'm not seeing X's events" debugging
     // rabbit holes. Warn at startup so the operator catches it fast.
+    // #247 finding 4: write `monitor.pid` so the Windows pidfile-scan
+    // collision detection can reverse-map our pid back to our home.
+    let _ = crate::ensure_up::write_self_role_pid("monitor");
     crate::session::warn_on_identity_collision(std::process::id(), "monitor");
     // Still proceed — InboxWatcher::from_dir_head handles missing dir.
 
@@ -1338,7 +1341,10 @@ pub(super) fn cmd_notify(
     // v0.13.x identity work: a long-running notify loop racing another
     // wire process on the same inbox cursor silently drops toasts.
     // Skipped under `--once` (single sweep, no cursor ownership).
+    // #247 finding 4: write `notify.pid` so the Windows pidfile-scan
+    // collision detection can reverse-map our pid back to our home.
     if !once {
+        let _ = crate::ensure_up::write_self_role_pid("notify");
         crate::session::warn_on_identity_collision(std::process::id(), "notify");
     }
 

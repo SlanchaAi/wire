@@ -582,10 +582,22 @@ fn read_card_identity(card_path: &Path) -> (Option<String>, Option<String>) {
 /// enumerate which daemon pids legitimately belong to a session so orphan
 /// detection doesn't flag a sibling session's daemon (A2).
 pub fn session_daemon_pid(session_home: &Path) -> Option<u32> {
-    let pidfile = session_home.join("state").join("wire").join("daemon.pid");
+    session_role_pid(session_home, "daemon")
+}
+
+/// Read a session home's `<role>.pid` (path-based, no WIRE_HOME read).
+/// Same JSON shape as `daemon.pid`. None if absent/corrupt.
+///
+/// #247 finding 4: lets the Windows identity-collision adapter walk
+/// `list_sessions()` × every inbox-owning role and reverse-map a
+/// candidate PID back to its serving `WIRE_HOME` without needing to
+/// read the remote process's environment.
+pub fn session_role_pid(session_home: &Path, role: &str) -> Option<u32> {
+    let pidfile = session_home
+        .join("state")
+        .join("wire")
+        .join(format!("{role}.pid"));
     let bytes = std::fs::read(&pidfile).ok()?;
-    // Pidfile is the JSON `{"pid": <n>, ...}` form (v0.5.11+). Anything
-    // else reads as "no daemon".
     serde_json::from_slice::<serde_json::Value>(&bytes)
         .ok()
         .and_then(|v| v.get("pid").and_then(|p| p.as_u64()))
@@ -1001,36 +1013,39 @@ pub const INBOX_OWNING_SUBCOMMANDS: &[&str] = &["mcp", "daemon", "monitor", "not
 /// pair.
 ///
 /// Best-effort: any subprocess / env-read failure is silent (the
-/// collision check should never block startup). Cross-platform via
-/// `ps -E -p <pid>` on macOS, `/proc/<pid>/environ` on Linux. Windows
-/// returns empty (no collision detected).
+/// collision check should never block startup).
+///
+/// Cross-platform process enumeration via
+/// [`crate::platform::find_processes_by_cmdline`] — the existing
+/// PowerShell + CIM `Get-CimInstance Win32_Process` adapter for
+/// Windows, `pgrep -f` for POSIX. The per-role mapping back to a
+/// `WIRE_HOME` then uses [`read_wire_home_from_pid`], which (POSIX)
+/// reads `/proc/<pid>/environ` or `ps -E` directly, and (Windows)
+/// walks `list_sessions()` × `<role>.pid` files since Windows has no
+/// portable cross-process env read. #247 finding 4: closes the
+/// "Windows returns empty" gap that left two `wire mcp` servers
+/// sharing one `WIRE_HOME` silently racing the inbox cursor on a
+/// Windows host.
 pub fn warn_on_identity_collision(self_pid: u32, role: &str) {
     let our_wire_home = match std::env::var("WIRE_HOME") {
         Ok(h) => h,
         Err(_) => return,
     };
 
-    // Single pgrep call with an alternation predicate. `pgrep -f`
-    // matches against the full argv string, so `wire (mcp|daemon|…)`
-    // catches every inbox-owning subcommand in one shot. Falls back to
-    // silent no-op on platforms without pgrep (Windows) — the env-read
-    // path below also returns None there, so detection is end-to-end
-    // unsupported on Windows. Future: a powershell adapter for
-    // identity collisions, tracked in #29 / #30.
-    let predicate = format!("wire ({})", INBOX_OWNING_SUBCOMMANDS.join("|"));
-    let pgrep_out = match std::process::Command::new("pgrep")
-        .args(["-f", &predicate])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return,
-    };
-
-    let other_pids: Vec<u32> = String::from_utf8_lossy(&pgrep_out.stdout)
-        .split_whitespace()
-        .filter_map(|s| s.parse::<u32>().ok())
-        .filter(|&p| p != self_pid)
-        .collect();
+    // One enumeration per inbox-owning role; merge the results. Going
+    // role-by-role rather than a single alternation predicate lets us
+    // reuse `crate::platform::find_processes_by_cmdline` unchanged —
+    // the Windows adapter there already matches the `wire.exe` image +
+    // a single CommandLine substring, and chaining N small queries is
+    // cheap (one PowerShell launch per role, ≤4 launches total).
+    let mut other_pids: Vec<u32> = Vec::new();
+    for sub in INBOX_OWNING_SUBCOMMANDS {
+        for pid in crate::platform::find_processes_by_cmdline(&format!("wire {sub}")) {
+            if pid != self_pid && !other_pids.contains(&pid) {
+                other_pids.push(pid);
+            }
+        }
+    }
 
     let other_homes: Vec<(u32, Option<String>)> = other_pids
         .iter()
@@ -1088,9 +1103,26 @@ pub(crate) fn emit_collision_warning(role: &str, our_wire_home: &str, colliders:
 }
 
 /// Best-effort cross-platform read of another process's `WIRE_HOME`.
+///
 /// Linux: parses `/proc/<pid>/environ` (NUL-separated KEY=VAL).
 /// macOS: `ps -E -p <pid>` (whitespace-separated KEY=VAL prefix).
-/// Windows / other: returns `None` (collision detection no-ops).
+/// Windows: walks every known session (`list_sessions()`) × every
+/// inbox-owning role (`INBOX_OWNING_SUBCOMMANDS`) and reads the
+/// per-role pidfile (`<session_home>/state/wire/<role>.pid`) — if
+/// any pidfile records `pid`, the session's `home_dir` is the
+/// candidate's `WIRE_HOME`. Returns None if no pidfile matches.
+///
+/// The Windows path requires every inbox-owning role to actually
+/// write its pidfile on startup — daemon has always done so via
+/// `write_self_daemon_pid`; #247 finding 4 adds the equivalent for
+/// `mcp` / `monitor` / `notify` via [`crate::ensure_up::write_self_role_pid`].
+///
+/// Why not read the remote process environment on Windows? `NtQuery
+/// InformationProcess` + `ReadProcessMemory` would give 100% coverage
+/// but adds an `ntdll` FFI dep + brittle PEB-layout assumptions across
+/// Windows builds. The pidfile-lookup gives equivalent coverage for
+/// every long-running wire role we care about, with the same on-disk
+/// data structure POSIX uses today, and zero new platform deps.
 ///
 /// Also used by `ensure_up::daemon_liveness` to scope the orphan-daemon
 /// check to processes serving the same WIRE_HOME.
@@ -1126,11 +1158,44 @@ pub(crate) fn read_wire_home_from_pid(pid: u32) -> Option<String> {
         None
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        wire_home_from_pid_via_pidfile_scan(pid, &list_sessions().unwrap_or_default())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = pid;
         None
     }
+}
+
+/// Pure-logic helper for the Windows pidfile-scan path: given a
+/// candidate PID and a snapshot of `(home_dir, role-pid)` pairs from
+/// every known session × inbox-owning role, return the home whose
+/// pidfile records this PID. Extracted so the policy is unit-testable
+/// without a real `list_sessions` filesystem snapshot.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn find_home_for_pid(pid: u32, sessions_role_pids: &[(String, u32)]) -> Option<String> {
+    sessions_role_pids
+        .iter()
+        .find_map(|(home, recorded)| (*recorded == pid).then(|| home.clone()))
+}
+
+/// Windows-side bridge: from the SessionInfo list, expand to
+/// `(home_str, pid)` for every inbox-owning role's pidfile, then ask
+/// [`find_home_for_pid`].
+#[cfg(windows)]
+fn wire_home_from_pid_via_pidfile_scan(pid: u32, sessions: &[SessionInfo]) -> Option<String> {
+    let mut pairs: Vec<(String, u32)> = Vec::new();
+    for s in sessions {
+        for role in INBOX_OWNING_SUBCOMMANDS {
+            if let Some(p) = session_role_pid(&s.home_dir, role) {
+                pairs.push((s.home_dir.to_string_lossy().to_string(), p));
+            }
+        }
+    }
+    find_home_for_pid(pid, &pairs)
 }
 
 /// v0.6.7: apply `detect_session_wire_home` for the current process.
@@ -2349,5 +2414,63 @@ mod tests {
         // by-key/ but no hash after (just the bare dir).
         assert!(!is_by_key_shape("/wire/sessions/by-key/"));
         assert!(!is_by_key_shape("/wire/sessions/by-key"));
+    }
+
+    // ---------- #247 finding 4: Windows pidfile-scan path ----------
+
+    #[test]
+    fn find_home_for_pid_matches_first_recorded_session() {
+        let pairs = vec![
+            ("/wire/sessions/by-key/aaaaaaaaaaaaaaaa".to_string(), 1001),
+            ("/wire/sessions/by-key/bbbbbbbbbbbbbbbb".to_string(), 1002),
+            ("/wire/sessions/by-key/cccccccccccccccc".to_string(), 1003),
+        ];
+        assert_eq!(
+            find_home_for_pid(1002, &pairs).as_deref(),
+            Some("/wire/sessions/by-key/bbbbbbbbbbbbbbbb")
+        );
+    }
+
+    #[test]
+    fn find_home_for_pid_returns_none_when_no_session_owns_pid() {
+        let pairs = vec![("/home-A".to_string(), 1001), ("/home-B".to_string(), 1002)];
+        assert_eq!(find_home_for_pid(9999, &pairs), None);
+    }
+
+    #[test]
+    fn find_home_for_pid_empty_input_is_none() {
+        assert_eq!(find_home_for_pid(1234, &[]), None);
+    }
+
+    #[test]
+    fn find_home_for_pid_handles_one_pid_in_multiple_roles() {
+        // Realistic shape on Windows: a single wire process serves
+        // multiple inbox-owning roles for one session (e.g. the same
+        // pid in daemon.pid + mcp.pid, hypothetical). Pidfile-scan
+        // emits one entry per (home, role) pair, so the same pid
+        // appears multiple times under the same home — first match
+        // wins, which is correct.
+        let pairs = vec![("/home-A".to_string(), 4242), ("/home-A".to_string(), 4242)];
+        assert_eq!(find_home_for_pid(4242, &pairs).as_deref(), Some("/home-A"));
+    }
+
+    #[test]
+    fn session_role_pid_reads_json_pid_from_role_pidfile() {
+        use std::io::Write as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_dir = tmp.path().join("state").join("wire");
+        std::fs::create_dir_all(&pid_dir).unwrap();
+
+        // Mimic the JSON shape ensure_up::write_pid_record produces.
+        let pidfile = pid_dir.join("mcp.pid");
+        let mut f = std::fs::File::create(&pidfile).unwrap();
+        write!(&mut f, r#"{{"pid":7777,"version":"0.16.0"}}"#).unwrap();
+
+        assert_eq!(session_role_pid(tmp.path(), "mcp"), Some(7777));
+        // A role with no pidfile reads as None.
+        assert_eq!(session_role_pid(tmp.path(), "monitor"), None);
+        // Corrupt body reads as None (no panic).
+        std::fs::write(pid_dir.join("notify.pid"), b"this is not json").unwrap();
+        assert_eq!(session_role_pid(tmp.path(), "notify"), None);
     }
 }

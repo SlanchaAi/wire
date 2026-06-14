@@ -292,20 +292,42 @@ fn write_pid_record(name: &str, record: &DaemonPid) -> Result<()> {
 /// `pending_pair::cleanup_on_startup` alongside the now-removed SAS
 /// pending-pair recovery; the pidfile write was never SAS-specific.)
 pub fn write_self_daemon_pid() -> Result<()> {
-    let path = pid_file("daemon")?;
+    write_self_role_pid("daemon")
+}
+
+/// Long-running-role startup: claim the `<role>.pid` file for THIS
+/// process inside the active `WIRE_HOME`. Same on-disk JSON shape as
+/// `daemon.pid`, just keyed by role.
+///
+/// #247 finding 4: the per-role pidfile is what lets the cross-platform
+/// identity-collision check map another wire process's PID back to the
+/// `WIRE_HOME` it serves. Windows has no portable way to read another
+/// process's environment, so the env-based POSIX path
+/// (`/proc/<pid>/environ` / `ps -E`) doesn't translate — but every
+/// inbox-owning long-running role (daemon / mcp / monitor / notify)
+/// living under `<WIRE_HOME>/state/wire/<role>.pid` IS a portable
+/// signal: a Windows waiter walks `list_sessions()` × roles, matches
+/// the candidate PID against each pidfile, and reads off the session's
+/// home. The POSIX path keeps its env-based fast path; this gives
+/// Windows the same coverage without an `NtQueryInformationProcess`
+/// FFI dep.
+///
+/// Idempotent: if the pidfile already records our PID we leave it
+/// alone.
+pub fn write_self_role_pid(role: &str) -> Result<()> {
+    let path = pid_file(role)?;
     let my_pid = std::process::id();
     if path.exists()
         && let Ok(s) = std::fs::read_to_string(&path)
         && let Ok(rec) = serde_json::from_str::<DaemonPid>(s.trim())
         && rec.pid == my_pid
     {
-        // We already own this pidfile — nothing to do.
         return Ok(());
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    write_pid_record("daemon", &build_pid_record(my_pid))
+    write_pid_record(role, &build_pid_record(my_pid))
 }
 
 /// Schema string written into every JSON last-sync file. Bumped if the

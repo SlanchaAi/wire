@@ -124,6 +124,13 @@ pub fn run() -> Result<()> {
     // the cwd's session"); operators hit it as "they look identical"
     // and burn hours debugging. The warning gives them a clear
     // remediation path the first time they see it.
+    //
+    // #247 finding 4: write our `mcp.pid` BEFORE the collision check
+    // so a sibling MCP server starting concurrently has a chance of
+    // seeing us via the Windows pidfile-scan path. Best-effort; a
+    // failed write just means the sibling falls back to the same
+    // "no signal" behavior the pre-fix code had.
+    let _ = crate::ensure_up::write_self_role_pid("mcp");
     crate::session::warn_on_identity_collision(std::process::id(), "mcp");
 
     let state = McpState::default();
