@@ -179,6 +179,32 @@ fn default_handle() -> String {
     }
 }
 
+/// Choose an existing self endpoint to reuse, honoring an explicit relay.
+///
+/// - `Some(relay)` → ONLY a slot already on that relay (compared with a
+///   trailing slash trimmed) qualifies. A named relay is never silently
+///   swapped for an unrelated existing slot — that was #279, where
+///   `wire claim --relay wireup.net` reused the loopback primary and POSTed
+///   the claim to `127.0.0.1`. `None` means "allocate one on the requested
+///   relay" to the caller.
+/// - `None` → any existing slot, federation-first then first (the v0.6.6
+///   local-only-preserving behavior — don't churn / don't auto-federate).
+///
+/// Pure (no I/O) so the relay-honoring choice is locked by unit tests.
+fn pick_reusable_self_endpoint<'a>(
+    existing: &'a [crate::endpoints::Endpoint],
+    preferred_relay: Option<&str>,
+) -> Option<&'a crate::endpoints::Endpoint> {
+    let norm = |u: &str| u.trim_end_matches('/').to_string();
+    match preferred_relay {
+        Some(p) => existing.iter().find(|e| norm(&e.relay_url) == norm(p)),
+        None => existing
+            .iter()
+            .find(|e| e.scope == crate::endpoints::EndpointScope::Federation)
+            .or_else(|| existing.first()),
+    }
+}
+
 /// Ensure this node has an identity + relay slot. Idempotent.
 /// Returns (did, relay_url, slot_id, slot_token).
 pub fn ensure_self_with_relay(
@@ -201,46 +227,60 @@ pub fn ensure_self_with_relay(
 
     let mut relay_state = config::read_relay_state()?;
 
-    // v0.6.6: prefer an existing endpoint over allocating a new one.
-    // `--local-only` sessions don't have legacy `self.slot_id` but DO
-    // have `self.endpoints[]` with a local slot — those should be
-    // honored, not stomped with a fresh federation allocation. Without
-    // this guard, `wire accept` on a local-only session would
-    // auto-allocate a federation slot at DEFAULT_RELAY (wireup.net)
-    // every time, silently turning local-only sessions into dual-slot.
+    // Pick a reusable existing self slot, honoring an explicit relay choice.
+    //
+    // v0.6.6: prefer an existing endpoint over allocating a new one — a
+    // `--local-only` session has no legacy `self.slot_id` but DOES have a
+    // local slot in `self.endpoints[]`, which must not be stomped with a
+    // fresh federation allocation (that silently turned local-only sessions
+    // dual-slot).
+    //
+    // #279: BUT when the caller names a relay (`wire claim --relay X`,
+    // `wire add --relay X`, accept-invite with the inviter's relay), only a
+    // slot ALREADY on X qualifies for reuse. The old code returned any
+    // existing slot regardless, so `claim --relay wireup.net` reused the
+    // loopback primary and POSTed the claim to `127.0.0.1` — the relay flag
+    // was silently ignored. If no slot is on X, fall through and allocate one
+    // there (additively, so other slots survive).
     let existing = crate::endpoints::self_endpoints(&relay_state);
-    if !existing.is_empty() {
-        let ep = existing
-            .iter()
-            .find(|e| e.scope == crate::endpoints::EndpointScope::Federation)
-            .cloned()
-            .unwrap_or_else(|| existing[0].clone());
+    if let Some(ep) = pick_reusable_self_endpoint(&existing, preferred_relay).cloned() {
         return Ok((did, ep.relay_url, ep.slot_id, ep.slot_token));
     }
 
-    let self_state = relay_state.get("self").cloned().unwrap_or(Value::Null);
-
-    if self_state.is_null() || self_state.get("slot_id").and_then(Value::as_str).is_none() {
-        let client = crate::relay_client::RelayClient::new(relay);
-        client.check_healthz()?;
-        let handle = crate::agent_card::display_handle_from_did(&did);
-        let alloc = client.allocate_slot(Some(handle))?;
-        relay_state["self"] = json!({
-            "relay_url": relay,
-            "slot_id": alloc.slot_id,
-            "slot_token": alloc.slot_token,
-        });
-        config::write_relay_state(&relay_state)?;
-    }
-
-    let self_state = relay_state.get("self").cloned().unwrap_or(Value::Null);
-    let relay_url = self_state["relay_url"].as_str().unwrap_or("").to_string();
-    let slot_id = self_state["slot_id"].as_str().unwrap_or("").to_string();
-    let slot_token = self_state["slot_token"].as_str().unwrap_or("").to_string();
-    if relay_url.is_empty() || slot_id.is_empty() || slot_token.is_empty() {
-        bail!("self relay state incomplete after auto-allocate");
-    }
-    Ok((did, relay_url, slot_id, slot_token))
+    // No reusable slot on the target relay → allocate one there and ADD it to
+    // `self.endpoints[]` (additive: existing slots, e.g. a local relay, are
+    // preserved). Goes through `upsert_self_endpoint` so the write shape +
+    // legacy top-level fields match `bind-relay` / `init`.
+    let client = crate::relay_client::RelayClient::new(relay);
+    client.check_healthz()?;
+    let handle = crate::agent_card::display_handle_from_did(&did);
+    let alloc = client.allocate_slot(Some(handle))?;
+    let scope = crate::endpoints::infer_scope_from_url(relay);
+    let ep = match scope {
+        crate::endpoints::EndpointScope::Local => crate::endpoints::Endpoint::local(
+            relay.to_string(),
+            alloc.slot_id.clone(),
+            alloc.slot_token.clone(),
+        ),
+        crate::endpoints::EndpointScope::Lan => crate::endpoints::Endpoint::lan(
+            relay.to_string(),
+            alloc.slot_id.clone(),
+            alloc.slot_token.clone(),
+        ),
+        crate::endpoints::EndpointScope::Uds => crate::endpoints::Endpoint::uds(
+            relay.to_string(),
+            alloc.slot_id.clone(),
+            alloc.slot_token.clone(),
+        ),
+        crate::endpoints::EndpointScope::Federation => crate::endpoints::Endpoint::federation(
+            relay.to_string(),
+            alloc.slot_id.clone(),
+            alloc.slot_token.clone(),
+        ),
+    };
+    crate::endpoints::upsert_self_endpoint(&mut relay_state, ep);
+    config::write_relay_state(&relay_state)?;
+    Ok((did, relay.to_string(), alloc.slot_id, alloc.slot_token))
 }
 
 /// Mint a fresh invite URL. Auto-inits + auto-allocates relay slot if needed.
@@ -999,6 +1039,67 @@ pub fn maybe_consume_pair_drop_ack(event: &Value) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::endpoints::Endpoint;
+
+    // ---- #279: relay-honoring self-slot reuse ----
+
+    #[test]
+    fn pick_reusable_some_relay_only_matches_that_relay() {
+        // The #279 layout: a loopback primary + a federation slot. Asking for
+        // wireup.net must NOT return the loopback slot — it returns the
+        // wireup.net slot, and a relay with NO existing slot returns None
+        // (caller then allocates there) instead of an unrelated slot.
+        let existing = vec![
+            Endpoint::local("http://127.0.0.1:18791".into(), "loc".into(), "lt".into()),
+            Endpoint::federation("https://wireup.net".into(), "fed".into(), "ft".into()),
+        ];
+        let pick = pick_reusable_self_endpoint(&existing, Some("https://wireup.net")).unwrap();
+        assert_eq!(pick.slot_id, "fed");
+        // Trailing slash is normalized away.
+        let pick2 = pick_reusable_self_endpoint(&existing, Some("https://wireup.net/")).unwrap();
+        assert_eq!(pick2.slot_id, "fed");
+        // A relay we hold no slot on → None (allocate, don't reuse loopback).
+        assert!(pick_reusable_self_endpoint(&existing, Some("https://other.example")).is_none());
+    }
+
+    #[test]
+    fn pick_reusable_loopback_only_does_not_satisfy_federation_request() {
+        // The exact #279 trap: only a loopback slot exists, caller asks for a
+        // federation relay → must NOT reuse the loopback (which the peer can't
+        // reach) — returns None so the caller allocates on the real relay.
+        let existing = vec![Endpoint::local(
+            "http://127.0.0.1:18791".into(),
+            "loc".into(),
+            "lt".into(),
+        )];
+        assert!(pick_reusable_self_endpoint(&existing, Some("https://wireup.net")).is_none());
+    }
+
+    #[test]
+    fn pick_reusable_none_prefers_federation_then_first() {
+        // No explicit relay → keep the v0.6.6 behavior: federation-first, else
+        // the first existing slot (don't churn, don't auto-federate).
+        let local_only = vec![Endpoint::local(
+            "http://127.0.0.1:8771".into(),
+            "loc".into(),
+            "lt".into(),
+        )];
+        assert_eq!(
+            pick_reusable_self_endpoint(&local_only, None)
+                .unwrap()
+                .slot_id,
+            "loc"
+        );
+        let dual = vec![
+            Endpoint::local("http://127.0.0.1:8771".into(), "loc".into(), "lt".into()),
+            Endpoint::federation("https://wireup.net".into(), "fed".into(), "ft".into()),
+        ];
+        assert_eq!(
+            pick_reusable_self_endpoint(&dual, None).unwrap().slot_id,
+            "fed"
+        );
+        assert!(pick_reusable_self_endpoint(&[], None).is_none());
+    }
 
     // ---- RFC-001 Phase 1b: org-auto-pin decision gate ----
 
