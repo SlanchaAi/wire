@@ -1231,6 +1231,57 @@ pub fn session_source() -> &'static str {
     SESSION_SOURCE.get().copied().unwrap_or("unknown")
 }
 
+/// Sources that indicate the process did NOT inherit an explicit identity
+/// signal from its launcher. `machine-default` means a bare CLI / no
+/// session id at all; `minted` means an MCP server fell through to a
+/// fresh per-process key. Either way, a long-running inbox-owning role
+/// running under one of these sources is almost certainly NOT the
+/// identity its launcher intended (#284.4: the operator-facing symptom
+/// is a spawn that should have inherited `WIRE_HOME` but didn't, and
+/// then silently writes to / blocks on the cwd-default home alongside a
+/// sibling process serving the real session-key home).
+pub fn is_unexpected_session_source(source: &str) -> bool {
+    matches!(source, "machine-default" | "minted")
+}
+
+/// #284.4: at startup, a long-running inbox-owning role (`daemon`, `mcp`,
+/// `monitor`, `notify`) calls this to surface the "the launcher meant
+/// to hand us an explicit identity but didn't" failure mode. Default
+/// behavior is a loud, force-rendered stderr warning naming the
+/// resolved source so operators see the silent-collision risk; setting
+/// `WIRE_STRICT_SESSION=1` upgrades it to a hard exit (code 2) so a
+/// script wrapper can fail-fast instead of waiting for the downstream
+/// `init` / `bind` / `daemon` call to block on a shared relay lock.
+///
+/// Roles that aren't in the inbox-owning long-running set (`whoami`,
+/// `send`, `peers`, …) deliberately skip this check — they're meant to
+/// run from a bare CLI on the machine-default identity, and warning
+/// every one of them would drown legitimate ad-hoc usage in noise.
+pub fn warn_if_unexpected_session_source(role: &str) {
+    let source = session_source();
+    if !is_unexpected_session_source(source) {
+        return;
+    }
+    let strict = std::env::var("WIRE_STRICT_SESSION").is_ok_and(|v| !v.is_empty() && v != "0");
+    let message = format!(
+        "wire {role}: session-source=`{source}` — the launcher did not pass a session-key \
+         (WIRE_HOME / WIRE_SESSION_ID / CLAUDE_CODE_SESSION_ID), so this process is running \
+         against the {kind} identity. If a sibling agent is serving the real session-key \
+         home, they will race the inbox cursor. Pass an explicit `WIRE_SESSION_ID=<key>` or \
+         `WIRE_HOME=<path>` to fix.",
+        kind = match source {
+            "machine-default" => "machine-default (bare CLI)",
+            "minted" => "freshly minted per-process",
+            _ => "unexpected fallback",
+        },
+    );
+    if strict {
+        eprintln!("wire {role}: ERROR (WIRE_STRICT_SESSION=1) — {message}");
+        std::process::exit(2);
+    }
+    eprintln!("{message}");
+}
+
 /// RFC-008 §C — does this `WIRE_HOME` path point at the modern operator-
 /// explicit `sessions/by-key/<16-hex-hash>` shape, or at an older/foreign
 /// path?
@@ -2472,5 +2523,46 @@ mod tests {
         // Corrupt body reads as None (no panic).
         std::fs::write(pid_dir.join("notify.pid"), b"this is not json").unwrap();
         assert_eq!(session_role_pid(tmp.path(), "notify"), None);
+    }
+
+    // ---------- #284.4: is_unexpected_session_source predicate ----------
+
+    #[test]
+    fn is_unexpected_session_source_flags_machine_default_and_minted() {
+        assert!(is_unexpected_session_source("machine-default"));
+        assert!(is_unexpected_session_source("minted"));
+    }
+
+    #[test]
+    fn is_unexpected_session_source_passes_explicit_sources() {
+        // Every adapter that names an explicit launcher signal counts
+        // as "the operator actually meant this identity."
+        for ok in [
+            "env:WIRE_HOME",
+            "env:WIRE_HOME_FORCE",
+            "override",
+            "claude-code",
+            "claude-code-pidfile",
+            "codex-cli",
+            "copilot-cli",
+            "vscode-workspace",
+        ] {
+            assert!(
+                !is_unexpected_session_source(ok),
+                "explicit source `{ok}` must NOT be flagged"
+            );
+        }
+    }
+
+    #[test]
+    fn is_unexpected_session_source_handles_unknown_conservatively() {
+        // `unknown` means adoption never ran — treat as a separate
+        // failure mode, NOT as the same class as machine-default /
+        // minted. Callers (warn_if_unexpected_session_source) can
+        // decide what to do with it; this predicate stays narrow.
+        assert!(!is_unexpected_session_source("unknown"));
+        // Future adapter labels likewise default to "explicit"
+        // until a maintainer opts them in.
+        assert!(!is_unexpected_session_source("future-adapter-X"));
     }
 }

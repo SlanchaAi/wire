@@ -117,6 +117,12 @@ pub fn run() -> Result<()> {
         let _ = crate::ensure_up::ensure_daemon_running();
     }
 
+    // #284.4: surface "launcher didn't pass a session-key" BEFORE the
+    // collision check. The minted-per-process / machine-default fallback
+    // means we're almost certainly running against the wrong identity;
+    // under `WIRE_STRICT_SESSION=1` this exits 2 before the rest of MCP
+    // bringup wedges on a shared lock or cursor race.
+    crate::session::warn_if_unexpected_session_source("mcp");
     // v0.6.10: surface multi-agent identity collisions explicitly.
     // Two Claudes (or any MCP-host pair) launched in the same cwd
     // auto-detect into the same wire session and silently share an
