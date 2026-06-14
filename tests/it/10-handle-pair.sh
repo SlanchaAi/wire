@@ -27,10 +27,14 @@ w "$A" accept "$BH" --json >/dev/null
 w "$B" pull --json >/dev/null   # B consumes A's pair_drop_ack
 
 step "both sides pinned each other VERIFIED"
-assert "A pinned B" "w \"$A\" peers --json | jq -e '.[].handle' | grep -q $BH"
-assert "B pinned A" "w \"$B\" peers --json | jq -e '.[].handle' | grep -q $AH"
-assert "A pinned B at VERIFIED" \
-  "w \"$A\" peers --json | jq -e '.[] | select(.handle==\"$BH\") | .tier==\"VERIFIED\"'"
+# accept writes trust.json in one process; `peers` reads it in another — poll
+# (don't single-shot) so a filesystem write/read beat can't flake the check.
+a_has_b()      { w "$A" peers --json | grep -q "$BH"; }
+b_has_a()      { w "$B" peers --json | grep -q "$AH"; }
+a_b_verified() { w "$A" peers --json | jq -e --arg h "$BH" '.[]|select(.handle==$h)|.tier=="VERIFIED"' >/dev/null; }
+assert "A pinned B"             "wait_until 10 a_has_b"
+assert "B pinned A"             "wait_until 10 b_has_a"
+assert "A pinned B at VERIFIED" "wait_until 10 a_b_verified"
 
 step "A → B  signed message, delivered + verified"
 w "$A" send --queue "$BH" decision "hello from $AH" >/dev/null
