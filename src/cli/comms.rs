@@ -953,10 +953,19 @@ pub(super) fn cmd_tail(
             None => event.clone(),
         };
         let event = &ev_dec;
+        // #281: an `enc` envelope this build couldn't open (decrypt failed, no
+        // key, or an `enc` scheme we don't support) is NOT readable — don't
+        // present its raw ciphertext as if it were the message.
+        // `decrypt_event_for_read` marks success with `dec:true`, so a
+        // surviving `enc` without `dec:true` means "encrypted, unreadable here".
+        let undecryptable = tail_event_undecryptable(event);
         if as_json {
             let mut event_with_meta = event.clone();
             if let Some(obj) = event_with_meta.as_object_mut() {
                 obj.insert("verified".into(), json!(verified));
+                if undecryptable {
+                    obj.insert("decryptable".into(), json!(false));
+                }
             }
             println!("{}", serde_json::to_string(&event_with_meta)?);
         } else {
@@ -967,13 +976,7 @@ pub(super) fn cmd_tail(
             let from = event.get("from").and_then(Value::as_str).unwrap_or("?");
             let kind = event.get("kind").and_then(Value::as_u64).unwrap_or(0);
             let kind_name = event.get("type").and_then(Value::as_str).unwrap_or("?");
-            let summary = event
-                .get("body")
-                .map(|b| match b {
-                    Value::String(s) => s.clone(),
-                    _ => b.to_string(),
-                })
-                .unwrap_or_default();
+            let summary = tail_body_summary(event);
             let mark = if verified { "✓" } else { "✗" };
             let deadline = event
                 .get("time_sensitive_until")
@@ -984,6 +987,33 @@ pub(super) fn cmd_tail(
         }
     }
     Ok(())
+}
+
+/// True iff `event` carries an `enc` envelope that wasn't opened for this read
+/// (no `dec:true` marker from [`crate::enc::wire_x25519::decrypt_event_for_read`]).
+/// Such a body is ciphertext we can't render — decrypt failed, we had no key, or
+/// it's an `enc` scheme this build doesn't understand. Pure; unit-tested (#281).
+fn tail_event_undecryptable(event: &Value) -> bool {
+    event.get("enc").and_then(Value::as_str).is_some()
+        && event.get("dec").and_then(Value::as_bool) != Some(true)
+}
+
+/// Human one-line body summary for `wire tail`. Returns an explicit placeholder
+/// for an undecryptable `enc` body instead of dumping raw ciphertext as if it
+/// were the message (#281) — a verified signature on an unreadable body must not
+/// look like a delivered plaintext. Plaintext bodies render as before.
+fn tail_body_summary(event: &Value) -> String {
+    if tail_event_undecryptable(event) {
+        let enc = event.get("enc").and_then(Value::as_str).unwrap_or("?");
+        return format!(
+            "<encrypted DM (enc={enc}) — this wire build could not decrypt it; run `wire upgrade`, or check that the peer pinned your current key>"
+        );
+    }
+    match event.get("body") {
+        Some(Value::String(s)) => s.clone(),
+        Some(b) => b.to_string(),
+        None => String::new(),
+    }
 }
 
 // ---------- monitor (live-tail across all peers, harness-friendly) ----------
@@ -1473,5 +1503,64 @@ mod notify_sweep_tests {
         assert!(third[0].body_preview.contains("second"));
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+#[cfg(test)]
+mod tail_render_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn undecryptable_enc_body_renders_placeholder_not_ciphertext() {
+        // #281: an enc-bearing event we couldn't open (no `dec:true`) must NOT
+        // render its raw ciphertext as the message body.
+        let ev = json!({
+            "enc": "wire-x25519.v1",
+            "body": {"ct": "AkSbz2hEQ8FiTShb=="},
+            "type": "claim",
+        });
+        assert!(tail_event_undecryptable(&ev));
+        let s = tail_body_summary(&ev);
+        assert!(s.contains("encrypted DM"), "got: {s}");
+        assert!(s.contains("wire-x25519.v1"), "names the enc scheme: {s}");
+        assert!(s.contains("wire upgrade"), "points at the fix: {s}");
+        assert!(!s.contains("AkSbz2"), "must NOT leak ciphertext: {s}");
+    }
+
+    #[test]
+    fn successfully_decrypted_enc_body_renders_plaintext() {
+        // decrypt_event_for_read leaves `enc` in place but adds `dec:true` and a
+        // plaintext body — that is readable, not flagged.
+        let ev = json!({
+            "enc": "wire-x25519.v1",
+            "dec": true,
+            "body": "hello over the wire",
+            "type": "claim",
+        });
+        assert!(!tail_event_undecryptable(&ev));
+        assert_eq!(tail_body_summary(&ev), "hello over the wire");
+    }
+
+    #[test]
+    fn plaintext_body_unaffected() {
+        let ev = json!({"body": "plain message", "type": "decision"});
+        assert!(!tail_event_undecryptable(&ev));
+        assert_eq!(tail_body_summary(&ev), "plain message");
+    }
+
+    #[test]
+    fn unknown_enc_scheme_is_flagged_not_dumped() {
+        // Forward-compat: an `enc` discriminator this build doesn't understand
+        // (decrypt_event_for_read only handles wire-x25519.v1) → still flagged.
+        let ev = json!({
+            "enc": "some-future-scheme.v9",
+            "body": {"ct": "ZZZZ"},
+            "type": "claim",
+        });
+        assert!(tail_event_undecryptable(&ev));
+        let s = tail_body_summary(&ev);
+        assert!(s.contains("some-future-scheme.v9"), "got: {s}");
+        assert!(!s.contains("ZZZZ"), "must not dump ct: {s}");
     }
 }
