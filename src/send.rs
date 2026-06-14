@@ -223,6 +223,39 @@ pub fn attempt_deliver(peer_handle: &str, signed_event: &Value) -> Result<SyncDe
     Ok(last_failure.unwrap_or(SyncDelivery::PeerUnknown { event_id }))
 }
 
+/// Build the actionable `peer_unknown` reason string from the three states the
+/// old single message conflated (#284.6). `trusted` = a trust pin exists;
+/// `has_endpoint` = relay_state has any endpoint for the peer; `has_usable_slot`
+/// = at least one endpoint carries a non-empty `slot_token`. Pure → unit-tested.
+///
+/// The key operator guidance: when a peer is pinned but unsendable, the BARE
+/// nickname dial short-circuits to `already_pinned` WITHOUT re-registering the
+/// slot, so the fix is the FULL `<peer>@<relay>` dial.
+fn peer_unknown_reason(
+    peer: &str,
+    trusted: bool,
+    has_endpoint: bool,
+    has_usable_slot: bool,
+) -> String {
+    if !trusted {
+        format!(
+            "peer '{peer}' is not pinned — run `wire dial {peer}@<relay>` to pair, or pass --queue (CLI) / queue:true (MCP) to buffer for the daemon to attempt later"
+        )
+    } else if !has_endpoint {
+        format!(
+            "peer '{peer}' IS pinned but has no relay endpoint recorded — re-register with a FULL `wire dial {peer}@<relay>` (the bare nickname reports `already_pinned` WITHOUT re-registering the slot)"
+        )
+    } else if !has_usable_slot {
+        format!(
+            "peer '{peer}' IS pinned but its relay slot has no token yet — their pair_drop_ack hasn't landed (common right after a daemon/MCP restart). Re-run the FULL `wire dial {peer}@<relay>` (NOT the bare nickname) to re-register, then resend"
+        )
+    } else {
+        format!(
+            "peer '{peer}' could not be reached on any recorded endpoint — check `wire status`, then re-dial `{peer}@<relay>`"
+        )
+    }
+}
+
 /// Render a `SyncDelivery` as the JSON value `wire send --json` /
 /// `tool_send` return. Fields are flat (no nested struct) so JSON
 /// consumers can read `.status` + `.event_id` directly without
@@ -261,10 +294,26 @@ pub fn delivery_json(d: &SyncDelivery, peer: &str) -> Value {
             obj.insert("reason".into(), json!(detail));
         }
         SyncDelivery::PeerUnknown { .. } => {
+            // #284.6: "peer_unknown" conflated three distinct states — no trust
+            // pin, pinned-but-no-endpoint, and pinned-with-an-endpoint-whose-
+            // slot_token-is-empty (the ack hasn't landed, common after a
+            // daemon/MCP restart). A peer can be VERIFIED in trust yet hit this.
+            // Classify against live state so the message names the real cause
+            // and the real fix (a FULL `@relay` dial, not the nickname short-
+            // circuit which reports already_pinned without re-registering).
+            let trust = crate::config::read_trust().unwrap_or_default();
+            let state = crate::config::read_relay_state().unwrap_or_default();
+            let trusted = trust.get("agents").and_then(|a| a.get(peer)).is_some();
+            let eps = crate::endpoints::peer_endpoints_in_priority_order(&state, peer);
+            let has_endpoint = !eps.is_empty();
+            let has_usable_slot = eps.iter().any(|e| !e.slot_token.is_empty());
             obj.insert(
                 "reason".into(),
-                json!(format!(
-                    "peer '{peer}' not pinned — run `wire dial {peer}` to pair, or pass --queue (CLI) / queue:true (MCP) to write to outbox for the daemon to attempt later"
+                json!(peer_unknown_reason(
+                    peer,
+                    trusted,
+                    has_endpoint,
+                    has_usable_slot
                 )),
             );
         }
@@ -275,6 +324,27 @@ pub fn delivery_json(d: &SyncDelivery, peer: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_unknown_reason_classifies_the_three_states() {
+        // Not pinned at all.
+        let r = peer_unknown_reason("p", false, false, false);
+        assert!(r.contains("is not pinned"), "{r}");
+        // Pinned but no endpoint → full dial, warn about nickname short-circuit.
+        let r = peer_unknown_reason("p", true, false, false);
+        assert!(r.contains("IS pinned"), "{r}");
+        assert!(r.contains("no relay endpoint"), "{r}");
+        assert!(r.contains("@<relay>"), "{r}");
+        assert!(r.contains("bare nickname"), "{r}");
+        // Pinned, endpoint exists, but slot_token empty (the #284.6 desync).
+        let r = peer_unknown_reason("p", true, true, false);
+        assert!(r.contains("no token yet"), "{r}");
+        assert!(r.contains("daemon/MCP restart"), "{r}");
+        assert!(r.contains("NOT the bare nickname"), "{r}");
+        // Pinned + usable slot but unreachable (fallback wording).
+        let r = peer_unknown_reason("p", true, true, true);
+        assert!(r.contains("could not be reached"), "{r}");
+    }
 
     #[test]
     fn status_str_matches_variant() {

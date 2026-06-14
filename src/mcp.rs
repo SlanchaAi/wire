@@ -560,7 +560,8 @@ fn tool_defs() -> Vec<Value> {
                     "peer": {"type": "string", "description": "Peer handle (without did:wire: prefix). Must be a pinned peer; check wire_peers first."},
                     "kind": {"type": "string", "description": "Event kind: a name (decision, claim, ack, agent_card, trust_add_key, trust_revoke_key, wire_open, wire_close) or a numeric kind id."},
                     "body": {"type": "string", "description": "Event body. Plain text becomes a JSON string; valid JSON is parsed and embedded structurally."},
-                    "time_sensitive_until": {"type": "string", "description": "Optional advisory deadline: duration (`30m`, `2h`, `1d`) or RFC3339 timestamp."}
+                    "time_sensitive_until": {"type": "string", "description": "Optional advisory deadline: duration (`30m`, `2h`, `1d`) or RFC3339 timestamp."},
+                    "queue": {"type": "boolean", "description": "Default false (synchronous send; status is the live relay verdict). Set true to write to the outbox for the daemon to push later — the legacy offline-buffer / pre-pair path. (#284.7: this was documented but missing from the schema.)"}
                 },
                 "required": ["peer", "kind", "body"]
             }
