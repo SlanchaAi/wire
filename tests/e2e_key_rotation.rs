@@ -87,7 +87,7 @@ fn rotate_op_key_mints_new_did_records_succession_and_flows_to_card() {
     // op_did, never the old one).
     assert!(
         Command::new(wire_bin())
-            .args(["init", "darby", "--offline"])
+            .args(["init", "--offline"])
             .env("WIRE_HOME", &home)
             .env("WIRE_HOME_FORCE", "1")
             .output()

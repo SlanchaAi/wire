@@ -117,27 +117,18 @@ fn maybe_warn_peer_attentiveness(peer: &str) {
         Ok(s) => s,
         Err(_) => return,
     };
-    let p = state.get("peers").and_then(|p| p.get(peer));
-    let slot_id = match p.and_then(|p| p.get("slot_id")).and_then(Value::as_str) {
-        Some(s) if !s.is_empty() => s,
-        _ => return,
-    };
-    let slot_token = match p.and_then(|p| p.get("slot_token")).and_then(Value::as_str) {
-        Some(s) if !s.is_empty() => s,
-        _ => return,
-    };
-    let relay_url = match p.and_then(|p| p.get("relay_url")).and_then(Value::as_str) {
-        Some(s) if !s.is_empty() => s.to_string(),
-        _ => match state
-            .get("self")
-            .and_then(|s| s.get("relay_url"))
-            .and_then(Value::as_str)
+    // RFC-006 Part B: resolve the peer's slot from `endpoints[]` (single
+    // routing source), highest-priority first.
+    let ep = match crate::endpoints::peer_primary_endpoint(&state, peer) {
+        Some(ep)
+            if !ep.slot_id.is_empty() && !ep.slot_token.is_empty() && !ep.relay_url.is_empty() =>
         {
-            Some(s) if !s.is_empty() => s.to_string(),
-            _ => return,
-        },
+            ep
+        }
+        _ => return,
     };
-    let client = crate::relay_client::RelayClient::new(&relay_url);
+    let (slot_id, slot_token, relay_url) = (&ep.slot_id, &ep.slot_token, &ep.relay_url);
+    let client = crate::relay_client::RelayClient::new(relay_url);
     let (_count, last_pull) = match client.slot_state(slot_id, slot_token) {
         Ok(t) => t,
         Err(_) => return,

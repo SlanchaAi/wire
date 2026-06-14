@@ -10,25 +10,11 @@ use crate::{
 
 // ---------- init ----------
 
-pub(crate) fn cmd_init(
-    handle: Option<&str>,
-    name: Option<&str>,
-    relay: Option<&str>,
-    offline: bool,
-    as_json: bool,
-) -> Result<()> {
-    // One-name rule: a typed handle (if any) is only a vanity seed — the
-    // persona is derived from the keypair fingerprint, so it has no effect
-    // on the resulting identity. `wire up` passes None (there is no name to
-    // type); an explicit `wire init <handle>` passes Some and we surface the
-    // "ignored in favor of persona" notice for transparency.
-    if let Some(h) = handle
-        && !h
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        bail!("handle must be ASCII alphanumeric / '-' / '_' (got {h:?})");
-    }
+pub(crate) fn cmd_init(relay: Option<&str>, offline: bool, as_json: bool) -> Result<()> {
+    // One-name rule: there is no operator-typed name to assign. Your identity
+    // — and therefore your name — is minted here, from the freshly-generated
+    // keypair: the persona handle is derived from the public-key fingerprint.
+    // `init` is the sole naming event; no input names anything.
     if config::is_initialized()? {
         bail!(
             "already initialized — config exists at {:?}. Delete it first if you want a fresh identity.",
@@ -143,21 +129,14 @@ pub(crate) fn cmd_init(
     // handle was the addressable one. Now they're the same string.
     // The seed string only fills the (immediately-discarded) handle portion
     // of a synthetic DID; the persona derives from the fp suffix regardless,
-    // so any seed yields the same identity.
-    let seed = handle.unwrap_or("agent");
-    let synth_did = crate::agent_card::did_for_with_key(seed, &pk_bytes);
+    // so the seed is identity-irrelevant — a fixed constant suffices.
+    let synth_did = crate::agent_card::did_for_with_key("agent", &pk_bytes);
     let character = crate::character::Character::from_did(&synth_did);
     let canonical_handle: &str = &character.nickname;
-    if let Some(typed) = handle
-        && typed != canonical_handle
-    {
-        eprintln!(
-            "wire init: one-name rule — typed `{typed}` ignored in favor of \
-             DID-derived persona `{canonical_handle}`. Peers will reach you as `{canonical_handle}`."
-        );
-    }
 
-    let card = build_agent_card(canonical_handle, &pk_bytes, name, None, None);
+    // The card's display `name` is the handle, title-cased — never a
+    // free-choice value. There is no operator name input that could diverge.
+    let card = build_agent_card(canonical_handle, &pk_bytes, None, None, None);
     // Card-emit (RFC-001 Phase 1b): attach operator/org claims if enrolled
     // (fail-soft no-op otherwise; signed below so the sig covers the claims).
     let card = crate::enroll::with_op_claims_if_enrolled(card)?;
@@ -798,7 +777,7 @@ fn cmd_identity_create(name: Option<&str>, anonymous: bool, as_json: bool) -> Re
         // Run `wire init <name>` with WIRE_HOME = anon_root/sessions/<name>
         let session_home = anon_root.join("sessions").join(&anon_name);
         std::fs::create_dir_all(&session_home)?;
-        let status = super::run_wire_with_home(&session_home, &["init", &anon_name, "--offline"])?;
+        let status = super::run_wire_with_home(&session_home, &["init", "--offline"])?;
         if !status.success() {
             bail!("anonymous identity init failed: {status}");
         }
