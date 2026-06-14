@@ -1174,6 +1174,24 @@ async fn handle_claim(
         )
             .into_response();
     }
+    // Audit L3: the claimant-supplied `relay_url` is echoed verbatim into the
+    // advertised A2A `endpoint` (well_known_agent_card_a2a). Reject anything
+    // that isn't a clean `http(s)://host[:port]` — no userinfo (the
+    // `handle@relay` bug), no `javascript:`/other schemes — so a poisoned
+    // endpoint can't be planted in the directory for A2A consumers to follow.
+    if let Some(url) = req.relay_url.as_deref()
+        && !url.is_empty()
+        && !is_valid_public_relay_url(url)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "relay_url must be http(s)://host[:port] with no userinfo",
+                "relay_url": url,
+            })),
+        )
+            .into_response();
+    }
     // Verify the card signature using the public verify_agent_card helper.
     if let Err(e) = crate::agent_card::verify_agent_card(&req.card) {
         return (
@@ -1656,8 +1674,15 @@ async fn handles_directory(
 /// (pair_drop / agent_card), self-signed, and the carrying agent-card embedded
 /// in the body must verify-OK on its own.
 ///
-/// Rate-limiting is the same governor that gates the other write endpoints.
-/// Slot quota still applies — a flood of intros hits the standard 64MB cap.
+/// SECURITY (audit / #247 finding 3): this route is UNAUTHENTICATED by design
+/// (a stranger must be able to drop a pair-intro) and is NOT under the governor
+/// layer — it sits on the main router, not in `hot_writes`. The only backpressure
+/// is the per-slot 64MB quota, which is shared with the owner's own inbound, so a
+/// flood of intros to a known nick can fill the victim's slot and 413 their
+/// legitimate traffic. A per-nick / per-source intro rate-limit (and a separate
+/// intro-byte budget so a flood can't evict the owner) is tracked in #247.3 —
+/// it is NOT in place today. (Earlier comment here wrongly claimed governor
+/// coverage.)
 async fn handle_intro(
     State(relay): State<Relay>,
     Path(nick): Path<String>,
@@ -2008,6 +2033,17 @@ async fn responder_health_set(
     headers: HeaderMap,
     Json(record): Json<ResponderHealthRecord>,
 ) -> impl IntoResponse {
+    // Defense-in-depth (audit L1): `slot_id` is interpolated into a filesystem
+    // path below, so validate its shape BEFORE use even though `check_token`
+    // (which only matches `random_hex(16)` keys) would already reject a
+    // traversal id. Mirrors the guard in `append_event_to_disk`.
+    if !is_valid_slot_id(&slot_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid slot_id"})),
+        )
+            .into_response();
+    }
     if let Err(resp) = check_token(&relay, &headers, &slot_id).await {
         return resp;
     }
@@ -2094,6 +2130,39 @@ fn is_valid_slot_id(s: &str) -> bool {
     s.len() == 32
         && s.bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+/// A claimant-advertised `relay_url` is acceptable for the public directory iff
+/// it is `http://` or `https://`, has a non-empty host authority, and carries NO
+/// userinfo (`user@host` — the `handle@relay` bug) and no embedded
+/// whitespace/control. Audit L3 — the value is echoed into the A2A `endpoint`,
+/// so a non-URL / alternate-scheme value must not be planted there. Pure +
+/// unit-tested. Intentionally strict: scheme + authority shape only, not a full
+/// RFC-3986 parse.
+fn is_valid_public_relay_url(u: &str) -> bool {
+    let rest = match u
+        .strip_prefix("https://")
+        .or_else(|| u.strip_prefix("http://"))
+    {
+        Some(r) => r,
+        None => return false,
+    };
+    // Authority is everything up to the first '/'.
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() {
+        return false;
+    }
+    // No userinfo (`user[:pass]@host`).
+    if authority.contains('@') {
+        return false;
+    }
+    // No whitespace / control chars anywhere in the URL.
+    if u.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    // Host (strip optional :port) must be non-empty.
+    let host = authority.split(':').next().unwrap_or("");
+    !host.is_empty()
 }
 
 fn random_hex(n_bytes: usize) -> String {
@@ -2274,6 +2343,35 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"abcd")); // length mismatch
+    }
+
+    #[test]
+    fn valid_public_relay_url_accepts_clean_https_and_ports() {
+        assert!(is_valid_public_relay_url("https://wireup.net"));
+        assert!(is_valid_public_relay_url("https://wireup.net/"));
+        assert!(is_valid_public_relay_url("http://127.0.0.1:8771"));
+        assert!(is_valid_public_relay_url(
+            "https://relay.example.com:443/path"
+        ));
+    }
+
+    #[test]
+    fn valid_public_relay_url_rejects_userinfo_and_bad_schemes() {
+        // Audit L3 / the `handle@relay` userinfo bug.
+        assert!(!is_valid_public_relay_url(
+            "https://raven-kettle@wireup.net"
+        ));
+        assert!(!is_valid_public_relay_url("https://user:pass@host"));
+        // Non-http schemes.
+        assert!(!is_valid_public_relay_url("javascript:alert(1)"));
+        assert!(!is_valid_public_relay_url("file:///etc/passwd"));
+        assert!(!is_valid_public_relay_url("wireup.net")); // no scheme
+        // Empty host / authority.
+        assert!(!is_valid_public_relay_url("https://"));
+        assert!(!is_valid_public_relay_url("https:///path"));
+        // Whitespace / control.
+        assert!(!is_valid_public_relay_url("https://wireup.net\n"));
+        assert!(!is_valid_public_relay_url("https://wire up.net"));
     }
 
     #[test]
