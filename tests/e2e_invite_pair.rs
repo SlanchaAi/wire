@@ -104,13 +104,13 @@ async fn invite_url_one_paste_pair_e2e() {
     // path is covered by accept_zero_config_auto_init below; same-machine
     // hostname collision makes auto-init undesirable in this test.)
     assert!(
-        wire(&paul, &["init", "paul", "--relay", &relay_url])
+        wire(&paul, &["init", "--relay", &relay_url])
             .status
             .success()
     );
     let paul_h = read_handle(&paul);
     assert!(
-        wire(&willard, &["init", "willard", "--relay", &relay_url])
+        wire(&willard, &["init", "--relay", &relay_url])
             .status
             .success()
     );
@@ -264,7 +264,7 @@ async fn expired_invite_rejected_on_accept() {
     let paul = fresh_dir("paul-exp");
     let willard = fresh_dir("willard-exp");
     assert!(
-        wire(&paul, &["init", "paul", "--relay", &relay_url])
+        wire(&paul, &["init", "--relay", &relay_url])
             .status
             .success()
     );
@@ -306,7 +306,7 @@ async fn accept_zero_config_auto_init() {
     let paul = fresh_dir("paul-zc");
     let bare = fresh_dir("bare-zc");
     assert!(
-        wire(&paul, &["init", "paul", "--relay", &relay_url])
+        wire(&paul, &["init", "--relay", &relay_url])
             .status
             .success()
     );

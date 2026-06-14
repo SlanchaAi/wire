@@ -165,19 +165,19 @@ async fn three_party_mesh_of_bilateral_round_trips() {
     let willard = fresh_dir("willard");
     let carol = fresh_dir("carol");
     assert!(
-        wire(&paul, &["init", "paul", "--relay", &relay_url])
+        wire(&paul, &["init", "--relay", &relay_url])
             .status
             .success()
     );
     let paul_h = read_handle(&paul);
     assert!(
-        wire(&willard, &["init", "willard", "--relay", &relay_url])
+        wire(&willard, &["init", "--relay", &relay_url])
             .status
             .success()
     );
     let willard_h = read_handle(&willard);
     assert!(
-        wire(&carol, &["init", "carol", "--relay", &relay_url])
+        wire(&carol, &["init", "--relay", &relay_url])
             .status
             .success()
     );

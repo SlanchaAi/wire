@@ -16,7 +16,6 @@ use crate::config;
 ///     public relay)
 pub(crate) fn cmd_up(
     relay_arg: Option<&str>,
-    name: Option<&str>,
     with_local: Option<&str>,
     no_local: bool,
     as_json: bool,
@@ -57,13 +56,7 @@ pub(crate) fn cmd_up(
     if config::is_initialized()? {
         step("init", "already initialized".to_string());
     } else {
-        super::cmd_init(
-            None,
-            name,
-            Some(&relay_url),
-            false,
-            /* as_json */ false,
-        )?;
+        super::cmd_init(Some(&relay_url), false, /* as_json */ false)?;
         step("init", format!("created identity bound to {relay_url}"));
     }
 

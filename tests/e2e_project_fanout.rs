@@ -48,7 +48,7 @@ fn wire(home: &PathBuf, args: &[&str]) -> std::process::Output {
 fn make_peer(prefix: &str, project: &str) -> (String, Value) {
     let home = fresh_dir(prefix);
     assert!(
-        wire(&home, &["init", prefix, "--offline"]).status.success(),
+        wire(&home, &["init", "--offline"]).status.success(),
         "init {prefix} failed"
     );
     // Tag the card with a project, then read it back.
@@ -74,7 +74,7 @@ fn send_project_fans_out_only_to_eligible_peers() {
     // Sender A.
     let a = fresh_dir("sender");
     assert!(
-        wire(&a, &["init", "sender", "--offline"]).status.success(),
+        wire(&a, &["init", "--offline"]).status.success(),
         "init sender failed"
     );
 
@@ -127,7 +127,7 @@ fn send_project_fans_out_only_to_eligible_peers() {
 fn send_project_no_recipients_is_noop_success() {
     let a = fresh_dir("lonely");
     assert!(
-        wire(&a, &["init", "lonely", "--offline"]).status.success(),
+        wire(&a, &["init", "--offline"]).status.success(),
         "init failed"
     );
     // No peers pinned at all → empty fan-out, exit 0, recipients = [].
