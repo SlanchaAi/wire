@@ -12,6 +12,8 @@ the PR description linked in each section.
 
 ### Fixed
 
+- **Relay: validate claimant `relay_url`, harden `responder-health` path, correct a false rate-limit comment** (relay security audit): `POST /v1/handle/claim` now rejects a `relay_url` that isn't clean `http(s)://host[:port]` — no userinfo (`handle@relay`), no alternate scheme — so a poisoned `endpoint` can't be planted in the public A2A directory. `POST /v1/slot/:slot_id/responder-health` now validates `slot_id` shape before using it in a filesystem path (defense-in-depth). The `handle_intro` doc comment that wrongly claimed governor coverage is corrected — that route is unauthenticated and ungoverned (per-nick intro rate-limit tracked in #247.3).
+
 - **`wire whois` / `wire dial` / `wire add` now surface the resolved DID + key fingerprint and refuse a poisoned card** (#247 finding 4): relay-mediated discovery was trusted implicitly — a malicious/compromised relay could serve a card under someone else's DID pre-pair. These verbs now print the resolved key fingerprint with a "verify out-of-band — discovery is trusted for routing, not identity" reminder, surface `fingerprint`/`fingerprint_matches_did` in `--json`, and **hard-refuse the pair** when the card's advertised key doesn't hash to the fingerprint baked into its claimed DID.
 
 - **`wire upgrade` no longer corrupts systemd/launchd units after a `cargo install` in-place replace** (#274): the kernel marks the replaced running binary's `/proc/self/exe` with a trailing ` (deleted)`, which was written verbatim into `ExecStart=`, leaving the daemon flapping forever (`error: unrecognized subcommand '(deleted)'`). The exe path is now resolved (marker stripped) before it reaches a unit file.
