@@ -162,7 +162,25 @@ pub fn resolve_peer_did(trust: &Value, peer_handle: &str) -> String {
 ///
 /// The caller must independently run SAS confirmation (via `compute_sas`)
 /// before calling `promote_to_verified`. Pinning alone DOES NOT verify.
-pub fn add_agent_card_pin(trust: &mut Trust, card: &Value, tier: Option<&str>) {
+///
+/// SECURITY (#245 — grindable nick-collision pin-overwrite): the trust store is
+/// keyed by the peer's persona nick, which is a deterministic function of the
+/// keypair over a small (~65k) word-list — so an attacker can grind keys (or
+/// simply set the card's `handle` field) until their nick collides with a
+/// victim's, then OVERWRITE the victim's pin (its keys/DID), hijacking the nick:
+/// the real victim's messages then fail verify (their key is gone) and the
+/// attacker's verify as the victim. This guard REFUSES to overwrite an existing
+/// nick whose pinned `did` differs from the incoming card's `did`. DIDs carry
+/// the key fingerprint (`did:wire:<nick>-<fp>`), so they are NOT grindable to
+/// match a *specific* full DID — and a same-identity re-pin / key-succession
+/// keeps the same DID, so legitimate updates are unaffected. (The complete fix —
+/// letting two distinct identities that collide on a nick COEXIST by re-keying
+/// the whole store by DID — is the larger follow-up tracked in #245.)
+pub fn add_agent_card_pin(
+    trust: &mut Trust,
+    card: &Value,
+    tier: Option<&str>,
+) -> Result<(), String> {
     let did = card.get("did").and_then(Value::as_str).unwrap_or_default();
     // v0.5.7+: prefer the explicit `handle` field on the card (display name).
     // Fall back to stripping the DID prefix for legacy cards. For v0.5.7+
@@ -174,7 +192,22 @@ pub fn add_agent_card_pin(trust: &mut Trust, card: &Value, tier: Option<&str>) {
         .map(str::to_string)
         .unwrap_or_else(|| crate::agent_card::display_handle_from_did(did).to_string());
     if handle.is_empty() {
-        panic!("card has no resolvable handle (did={did:?})");
+        return Err(format!("card has no resolvable handle (did={did:?})"));
+    }
+    // #245 collision guard: refuse to overwrite a different identity's pin.
+    if let Some(existing_did) = trust
+        .get("agents")
+        .and_then(|a| a.get(&handle))
+        .and_then(|e| e.get("did"))
+        .and_then(Value::as_str)
+        && !existing_did.is_empty()
+        && !did.is_empty()
+        && existing_did != did
+    {
+        return Err(format!(
+            "trust pin collision on nick '{handle}': already pinned to {existing_did}, refusing to overwrite with a DIFFERENT identity {did} (possible grindable-nick attack — #245). \
+             Use `wire forget-peer {handle}` first if you intend to replace it."
+        ));
     }
     let tier = tier.unwrap_or("UNTRUSTED");
     let now = now_iso();
@@ -206,6 +239,7 @@ pub fn add_agent_card_pin(trust: &mut Trust, card: &Value, tier: Option<&str>) {
         "card": card.clone(),
         "pinned_at": now,
     });
+    Ok(())
 }
 
 /// Promote UNTRUSTED or ORG_VERIFIED → VERIFIED. Returns `Err(reason)` if
@@ -387,13 +421,62 @@ mod tests {
             "test setup: card DID should carry long-hex suffix"
         );
         let mut t = empty_trust();
-        add_agent_card_pin(&mut t, &card, Some("VERIFIED"));
+        add_agent_card_pin(&mut t, &card, Some("VERIFIED")).unwrap();
 
         let resolved = resolve_peer_did(&t, "sunlit-aurora");
         assert_eq!(
             resolved, pinned_did,
             "pinned peer must resolve to its full DID, not the bare handle"
         );
+    }
+
+    #[test]
+    fn add_agent_card_pin_refuses_nick_collision_from_a_different_identity() {
+        // #245: two distinct keypairs can share a persona nick (the ~65k
+        // word-list is grindable, and the card's `handle` field is spoofable).
+        // Pinning a DIFFERENT identity under an already-pinned nick must be
+        // REFUSED, not silently overwrite (which would hijack the nick).
+        let (sk_a, pk_a) = generate_keypair();
+        let card_a = sign_agent_card(
+            &build_agent_card("raven-kettle", &pk_a, None, None, None),
+            &sk_a,
+        );
+        let did_a = card_a
+            .get("did")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+
+        let (sk_b, pk_b) = generate_keypair();
+        let card_b = sign_agent_card(
+            &build_agent_card("raven-kettle", &pk_b, None, None, None),
+            &sk_b,
+        );
+        let did_b = card_b
+            .get("did")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        assert_ne!(did_a, did_b, "test setup: distinct keys ⇒ distinct DIDs");
+
+        let mut t = empty_trust();
+        add_agent_card_pin(&mut t, &card_a, Some("VERIFIED")).unwrap();
+
+        // Different identity, same nick → refused; incumbent A survives.
+        let err = add_agent_card_pin(&mut t, &card_b, Some("VERIFIED")).unwrap_err();
+        assert!(
+            err.contains("collision"),
+            "expected collision error, got: {err}"
+        );
+        assert_eq!(
+            t["agents"]["raven-kettle"]["did"], did_a,
+            "incumbent A's pin must NOT be overwritten by colliding identity B"
+        );
+
+        // Same identity re-pin (e.g. tier bump / key succession keeps the DID)
+        // is still allowed.
+        add_agent_card_pin(&mut t, &card_a, Some("TRUSTED")).unwrap();
+        assert_eq!(t["agents"]["raven-kettle"]["tier"], "TRUSTED");
     }
 
     #[test]
@@ -414,7 +497,7 @@ mod tests {
         let (sk, pk) = generate_keypair();
         let card = sign_agent_card(&build_agent_card("paul", &pk, None, None, None), &sk);
         let mut t = empty_trust();
-        add_agent_card_pin(&mut t, &card, None);
+        add_agent_card_pin(&mut t, &card, None).unwrap();
         assert_eq!(get_tier(&t, "paul"), "UNTRUSTED");
         // v0.5.7+: DID is pubkey-suffixed.
         let did = t["agents"]["paul"]["did"].as_str().unwrap();
@@ -426,7 +509,7 @@ mod tests {
         let (sk, pk) = generate_keypair();
         let card = sign_agent_card(&build_agent_card("paul", &pk, None, None, None), &sk);
         let mut t = empty_trust();
-        add_agent_card_pin(&mut t, &card, None);
+        add_agent_card_pin(&mut t, &card, None).unwrap();
         let kid = t["agents"]["paul"]["public_keys"][0]["key_id"]
             .as_str()
             .unwrap();
@@ -439,7 +522,7 @@ mod tests {
         let (sk, pk) = generate_keypair();
         let card = sign_agent_card(&build_agent_card("paul", &pk, None, None, None), &sk);
         let mut t = empty_trust();
-        add_agent_card_pin(&mut t, &card, None);
+        add_agent_card_pin(&mut t, &card, None).unwrap();
         promote_to_verified(&mut t, "paul").unwrap();
         assert_eq!(get_tier(&t, "paul"), "VERIFIED");
         assert!(t["agents"]["paul"]["verified_at"].is_string());
@@ -450,7 +533,7 @@ mod tests {
         let (sk, pk) = generate_keypair();
         let card = sign_agent_card(&build_agent_card("paul", &pk, None, None, None), &sk);
         let mut t = empty_trust();
-        add_agent_card_pin(&mut t, &card, None);
+        add_agent_card_pin(&mut t, &card, None).unwrap();
         promote_to_verified(&mut t, "paul").unwrap();
         let err = promote_to_verified(&mut t, "paul").unwrap_err();
         assert!(err.contains("VERIFIED"), "got: {err}");
@@ -494,7 +577,7 @@ mod tests {
         let (sk, pk) = generate_keypair();
         let card = sign_agent_card(&build_agent_card("paul", &pk, None, None, None), &sk);
         let mut t = empty_trust();
-        add_agent_card_pin(&mut t, &card, None);
+        add_agent_card_pin(&mut t, &card, None).unwrap();
         promote_to_org_verified(&mut t, "paul").unwrap();
         assert_eq!(get_tier(&t, "paul"), "ORG_VERIFIED");
         assert!(t["agents"]["paul"]["org_verified_at"].is_string());
@@ -507,7 +590,7 @@ mod tests {
         let (sk, pk) = generate_keypair();
         let card = sign_agent_card(&build_agent_card("paul", &pk, None, None, None), &sk);
         let mut t = empty_trust();
-        add_agent_card_pin(&mut t, &card, None);
+        add_agent_card_pin(&mut t, &card, None).unwrap();
         promote_to_verified(&mut t, "paul").unwrap();
         let err = promote_to_org_verified(&mut t, "paul").unwrap_err();
         assert!(err.contains("VERIFIED"), "got: {err}");
@@ -521,7 +604,7 @@ mod tests {
         let (sk, pk) = generate_keypair();
         let card = sign_agent_card(&build_agent_card("paul", &pk, None, None, None), &sk);
         let mut t = empty_trust();
-        add_agent_card_pin(&mut t, &card, None);
+        add_agent_card_pin(&mut t, &card, None).unwrap();
         promote_to_org_verified(&mut t, "paul").unwrap();
         let err = promote_to_org_verified(&mut t, "paul").unwrap_err();
         assert!(err.contains("ORG_VERIFIED"), "got: {err}");
@@ -535,7 +618,7 @@ mod tests {
         let (sk, pk) = generate_keypair();
         let card = sign_agent_card(&build_agent_card("paul", &pk, None, None, None), &sk);
         let mut t = empty_trust();
-        add_agent_card_pin(&mut t, &card, None);
+        add_agent_card_pin(&mut t, &card, None).unwrap();
         promote_to_org_verified(&mut t, "paul").unwrap();
         promote_to_verified(&mut t, "paul").unwrap();
         assert_eq!(get_tier(&t, "paul"), "VERIFIED");

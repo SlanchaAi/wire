@@ -597,7 +597,8 @@ fn group_join_pin_material(event: &Value) -> Option<(String, String, String, Str
     let card = body.get("joiner_card")?;
     // Verify the event signs under the card it carries (one-entry trust).
     let mut tmp = json!({"agents": {}});
-    crate::trust::add_agent_card_pin(&mut tmp, card, Some("UNTRUSTED"));
+    // Empty tmp trust → no incumbent → the #245 collision guard never trips.
+    let _ = crate::trust::add_agent_card_pin(&mut tmp, card, Some("UNTRUSTED"));
     if verify_message_v31(event, &tmp).is_err() {
         return None;
     }

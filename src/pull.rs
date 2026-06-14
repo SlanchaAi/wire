@@ -144,7 +144,12 @@ fn maybe_autopin_local_sister(event: &Value, trust: &mut Value) -> bool {
         let Ok(card) = serde_json::from_slice::<Value>(&bytes) else {
             return false;
         };
-        crate::trust::add_agent_card_pin(trust, &card, Some("VERIFIED"));
+        // #245: refuse to auto-pin a card that collides on an existing nick with
+        // a DIFFERENT identity — reject the pair rather than overwrite the pin.
+        if let Err(e) = crate::trust::add_agent_card_pin(trust, &card, Some("VERIFIED")) {
+            eprintln!("wire pull: refusing sister auto-pin — {e}");
+            return false;
+        }
 
         // Mutual trust must be mutual REACHABILITY: also register the sister's
         // relay slot so our reply has somewhere to go — otherwise the receive

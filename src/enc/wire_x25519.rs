@@ -867,7 +867,7 @@ mod tests {
 
         // B pins A's full card (carrying A's dh_pubkey + verify key).
         let mut trust_b = empty_trust();
-        add_agent_card_pin(&mut trust_b, &a_card, Some("VERIFIED"));
+        add_agent_card_pin(&mut trust_b, &a_card, Some("VERIFIED")).unwrap();
 
         // A seals + signs a message to B (B's dh from B's card/derivation).
         let a_handle = a_card["handle"].as_str().unwrap().to_string();
