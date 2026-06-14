@@ -8,6 +8,13 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [Unreleased]
+
+### Fixed
+
+- **`wire upgrade --refresh-stale-children` no longer kills stale daemons the supervisor can't respawn** (#275): the flag killed every stale-binary session daemon, but the `--all-sessions` supervisor only respawns sessions it's eligible for (registry-bound OR active within the idle cutoff). A free-floating/unbound+idle session was killed and never brought back — its identity silently stopped syncing while the upgrade reported success. It now kills only the daemons the supervisor will respawn and leaves the rest running, surfacing them (in human + JSON output, `wire status`, and `--check`) as "relaunch manually."
+
+
 ## [v0.16.0] — 2026-06-14
 
 **v0.16.0 — the 1.0 format freeze + onboarding cleanup. RFC-006 collapses the two dual on-disk representations into one each; the CLI stops pretending you name your own identity. BREAKING — on-disk session/peer state and a few CLI args changed; `wire nuke` resets a machine.**

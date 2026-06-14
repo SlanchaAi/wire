@@ -642,7 +642,15 @@ pub(super) fn cmd_supervisor(as_json: bool) -> Result<()> {
                 .and_then(|s| s.daemon_pid)
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "?".to_string());
-            println!("  {name:<24} running v{ver} (pid {pid})");
+            // #275: flag the ones the supervisor would NOT respawn even after
+            // they exit — `--refresh-stale-children` leaves these running, and
+            // a manual kill orphans them. The operator must relaunch by hand.
+            let tag = if state.stale_unmanaged_sessions.contains(name) {
+                "  [unmanaged: supervisor won't respawn — relaunch manually, don't just kill]"
+            } else {
+                ""
+            };
+            println!("  {name:<24} running v{ver} (pid {pid}){tag}");
         }
     }
     Ok(())

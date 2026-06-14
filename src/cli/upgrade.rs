@@ -649,13 +649,36 @@ pub(crate) fn cmd_upgrade(
     // explicit opt-in upgrade flag should override that policy, because
     // killing a daemon interrupts any in-flight sync for that session.
     // Errors reading supervisor state are non-fatal (no-op).
-    let stale_children_killed: Vec<serde_json::Value> = if refresh_stale_children {
+    // (killed, left-running-unmanaged). #275: only kill stale daemons the
+    // supervisor will actually respawn; a stale daemon the supervisor doesn't
+    // manage (unbound + idle past cutoff) would be orphaned by a kill — the
+    // supervisor never brings it back — so we leave it running and report it
+    // for manual relaunch instead of silently black-holing that identity.
+    let (stale_children_killed, stale_children_unmanaged): (
+        Vec<serde_json::Value>,
+        Vec<serde_json::Value>,
+    ) = if refresh_stale_children {
         match crate::daemon_supervisor::read_supervisor_state() {
             Ok(sv) => {
                 let mut killed: Vec<serde_json::Value> = Vec::new();
+                let mut unmanaged: Vec<serde_json::Value> = Vec::new();
                 let cli_v = env!("CARGO_PKG_VERSION");
                 for s in &sv.sessions {
                     if !sv.stale_binary_sessions.contains(&s.name) {
+                        continue;
+                    }
+                    // #275: the supervisor's eligibility filter (registry-bound
+                    // OR recently-active) drops this session, so killing its
+                    // daemon would orphan it — nothing respawns it. Leave it and
+                    // surface it for manual relaunch.
+                    if sv.stale_unmanaged_sessions.contains(&s.name) {
+                        unmanaged.push(json!({
+                            "session": s.name,
+                            "pid": s.daemon_pid,
+                            "prev_version": s.daemon_version,
+                            "cli_version": cli_v,
+                            "reason": "supervisor would not respawn it (not registry-bound and idle past cutoff); left running — relaunch manually",
+                        }));
                         continue;
                     }
                     if let Some(pid) = s.daemon_pid {
@@ -673,13 +696,26 @@ pub(crate) fn cmd_upgrade(
                         }));
                     }
                 }
-                if !killed.is_empty() && !as_json {
-                    eprintln!(
-                        "wire upgrade: --refresh-stale-children will kill {} stale-binary session daemon(s); supervisor respawns each on next 10s poll.",
-                        killed.len()
-                    );
+                if !as_json {
+                    if !killed.is_empty() {
+                        eprintln!(
+                            "wire upgrade: --refresh-stale-children will kill {} stale-binary session daemon(s); the supervisor respawns each on its next poll.",
+                            killed.len()
+                        );
+                    }
+                    if !unmanaged.is_empty() {
+                        let names: Vec<&str> = unmanaged
+                            .iter()
+                            .filter_map(|e| e.get("session").and_then(|v| v.as_str()))
+                            .collect();
+                        eprintln!(
+                            "wire upgrade: left {} stale-binary daemon(s) running — the --all-sessions supervisor does not manage them (not registry-bound + idle), so it would NOT respawn them after a kill. Relaunch manually: {}",
+                            unmanaged.len(),
+                            names.join(", ")
+                        );
+                    }
                 }
-                killed
+                (killed, unmanaged)
             }
             Err(e) => {
                 if !as_json {
@@ -688,11 +724,11 @@ pub(crate) fn cmd_upgrade(
                          The flag is a no-op when no `wire daemon --all-sessions` supervisor is running."
                     );
                 }
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         }
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     if check_only {
@@ -836,10 +872,16 @@ pub(crate) fn cmd_upgrade(
                 && !sv.stale_binary_sessions.is_empty()
             {
                 let cli_v = env!("CARGO_PKG_VERSION");
+                // #275: only the supervisor-managed stale daemons would be
+                // killed+respawned; unmanaged ones are left running.
+                let respawnable =
+                    sv.stale_binary_sessions.len() - sv.stale_unmanaged_sessions.len();
                 if refresh_stale_children {
                     println!(
-                        "  stale children:   {} session(s) on old binary; --refresh-stale-children WOULD kill each so supervisor respawns on v{cli_v}",
-                        sv.stale_binary_sessions.len()
+                        "  stale children:   {} session(s) on old binary; --refresh-stale-children WOULD kill {} the supervisor will respawn on v{cli_v}, and LEAVE {} it can't respawn",
+                        sv.stale_binary_sessions.len(),
+                        respawnable,
+                        sv.stale_unmanaged_sessions.len()
                     );
                 } else {
                     println!(
@@ -854,7 +896,12 @@ pub(crate) fn cmd_upgrade(
                         .find(|s| &s.name == name)
                         .and_then(|s| s.daemon_version.clone())
                         .unwrap_or_else(|| "?".to_string());
-                    println!("                    - {name} running v{ver}");
+                    let tag = if sv.stale_unmanaged_sessions.contains(name) {
+                        "  [unmanaged — supervisor won't respawn; relaunch manually]"
+                    } else {
+                        ""
+                    };
+                    println!("                    - {name} running v{ver}{tag}");
                 }
             }
             if let Some(w) = &path_warning_check {
@@ -1117,6 +1164,7 @@ pub(crate) fn cmd_upgrade(
                 "cli_version": cli_version,
                 "session_respawns": session_respawns,
                 "stale_children_killed": stale_children_killed,
+                "stale_children_unmanaged": stale_children_unmanaged,
                 "path_binaries": path_dupes,
                 "path_binaries_detail": path_binaries_detail,
                 "path_warning": path_warning,
@@ -1160,6 +1208,22 @@ pub(crate) fn cmd_upgrade(
                 stale_children_killed.len()
             );
             for entry in &stale_children_killed {
+                let name = entry.get("session").and_then(Value::as_str).unwrap_or("?");
+                let pid = entry.get("pid").and_then(Value::as_u64).unwrap_or(0);
+                let prev = entry
+                    .get("prev_version")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                println!("                    - {name} (pid {pid}, was v{prev})");
+            }
+        }
+        if !stale_children_unmanaged.is_empty() {
+            // #275: stale daemons the supervisor won't respawn — NOT killed.
+            println!(
+                "wire upgrade: left {} stale-binary daemon(s) running — the --all-sessions supervisor would NOT respawn them (not registry-bound + idle past cutoff). Relaunch manually after upgrade:",
+                stale_children_unmanaged.len()
+            );
+            for entry in &stale_children_unmanaged {
                 let name = entry.get("session").and_then(Value::as_str).unwrap_or("?");
                 let pid = entry.get("pid").and_then(Value::as_u64).unwrap_or(0);
                 let prev = entry
