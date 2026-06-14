@@ -519,7 +519,17 @@ pub(super) fn cmd_whois(
         // Remote resolution via .well-known/wire/agent on the handle's domain.
         let resolved = crate::pair_profile::resolve_handle(&parsed, relay_override)?;
         if as_json {
-            println!("{}", serde_json::to_string(&resolved)?);
+            // #247 finding 4: surface the key fingerprint + whether it matches
+            // the claimed DID so JSON consumers can gate on poisoned discovery.
+            let did = resolved.get("did").and_then(Value::as_str).unwrap_or("");
+            let card = resolved.get("card").cloned().unwrap_or(Value::Null);
+            let (computed_fp, _did_fp, fp_matches) = resolved_key_fingerprint(&card, did);
+            let mut payload = resolved.clone();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("fingerprint".into(), json!(computed_fp));
+                obj.insert("fingerprint_matches_did".into(), json!(fp_matches));
+            }
+            println!("{}", serde_json::to_string(&payload)?);
         } else {
             print_resolved_profile(&resolved);
         }
@@ -565,6 +575,20 @@ fn print_resolved_profile(resolved: &Value) {
         .unwrap_or(Value::Null);
     println!("{did}");
     println!("  nick:         {nick}");
+    // #247 finding 4: surface the key fingerprint + flag a card whose key
+    // doesn't match its claimed DID, and remind the operator that relay
+    // discovery is trusted for ROUTING, not identity — verify out-of-band.
+    let card = resolved.get("card").cloned().unwrap_or(Value::Null);
+    let (computed_fp, _did_fp, fp_matches) = resolved_key_fingerprint(&card, did);
+    if let Some(fp) = &computed_fp {
+        if fp_matches {
+            println!("  fingerprint:  {fp}  (matches DID)");
+        } else {
+            println!(
+                "  fingerprint:  {fp}  ⚠ DOES NOT MATCH the DID's fingerprint — the relay served a card whose key ≠ its claimed identity. Do NOT pair; verify out-of-band."
+            );
+        }
+    }
     if !relay.is_empty() {
         println!("  relay_url:    {relay}");
     }
@@ -592,6 +616,35 @@ fn print_resolved_profile(resolved: &Value) {
     if let Some(s) = pick("pronouns") {
         println!("  pronouns:     {s}");
     }
+    // #247 finding 4: discovery is relay-mediated; the operator should confirm
+    // the DID + fingerprint with the peer over a second channel before relying
+    // on a first-contact pair.
+    println!(
+        "  ⓘ resolved via relay discovery (trusted for routing, not identity) — verify this DID + fingerprint out-of-band before relying on the pair."
+    );
+}
+
+/// Fingerprint check for a resolved peer card (#247 finding 4 — relay-served
+/// discovery is trusted-for-routing, not trusted-for-identity).
+///
+/// Returns `(computed_fp, did_fp, matches)`: `computed_fp` is the fingerprint
+/// of the card's advertised ed25519 verify key; `did_fp` is the fingerprint
+/// baked into the `did:wire:<handle>-<fp>` the card claims. They MUST be equal —
+/// a mismatch means the relay served a card whose key does not match its own
+/// DID (a poisoned-discovery red flag). `matches` is false when the card has no
+/// usable key or `did_fp` is empty. Pure → unit-tested.
+fn resolved_key_fingerprint(card: &Value, did: &str) -> (Option<String>, String, bool) {
+    let did_fp = did.rsplit('-').next().unwrap_or("").to_string();
+    let computed = card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .and_then(|k| crate::signing::b64decode(k).ok())
+        .map(|pk| crate::signing::fingerprint(&pk));
+    let matches = !did_fp.is_empty() && computed.as_deref() == Some(did_fp.as_str());
+    (computed, did_fp, matches)
 }
 
 // `wire add <nick@domain>` section header. See cmd_add below.
@@ -1055,6 +1108,24 @@ pub(super) fn cmd_add(
         .to_string();
     let peer_handle = crate::agent_card::display_handle_from_did(&peer_did).to_string();
 
+    // #247 finding 4: this is a relay-mediated first contact. Surface the
+    // resolved DID + key fingerprint (so the operator can verify out-of-band),
+    // and HARD-REFUSE if the card's key doesn't match its claimed DID — that's
+    // a poisoned card, not just an unfamiliar relay.
+    let (peer_fp, _did_fp, fp_matches) = resolved_key_fingerprint(&peer_card, &peer_did);
+    if peer_fp.is_some() && !fp_matches {
+        bail!(
+            "wire add: REFUSING to pair `{handle_arg}` — the resolved card's key fingerprint ({}) does not match the fingerprint in its DID `{peer_did}`. The relay served a card whose key ≠ its claimed identity (poisoned discovery). Verify with the peer out-of-band.",
+            peer_fp.as_deref().unwrap_or("?")
+        );
+    }
+    if !as_json {
+        eprintln!(
+            "wire add: resolved {peer_did} (fingerprint {}) via relay discovery — trusted for routing, not identity. Verify out-of-band before relying on this pair.",
+            peer_fp.as_deref().unwrap_or("?")
+        );
+    }
+
     // Self-pair guard (issue #30, explicit "Optional" ask). Refuses loudly
     // when the resolved peer DID matches our own. See
     // `reject_self_pair_after_resolution` for the full failure-mode and
@@ -1199,6 +1270,7 @@ pub(super) fn cmd_add(
                 "event_id": event_id,
                 "drop_response": resp,
                 "self_reachable": self_reachable,
+                "peer_fingerprint": peer_fp,
                 "status": "drop_sent",
             }))?
         );
@@ -1511,6 +1583,47 @@ fn reject_self_pair_after_resolution(our_did: &str, peer_did: &str) -> Result<()
 }
 
 // Integration tests for the CLI live in `tests/cli.rs` (cargo's tests/ dir).
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+
+    fn card_with_key(pk: &[u8]) -> Value {
+        json!({"verify_keys": {"ed25519:x": {"key": crate::signing::b64encode(pk)}}})
+    }
+
+    #[test]
+    fn fingerprint_matches_when_card_key_matches_did() {
+        let pk = [7u8; 32];
+        let fp = crate::signing::fingerprint(&pk);
+        let did = format!("did:wire:raven-kettle-{fp}");
+        let (computed, did_fp, matches) = resolved_key_fingerprint(&card_with_key(&pk), &did);
+        assert_eq!(computed.as_deref(), Some(fp.as_str()));
+        assert_eq!(did_fp, fp);
+        assert!(matches);
+    }
+
+    #[test]
+    fn fingerprint_mismatch_when_card_key_differs_from_did() {
+        // Poisoned discovery: card advertises a key whose fp ≠ the DID suffix.
+        let pk = [7u8; 32];
+        let did = "did:wire:raven-kettle-deadbeef"; // wrong suffix
+        let (computed, _did_fp, matches) = resolved_key_fingerprint(&card_with_key(&pk), did);
+        assert_eq!(
+            computed.as_deref(),
+            Some(crate::signing::fingerprint(&pk).as_str())
+        );
+        assert!(!matches, "key-vs-DID mismatch must NOT match");
+    }
+
+    #[test]
+    fn fingerprint_no_key_is_not_a_match() {
+        let (computed, _did_fp, matches) =
+            resolved_key_fingerprint(&json!({}), "did:wire:x-12345678");
+        assert!(computed.is_none());
+        assert!(!matches);
+    }
+}
 
 #[cfg(test)]
 mod reachability_tests {
