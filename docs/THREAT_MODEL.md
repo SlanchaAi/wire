@@ -1,6 +1,6 @@
-# wire threat model — v0.1
+# wire threat model
 
-This document enumerates the threats `wire` is designed to resist, the threats it explicitly does NOT resist (deferred or out of scope), and the security properties of the v0.1 implementation.
+This document enumerates the threats `wire` is designed to resist, the threats it explicitly does NOT resist (deferred or out of scope), and the security properties of the **current shipped implementation** (v0.15, on the 1.0 track). Threat entries are dated/versioned inline where the posture changed; "v0.1" labels below mark the original baseline, not a claim about today's code — read the per-threat **Status** and **Mitigation (current)** lines for the live posture.
 
 ## Trust boundaries
 
@@ -18,9 +18,17 @@ The trust model in one sentence: **operators trust their own machines and each o
 
 **Threat:** an attacker observes all relay traffic (request bodies, response bodies, slot ids, tokens) for some pairing.
 
-**Mitigation:** all event bodies are Ed25519-signed but **not encrypted** in v0.1. The eavesdropper can read message contents. Bootstrap payloads (signed agent-card + slot tokens, exchanged at pair time) ARE encrypted with ChaCha20-Poly1305 under a key derived from SPAKE2 — bootstrap contents are protected from passive observation.
+**Mitigation (current — D1, RFC-006):** **direct-message bodies between dh-capable peers are sealed.** Since the D1 wiring, every signed agent-card carries an X25519 `dh_pubkey` (derived from the same Ed25519 seed via the same-curve map), and `wire send` encrypts the event body to a pinned peer's `dh_pubkey` *before* signing, using **`wire-x25519.v1`** — NIP-44 v2's vetted symmetric envelope (HKDF → ChaCha20 + HMAC-SHA256, encrypt-then-MAC, length-hiding padding) over an X25519 ECDH conversation key with a wire-specific HKDF salt. The relay (and a passive eavesdropper) sees ciphertext + routing metadata (`from`/`to` DIDs, kind, timestamps, slot ids/tokens), not message contents. Authenticity comes from the outer Ed25519 signature, and decryption is verify-before-open by construction; the `(from,to)` context is bound into the HKDF `info` (reflection resistance). The discriminator is `wire-x25519.v1`, never `nip44.v2`, so it is deliberately NOT Nostr-wire-compatible.
 
-**Status:** v0.1 events are plaintext-on-the-wire. Operators handling sensitive content MUST treat the relay as observable. Per-event encryption (NIP-44 v2 or DIDComm authcrypt) is a v0.2+ candidate; see `BACKLOG.md`.
+**What is NOT sealed (honest scope):**
+- **Legacy peers** with no `dh_pubkey` on their pinned card fall back to **plaintext** (no silent failure, but also no confidentiality) — relevant only for pre-D1 cards.
+- **Group bodies** are still signed-plaintext on the shared slot (see T15) — DM sealing does not extend to group rooms.
+- **Routing metadata** (who-talks-to-whom, timing, sizes-modulo-padding) is always relay-visible by design.
+- **No forward secrecy / no post-compromise security:** the conversation key is static per identity-pair, so an Ed25519-seed compromise retroactively decrypts every message ever exchanged with that peer. The seed is a long-term root secret. Per-message FS would need an epoch/ephemeral input (MLS-class; deferred — `ANTI_FEATURES.md`, `BACKLOG.md`).
+
+**Status:** DM confidentiality against the relay is **present** for modern peers (sealed) and **by-design absent** for group content + legacy-card peers + all routing metadata. Operators with stricter needs self-host the relay (`wire relay-server`). Full MLS group confidentiality + forward secrecy are explicitly **out of 1.0**; see `BACKLOG.md`.
+
+> Historical note: pre-D1, all bodies were plaintext-on-the-wire, and pair-time bootstrap payloads were ChaCha20-Poly1305-sealed under a SPAKE2-derived key. The SPAKE2/SAS pairing flow was removed (RFC-005 follow-on); pairing is now `wire dial` + bilateral accept (T2), and body confidentiality is the D1 layer above.
 
 ## Threat T2 — active MITM during pairing *(SAS path removed in RFC-005 follow-on; `wire dial` path below)*
 

@@ -389,11 +389,18 @@ pub fn accept_invite(url: &str) -> Result<Value> {
 
     let peer_handle = crate::agent_card::display_handle_from_did(&payload.did).to_string();
     let mut relay_state = config::read_relay_state()?;
-    relay_state["peers"][&peer_handle] = json!({
-        "relay_url": payload.relay_url,
-        "slot_id": payload.slot_id,
-        "slot_token": payload.slot_token,
-    });
+    // RFC-006 Part B: pin the issuer's slot as an `endpoints[]` entry (the
+    // single peer-routing source), not flat top-level fields. The invite
+    // payload's coords are a federation slot.
+    crate::endpoints::pin_peer_endpoints(
+        &mut relay_state,
+        &peer_handle,
+        &[crate::endpoints::Endpoint::federation(
+            payload.relay_url.clone(),
+            payload.slot_id.clone(),
+            payload.slot_token.clone(),
+        )],
+    )?;
     config::write_relay_state(&relay_state)?;
 
     // Build signed pair_drop event carrying our own card + slot coords +

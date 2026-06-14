@@ -17,10 +17,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 command -v docker >/dev/null 2>&1 || { echo "docker not found on PATH" >&2; exit 1; }
 
-# Build the image on first use or if the Dockerfile changed since last build.
-if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  docker build -t "$IMAGE" "$ROOT/test-env"
-fi
+# Always (re)build so Dockerfile / entrypoint / CMD changes are actually picked
+# up — docker's layer cache makes an unchanged build near-instant. The previous
+# "only build if the image is missing" check silently ran a STALE image after a
+# Dockerfile edit (a newly-added gate step never executed, yet the gate still
+# reported green).
+docker build -t "$IMAGE" "$ROOT/test-env"
 
 # Allocate a TTY only when attached to one (so CI / pipes don't break).
 tty_flag=()

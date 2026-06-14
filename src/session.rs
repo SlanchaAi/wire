@@ -102,51 +102,58 @@ pub fn default_sessions_root() -> Result<PathBuf> {
     Ok(state.join("wire").join("sessions"))
 }
 
-/// Full filesystem path for the named session's WIRE_HOME root.
-/// Inside this dir the standard wire layout applies: `config/wire/...`
-/// and `state/wire/...`.
+/// Full filesystem path for a *named* session's WIRE_HOME root —
+/// `<sessions_root>/by-key/<hash>` where the by-key hash is derived
+/// from the (sanitized) operator-typed name. Inside this dir the
+/// standard wire layout applies: `config/wire/...` and `state/wire/...`.
 ///
-/// Resolves the *legacy v0.6 top-level* layout only — joins the
-/// session name directly onto `sessions_root`. Operator-facing CLI
-/// paths that accept a user-typed session name should use
-/// [`find_session_home_by_name`] instead, which also handles the
-/// v0.13 `by-key/<hash>` layout where the on-disk dir name is a hash
-/// and the user-facing name is the persona handle derived from the
-/// card.
+/// RFC-006 Part A (1.0 format freeze): there is now exactly ONE physical
+/// session layout — `by-key/<hash>`. A named session's key is its name;
+/// an agent session's key is its session id. Both hash into the same
+/// store, so every reader (`list_sessions`, `find_session_home_by_name`,
+/// the supervisor) handles one shape instead of straddling the old
+/// `sessions/<name>/` top-level layout AND `by-key/<hash>/`.
+///
+/// Operator-facing CLI paths that accept a user-typed name should still
+/// prefer [`find_session_home_by_name`]: it resolves both a named
+/// session (key == name) AND an agent session typed by its DID-derived
+/// persona handle (key == session id, name on disk is the hash).
 pub fn session_dir(name: &str) -> Result<PathBuf> {
-    Ok(sessions_root()?.join(sanitize_name(name)))
+    session_home_for_key(&sanitize_name(name))
 }
 
-/// Operator-facing session-name → home_dir resolver. Handles BOTH
-/// layouts wire has shipped:
+/// Operator-facing session-name → home_dir resolver. RFC-006 Part A
+/// (1.0 format freeze) collapsed the two historical disk layouts into a
+/// single `by-key/<hash>` store, so this resolver now keys two *naming*
+/// conventions onto one physical layout:
 ///
-/// 1. **v0.6 top-level**: `sessions_root/<name>` — the user-typed
-///    name IS the directory name. [`session_dir`] is the direct
-///    primitive.
-/// 2. **v0.13 by-key/<hash>**: the on-disk dir is a 16-hex hash but
-///    operators type the persona handle (`coral-weasel`,
-///    `agate-nimbus`) — derived from the card's DID. [`list_sessions`]
-///    surfaces those entries with `SessionInfo.name = handle`, so we
-///    can walk it and match.
+/// 1. **Named session**: the operator typed the session NAME (e.g.
+///    `slancha-api`). A named session's by-key hash is derived from the
+///    name itself, so [`session_dir`] computes the home directly — no
+///    enumeration.
+/// 2. **Agent persona**: the operator typed the DID-derived persona
+///    HANDLE (`coral-weasel`, `agate-nimbus`) of an agent session whose
+///    key is its session id, not its name. The handle does not hash to
+///    the home, so we fall back to a [`list_sessions`] walk, which
+///    surfaces each by-key entry with `SessionInfo.name = handle`.
 ///
-/// Order: try the literal top-level path first (fast, no enumeration),
-/// then fall back to a `list_sessions` walk for the by-key handle
-/// case. Returns `Ok(None)` when neither layout has a match — the
-/// caller decides whether to error or no-op.
+/// Order: compute the named-key home first (fast, no enumeration), then
+/// fall back to the handle walk. Returns `Ok(None)` when neither matches
+/// — the caller decides whether to error or no-op.
 ///
 /// v0.14.2 (#170 follow-up from #174's PR body): operators running
-/// `wire daemon --session foo` from a tmux pane on a v0.13 box hit
-/// `session 'foo' not found` because the literal path didn't exist.
-/// That's #174's exact failure mode (supervisor case, now fixed via
-/// env-pinned WIRE_HOME) reapplied to the operator-facing CLI path.
+/// `wire daemon --session foo` from a tmux pane hit `session 'foo' not
+/// found` when the resolver only knew the literal top-level path. Post
+/// Part A both naming conventions resolve through the one by-key store.
 pub fn find_session_home_by_name(name: &str) -> Result<Option<PathBuf>> {
-    // 1. Legacy literal lookup.
+    // 1. Named session: key == name → deterministic by-key home.
     let direct = session_dir(name)?;
     if direct.exists() {
         return Ok(Some(direct));
     }
-    // 2. v0.13 by-key walk: list_sessions overrides SessionInfo.name to
-    // the handle when the card is present; match against either the
+    // 2. Agent persona: typed name is the card-derived handle, not the
+    // session key. list_sessions overrides SessionInfo.name to the
+    // handle when the card is present; match against either the
     // overridden name or the raw by-key hash.
     let sanitized = sanitize_name(name);
     for info in list_sessions().unwrap_or_default() {
@@ -507,48 +514,43 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
             Some(s) => s.to_string(),
             None => continue,
         };
-        // Skip the registry sidecar.
-        if name == "registry.json" {
+        // RFC-006 Part A (1.0 format freeze): session homes live ONLY
+        // under `by-key/<hash>` — never at the top level. The `by-key`
+        // dir is a container, not a session; every other top-level entry
+        // (the `registry.json` sidecar, its lock/tmp, stray dirs) is
+        // ignored. Descend one level so same-box discovery (`list-local`
+        // / `pair-all-local`) sees the real homes.
+        if name != "by-key" {
             continue;
         }
-        // v0.13: session homes live under `by-key/<hash>`, not at the top
-        // level. Descend one level so same-box discovery (`list-local` /
-        // `pair-all-local`) sees them — the `by-key` dir itself is a
-        // container, not a session. Without this, EVERY v0.13 session was
-        // invisible to the local mesh, silently forcing same-box sisters
-        // onto federation instead of fast loopback routing.
-        if name == "by-key" {
-            for sub in std::fs::read_dir(&path)?.flatten() {
-                let sub_path = sub.path();
-                if !sub_path.is_dir() {
-                    continue;
-                }
-                let hash = sub_path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("?")
-                    .to_string();
-                let mut info = mk(sub_path, hash);
-                // E8 (v0.13.2): skip uninitialized by-key homes. maybe_adopt_
-                // session_wire_home creates the home dir on first resolution —
-                // before any identity exists — so transient/probe session keys
-                // that never `wire up` leave empty or agent-card-less homes.
-                // Without this filter they surfaced as phantom "?"-handle
-                // sisters in list-local, degrading the very discovery rc3
-                // fixed. No DID == no identity == not a session.
-                if info.did.is_none() {
-                    continue;
-                }
-                // Prefer the persona handle as the display name when the home
-                // is initialized; fall back to the by-key hash otherwise.
-                if let Some(h) = info.handle.clone() {
-                    info.name = h;
-                }
-                out.push(info);
+        for sub in std::fs::read_dir(&path)?.flatten() {
+            let sub_path = sub.path();
+            if !sub_path.is_dir() {
+                continue;
             }
-            continue;
+            let hash = sub_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .to_string();
+            let mut info = mk(sub_path, hash);
+            // E8 (v0.13.2): skip uninitialized by-key homes. maybe_adopt_
+            // session_wire_home creates the home dir on first resolution —
+            // before any identity exists — so transient/probe session keys
+            // that never `wire up` leave empty or agent-card-less homes.
+            // Without this filter they surfaced as phantom "?"-handle
+            // sisters in list-local, degrading the very discovery rc3
+            // fixed. No DID == no identity == not a session.
+            if info.did.is_none() {
+                continue;
+            }
+            // Prefer the persona handle as the display name when the home
+            // is initialized; fall back to the by-key hash otherwise.
+            if let Some(h) = info.handle.clone() {
+                info.name = h;
+            }
+            out.push(info);
         }
-        out.push(mk(path, name));
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
@@ -956,11 +958,17 @@ fn parent_pid(_pid: u32) -> Option<u32> {
 /// collide and there is no path-string to mis-normalize (the Windows bug
 /// cannot occur). 64 bits is collision-safe at this scale.
 pub fn session_home_for_key(key: &str) -> Result<PathBuf> {
+    Ok(sessions_root()?.join("by-key").join(by_key_dir_name(key)))
+}
+
+/// The by-key directory name (16 hex chars / 64 bits) for a session key —
+/// the first 8 bytes of SHA-256(key). Public so test fixtures and external
+/// tooling can locate a session home without replicating the hash:
+/// `session_home_for_key(key) == sessions_root()/by-key/<by_key_dir_name(key)>`.
+pub fn by_key_dir_name(key: &str) -> String {
     let mut h = Sha256::new();
     h.update(key.as_bytes());
-    let digest = h.finalize();
-    let hash = hex::encode(&digest[..8]); // 16 hex chars / 64 bits
-    Ok(sessions_root()?.join("by-key").join(hash))
+    hex::encode(&h.finalize()[..8])
 }
 
 /// Long-running `wire <subcommand>` invocations that own the inbox
@@ -1766,33 +1774,38 @@ mod tests {
     }
 
     #[test]
-    fn find_session_home_by_name_resolves_both_layouts() {
-        // #44 / #170 follow-up: v0.6 top-level sessions (dir name ==
-        // operator-typed name) and v0.13 by-key sessions (dir name is
-        // a hash, operator types the persona handle from the card)
-        // must BOTH resolve via `find_session_home_by_name`. Pre-fix
-        // (`session_dir(name)` only) the v0.13 by-key case bailed
-        // with "session not found" even though `wire session list`
-        // showed it.
+    fn find_session_home_by_name_resolves_named_and_persona() {
+        // RFC-006 Part A: a single by-key store, two naming conventions.
+        // (1) A NAMED session's key is its name, so its home is
+        //     `session_dir(name)` directly. (2) An AGENT session's key is
+        //     its session id; the operator types the DID-derived persona
+        //     HANDLE, which does not hash to the home, so the handle walk
+        //     resolves it. Both must resolve via `find_session_home_by_name`.
         let _guard = crate::config::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let tmp = std::env::temp_dir().join(format!("wire-find-{}", rand::random::<u32>()));
         let _ = std::fs::remove_dir_all(&tmp);
         let root = tmp.join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
 
-        // Legacy v0.6 top-level: a dir named `legacy-pane` directly
-        // under sessions_root.
-        let legacy_home = root.join("legacy-pane");
-        let legacy_cfg = legacy_home.join("config").join("wire");
-        std::fs::create_dir_all(&legacy_cfg).unwrap();
+        // SAFETY: ENV_LOCK is held. Set early so `session_dir` resolves
+        // the canonical by-key home under this test root.
+        unsafe { std::env::set_var("WIRE_HOME", &root) };
+
+        // (1) Named session: key == name → `by-key/<hash(name)>`. The card
+        // handle equals the name (named sessions claim their own name).
+        let named_home = super::session_dir("named-pane").unwrap();
+        let named_cfg = named_home.join("config").join("wire");
+        std::fs::create_dir_all(&named_cfg).unwrap();
         std::fs::write(
-            legacy_cfg.join("agent-card.json"),
-            r#"{"did":"did:wire:legacy-pane-aaaa1111","handle":"legacy-pane","verify_keys":{}}"#,
+            named_cfg.join("agent-card.json"),
+            r#"{"did":"did:wire:named-pane-aaaa1111","handle":"named-pane","verify_keys":{}}"#,
         )
         .unwrap();
 
-        // v0.13 by-key: dir name is a hash, card's handle is `coral-weasel`.
+        // (2) Agent session: dir is a session-key hash, card handle is the
+        // DID-derived persona `coral-weasel` (≠ the hash).
         let bykey_home = root.join("by-key").join("3049827d92d4fbd5");
         let bykey_cfg = bykey_home.join("config").join("wire");
         std::fs::create_dir_all(&bykey_cfg).unwrap();
@@ -1802,23 +1815,21 @@ mod tests {
         )
         .unwrap();
 
-        // SAFETY: ENV_LOCK is held.
-        unsafe { std::env::set_var("WIRE_HOME", &root) };
-
-        // Legacy lookup: operator types the literal dir name.
-        let legacy = super::find_session_home_by_name("legacy-pane").unwrap();
+        // Named lookup: operator types the session name; resolves via the
+        // deterministic by-key home, no enumeration.
+        let named = super::find_session_home_by_name("named-pane").unwrap();
         assert_eq!(
-            legacy.as_deref(),
-            Some(legacy_home.as_path()),
-            "v0.6 top-level layout: legacy-pane must resolve to its top-level dir"
+            named.as_deref(),
+            Some(named_home.as_path()),
+            "named session must resolve to its by-key/<hash(name)> home"
         );
 
-        // by-key lookup: operator types the persona handle, not the hash.
+        // Persona lookup: operator types the persona handle, not the hash.
         let bykey = super::find_session_home_by_name("coral-weasel").unwrap();
         assert_eq!(
             bykey.as_deref(),
             Some(bykey_home.as_path()),
-            "v0.13 by-key layout: coral-weasel must resolve to its by-key/<hash> dir"
+            "agent persona handle must resolve to its by-key/<hash> dir"
         );
 
         // by-key lookup via the hash itself also works (some tooling
@@ -1827,7 +1838,7 @@ mod tests {
         assert_eq!(
             by_hash.as_deref(),
             Some(bykey_home.as_path()),
-            "v0.13 by-key layout: hash dir name must also resolve"
+            "raw by-key hash dir name must also resolve"
         );
 
         // Negative: an unknown name returns None, not an error.
