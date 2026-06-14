@@ -9,8 +9,15 @@
 # integration tests — they exercise what a user/script actually runs, not the
 # library internals `cargo test` covers.
 set -uo pipefail
-cd "$(dirname "$0")"
 WIRE="${WIRE:-wire}"
+# Resolve a relative binary PATH to absolute BEFORE we cd into tests/it/ —
+# otherwise a relative WIRE (CI passes ./target/release/wire) no longer resolves
+# from the new cwd. A bare command name (on PATH) is left untouched.
+case "$WIRE" in
+  */*) [ -e "$WIRE" ] && WIRE="$(cd "$(dirname "$WIRE")" && pwd)/$(basename "$WIRE")" ;;
+esac
+export WIRE
+cd "$(dirname "$0")"
 command -v "$WIRE" >/dev/null 2>&1 || { echo "wire binary not found ($WIRE) — set WIRE=path"; exit 1; }
 
 echo "wire integration suite — binary: $($WIRE --version 2>/dev/null || echo "$WIRE")"
