@@ -276,9 +276,69 @@ pub fn kill_process(pid: u32, force: bool) -> bool {
     }
 }
 
+/// Resolve the path of the currently-running executable, robust to the Linux
+/// kernel's `(deleted)` marker.
+///
+/// When a running binary is replaced *in place* — e.g. `cargo install
+/// slancha-wire` unlinks and recreates `~/.cargo/bin/wire` while `wire upgrade`
+/// is still running — the kernel appends a literal ` (deleted)` suffix to
+/// `/proc/self/exe`. That suffix marks the unlinked inode; it is NOT part of
+/// the path. [`std::env::current_exe`] surfaces it verbatim, and writing it
+/// into a systemd `ExecStart=` / launchd program path corrupts the unit
+/// (`error: unrecognized subcommand '(deleted)'`, the unit then flaps forever).
+///
+/// This strips a trailing ` (deleted)` so callers get the real install path,
+/// which the in-place replacement has already recreated on disk. Issues #274,
+/// #276.
+pub fn current_exe_resolved() -> std::io::Result<std::path::PathBuf> {
+    Ok(strip_deleted_suffix(&std::env::current_exe()?))
+}
+
+/// Pure inner of [`current_exe_resolved`]: strip a trailing ` (deleted)` kernel
+/// marker from an exe path. Only the exact trailing ` (deleted)` token (leading
+/// space included) is removed — a path that merely contains the text, or a real
+/// filename ending in `(deleted)` without the kernel's leading space, is left
+/// untouched. Testable without an actually-unlinked binary.
+pub fn strip_deleted_suffix(p: &std::path::Path) -> std::path::PathBuf {
+    match p.to_string_lossy().strip_suffix(" (deleted)") {
+        Some(stripped) => std::path::PathBuf::from(stripped),
+        None => p.to_path_buf(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_deleted_suffix_removes_kernel_marker() {
+        use std::path::Path;
+        // The repro from #274: cargo in-place replace → /proc/self/exe carries
+        // the marker → it must NOT reach the unit's ExecStart.
+        assert_eq!(
+            strip_deleted_suffix(Path::new("/home/admin/.cargo/bin/wire (deleted)")),
+            Path::new("/home/admin/.cargo/bin/wire")
+        );
+    }
+
+    #[test]
+    fn strip_deleted_suffix_leaves_clean_path_untouched() {
+        use std::path::Path;
+        assert_eq!(
+            strip_deleted_suffix(Path::new("/usr/local/bin/wire")),
+            Path::new("/usr/local/bin/wire")
+        );
+    }
+
+    #[test]
+    fn strip_deleted_suffix_only_strips_exact_trailing_token() {
+        use std::path::Path;
+        // No leading space → not the kernel marker shape → leave alone.
+        assert_eq!(
+            strip_deleted_suffix(Path::new("/opt/wire(deleted)")),
+            Path::new("/opt/wire(deleted)")
+        );
+    }
 
     #[test]
     fn cmdline_role_strips_wire_prefix() {
