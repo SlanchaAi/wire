@@ -221,3 +221,57 @@ jobs:
           $fresh = (& $wire whoami --json | ConvertFrom-Json)
           if (-not $fresh.did.StartsWith("did:wire:")) { throw "re-up should recreate identity" }
           Write-Host "install-smoke-windows: fresh-user + nuke OK"
+
+  install-script-smoke:
+    # The REAL installer, end-to-end. `install-smoke` copies the binary
+    # straight onto PATH and never touches install.sh — so the path a user
+    # actually runs (`curl … | sh`: triple detection → download → SHA-256
+    # verify → --prefix install → PATH/next-steps) is untested. This serves a
+    # locally-built binary as a release asset over http and runs install.sh
+    # against it (WIRE_DIST_URL override — no real GitHub Release needed),
+    # then drives the fresh-user onboarding through the installed binary.
+    # Catches installer bugs (wrong triple/asset name, broken verify, bad
+    # install dir) that compile + pass tests but break first-touch install.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: cargo build --release --bin wire
+      - name: install.sh from a clean machine, then fresh-user onboarding
+        # Serve + install + assert in ONE step so the http server's lifetime is
+        # controlled (a background server from an earlier step isn't guaranteed
+        # to survive into the next).
+        run: |
+          set -euo pipefail
+          DIST="$(mktemp -d)"
+          # Resolve the SAME triple install.sh will request on this runner, so
+          # the served asset name matches (mirrors install.sh's Linux branch).
+          case "$(uname -m)" in
+            x86_64|amd64)  triple="x86_64-unknown-linux-musl" ;;
+            aarch64|arm64) triple="aarch64-unknown-linux-musl" ;;
+            *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;;
+          esac
+          cp target/release/wire "$DIST/wire-$triple"
+          ( cd "$DIST" && sha256sum "wire-$triple" > "wire-$triple.sha256" )
+          # Serve over http so install.sh's curl exercises the real download +
+          # SHA-256-sibling verify path (not a file:// shortcut, which would let
+          # install.sh silently cargo-fall-back to the crates.io release).
+          ( cd "$DIST" && python3 -m http.server 8099 >/dev/null 2>&1 & )
+          SRV=$!; trap 'kill "$SRV" 2>/dev/null || true' EXIT
+          for i in $(seq 1 20); do curl -fsS "http://127.0.0.1:8099/wire-$triple.sha256" -o /dev/null && break; sleep 0.5; done
+
+          PFX="$(mktemp -d)/bin"
+          WIRE_DIST_URL="http://127.0.0.1:8099" sh install.sh --prefix "$PFX"
+          test -x "$PFX/wire"                       # landed where --prefix said
+          "$PFX/wire" --version
+          export WIRE_HOME="$(mktemp -d)/home" WIRE_QUIET_AUTOSESSION=1
+          cd "$(mktemp -d)"                         # clean cwd, no repo
+          "$PFX/wire" whoami --json | jq -e '.initialized == false'   # pre-init
+          # up --offline is PR-only — if install.sh had cargo-fallen-back to the
+          # crates.io release, this flag wouldn't exist, so it also proves the
+          # SERVED binary was the one installed.
+          "$PFX/wire" up --offline
+          "$PFX/wire" whoami --json | jq -e '.did | startswith("did:wire:")'
+          echo "install-script-smoke: install.sh + fresh onboarding OK"
