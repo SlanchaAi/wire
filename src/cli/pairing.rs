@@ -1171,6 +1171,24 @@ pub(super) fn cmd_add(
         .unwrap_or("")
         .to_string();
 
+    // #278: we just advertised our self endpoints to a FEDERATION peer. If our
+    // only self slot is loopback (or UDS), the peer has no routable address to
+    // deliver their `pair_drop_ack` to — the pair will sit at PENDING_ACK
+    // forever while the operator sees a success-looking `drop_sent`. Warn (and
+    // flag it in JSON); don't block — the operator may be about to bind a relay.
+    let self_reachable = self_reachable_for_federation(&our_endpoints, &our_relay);
+    if !self_reachable {
+        eprintln!(
+            "wire add: WARN you are not federation-reachable — your only self endpoint is loopback ({our_relay})."
+        );
+        eprintln!(
+            "  {peer_handle} cannot deliver their pair_drop_ack there, so this pair will stay PENDING_ACK."
+        );
+        eprintln!(
+            "  Become reachable, then re-run: `wire bind-relay https://<your-relay>` (or `wire up --relay https://wireup.net`) + `wire claim`."
+        );
+    }
+
     if as_json {
         println!(
             "{}",
@@ -1180,6 +1198,7 @@ pub(super) fn cmd_add(
                 "peer_handle": peer_handle,
                 "event_id": event_id,
                 "drop_response": resp,
+                "self_reachable": self_reachable,
                 "status": "drop_sent",
             }))?
         );
@@ -1189,6 +1208,26 @@ pub(super) fn cmd_add(
         );
     }
     Ok(())
+}
+
+/// True iff our advertised self endpoints give a federation peer a routable
+/// address for their `pair_drop_ack`. A purely loopback / UDS self slot is NOT
+/// reachable from another host — the peer can never ack, so the pair sticks at
+/// PENDING_ACK forever (#278). `endpoints` is `self_endpoints(..)`;
+/// `fallback_relay` is the legacy top-level self `relay_url`, consulted only
+/// when `endpoints[]` is empty (pre-v0.5.17 state). Pure → unit-tested.
+fn self_reachable_for_federation(
+    endpoints: &[crate::endpoints::Endpoint],
+    fallback_relay: &str,
+) -> bool {
+    if !endpoints.is_empty() {
+        endpoints
+            .iter()
+            .any(|e| e.scope == crate::endpoints::EndpointScope::Federation)
+    } else {
+        crate::endpoints::infer_scope_from_url(fallback_relay)
+            == crate::endpoints::EndpointScope::Federation
+    }
 }
 
 /// v0.5.14 bilateral-completion path for `wire add`. Called when the peer's
@@ -1472,6 +1511,52 @@ fn reject_self_pair_after_resolution(our_did: &str, peer_did: &str) -> Result<()
 }
 
 // Integration tests for the CLI live in `tests/cli.rs` (cargo's tests/ dir).
+
+#[cfg(test)]
+mod reachability_tests {
+    use super::*;
+    use crate::endpoints::Endpoint;
+
+    #[test]
+    fn federation_endpoint_is_reachable() {
+        let eps = vec![Endpoint::federation(
+            "https://wireup.net".into(),
+            "s".into(),
+            "t".into(),
+        )];
+        assert!(self_reachable_for_federation(&eps, "ignored"));
+    }
+
+    #[test]
+    fn loopback_only_is_not_reachable() {
+        // The #278 trap: only a loopback self slot → a federation peer can't ack.
+        let eps = vec![Endpoint::local(
+            "http://127.0.0.1:18791".into(),
+            "s".into(),
+            "t".into(),
+        )];
+        assert!(!self_reachable_for_federation(&eps, "ignored"));
+    }
+
+    #[test]
+    fn dual_slot_local_plus_federation_is_reachable() {
+        let eps = vec![
+            Endpoint::local("http://127.0.0.1:8771".into(), "l".into(), "lt".into()),
+            Endpoint::federation("https://wireup.net".into(), "f".into(), "ft".into()),
+        ];
+        assert!(self_reachable_for_federation(&eps, "ignored"));
+    }
+
+    #[test]
+    fn empty_endpoints_falls_back_to_legacy_relay_scope() {
+        // Pre-v0.5.17 state with no endpoints[]: judge by the legacy relay_url.
+        assert!(self_reachable_for_federation(&[], "https://wireup.net"));
+        assert!(!self_reachable_for_federation(
+            &[],
+            "http://127.0.0.1:18791"
+        ));
+    }
+}
 
 #[cfg(test)]
 mod self_pair_guard_tests {
