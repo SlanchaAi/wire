@@ -8,6 +8,36 @@ Generated from git tag annotations; for richer context see
 the PR description linked in each section.
 
 
+## [v0.16.0] — 2026-06-14
+
+**v0.16.0 — the 1.0 format freeze + onboarding cleanup. RFC-006 collapses the two dual on-disk representations into one each; the CLI stops pretending you name your own identity. BREAKING — on-disk session/peer state and a few CLI args changed; `wire nuke` resets a machine.**
+
+Pre-1.0 housekeeping: freeze the on-disk formats so they never need migration, and make the identity surface honest (the crypto names you, not a typed flag). No production users, so it breaks freely.
+
+### RFC-006 — format freeze (collapse the dual representations)
+
+- **Part A — one session store** (#269): sessions live only under `sessions/by-key/<hash>/`; the legacy top-level `sessions/<name>/` layout is gone. A named session keys off its name, an agent session off its session-id — both into the one store. Kills the `cwd → identity` straddle behind the #170/#174 fork-storms. Sessions now surface uniformly by their persona handle.
+- **Part B — one peer-routing source** (#268): a peer's relay slot lives only in `endpoints[]`; the flat `relay_url`/`slot_id`/`slot_token` top-level peer fields are gone. Delivery iterates `endpoints[]` with priority failover. (Fixed an `effective_tier` reader missed in the migration that wrongly showed freshly-paired peers as `PENDING_ACK`.)
+
+### Identity surface — init is the sole naming event (#270)
+
+- **No name to type.** Removed `wire init <handle>` (vestigial seed), `wire init --name` / `wire up --name` (these published a free-choice display name ≠ your handle — a one-name violation). Your persona is derived from the keypair at init; the card's display name is the handle, always.
+- **One onboarding verb.** `wire up` is the front door; **`wire up --offline`** folds in offline keygen; `wire init` is demoted to an internal primitive users never type.
+- `wire session new <name>` kept — that name is a home *locator*, not an identity.
+
+### Stability + security (the v0.15.x backlog, #260)
+
+- Daemon no longer self-aborts on its own singleton pidfile (#263); orphan-daemon detection scoped to the current `WIRE_HOME` (#248); the nuke unit-test no longer tears down the live host service (#243).
+- Path-traversal rejected in group ids before any filesystem write (#238); five operator-input/IO error-path bugs in the CLI fixed, TDD'd (#239). DID-key binding gap + fresh-install status orphan fixed (#244/#248).
+- Threat-model truth pass — honest D1 DM-sealing posture (#266); landing corrected to v0.15 reality (#264); root decluttered (#265); the 15.7k-line `cli.rs` split into a module tree (#242).
+
+### Testing + release gating
+
+- **Real integration suite** (`tests/it/`): boots actual relays and drives the shipped binary — zero-paste pairing, on-box sister mesh, onboarding, nuke/recovery, group join-by-code cross-member verified read, and federation over a **non-loopback remote relay**.
+- New CI jobs: `integration-tests`, `install-script-smoke` (runs the real `install.sh`), and the demo jobs wired into the local `test-env` gate so it mirrors CI.
+- `main` is branch-protected: all checks must pass (and be up-to-date) before merge, admins included.
+
+
 ## [v0.15.0] — 2026-06-07
 
 **v0.15.0 — the de-deprecation: every backwards-compatibility surface removed. `wire dial` is now the sole pairing path; agents only ever see canonical verbs. BREAKING — old on-disk state is incompatible; `wire nuke` resets a machine.**
