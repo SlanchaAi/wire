@@ -182,11 +182,7 @@ async fn pair_two_homes_with_local_endpoints(
 
     // ---- alice ----
     let alice = fresh_dir(alice_name);
-    assert!(
-        wire(&alice, &["init", alice_name, "--relay", fed_url])
-            .status
-            .success()
-    );
+    assert!(wire(&alice, &["init", "--relay", fed_url]).status.success());
     // v0.11: agent-card.handle is the DID-derived character. Discover
     // alice's actual handle for the federation claim + downstream uses.
     let alice_h = read_handle(&alice);
@@ -202,11 +198,7 @@ async fn pair_two_homes_with_local_endpoints(
 
     // ---- bob ----
     let bob = fresh_dir(bob_name);
-    assert!(
-        wire(&bob, &["init", bob_name, "--relay", fed_url])
-            .status
-            .success()
-    );
+    assert!(wire(&bob, &["init", "--relay", fed_url]).status.success());
     let bob_h = read_handle(&bob);
     assert!(
         wire(&bob, &["claim", &bob_h, "--public-url", fed_url, "--json"])

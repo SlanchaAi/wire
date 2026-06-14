@@ -118,7 +118,7 @@ async fn pair_two_homes(
 
     let alice = fresh_dir(alice_name);
     assert!(
-        wire(&alice, &["init", alice_name, "--relay", relay_url])
+        wire(&alice, &["init", "--relay", relay_url])
             .status
             .success()
     );
@@ -133,11 +133,7 @@ async fn pair_two_homes(
     );
 
     let bob = fresh_dir(bob_name);
-    assert!(
-        wire(&bob, &["init", bob_name, "--relay", relay_url])
-            .status
-            .success()
-    );
+    assert!(wire(&bob, &["init", "--relay", relay_url]).status.success());
     let bob_h = read_handle(&bob);
 
     // bob → alice: handle-path pair_drop. Lands in alice's pending-inbound.
@@ -221,7 +217,7 @@ async fn stress_bind_relay_accumulates_many_slots() {
 
     // init bound to the first relay, then additively bind the rest.
     assert!(
-        wire(&home, &["init", "alice", "--relay", &relays[0]])
+        wire(&home, &["init", "--relay", &relays[0]])
             .status
             .success()
     );

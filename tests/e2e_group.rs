@@ -159,14 +159,10 @@ async fn group_join_code_admits_unpaired_member() {
     // alice + bob bind the relay (the canonical dial flow needs published
     // slots on both pairing ends); dave joins by group code and never pairs,
     // so it stays offline.
-    for (h, n) in [(&alice, "alice"), (&bob, "bob")] {
-        assert!(
-            wire(h, &["init", n, "--relay", &relay_url])
-                .status
-                .success()
-        );
+    for h in [&alice, &bob] {
+        assert!(wire(h, &["init", "--relay", &relay_url]).status.success());
     }
-    assert!(wire(&dave, &["init", "dave", "--offline"]).status.success());
+    assert!(wire(&dave, &["init", "--offline"]).status.success());
     let bob_h = read_handle(&bob);
     let dave_h = read_handle(&dave);
 
@@ -264,17 +260,17 @@ async fn group_bidirectional_room_with_introduce_pin() {
     // All three bind the relay — alice pairs (dials) bilaterally with each
     // member via the canonical handle-dial flow, which needs published slots.
     assert!(
-        wire(&alice, &["init", "alice", "--relay", &relay_url])
+        wire(&alice, &["init", "--relay", &relay_url])
             .status
             .success()
     );
     assert!(
-        wire(&bob, &["init", "bob", "--relay", &relay_url])
+        wire(&bob, &["init", "--relay", &relay_url])
             .status
             .success()
     );
     assert!(
-        wire(&carol, &["init", "carol", "--relay", &relay_url])
+        wire(&carol, &["init", "--relay", &relay_url])
             .status
             .success()
     );
