@@ -258,7 +258,10 @@ jobs:
           # Serve over http so install.sh's curl exercises the real download +
           # SHA-256-sibling verify path (not a file:// shortcut, which would let
           # install.sh silently cargo-fall-back to the crates.io release).
-          ( cd "$DIST" && python3 -m http.server 8099 >/dev/null 2>&1 & )
+          # Background the subshell itself (not `& )` inside it) so $! captures
+          # the server PID — `& )` backgrounds within the subshell and leaves $!
+          # unset, which is fatal under `set -u`.
+          ( cd "$DIST" && exec python3 -m http.server 8099 >/dev/null 2>&1 ) &
           SRV=$!; trap 'kill "$SRV" 2>/dev/null || true' EXIT
           for i in $(seq 1 20); do curl -fsS "http://127.0.0.1:8099/wire-$triple.sha256" -o /dev/null && break; sleep 0.5; done
 
