@@ -637,6 +637,16 @@ pub struct SupervisorState {
     /// future `wire upgrade --refresh-stale-children` to force the
     /// supervisor to respawn them on the current binary.
     pub stale_binary_sessions: Vec<String>,
+    /// v0.16.x (#275): the subset of `stale_binary_sessions` the
+    /// `--all-sessions` supervisor would NOT respawn — i.e. sessions
+    /// the supervisor's eligibility filter (`supervisor_eligible`:
+    /// registry-bound OR active within the idle cutoff) drops. Killing
+    /// one of these (which `wire upgrade --refresh-stale-children` used
+    /// to do indiscriminately) orphans it: the supervisor never brings
+    /// it back, so the identity silently stops syncing. `wire upgrade`
+    /// must NOT kill these — it surfaces them as "relaunch manually"
+    /// instead.
+    pub stale_unmanaged_sessions: Vec<String>,
 }
 
 /// One session as seen by the supervisor.
@@ -677,8 +687,24 @@ pub fn read_supervisor_state() -> Result<SupervisorState> {
 
     // Per-session liveness — walk list_sessions, read each home's
     // pidfile + last_sync.
-    let sessions: Vec<SupervisedSession> = crate::session::list_sessions()
-        .unwrap_or_default()
+    let infos = crate::session::list_sessions().unwrap_or_default();
+
+    // #275: the names the `--all-sessions` supervisor would actually own a
+    // daemon for, computed with the SAME predicate the supervisor loop uses
+    // (`supervisor_eligible`: registry-bound OR active within the idle cutoff).
+    // Used below to flag stale sessions the supervisor will NOT respawn, so
+    // `wire upgrade --refresh-stale-children` doesn't kill-and-orphan them.
+    let eligible_names: std::collections::HashSet<String> = supervisor_eligible(
+        infos.clone(),
+        max_idle_from_env(),
+        SystemTime::now(),
+        fs_last_active,
+    )
+    .into_iter()
+    .map(|s| s.name)
+    .collect();
+
+    let sessions: Vec<SupervisedSession> = infos
         .into_iter()
         .map(|info| {
             let daemon_pid = crate::session::session_daemon_pid(&info.home_dir);
@@ -738,13 +764,36 @@ pub fn read_supervisor_state() -> Result<SupervisorState> {
         .map(|s| s.name.clone())
         .collect();
 
+    // #275: split the stale set by whether the supervisor would respawn it.
+    // The "unmanaged" ones must not be killed by `--refresh-stale-children`.
+    let (_respawnable, stale_unmanaged_sessions) =
+        partition_stale_by_eligibility(&stale_binary_sessions, &eligible_names);
+
     Ok(SupervisorState {
         supervisor_pid,
         supervisor_alive,
         sessions,
         unmanaged_pids,
         stale_binary_sessions,
+        stale_unmanaged_sessions,
     })
+}
+
+/// Split stale-binary session names into `(respawnable, unmanaged)`: a stale
+/// session is respawnable iff the `--all-sessions` supervisor would re-own it
+/// (its name is in `eligible`). The `unmanaged` ones are stale daemons the
+/// supervisor's eligibility filter drops (unbound + idle past the cutoff, or
+/// never-synced) — killing one orphans it because nothing respawns it. Pure +
+/// unit-tested so `wire upgrade --refresh-stale-children`'s "don't kill what
+/// you can't respawn" contract (#275) is locked. Order-preserving.
+fn partition_stale_by_eligibility(
+    stale: &[String],
+    eligible: &std::collections::HashSet<String>,
+) -> (Vec<String>, Vec<String>) {
+    stale
+        .iter()
+        .cloned()
+        .partition(|name| eligible.contains(name))
 }
 
 /// Compare two dotted-integer version strings: `a < b`?
@@ -1000,6 +1049,36 @@ mod tests {
             parse_max_idle(Some("not-a-number")),
             Some(Duration::from_secs(DEFAULT_MAX_IDLE_DAYS * 86_400))
         );
+    }
+
+    #[test]
+    fn partition_stale_splits_respawnable_from_unmanaged() {
+        // #275: stale sessions the supervisor would respawn (eligible) vs ones
+        // it would orphan. `wire upgrade --refresh-stale-children` may kill the
+        // former (supervisor brings them back) but must leave the latter.
+        let stale = vec![
+            "bound".to_string(),
+            "active".to_string(),
+            "orphan".to_string(),
+        ];
+        let eligible: std::collections::HashSet<String> =
+            ["bound".to_string(), "active".to_string()]
+                .into_iter()
+                .collect();
+        let (respawnable, unmanaged) = partition_stale_by_eligibility(&stale, &eligible);
+        assert_eq!(respawnable, vec!["bound".to_string(), "active".to_string()]);
+        assert_eq!(unmanaged, vec!["orphan".to_string()]);
+    }
+
+    #[test]
+    fn partition_stale_all_unmanaged_when_none_eligible() {
+        // No supervisor-eligible sessions → every stale daemon is unmanaged →
+        // none may be killed (the silent-orphan footgun from #275).
+        let stale = vec!["a".to_string(), "b".to_string()];
+        let eligible = std::collections::HashSet::new();
+        let (respawnable, unmanaged) = partition_stale_by_eligibility(&stale, &eligible);
+        assert!(respawnable.is_empty());
+        assert_eq!(unmanaged, stale);
     }
 
     #[test]
