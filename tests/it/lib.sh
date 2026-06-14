@@ -37,22 +37,33 @@ _it_cleanup() {
 # it_home <label> -> echoes a fresh per-agent WIRE_HOME under the test tmp.
 it_home() { local d="$_IT_TMP/$1"; mkdir -p "$d"; echo "$d"; }
 
-# boot_relay <port> [--local-only] -> starts a relay-server on 127.0.0.1:<port>,
-# waits for /healthz, tracks the pid for cleanup. Echoes the relay URL.
-boot_relay() {
-  local port="$1"; shift
+# boot_relay_on <host> <port> [--local-only] -> starts a relay-server bound to
+# <host>:<port>, waits for /healthz, tracks the pid for cleanup. Echoes the URL.
+boot_relay_on() {
+  local host="$1" port="$2"; shift 2
   local home="$_IT_TMP/relay-$port"; mkdir -p "$home"
-  WIRE_HOME="$home" "$WIRE" relay-server --bind "127.0.0.1:$port" "$@" \
+  WIRE_HOME="$home" "$WIRE" relay-server --bind "$host:$port" "$@" \
     >"$_IT_TMP/relay-$port.log" 2>&1 &
   _IT_PIDS="$_IT_PIDS $!"
-  local url="http://127.0.0.1:$port" i
+  local url="http://$host:$port" i
   for i in $(seq 1 40); do
     curl -fsS "$url/healthz" >/dev/null 2>&1 && { echo "$url"; return 0; }
     sleep 0.25
   done
-  echo "FATAL: relay on $port never became healthy" >&2
+  echo "FATAL: relay on $host:$port never became healthy" >&2
   cat "$_IT_TMP/relay-$port.log" >&2
   exit 1
+}
+
+# boot_relay <port> [--local-only] -> boot_relay_on loopback (the common case).
+boot_relay() { local port="$1"; shift; boot_relay_on "127.0.0.1" "$port" "$@"; }
+
+# nonloopback_ip -> a routable, non-loopback IPv4 of this host (empty if none).
+nonloopback_ip() {
+  local ip
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' | head -1)"
+  [ -n "$ip" ] || ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  echo "$ip"
 }
 
 # w <home> <wire args...> -> run the wire CLI against a specific home, quietly.
