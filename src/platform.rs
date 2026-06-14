@@ -16,8 +16,104 @@
 //! Each helper returns conservative defaults on tool failure (empty
 //! Vec, `false`) so callers can chain them without aborting an upgrade
 //! mid-flight when one query hiccups.
+//!
+//! ### Bounded shell-out (#284.1)
+//!
+//! Every Windows shell-out below is wrapped in [`run_with_timeout`].
+//! PowerShell's `Get-CimInstance` can wedge — observed on a host with
+//! 254 stale `wire.exe` processes piled up by a broken SessionStart
+//! loop, but also any corrupted CIM repository — and any `wire status`
+//! / `wire up` / `wire doctor` call that lands on a wedged enumeration
+//! would block forever waiting on the child. The wrapper kills the
+//! child after `WIRE_PLATFORM_TIMEOUT_SECS` (default 5s) and the
+//! caller falls through to its existing tool-error fallback (empty
+//! Vec, `None`, etc.), so a probe that can't answer in 5s reads as
+//! "no answer" rather than "wedge the whole CLI".
 
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+/// Bounded timeout for Windows shell-outs in this module. Override via
+/// `WIRE_PLATFORM_TIMEOUT_SECS`. Default 5s — every probe in this
+/// module is a single PowerShell / tasklist call that completes in
+/// well under 500ms on a healthy host. POSIX builds never call this
+/// at runtime (the test module does, hence not `#[cfg(windows)]`-only),
+/// so silence the dead-code lint there.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn platform_shell_timeout() -> Duration {
+    std::env::var("WIRE_PLATFORM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(5))
+}
+
+/// Run `cmd` with a wall-clock timeout. Returns `Some(Output)` on
+/// completion, or `None` on timeout (or spawn failure / wait failure).
+/// On timeout the child is killed best-effort via a platform-native
+/// shell-out (`taskkill /F /T /PID` on Windows, `kill -9` on POSIX) so
+/// the wedged process tree exits with the wrapper.
+///
+/// `Stdio` defaults: stdin null, stdout/stderr piped. Callers may
+/// override `stdin` before calling but should leave the pipes alone —
+/// the reader thread relies on them being captured to drain output
+/// while we wait.
+///
+/// Implementation: spawn the child, hand `wait_with_output` to a
+/// background thread that sends the result through a channel, then
+/// `recv_timeout` on the main thread. On timeout we kill the PID via
+/// the OS-native tool (we can't call `Child::kill` here because the
+/// `Child` moved into the reader thread).
+pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = cmd.spawn().ok()?;
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel::<Output>();
+    thread::spawn(move || {
+        if let Ok(out) = child.wait_with_output() {
+            let _ = tx.send(out);
+        }
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(out) => Some(out),
+        Err(_) => {
+            // Kill the wedged child by PID. Best-effort: a failure here
+            // just means the reader thread keeps waiting; the main
+            // thread already moved on with `None`.
+            kill_pid_best_effort(pid);
+            None
+        }
+    }
+}
+
+fn kill_pid_best_effort(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill.exe")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+    }
+}
 
 /// True iff pid is alive.
 ///
@@ -44,15 +140,22 @@ pub fn process_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        let out = Command::new("tasklist.exe")
-            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
+        // Bounded: a wedged `tasklist` would hang every `wire status` /
+        // `wire doctor` it touches. 5s default — `tasklist /FI "PID eq …"`
+        // completes in well under 100ms on a healthy host.
+        let mut cmd = Command::new("tasklist.exe");
+        cmd.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);
+        match run_with_timeout(cmd, platform_shell_timeout()) {
+            Some(o) if o.status.success() => {
                 let s = String::from_utf8_lossy(&o.stdout);
                 let trimmed = s.trim();
                 !trimmed.is_empty() && !trimmed.starts_with("INFO:")
             }
+            // Timeout / failure → conservative `false` (treat as dead).
+            // Same fallback the old `Err(_) | Ok(non-success)` arm
+            // produced; `wire status` already handles "daemon missing"
+            // cleanly, and surfacing "timed out probing" is part of
+            // #284.1's bounded-but-loud story.
             _ => false,
         }
     }
@@ -129,10 +232,13 @@ pub fn find_processes_by_cmdline(pattern: &str) -> Vec<u32> {
              Where-Object {{ $_.Name -like 'wire*' -and $_.ProcessId -ne $PID -and $_.CommandLine -like '*{escaped}*' }} | \
              Select-Object -ExpandProperty ProcessId"
         );
-        Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
-            .output()
-            .ok()
+        // Bounded: a wedged `Get-CimInstance` (corrupted CIM repo, or
+        // simply slow under heavy WMI contention on a host with
+        // hundreds of stale `wire.exe` processes — see #284.1 / #284.2)
+        // would hang every CLI invocation it's reached from. 5s default.
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &ps]);
+        run_with_timeout(cmd, platform_shell_timeout())
             .filter(|o| o.status.success())
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
@@ -204,10 +310,9 @@ pub fn pid_cmdline(pid: u32) -> Option<String> {
              Where-Object {{ $_.ProcessId -eq {pid} }} | \
              Select-Object -ExpandProperty CommandLine"
         );
-        let out = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
-            .output()
-            .ok()?;
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &ps]);
+        let out = run_with_timeout(cmd, platform_shell_timeout())?;
         if !out.status.success() {
             return None;
         }
@@ -446,5 +551,85 @@ mod tests {
         // worth a test, given the cfg-gated dispatch.
         let dead = 4_000_000_002;
         let _ = kill_process(dead, false);
+    }
+
+    // ---------- #284.1: run_with_timeout ----------
+
+    use std::time::Instant;
+
+    #[test]
+    fn run_with_timeout_returns_some_on_fast_command() {
+        // Pick a tiny command that exists on every platform.
+        #[cfg(unix)]
+        let cmd = {
+            let mut c = Command::new("echo");
+            c.arg("hello");
+            c
+        };
+        #[cfg(windows)]
+        let cmd = {
+            let mut c = Command::new("cmd.exe");
+            c.args(["/C", "echo hello"]);
+            c
+        };
+        let out = run_with_timeout(cmd, Duration::from_secs(5));
+        assert!(out.is_some(), "echo must complete inside 5s");
+        let out = out.unwrap();
+        assert!(out.status.success());
+        let s = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            s.contains("hello"),
+            "stdout should contain `hello`; got {s:?}"
+        );
+    }
+
+    #[test]
+    fn run_with_timeout_returns_none_and_kills_on_slow_command() {
+        // Sleep WAY past the timeout so we can prove the wrapper
+        // returns inside the timeout window, not at sleep completion.
+        #[cfg(unix)]
+        let cmd = {
+            let mut c = Command::new("sleep");
+            c.arg("60");
+            c
+        };
+        #[cfg(windows)]
+        let cmd = {
+            let mut c = Command::new("powershell.exe");
+            c.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 60",
+            ]);
+            c
+        };
+        let started = Instant::now();
+        let out = run_with_timeout(cmd, Duration::from_millis(500));
+        let elapsed = started.elapsed();
+        assert!(out.is_none(), "slow command must time out, got {out:?}");
+        // Generous upper bound — taskkill / kill spawning takes a beat,
+        // and CI runners are not real-time. The point is "not 60s".
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "must return well inside the wedged child's runtime; elapsed={elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn platform_shell_timeout_default_is_5s() {
+        // SAFETY: serial tests + this test only reads / restores its own var.
+        // Save and restore any existing value so a sibling test isn't
+        // perturbed (no global ENV_LOCK in this module).
+        let prev = std::env::var("WIRE_PLATFORM_TIMEOUT_SECS").ok();
+        unsafe { std::env::remove_var("WIRE_PLATFORM_TIMEOUT_SECS") };
+        assert_eq!(platform_shell_timeout(), Duration::from_secs(5));
+        unsafe { std::env::set_var("WIRE_PLATFORM_TIMEOUT_SECS", "12") };
+        assert_eq!(platform_shell_timeout(), Duration::from_secs(12));
+        // Restore.
+        match prev {
+            Some(v) => unsafe { std::env::set_var("WIRE_PLATFORM_TIMEOUT_SECS", v) },
+            None => unsafe { std::env::remove_var("WIRE_PLATFORM_TIMEOUT_SECS") },
+        }
     }
 }
