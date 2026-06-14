@@ -82,11 +82,12 @@ pub enum Command {
     /// slotless, acknowledge `wire bind-relay` is required before any
     /// pair or send).
     ///
-    /// v0.13.1: folded into `wire up` and hidden. Your handle is your
-    /// DID-derived persona (one-name rule) — there is no name to type. Init
-    /// is the sole naming event: it mints the keypair and the persona is
-    /// derived from it. Kept callable for explicit offline keygen
-    /// (`wire init --offline`); everyone else uses `wire up`.
+    /// Internal primitive — folded into `wire up` and hidden. Your handle is
+    /// your DID-derived persona (one-name rule); there is no name to type.
+    /// Init is the sole naming event: it mints the keypair and the persona is
+    /// derived from it. Users never type this — `wire up` runs it, and
+    /// `wire up --offline` covers offline keygen. Kept as a callable command
+    /// only because `wire up` / `wire session new` invoke it internally.
     #[command(hide = true)]
     Init {
         /// Relay URL — binds an inbound slot in the same step. Required
@@ -626,6 +627,11 @@ pub enum Command {
         /// or a full URL. Omit for the default public relay. No nick — your
         /// handle is your DID-derived persona.
         relay: Option<String>,
+        /// Mint your identity offline — keypair + DID-derived persona, no
+        /// relay bound and nothing claimed. Bind later with `wire up <relay>`
+        /// or `wire bind-relay <relay>`. For air-gapped keygen / bind-later.
+        #[arg(long, conflicts_with_all = ["relay", "with_local"])]
+        offline: bool,
         /// Also additively dual-bind a LOCAL relay slot for fast same-box
         /// sister-session routing. Defaults to probing
         /// `http://127.0.0.1:8771`; pass a URL to override. Local relays
@@ -1906,10 +1912,17 @@ pub fn run() -> Result<()> {
         } => pairing::cmd_add(&handle, relay.as_deref(), local_sister, json),
         Command::Up {
             relay,
+            offline,
             with_local,
             no_local,
             json,
-        } => setup::cmd_up(relay.as_deref(), with_local.as_deref(), no_local, json),
+        } => setup::cmd_up(
+            relay.as_deref(),
+            offline,
+            with_local.as_deref(),
+            no_local,
+            json,
+        ),
         Command::Doctor {
             json,
             recent_rejections,

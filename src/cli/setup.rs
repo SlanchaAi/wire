@@ -16,6 +16,7 @@ use crate::config;
 ///     public relay)
 pub(crate) fn cmd_up(
     relay_arg: Option<&str>,
+    offline: bool,
     with_local: Option<&str>,
     no_local: bool,
     as_json: bool,
@@ -51,10 +52,17 @@ pub(crate) fn cmd_up(
         }
     };
 
-    // 1. init (or note existing identity). No typed name — cmd_init(None)
-    // generates the persona from the freshly-minted keypair (one-name rule).
+    // 1. init (or note existing identity). No typed name — cmd_init generates
+    // the persona from the freshly-minted keypair (one-name rule). `--offline`
+    // mints keypair only; no relay is bound.
     if config::is_initialized()? {
         step("init", "already initialized".to_string());
+    } else if offline {
+        super::cmd_init(None, /* offline */ true, /* as_json */ false)?;
+        step(
+            "init",
+            "created offline identity (no relay bound)".to_string(),
+        );
     } else {
         super::cmd_init(Some(&relay_url), false, /* as_json */ false)?;
         step("init", format!("created identity bound to {relay_url}"));
@@ -67,6 +75,36 @@ pub(crate) fn cmd_up(
         crate::agent_card::display_handle_from_did(did).to_string()
     };
     step("identity", format!("persona is `{canonical}`"));
+
+    // Offline: identity is minted but unbound — no relay to bind, claim, or
+    // dual-slot, and a slotless daemon has nothing to sync. Report how to go
+    // online later and return before any networked step.
+    if offline {
+        step(
+            "offline",
+            format!(
+                "identity ready, no relay bound. Go online later: \
+                 `wire up` (default relay) or `wire bind-relay <relay>`, \
+                 then `wire claim {canonical}`."
+            ),
+        );
+        if as_json {
+            let steps_json: Vec<_> = report
+                .iter()
+                .map(|(k, v)| json!({"stage": k, "detail": v}))
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "nick": canonical,
+                    "relay": Value::Null,
+                    "offline": true,
+                    "steps": steps_json,
+                }))?
+            );
+        }
+        return Ok(());
+    }
 
     // 2. Ensure relay binding matches. cmd_init with --relay binds it; if
     // already initialized we may need to bind to the requested relay

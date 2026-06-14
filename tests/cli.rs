@@ -141,6 +141,45 @@ fn whoami_json_surfaces_session_source() {
 }
 
 #[test]
+fn up_offline_mints_identity_without_binding_a_relay() {
+    // `wire up --offline` folds in the old `init --offline` keygen: it mints
+    // the keypair + DID-derived persona but binds no relay and claims nothing.
+    let home = fresh_home();
+    let out = run(&home, &["up", "--offline"]);
+    assert!(out.status.success(), "up --offline failed: {out:?}");
+    assert!(
+        home.join("config/wire/agent-card.json").exists(),
+        "identity not minted"
+    );
+    // The narrated steps (stderr) must report the unbound/offline state.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("offline") || stderr.contains("no relay bound"),
+        "up --offline should report the unbound state: {stderr}"
+    );
+    // No relay bound: relay-state, if written, carries no self.relay_url.
+    if let Ok(txt) = std::fs::read_to_string(home.join("config/wire/relay.json")) {
+        let rs: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
+        let bound = rs["self"]["relay_url"].as_str().unwrap_or("");
+        assert!(
+            bound.is_empty(),
+            "offline must not bind a relay_url, got `{bound}`"
+        );
+    }
+}
+
+#[test]
+fn up_offline_conflicts_with_a_relay_arg() {
+    // You can't be offline and bind a relay in one breath — clap rejects it.
+    let home = fresh_home();
+    let out = run(&home, &["up", "@wireup.net", "--offline"]);
+    assert!(
+        !out.status.success(),
+        "up --offline with a relay arg must be rejected"
+    );
+}
+
+#[test]
 fn init_creates_keypair_and_card() {
     let home = fresh_home();
     let out = run(&home, &["init", "--offline", "--json"]);
