@@ -153,7 +153,10 @@ pub fn status() -> Result<ServiceReport> {
 
 /// Install a user-scope service unit for the given kind.
 pub fn install_kind(kind: ServiceKind) -> Result<ServiceReport> {
-    let exe = std::env::current_exe()?;
+    // Robust to a `cargo install` in-place replace mid-`wire upgrade`: the
+    // kernel marks `/proc/self/exe` with a trailing ` (deleted)` that, written
+    // verbatim into ExecStart=, corrupts the unit (issue #274).
+    let exe = crate::platform::current_exe_resolved()?;
     let exe_str = exe.to_string_lossy().to_string();
 
     // v0.5.23: log path is macOS-only — launchd's StandardOutPath

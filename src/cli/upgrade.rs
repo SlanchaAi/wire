@@ -386,7 +386,13 @@ fn sha256_file(p: &std::path::Path) -> Result<String> {
 ///   running, so SOMETHING resolved this binary, just not via PATH).
 fn enumerate_path_wire_binaries() -> Vec<PathWireBinary> {
     let path = std::env::var("PATH").unwrap_or_default();
-    let current_exe_canon: Option<std::path::PathBuf> = std::env::current_exe()
+    // Resolve the ` (deleted)` kernel marker BEFORE canonicalize: after a
+    // `cargo install` in-place replace, `current_exe()` is `…/wire (deleted)`,
+    // which can't canonicalize → is_current_exe never matches → a false
+    // "off-PATH / old binary" warning even when the active PATH entry is a
+    // symlink to the freshly-upgraded binary (issue #276). Stripping the marker
+    // first lets the recreated install path canonicalize and match.
+    let current_exe_canon: Option<std::path::PathBuf> = crate::platform::current_exe_resolved()
         .ok()
         .and_then(|p| p.canonicalize().ok());
     enumerate_path_wire_binaries_from(&path, current_exe_canon.as_deref())
@@ -1395,6 +1401,42 @@ mod upgrade_tests {
         // path is the symlink (what the operator wrote), canonical is the real file.
         assert_eq!(bins[0].path, link);
         assert_eq!(bins[0].canonical, real.canonicalize().unwrap());
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore = "PATH separator + symlink semantics differ")]
+    fn no_shadow_warning_when_active_symlink_resolves_to_current_exe() {
+        // Issue #276: ~/.local/bin/wire is a symlink → ~/.cargo/bin/wire (the
+        // upgraded binary), and current_exe canonicalizes to that same real
+        // file. Both PATH entries are the SAME upgraded binary — there is no
+        // shadow, so no warning. (In production the caller first strips the
+        // ` (deleted)` marker so current_exe CAN canonicalize; here we pass the
+        // resolved canonical path directly, which is what that strip yields.)
+        let real_dir = tempfile::tempdir().unwrap();
+        let link_dir = tempfile::tempdir().unwrap();
+        let real = write_fake_wire(real_dir.path(), b"#!/bin/sh\necho upgraded\n");
+        let link = link_dir.path().join("wire");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let real_canon = real.canonicalize().unwrap();
+
+        // Symlink dir precedes the real dir on PATH (the #276 layout).
+        let path = format!(
+            "{}:{}",
+            link_dir.path().display(),
+            real_dir.path().display()
+        );
+        let bins = enumerate_path_wire_binaries_from(&path, Some(&real_canon));
+        assert_eq!(bins.len(), 1, "symlink chain collapses: {bins:?}");
+        assert!(
+            bins[0].is_current_exe,
+            "active symlink resolving to current_exe must count as current_exe"
+        );
+        assert!(
+            path_shadow_warning(&bins).is_none(),
+            "no warning when the active PATH entry resolves to the upgraded binary; got: {:?}",
+            path_shadow_warning(&bins)
+        );
     }
 
     #[test]
