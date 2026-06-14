@@ -55,11 +55,11 @@ sleep 0.5
 curl -fsS "$RELAY_URL/healthz" >/dev/null || { echo "relay did not come up"; cat "$WORK/relay.log"; exit 1; }
 
 echo "→ paul + willard init on $RELAY_URL"
-WIRE_HOME="$PAUL_HOME"    "$WIRE" init paul    --relay "$RELAY_URL" >/dev/null
-WIRE_HOME="$WILLARD_HOME" "$WIRE" init willard --relay "$RELAY_URL" >/dev/null
-# v0.11: discover each side's DID-derived character. The operator-typed
-# "paul" / "willard" are ignored at init; peers reach each other only by
-# the character handle.
+WIRE_HOME="$PAUL_HOME"    "$WIRE" init --relay "$RELAY_URL" >/dev/null
+WIRE_HOME="$WILLARD_HOME" "$WIRE" init --relay "$RELAY_URL" >/dev/null
+# init takes no name — each side's handle is its DID-derived persona,
+# minted from the keypair. Discover it; peers reach each other only by
+# that handle.
 PAUL_H="$(WIRE_HOME="$PAUL_HOME"    "$WIRE" whoami --json | jq -r .handle)"
 WILL_H="$(WIRE_HOME="$WILLARD_HOME" "$WIRE" whoami --json | jq -r .handle)"
 echo "    paul    → $PAUL_H"
