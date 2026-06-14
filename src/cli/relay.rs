@@ -310,28 +310,14 @@ pub(super) fn cmd_add_peer_slot(
         slot_token: slot_token.to_string(),
         scope: infer_scope_from_url(url),
     };
+    // RFC-006 Part B: `endpoints[]` is the single peer-routing source — no flat
+    // fallback (every pin carries `endpoints[]`).
     let mut endpoints: Vec<Endpoint> = state
         .get("peers")
         .and_then(|p| p.get(handle))
         .and_then(|e| e.get("endpoints"))
         .and_then(|a| serde_json::from_value::<Vec<Endpoint>>(a.clone()).ok())
         .unwrap_or_default();
-    // Back-compat: seed from legacy flat fields when the peer predates endpoints[].
-    if endpoints.is_empty()
-        && let Some(peer) = state.get("peers").and_then(|p| p.get(handle))
-        && let (Some(ru), Some(si), Some(st)) = (
-            peer.get("relay_url").and_then(Value::as_str),
-            peer.get("slot_id").and_then(Value::as_str),
-            peer.get("slot_token").and_then(Value::as_str),
-        )
-    {
-        endpoints.push(Endpoint {
-            relay_url: ru.to_string(),
-            slot_id: si.to_string(),
-            slot_token: st.to_string(),
-            scope: infer_scope_from_url(ru),
-        });
-    }
     // Upsert by relay_url: refresh in place if already pinned, else append.
     if let Some(existing) = endpoints
         .iter_mut()

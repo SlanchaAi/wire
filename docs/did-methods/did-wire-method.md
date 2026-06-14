@@ -51,10 +51,10 @@ The substring before the `-<fingerprint>` suffix MUST equal the agent's `handle`
 A wire agent generates a fresh Ed25519 keypair, builds a signed agent-card binding the DID to the public key, and (for federated visibility) claims the handle on a relay via `POST /v1/handle/claim`. The signed card IS the DID document; no separate registry update is needed.
 
 ```
-wire init <handle> --relay <relay-url>          # creates keypair + binds inbound slot
+wire init --relay <relay-url>                   # mints keypair (persona derived from it) + binds inbound slot
 wire bind-relay <relay-url>                     # (re-)bind to a relay if not done at init
 wire claim <handle> --relay <relay-url> --public-url <public-url>
-wire up <handle>@<relay-domain>                 # one-shot: init + bind + claim
+wire up @<relay-domain>                         # one-shot: init + bind + claim (no name — your handle is your persona)
 ```
 
 Operator and organisation DIDs (`did:wire:op:*`, `did:wire:org:*`) are created the same way but use the 32-hex `long_fingerprint`. They are minted by the operator's identity tooling — `wire enroll op` mints the operator root key; `wire enroll org-create` mints an organisation root key; `wire enroll org-add-member` issues a membership cert binding an `op_did` to an `org_did` (shipped in [#102](https://github.com/SlanchaAi/wire/pull/102)). Their pubkeys (and the membership certs) are embedded **inline** on each session card via the `op_pubkey` / `op_did` / `op_cert` and `org_memberships[].{org_did, org_pubkey, member_cert}` fields added in [RFC-001](../rfc/0001-identity-layer.md) (agent-card `schema_version: "v3.2"`) — verification is fully offline (no resolver, no lookup) on the pairing hot path.

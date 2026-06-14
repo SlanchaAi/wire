@@ -169,11 +169,7 @@ async fn bind_relay_is_additive_keeps_federation_and_local() {
     let home = fresh_dir("additive");
 
     // init binds the federation slot.
-    assert!(
-        wire(&home, &["init", "alice", "--relay", &fed])
-            .status
-            .success()
-    );
+    assert!(wire(&home, &["init", "--relay", &fed]).status.success());
     // additively bind the local slot.
     let out = wire(&home, &["bind-relay", &local, "--scope", "local", "--json"]);
     assert!(
@@ -313,22 +309,14 @@ async fn dual_slot_send_prefers_local_endpoint() {
     let bob = fresh_dir("bob");
 
     // Init + claim on federation.
-    assert!(
-        wire(&alice, &["init", "alice", "--relay", &fed])
-            .status
-            .success()
-    );
+    assert!(wire(&alice, &["init", "--relay", &fed]).status.success());
     let alice_h = read_handle(&alice);
     assert!(
         wire(&alice, &["claim", &alice_h, "--relay", &fed])
             .status
             .success()
     );
-    assert!(
-        wire(&bob, &["init", "bob", "--relay", &fed])
-            .status
-            .success()
-    );
+    assert!(wire(&bob, &["init", "--relay", &fed]).status.success());
     let bob_h = read_handle(&bob);
     assert!(
         wire(&bob, &["claim", &bob_h, "--relay", &fed])
@@ -443,11 +431,7 @@ async fn dual_slot_send_falls_back_to_federation_on_local_failure() {
     let bob = fresh_dir("bob-fallback");
 
     // Init + claim on federation.
-    assert!(
-        wire(&alice, &["init", "alice", "--relay", &fed])
-            .status
-            .success()
-    );
+    assert!(wire(&alice, &["init", "--relay", &fed]).status.success());
     let alice_h = read_handle(&alice);
     let _ = &alice_h; // v0.11 unused-var hush
     assert!(
@@ -455,11 +439,7 @@ async fn dual_slot_send_falls_back_to_federation_on_local_failure() {
             .status
             .success()
     );
-    assert!(
-        wire(&bob, &["init", "bob", "--relay", &fed])
-            .status
-            .success()
-    );
+    assert!(wire(&bob, &["init", "--relay", &fed]).status.success());
     let bob_h = read_handle(&bob);
     let _ = &bob_h; // v0.11 unused-var hush
     assert!(
@@ -552,11 +532,7 @@ async fn dual_slot_back_compat_v0_5_16_peer_routes_via_federation() {
     let alice = fresh_dir("alice-backcompat");
     let bob = fresh_dir("bob-backcompat");
 
-    assert!(
-        wire(&alice, &["init", "alice", "--relay", &fed])
-            .status
-            .success()
-    );
+    assert!(wire(&alice, &["init", "--relay", &fed]).status.success());
     let alice_h = read_handle(&alice);
     let _ = &alice_h; // v0.11 unused-var hush
     assert!(
@@ -564,11 +540,7 @@ async fn dual_slot_back_compat_v0_5_16_peer_routes_via_federation() {
             .status
             .success()
     );
-    assert!(
-        wire(&bob, &["init", "bob", "--relay", &fed])
-            .status
-            .success()
-    );
+    assert!(wire(&bob, &["init", "--relay", &fed]).status.success());
     let bob_h = read_handle(&bob);
     let _ = &bob_h; // v0.11 unused-var hush
     assert!(

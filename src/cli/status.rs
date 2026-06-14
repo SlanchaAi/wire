@@ -503,40 +503,32 @@ fn responder_status_allowed(status: &str) -> bool {
 
 fn relay_slot_for(peer: Option<&str>) -> Result<(String, String, String, String)> {
     let state = config::read_relay_state()?;
-    let (label, slot_info) = match peer {
-        Some(peer) => (
-            peer.to_string(),
-            state
-                .get("peers")
-                .and_then(|p| p.get(peer))
-                .ok_or_else(|| {
-                    anyhow!(
-                        "unknown peer {peer:?} in relay state — pair with them first:\n  \
-                         wire add {peer}@wireup.net   (or {peer}@<their-relay>)\n\
-                         (`wire peers` lists who you've already paired with.)"
-                    )
-                })?,
-        ),
+    // RFC-006 Part B: resolve through the endpoint helpers. Peer routing comes
+    // from `endpoints[]` (single source); self still synthesizes from its flat
+    // fields (self-slot collapse is a separate step).
+    let (label, ep) = match peer {
+        Some(peer) => {
+            if state.get("peers").and_then(|p| p.get(peer)).is_none() {
+                anyhow::bail!(
+                    "unknown peer {peer:?} in relay state — pair with them first:\n  \
+                     wire add {peer}@wireup.net   (or {peer}@<their-relay>)\n\
+                     (`wire peers` lists who you've already paired with.)"
+                );
+            }
+            (
+                peer.to_string(),
+                crate::endpoints::peer_primary_endpoint(&state, peer)
+                    .ok_or_else(|| anyhow!("{peer} has no pinned endpoints — re-pair"))?,
+            )
+        }
         None => (
             "self".to_string(),
-            state.get("self").filter(|v| !v.is_null()).ok_or_else(|| {
+            crate::endpoints::self_primary_endpoint(&state).ok_or_else(|| {
                 anyhow!("self slot not bound — run `wire bind-relay <url>` first")
             })?,
         ),
     };
-    let relay_url = slot_info["relay_url"]
-        .as_str()
-        .ok_or_else(|| anyhow!("{label} relay_url missing"))?
-        .to_string();
-    let slot_id = slot_info["slot_id"]
-        .as_str()
-        .ok_or_else(|| anyhow!("{label} slot_id missing"))?
-        .to_string();
-    let slot_token = slot_info["slot_token"]
-        .as_str()
-        .ok_or_else(|| anyhow!("{label} slot_token missing"))?
-        .to_string();
-    Ok((label, relay_url, slot_id, slot_token))
+    Ok((label, ep.relay_url, ep.slot_id, ep.slot_token))
 }
 
 /// v0.14.2 (#170 / honey-pine BUG 3): `wire supervisor` — operator-

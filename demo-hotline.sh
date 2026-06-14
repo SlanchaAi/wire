@@ -72,7 +72,7 @@ for h in "${HANDLES[@]}"; do
     home="$WORK/$h"
     mkdir -p "$home"
     echo "→ $h: init + claim"
-    WIRE_HOME="$home" "$WIRE" init "$h" --relay "$RELAY_URL" >/dev/null
+    WIRE_HOME="$home" "$WIRE" init --relay "$RELAY_URL" >/dev/null
     char="$(WIRE_HOME="$home" "$WIRE" whoami --json | jq -r .handle)"
     CHAR_OF[$h]="$char"
     WIRE_HOME="$home" "$WIRE" profile set emoji "${EMOJI[$h]}" >/dev/null
