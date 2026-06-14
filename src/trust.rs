@@ -129,7 +129,11 @@ pub fn effective_tier(trust: &Value, relay_state: &Value, handle: &str) -> Strin
         || crate::endpoints::peer_endpoints_in_priority_order(relay_state, handle)
             .iter()
             .any(|e| !e.slot_token.is_empty());
-    if has_slot { raw } else { "PENDING_ACK".to_string() }
+    if has_slot {
+        raw
+    } else {
+        "PENDING_ACK".to_string()
+    }
 }
 
 /// Resolve a bare peer handle to the full DID stored in trust. Falls back
