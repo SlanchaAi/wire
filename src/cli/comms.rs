@@ -989,13 +989,11 @@ pub(super) fn cmd_tail(
     Ok(())
 }
 
-/// True iff `event` carries an `enc` envelope that wasn't opened for this read
-/// (no `dec:true` marker from [`crate::enc::wire_x25519::decrypt_event_for_read`]).
-/// Such a body is ciphertext we can't render — decrypt failed, we had no key, or
-/// it's an `enc` scheme this build doesn't understand. Pure; unit-tested (#281).
+/// True iff `event` carries an `enc` envelope that wasn't opened for this read.
+/// Thin wrapper over the enc-module single source of truth (#281) so `wire tail`,
+/// the `wire_tail` MCP tool, and the `wire://inbox` resource all agree.
 fn tail_event_undecryptable(event: &Value) -> bool {
-    event.get("enc").and_then(Value::as_str).is_some()
-        && event.get("dec").and_then(Value::as_bool) != Some(true)
+    crate::enc::wire_x25519::is_encrypted_unreadable(event)
 }
 
 /// Human one-line body summary for `wire tail`. Returns an explicit placeholder
@@ -1004,10 +1002,7 @@ fn tail_event_undecryptable(event: &Value) -> bool {
 /// look like a delivered plaintext. Plaintext bodies render as before.
 fn tail_body_summary(event: &Value) -> String {
     if tail_event_undecryptable(event) {
-        let enc = event.get("enc").and_then(Value::as_str).unwrap_or("?");
-        return format!(
-            "<encrypted DM (enc={enc}) — this wire build could not decrypt it; run `wire upgrade`, or check that the peer pinned your current key>"
-        );
+        return crate::enc::wire_x25519::undecryptable_body_placeholder(event);
     }
     match event.get("body") {
         Some(Value::String(s)) => s.clone(),
