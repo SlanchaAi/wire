@@ -470,8 +470,22 @@ fn read_inbox_resource(peer_opt: Option<String>) -> Result<String, String> {
             obj.insert("body".into(), plain);
             obj.insert("dec".into(), json!(true));
         }
+        // #281: flag + placeholder an enc body we couldn't open, rather than
+        // emitting raw ciphertext to the reading agent as the message body.
+        let undecryptable = crate::enc::wire_x25519::is_encrypted_unreadable(&event);
+        let placeholder = if undecryptable {
+            Some(crate::enc::wire_x25519::undecryptable_body_placeholder(
+                &event,
+            ))
+        } else {
+            None
+        };
         if let Some(obj) = event.as_object_mut() {
             obj.insert("verified".into(), json!(verified));
+            if let Some(p) = placeholder {
+                obj.insert("decryptable".into(), json!(false));
+                obj.insert("body".into(), json!(p));
+            }
         }
         out.push_str(&serde_json::to_string(&event).map_err(|e| e.to_string())?);
         out.push('\n');
@@ -1406,8 +1420,18 @@ fn tool_tail(args: &Value) -> Result<Value, String> {
                 Some(s) => crate::enc::wire_x25519::decrypt_event_for_read(&event, &trust, s),
                 None => event.clone(),
             };
+            // #281: an enc body we couldn't open must NOT be handed to the
+            // reading agent as raw ciphertext masquerading as the message. Flag
+            // it + replace the body with an explicit placeholder.
+            let undecryptable = crate::enc::wire_x25519::is_encrypted_unreadable(&event_with_meta);
             if let Some(obj) = event_with_meta.as_object_mut() {
                 obj.insert("verified".into(), json!(verified));
+                if undecryptable {
+                    let placeholder =
+                        crate::enc::wire_x25519::undecryptable_body_placeholder(&event);
+                    obj.insert("decryptable".into(), json!(false));
+                    obj.insert("body".into(), json!(placeholder));
+                }
             }
             let ts = event
                 .get("timestamp")

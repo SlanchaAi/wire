@@ -459,9 +459,57 @@ pub fn decrypt_event_for_read(event: &Value, trust: &Value, seed: &[u8; 32]) -> 
     event.clone()
 }
 
+/// True iff `event` still carries an `enc` envelope that was NOT opened for this
+/// read — i.e. ciphertext we cannot render as plaintext. [`decrypt_event_for_read`]
+/// marks a successful open with `dec:true` (leaving `enc` in place), so "`enc`
+/// present without `dec:true`" means encrypted-and-unreadable here: decrypt
+/// failed, we had no key, or it's an `enc` scheme this build doesn't support.
+///
+/// Single source of truth for the read surfaces (`wire tail`, the `wire_tail`
+/// MCP tool, the `wire://inbox` resource) so none of them present raw ciphertext
+/// as if it were the message body (#281). Call AFTER `decrypt_event_for_read`.
+pub fn is_encrypted_unreadable(event: &Value) -> bool {
+    event.get("enc").and_then(Value::as_str).is_some()
+        && event.get("dec").and_then(Value::as_bool) != Some(true)
+}
+
+/// Human/agent-facing placeholder string for an `enc` body this build could not
+/// decrypt — names the scheme and points at the fix, never leaks ciphertext.
+pub fn undecryptable_body_placeholder(event: &Value) -> String {
+    let enc = event.get("enc").and_then(Value::as_str).unwrap_or("?");
+    format!(
+        "<encrypted DM (enc={enc}) — this wire build could not decrypt it; run `wire upgrade`, or check that the peer pinned your current key>"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_encrypted_unreadable_flags_enc_without_dec() {
+        // enc present, no dec:true → unreadable (#281).
+        let ev = json!({"enc": ENC_DISCRIMINATOR, "body": {"ct": "AAAA"}});
+        assert!(is_encrypted_unreadable(&ev));
+        // enc + dec:true (decrypt_event_for_read marked it) → readable.
+        let ev_ok = json!({"enc": ENC_DISCRIMINATOR, "dec": true, "body": "hi"});
+        assert!(!is_encrypted_unreadable(&ev_ok));
+        // plaintext (no enc) → not flagged.
+        let ev_plain = json!({"body": "hi"});
+        assert!(!is_encrypted_unreadable(&ev_plain));
+        // unknown future enc scheme this build can't open → flagged.
+        let ev_future = json!({"enc": "future.v9", "body": {"ct": "BBBB"}});
+        assert!(is_encrypted_unreadable(&ev_future));
+    }
+
+    #[test]
+    fn undecryptable_placeholder_names_scheme_and_hides_ciphertext() {
+        let ev = json!({"enc": ENC_DISCRIMINATOR, "body": {"ct": "SECRETCIPHERTEXT"}});
+        let p = undecryptable_body_placeholder(&ev);
+        assert!(p.contains(ENC_DISCRIMINATOR), "names scheme: {p}");
+        assert!(p.contains("wire upgrade"), "points at fix: {p}");
+        assert!(!p.contains("SECRETCIPHERTEXT"), "never leaks ct: {p}");
+    }
 
     // Two fixed seeds → deterministic identities for the golden + symmetry tests.
     const SEED_A: [u8; 32] = [1u8; 32];
