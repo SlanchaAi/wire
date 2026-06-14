@@ -79,9 +79,9 @@ pub(super) fn cmd_session_new(
     // The session is not actually slotless — init is just deferred to
     // the subsequent allocation pass.
     let init_args: Vec<&str> = if local_only {
-        vec!["init", &name, "--offline"]
+        vec!["init", "--offline"]
     } else {
-        vec!["init", &name, "--relay", relay]
+        vec!["init", "--relay", relay]
     };
     let init_status = super::run_wire_with_home(&session_home, &init_args)?;
     if !init_status.success() {
@@ -768,11 +768,11 @@ pub fn maybe_auto_init_cwd_session(label: &str) {
         // try_allocate_local_slot afterward to attach an inbound slot
         // when a local relay is available. Init itself stays slotless
         // because it's a precursor step, not the final state.
-        match super::run_wire_with_home(&session_home, &["init", &name, "--offline"]) {
+        match super::run_wire_with_home(&session_home, &["init", "--offline"]) {
             Ok(status) if status.success() => {}
             Ok(status) => {
                 eprintln!(
-                    "wire {label}: auto-init: `wire init {name}` exited non-zero ({status}) — falling back to default identity"
+                    "wire {label}: auto-init: `wire init` for `{name}` exited non-zero ({status}) — falling back to default identity"
                 );
                 let _ = fs2::FileExt::unlock(&lock_file);
                 return;
