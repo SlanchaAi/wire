@@ -424,7 +424,8 @@ pub fn accept_invite(url: &str) -> Result<Value> {
 
     // Pin issuer in trust + relay-state.
     let mut trust = config::read_trust()?;
-    crate::trust::add_agent_card_pin(&mut trust, &payload.card, Some("VERIFIED"));
+    crate::trust::add_agent_card_pin(&mut trust, &payload.card, Some("VERIFIED"))
+        .map_err(anyhow::Error::msg)?;
     config::write_trust(&trust)?;
 
     let peer_handle = crate::agent_card::display_handle_from_did(&payload.did).to_string();
@@ -570,7 +571,11 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
     // (no nonce) this is the ONLY trust-write we'd make and we throw it away
     // immediately — see the bilateral-required branch below.
     let mut tmp_trust = config::read_trust()?;
-    crate::trust::add_agent_card_pin(&mut tmp_trust, &peer_card, Some("VERIFIED"));
+    // Transient pin to drive the verifier. If this nick is already pinned to a
+    // DIFFERENT identity (#245 collision), the pin is refused and the incumbent
+    // entry stays — which is correct: an impostor card then fails verify against
+    // the incumbent's key, exactly the rejection we want.
+    let _ = crate::trust::add_agent_card_pin(&mut tmp_trust, &peer_card, Some("VERIFIED"));
     crate::signing::verify_message_v31(event, &tmp_trust)
         .map_err(|e| anyhow!("pair_drop event sig verify failed: {e}"))?;
 
@@ -680,7 +685,8 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
         org_auto_pin_decision(&peer_card, &crate::org_policy::FileOrgPolicy::load())
     {
         let mut trust = crate::config::read_trust()?;
-        crate::trust::add_agent_card_pin(&mut trust, &peer_card, Some("ORG_VERIFIED"));
+        crate::trust::add_agent_card_pin(&mut trust, &peer_card, Some("ORG_VERIFIED"))
+            .map_err(anyhow::Error::msg)?;
         crate::config::write_trust(&trust)?;
 
         let endpoints_to_pin = if peer_endpoints.is_empty() {

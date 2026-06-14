@@ -76,7 +76,7 @@ fn ensure_pinned(trust: &mut Trust, peer_handle: &str, cards: &mut Vec<(String, 
     }
     let (sk, pk) = generate_keypair();
     let card = sign_agent_card(&build_agent_card(peer_handle, &pk, None, None, None), &sk);
-    add_agent_card_pin(trust, &card, None);
+    add_agent_card_pin(trust, &card, None).unwrap();
     cards.push((peer_handle.to_string(), card));
 }
 

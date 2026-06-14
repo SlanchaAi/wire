@@ -356,7 +356,8 @@ pub(super) fn cmd_pin(card_file: &str, as_json: bool) -> Result<()> {
         .map_err(|e| anyhow!("peer card signature invalid: {e}"))?;
 
     let mut trust = config::read_trust()?;
-    crate::trust::add_agent_card_pin(&mut trust, &card, Some("VERIFIED"));
+    crate::trust::add_agent_card_pin(&mut trust, &card, Some("VERIFIED"))
+        .map_err(anyhow::Error::msg)?;
 
     let did = card.get("did").and_then(Value::as_str).unwrap_or("");
     let handle = crate::agent_card::display_handle_from_did(did).to_string();
@@ -888,7 +889,8 @@ pub(crate) fn add_local_sister_core(sister_name: &str) -> Result<LocalSisterDrop
     // relay_state.peers with their full endpoint set. slot_token lands
     // via pair_drop_ack as usual.
     let mut trust = config::read_trust()?;
-    crate::trust::add_agent_card_pin(&mut trust, &sister_card, Some("VERIFIED"));
+    crate::trust::add_agent_card_pin(&mut trust, &sister_card, Some("VERIFIED"))
+        .map_err(anyhow::Error::msg)?;
     config::write_trust(&trust)?;
     let mut relay_state = config::read_relay_state()?;
     crate::endpoints::pin_peer_endpoints(&mut relay_state, &sister_handle, &sister_endpoints)?;
@@ -1146,7 +1148,8 @@ pub(super) fn cmd_add(
 
     // 3. Pin peer in trust + relay-state. slot_token will arrive via ack.
     let mut trust = config::read_trust()?;
-    crate::trust::add_agent_card_pin(&mut trust, &peer_card, Some("VERIFIED"));
+    crate::trust::add_agent_card_pin(&mut trust, &peer_card, Some("VERIFIED"))
+        .map_err(anyhow::Error::msg)?;
     config::write_trust(&trust)?;
     let mut relay_state = config::read_relay_state()?;
     // Additive re-pin (v0.13.2, E3 token-bleed fix). The old code REPLACED the
@@ -1320,7 +1323,8 @@ fn cmd_add_accept_pending(
     // 1. Pin peer in trust with VERIFIED — operator gestured consent by running
     //    `wire add` against this handle while a drop was waiting.
     let mut trust = config::read_trust()?;
-    crate::trust::add_agent_card_pin(&mut trust, &pending.peer_card, Some("VERIFIED"));
+    crate::trust::add_agent_card_pin(&mut trust, &pending.peer_card, Some("VERIFIED"))
+        .map_err(anyhow::Error::msg)?;
     config::write_trust(&trust)?;
 
     // 2. Record peer's relay coords + slot_token (already shipped to us in
