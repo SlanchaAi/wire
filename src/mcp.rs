@@ -948,7 +948,42 @@ fn tool_whoami() -> Result<Value, String> {
     for (k, v) in crate::cli::op_claims_from_card(&card) {
         payload.insert(k, v);
     }
+    // #247 finding 5: a long-lived `wire mcp` server keeps serving the binary
+    // it was spawned from. After `wire upgrade` swaps the daemon (but not the
+    // host-pinned MCP subprocess), the MCP server runs PRE-upgrade code in
+    // memory while the on-disk daemon is newer — an invisible "ghost identity"
+    // drift (today's 0.14.1-vs-0.16.0 dogfood). Surface it: compare the baked
+    // SERVER_VERSION against the live daemon's recorded version and flag a
+    // mismatch so the agent/operator knows to `/mcp` reconnect.
+    let daemon_version = match crate::ensure_up::read_pid_record("daemon") {
+        crate::ensure_up::PidRecord::Json(d) => Some(d.version.clone()),
+        _ => None,
+    };
+    payload.insert("server_version".into(), json!(SERVER_VERSION));
+    if let Some(dv) = &daemon_version {
+        payload.insert("daemon_version".into(), json!(dv));
+    }
+    if let Some(note) = mcp_stale_binary_note(SERVER_VERSION, daemon_version.as_deref()) {
+        payload.insert("stale_binary".into(), json!(true));
+        payload.insert("stale_binary_note".into(), json!(note));
+    }
     Ok(Value::Object(payload))
+}
+
+/// #247 finding 5: build a stale-binary NOTE iff the running MCP server's
+/// compile-time `server_version` differs from the live daemon's recorded
+/// `daemon_version`. `None` when there's no daemon version to compare or the
+/// versions match. The MCP server holds its binary in memory for its whole
+/// lifetime, so a mismatch means it's serving drifted code — reconnect to
+/// respawn it on the current binary. Pure → unit-tested.
+fn mcp_stale_binary_note(server_version: &str, daemon_version: Option<&str>) -> Option<String> {
+    let dv = daemon_version?;
+    if dv == server_version {
+        return None;
+    }
+    Some(format!(
+        "this wire MCP server is running v{server_version} but the on-disk daemon is v{dv} — the server is serving drifted code in memory. Reconnect (/mcp) to respawn it on the current binary."
+    ))
 }
 
 fn tool_peers() -> Result<Value, String> {
@@ -2008,6 +2043,18 @@ fn error_response(id: &Value, code: i32, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_stale_binary_note_flags_only_real_mismatch() {
+        // No daemon version to compare → no note.
+        assert!(mcp_stale_binary_note("0.16.0", None).is_none());
+        // Same version → no note.
+        assert!(mcp_stale_binary_note("0.16.0", Some("0.16.0")).is_none());
+        // Drift → note naming both versions + the /mcp reconnect remedy.
+        let n = mcp_stale_binary_note("0.14.1", Some("0.16.0")).expect("mismatch must flag");
+        assert!(n.contains("0.14.1") && n.contains("0.16.0"), "{n}");
+        assert!(n.contains("/mcp"), "{n}");
+    }
 
     #[test]
     fn unknown_method_returns_jsonrpc_error() {
