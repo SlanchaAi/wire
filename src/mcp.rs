@@ -1687,9 +1687,11 @@ fn tool_add(args: &Value) -> Result<Value, String> {
         .unwrap_or_else(|| format!("https://{}", parsed.domain));
 
     // Pin peer in trust + relay-state. slot_token arrives via ack later.
-    let mut trust = crate::config::read_trust().map_err(|e| format!("{e:#}"))?;
-    crate::trust::add_agent_card_pin(&mut trust, &peer_card, Some("VERIFIED"))?;
-    crate::config::write_trust(&trust).map_err(|e| format!("{e:#}"))?;
+    crate::config::update_trust(|trust| {
+        crate::trust::add_agent_card_pin(trust, &peer_card, Some("VERIFIED"))
+            .map_err(anyhow::Error::msg)
+    })
+    .map_err(|e| format!("{e:#}"))?;
     let mut relay_state = crate::config::read_relay_state().map_err(|e| format!("{e:#}"))?;
     let existing_token = relay_state
         .get("peers")
@@ -1782,9 +1784,11 @@ fn tool_pair_accept(args: &Value) -> Result<Value, String> {
 
     // Pin trust with VERIFIED — operator-equivalent consent gesture (the
     // agent is acting on the operator's instruction to accept).
-    let mut trust = crate::config::read_trust().map_err(|e| format!("{e:#}"))?;
-    crate::trust::add_agent_card_pin(&mut trust, &pending.peer_card, Some("VERIFIED"))?;
-    crate::config::write_trust(&trust).map_err(|e| format!("{e:#}"))?;
+    crate::config::update_trust(|trust| {
+        crate::trust::add_agent_card_pin(trust, &pending.peer_card, Some("VERIFIED"))
+            .map_err(anyhow::Error::msg)
+    })
+    .map_err(|e| format!("{e:#}"))?;
 
     // Record peer's relay coords + slot_token from the stored drop.
     let mut relay_state = crate::config::read_relay_state().map_err(|e| format!("{e:#}"))?;

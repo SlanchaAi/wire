@@ -658,6 +658,48 @@ pub fn read_trust() -> Result<Value> {
     Ok(serde_json::from_slice(&body)?)
 }
 
+/// Atomic read-modify-write against `trust.json`, mirroring [`update_relay_state`]
+/// (#246). The modifier sees a FRESH read and its result is persisted, all while
+/// holding the exclusive `trust.lock` — so a foreground pin (`wire add` /
+/// `accept` / `promote`) and the daemon's pull-path pin can't lost-update each
+/// other (each does `read_trust` → modify → `write_trust` unlocked, so without
+/// this both could read the same snapshot and the second write would drop the
+/// first's pin). If the modifier returns `Err`, the prior state is untouched.
+pub fn update_trust<F>(modifier: F) -> Result<()>
+where
+    F: FnOnce(&mut Value) -> Result<()>,
+{
+    use fs2::FileExt;
+    let lock_path = trust_state_lock_path()?;
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
+    }
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening {lock_path:?}"))?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("flock {lock_path:?}"))?;
+
+    // Read fresh INSIDE the lock; run the modifier; write atomically via the
+    // unlocked writer (we already hold trust.lock — re-acquiring would deadlock).
+    let mut trust = read_trust()?;
+    let result = modifier(&mut trust);
+    let write_result = if result.is_ok() {
+        write_trust_unlocked(&trust)
+    } else {
+        Ok(())
+    };
+    let _ = fs2::FileExt::unlock(&lock_file);
+    result?;
+    write_result?;
+    Ok(())
+}
+
 // ---------- relay binding state ----------
 
 /// Path to `relay.json` — holds our own slot binding and pinned peer slots.
@@ -1005,6 +1047,64 @@ mod tests {
                 h.join().unwrap();
             }
             assert_eq!(read_trust().unwrap()["version"], 1);
+        });
+    }
+
+    #[test]
+    fn update_trust_no_lost_update_under_concurrency() {
+        // #246 RMW: many threads each add a DISTINCT agent key via update_trust.
+        // The locked read-modify-write must serialize them so EVERY key survives
+        // — a plain read_trust→modify→write_trust would lost-update (two readers
+        // see the same snapshot, the second write drops the first's add).
+        with_temp_home(|| {
+            ensure_dirs().unwrap();
+            write_trust(&json!({"version": 1, "agents": {}})).unwrap();
+            let handles: Vec<_> = (0..8)
+                .map(|w| {
+                    std::thread::spawn(move || {
+                        for j in 0..15 {
+                            let key = format!("peer-{w}-{j}");
+                            update_trust(|t| {
+                                t["agents"][&key] = json!({"tier": "VERIFIED"});
+                                Ok(())
+                            })
+                            .unwrap();
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
+            let agents = read_trust().unwrap();
+            let n = agents["agents"].as_object().unwrap().len();
+            assert_eq!(
+                n,
+                8 * 15,
+                "every concurrent add must survive (no lost update)"
+            );
+        });
+    }
+
+    #[test]
+    fn update_trust_modifier_error_does_not_clobber() {
+        with_temp_home(|| {
+            ensure_dirs().unwrap();
+            write_trust(&json!({"version": 1, "agents": {"keep": {"tier": "VERIFIED"}}})).unwrap();
+            let r = update_trust(|t| {
+                t["agents"]["transient"] = json!({"tier": "X"});
+                anyhow::bail!("simulated mid-RMW error")
+            });
+            assert!(r.is_err());
+            let after = read_trust().unwrap();
+            assert!(
+                after["agents"]["keep"].is_object(),
+                "prior pin must survive"
+            );
+            assert!(
+                after["agents"]["transient"].is_null(),
+                "aborted modifier must not persist"
+            );
         });
     }
 
