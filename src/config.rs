@@ -596,10 +596,56 @@ pub fn write_display_overrides(overrides: &DisplayOverrides) -> Result<()> {
     Ok(())
 }
 
+/// Path to the flock file serialising concurrent writes to `trust.json`.
+/// Separate file for the same reason as `relay.lock`: an flock on the data
+/// file itself loses identity across the tmp+rename replacement.
+fn trust_state_lock_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("trust.lock"))
+}
+
+/// Atomic, lock-serialized write of the full trust store (#246).
+///
+/// The background daemon's pull path pins peers (`add_agent_card_pin` →
+/// `write_trust`) while a foreground `wire add` / `accept` / `promote` may
+/// write concurrently. The old raw `fs::write` was non-atomic AND lockless:
+/// two writers could interleave bytes into a torn, unparseable `trust.json`
+/// (the same failure class as relay.json Bug #3), breaking trust reads until
+/// hand-repaired. flock + tmp+rename, mirroring [`write_relay_state`], so a
+/// concurrent reader always sees either the whole old or whole new file.
+///
+/// (Read-modify-write *lost updates* — two callers each read-then-write — are a
+/// separate, deeper concern that needs an `update_trust`-style locked
+/// transaction like `update_relay_state`; tracked under #246.)
 pub fn write_trust(trust: &Value) -> Result<()> {
+    use fs2::FileExt;
+    let lock_path = trust_state_lock_path()?;
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
+    }
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening {lock_path:?}"))?;
+    lock_file
+        .lock_exclusive()
+        .with_context(|| format!("flock {lock_path:?}"))?;
+    let r = write_trust_unlocked(trust);
+    let _ = fs2::FileExt::unlock(&lock_file);
+    r
+}
+
+/// Atomic trust write WITHOUT the lock — caller must hold `trust.lock`. The
+/// fixed `trust.json.tmp` name is safe only under that lock (one writer at a
+/// time); tmp+rename then makes the replacement a single atomic step.
+fn write_trust_unlocked(trust: &Value) -> Result<()> {
     let path = trust_path()?;
     let body = serde_json::to_vec_pretty(trust)?;
-    fs::write(&path, body).with_context(|| format!("writing {path:?}"))?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, &body).with_context(|| format!("writing tmp {tmp:?}"))?;
+    fs::rename(&tmp, &path).with_context(|| format!("atomic rename {tmp:?} → {path:?}"))?;
     Ok(())
 }
 
@@ -911,6 +957,54 @@ mod tests {
                 h.join().unwrap();
             }
             assert!(read_relay_state().unwrap().get("self").is_some());
+        });
+    }
+
+    #[test]
+    fn write_trust_round_trips_and_leaves_no_tmp() {
+        // #246: write_trust is now atomic (tmp+rename). A write followed by a
+        // read must round-trip, and the `trust.json.tmp` must not linger.
+        with_temp_home(|| {
+            ensure_dirs().unwrap();
+            let t = json!({"version": 1, "agents": {"did:wire:raven-kettle-465c3352": {"tier": "VERIFIED"}}});
+            write_trust(&t).unwrap();
+            let back = read_trust().unwrap();
+            assert_eq!(
+                back["agents"]["did:wire:raven-kettle-465c3352"]["tier"],
+                "VERIFIED"
+            );
+            let tmp = trust_path().unwrap().with_extension("json.tmp");
+            assert!(!tmp.exists(), "tmp file must be consumed by the rename");
+        });
+    }
+
+    #[test]
+    fn write_trust_never_tears_under_concurrency() {
+        // #246 regression mirror of the relay.json Bug #3 test: many writers
+        // hammering trust.json must never leave a reader catching torn bytes.
+        // The flock + tmp+rename guarantees every read sees a whole file.
+        with_temp_home(|| {
+            ensure_dirs().unwrap();
+            write_trust(&json!({"version": 1, "agents": {}})).unwrap();
+            let handles: Vec<_> = (0..8)
+                .map(|w| {
+                    std::thread::spawn(move || {
+                        for j in 0..25 {
+                            let body = if j % 2 == 0 {
+                                json!({"version": 1, "agents": {"a": {"w": w, "pad": "x".repeat(2048)}}})
+                            } else {
+                                json!({"version": 1, "agents": {"a": {"w": w}}})
+                            };
+                            write_trust(&body).unwrap();
+                            read_trust().expect("trust.json must always parse");
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
+            assert_eq!(read_trust().unwrap()["version"], 1);
         });
     }
 
