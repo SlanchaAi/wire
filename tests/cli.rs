@@ -112,7 +112,7 @@ fn whoami_short_before_init_degrades_gracefully() {
 #[test]
 fn whoami_json_after_init_marks_initialized_true() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = run(&home, &["whoami", "--json"]);
     assert!(out.status.success());
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -129,7 +129,7 @@ fn whoami_json_surfaces_session_source() {
     // is the field an operator reads to diagnose a wrong/shared identity in
     // one command.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = run(&home, &["whoami", "--json"]);
     assert!(out.status.success());
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -141,9 +141,48 @@ fn whoami_json_surfaces_session_source() {
 }
 
 #[test]
+fn up_offline_mints_identity_without_binding_a_relay() {
+    // `wire up --offline` folds in the old `init --offline` keygen: it mints
+    // the keypair + DID-derived persona but binds no relay and claims nothing.
+    let home = fresh_home();
+    let out = run(&home, &["up", "--offline"]);
+    assert!(out.status.success(), "up --offline failed: {out:?}");
+    assert!(
+        home.join("config/wire/agent-card.json").exists(),
+        "identity not minted"
+    );
+    // The narrated steps (stderr) must report the unbound/offline state.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("offline") || stderr.contains("no relay bound"),
+        "up --offline should report the unbound state: {stderr}"
+    );
+    // No relay bound: relay-state, if written, carries no self.relay_url.
+    if let Ok(txt) = std::fs::read_to_string(home.join("config/wire/relay.json")) {
+        let rs: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
+        let bound = rs["self"]["relay_url"].as_str().unwrap_or("");
+        assert!(
+            bound.is_empty(),
+            "offline must not bind a relay_url, got `{bound}`"
+        );
+    }
+}
+
+#[test]
+fn up_offline_conflicts_with_a_relay_arg() {
+    // You can't be offline and bind a relay in one breath — clap rejects it.
+    let home = fresh_home();
+    let out = run(&home, &["up", "@wireup.net", "--offline"]);
+    assert!(
+        !out.status.success(),
+        "up --offline with a relay arg must be rejected"
+    );
+}
+
+#[test]
 fn init_creates_keypair_and_card() {
     let home = fresh_home();
-    let out = run(&home, &["init", "paul", "--offline", "--json"]);
+    let out = run(&home, &["init", "--offline", "--json"]);
     assert!(out.status.success(), "init failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -166,8 +205,8 @@ fn init_creates_keypair_and_card() {
 #[test]
 fn init_twice_refuses_to_clobber() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
-    let out = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
+    let out = run(&home, &["init", "--offline"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("already initialized"), "stderr: {stderr}");
@@ -176,7 +215,7 @@ fn init_twice_refuses_to_clobber() {
 #[test]
 fn whoami_after_init_returns_did_and_fingerprint() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = run(&home, &["whoami", "--json"]);
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
@@ -207,7 +246,7 @@ fn peers_empty_after_init_is_self_filtered() {
     // After `wire init paul`, trust contains paul (self-attested ATTESTED).
     // `wire peers` filters self out, so we expect an empty list.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = run(&home, &["peers", "--json"]);
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
@@ -218,7 +257,7 @@ fn peers_empty_after_init_is_self_filtered() {
 #[test]
 fn send_writes_to_outbox() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = run(
         &home,
         &[
@@ -288,7 +327,7 @@ fn pair_list_inbound_surfaces_pending_v0_5_14() {
     // record is enumerable + the back-compat `pair-list --json` shape is
     // preserved for existing scripts.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     write_pending_inbound_fixture(&home, "stranger");
     // v0.10: migrated from `wire pair-list-inbound` (removed) to
     // `wire pending`. Same underlying handler; canonical verb.
@@ -308,7 +347,7 @@ fn status_reports_pending_inbound_count_v0_5_14() {
     // count of stranger requests awaiting an operator accept — so monitoring
     // + dashboards can see who's waiting.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     write_pending_inbound_fixture(&home, "alice");
     write_pending_inbound_fixture(&home, "bob");
     let out = run(&home, &["status", "--json"]);
@@ -331,7 +370,7 @@ fn pair_reject_deletes_pending_inbound_v0_5_14() {
     // `wire reject <peer>` removes the pending record. After reject,
     // the pending list MUST NOT show the peer and the on-disk file MUST be gone.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     write_pending_inbound_fixture(&home, "spammer");
     let path = home.join("state/wire/pending-inbound-pairs/spammer.json");
     assert!(path.exists(), "fixture file should exist pre-reject");
@@ -607,7 +646,7 @@ fn init_interactive_skipped_when_non_tty_v0_9_5() {
     // crucial so CI runs don't hang waiting for stdin.
     let home = fresh_home();
     let out = std::process::Command::new(wire_bin())
-        .args(["init", "alice"])
+        .args(["init"])
         .env("WIRE_HOME", &home)
         .env("WIRE_HOME_FORCE", "1")
         .env("WIRE_NO_AUTO_JSON", "1")
@@ -691,7 +730,7 @@ fn accept_with_name_does_not_emit_deprecation_v0_9_4() {
 #[test]
 fn here_prints_self_when_no_neighbors_v0_9_3() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "alice", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     // v0.11: handle is DID-derived character, not "alice". Discover it
     // via whoami first so the assertion stays correct.
     let whoami = run(&home, &["whoami", "--json"]);
@@ -721,7 +760,7 @@ fn here_prints_self_when_no_neighbors_v0_9_3() {
 #[test]
 fn here_json_includes_self_sisters_peers_v0_9_3() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "alice", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = std::process::Command::new(wire_bin())
         .args(["here", "--json"])
         .env("WIRE_HOME", &home)
@@ -752,7 +791,7 @@ fn emoji_fallback_returns_ascii_tag_when_terminal_off_v0_9_3() {
     // an ASCII tag (e.g. `[bear]`) for the glyph. Test verifies the
     // env var path without depending on terminal detection.
     let home = fresh_home();
-    let _ = run(&home, &["init", "alice", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = std::process::Command::new(wire_bin())
         .args(["here"])
         .env("WIRE_HOME", &home)
@@ -779,7 +818,7 @@ fn whois_typo_returns_did_you_mean_v0_9_2() {
     // pool. v0.11 made handle = DID-derived character, so we discover
     // the actual character from whoami first, then query a typo of it.
     let home = fresh_home();
-    let _ = run(&home, &["init", "alice", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let whoami = run(&home, &["whoami", "--json"]);
     let card: serde_json::Value = serde_json::from_slice(&whoami.stdout).unwrap();
     let canonical = card["handle"].as_str().unwrap().to_string();
@@ -812,7 +851,7 @@ fn whois_typo_returns_json_success_with_candidates_v0_9_2() {
     // {found: false, candidates: [...]} containing the operator's
     // DID-derived character.
     let home = fresh_home();
-    let _ = run(&home, &["init", "alice", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let whoami = run(&home, &["whoami", "--json"]);
     let card: serde_json::Value = serde_json::from_slice(&whoami.stdout).unwrap();
     let canonical = card["handle"].as_str().unwrap().to_string();
@@ -881,7 +920,7 @@ fn init_offline_creates_keypair_without_slot_v0_9_1() {
     // v0.11: operator-typed `alice` is ignored; DID slug uses the
     // DID-derived character. Assert shape, not the operator's input.
     let home = fresh_home();
-    let out = run(&home, &["init", "alice", "--offline", "--json"]);
+    let out = run(&home, &["init", "--offline", "--json"]);
     assert!(out.status.success(), "init --offline failed: {out:?}");
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let did = parsed["did"].as_str().unwrap();
@@ -898,7 +937,7 @@ fn init_offline_creates_keypair_without_slot_v0_9_1() {
 #[test]
 fn json_emitted_when_stdout_is_piped_v0_9_1() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "alice", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = run(&home, &["whoami"]);
     assert!(out.status.success(), "whoami failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
@@ -910,7 +949,7 @@ fn json_emitted_when_stdout_is_piped_v0_9_1() {
 #[test]
 fn json_auto_can_be_opted_out_v0_9_1() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "alice", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = std::process::Command::new(wire_bin())
         .args(["whoami"])
         .env("WIRE_HOME", &home)
@@ -1171,7 +1210,7 @@ fn accept_errors_cleanly_when_no_pending_request_v0_5_14() {
     // v0.10: migrated from `wire pair-accept` (removed) to `wire accept`.
     // Same loud-fail semantics — must NEVER silently succeed.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = run(&home, &["accept", "ghost"]);
     assert!(!out.status.success(), "expected failure: {out:?}");
     let stderr = String::from_utf8(out.stderr).unwrap();
@@ -1185,7 +1224,7 @@ fn accept_errors_cleanly_when_no_pending_request_v0_5_14() {
 fn reject_idempotent_on_missing_peer_v0_5_14() {
     // v0.10+: `wire reject` is idempotent — succeeds even if no pending record.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = run(&home, &["reject", "ghost", "--json"]);
     assert!(out.status.success(), "reject failed: {out:?}");
     let s = String::from_utf8(out.stdout).unwrap();
@@ -1202,7 +1241,7 @@ fn send_with_fqdn_peer_normalizes_to_bare_handle_outbox() {
     // stuck silently for 25 min in the field report. Bare-handle
     // normalization at send time is the on-disk-contract enforcement.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = run(
         &home,
         &[
@@ -1235,7 +1274,7 @@ fn send_with_fqdn_peer_normalizes_to_bare_handle_outbox() {
 #[test]
 fn send_deadline_writes_signed_time_sensitive_until() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let deadline = "2030-01-02T03:04:05Z";
     let out = run(
         &home,
@@ -1273,7 +1312,7 @@ fn send_deadline_multibyte_final_char_errors_instead_of_panicking() {
     // byte-index split_at, so a multi-byte final char ("30分", "5µ")
     // panicked mid-send instead of returning a parse error.
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     for bad in ["30分", "5µ", "日"] {
         let out = run(
             &home,
@@ -1303,7 +1342,7 @@ fn send_deadline_multibyte_final_char_errors_instead_of_panicking() {
 #[test]
 fn send_deadline_garbage_errors_cleanly() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = run(
         &home,
         &[
@@ -1330,7 +1369,7 @@ fn group_list_empty_reports_no_groups() {
     // First tests/cli.rs coverage for the group family: empty-state list,
     // both human and --json shapes (e2e_group.rs covers the live flows).
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = run(&home, &["group", "list"]);
     assert!(out.status.success(), "group list failed: {out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1350,7 +1389,7 @@ fn group_list_empty_reports_no_groups() {
 fn send_idempotent_under_identical_body() {
     // The same body produces the same event_id (content-addressed).
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out1 = run(
         &home,
         &[
@@ -1387,7 +1426,7 @@ fn send_idempotent_under_identical_body() {
 #[test]
 fn verify_round_trips_a_send() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let _ = run(
         &home,
         &["send", "--queue", "paul", "decision", "self-test", "--json"],
@@ -1411,7 +1450,7 @@ fn verify_round_trips_a_send() {
 #[test]
 fn verify_rejects_tampered_event() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let _ = run(
         &home,
         &["send", "--queue", "paul", "decision", "original", "--json"],
@@ -1435,7 +1474,7 @@ fn mcp_initialize_then_tools_list_round_trip() {
     use std::process::Stdio;
 
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
 
     let mut child = Command::new(wire_bin())
         .arg("mcp")
@@ -1510,7 +1549,7 @@ fn mcp_tools_call_wire_whoami() {
     use std::process::Stdio;
 
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
 
     let mut child = Command::new(wire_bin())
         .arg("mcp")
@@ -1640,15 +1679,6 @@ fn mcp_tools_call_wire_init_idempotent_on_repeat() {
 }
 
 #[test]
-fn handle_validation_rejects_special_chars() {
-    let home = fresh_home();
-    let out = run(&home, &["init", "paul/etc"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("ASCII alphanumeric"), "stderr: {stderr}");
-}
-
-#[test]
 fn status_before_init_says_not_initialized() {
     let home = fresh_home();
     let out = run(&home, &["status"]);
@@ -1660,7 +1690,7 @@ fn status_before_init_says_not_initialized() {
 #[test]
 fn status_after_init_shows_did_and_zero_peers() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = run(&home, &["status", "--json"]);
     assert!(out.status.success());
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -1681,7 +1711,7 @@ fn status_after_init_shows_did_and_zero_peers() {
 #[test]
 fn forget_peer_removes_pinned_record() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     // Manually write a peer pin into trust (simulating a prior pair) without
     // running the full SAS flow.
     let trust_path = home.join("config/wire/trust.json");
@@ -1705,7 +1735,7 @@ fn forget_peer_removes_pinned_record() {
 #[test]
 fn forget_peer_unknown_returns_removed_false() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let out = run(&home, &["forget-peer", "ghost", "--json"]);
     assert!(out.status.success());
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -1715,7 +1745,7 @@ fn forget_peer_unknown_returns_removed_false() {
 #[test]
 fn forget_peer_purge_deletes_jsonl_files() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     // send to peer to materialize outbox file
     let _ = run(&home, &["send", "--queue", "willard", "decision", "stuff"]);
     let outbox_path = home.join("state/wire/outbox/willard.jsonl");
@@ -1742,7 +1772,7 @@ fn forget_peer_purge_deletes_jsonl_files() {
 #[test]
 fn status_after_send_shows_outbox_depth() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let _ = run(&home, &["send", "--queue", "willard", "decision", "hello"]);
     let _ = run(&home, &["send", "--queue", "willard", "decision", "world"]);
     let out = run(&home, &["status", "--json"]);
@@ -1795,7 +1825,7 @@ fn tail_json_bodies(home: &PathBuf, args: &[&str]) -> Vec<String> {
 #[test]
 fn tail_default_returns_newest_n() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     seed_inbox(&home, "willard", 10);
 
     let bodies = tail_json_bodies(&home, &["tail", "willard", "--json", "--limit", "3"]);
@@ -1811,7 +1841,7 @@ fn tail_default_returns_newest_n() {
 #[test]
 fn tail_oldest_flag_returns_first_n() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     seed_inbox(&home, "willard", 10);
 
     let bodies = tail_json_bodies(
@@ -1830,7 +1860,7 @@ fn tail_oldest_flag_returns_first_n() {
 #[test]
 fn tail_limit_zero_returns_all_chronological() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     seed_inbox(&home, "willard", 5);
 
     let default_bodies = tail_json_bodies(&home, &["tail", "willard", "--json", "--limit", "0"]);
@@ -1853,7 +1883,7 @@ fn tail_limit_zero_returns_all_chronological() {
 #[test]
 fn tail_multi_peer_sorts_by_timestamp() {
     let home = fresh_home();
-    let _ = run(&home, &["init", "paul", "--offline"]);
+    let _ = run(&home, &["init", "--offline"]);
     let dir = home.join("state/wire/inbox");
     std::fs::create_dir_all(&dir).unwrap();
     // alice: events at :01, :03, :05  bob: events at :02, :04, :06

@@ -82,17 +82,14 @@ pub enum Command {
     /// slotless, acknowledge `wire bind-relay` is required before any
     /// pair or send).
     ///
-    /// v0.13.1: folded into `wire up` and hidden. Your handle is your
-    /// DID-derived persona (one-name rule), so the typed `handle` arg is a
-    /// vestigial seed with no effect on identity. Kept callable for explicit
-    /// offline keygen (`wire init x --offline`); everyone else uses `wire up`.
+    /// Internal primitive — folded into `wire up` and hidden. Your handle is
+    /// your DID-derived persona (one-name rule); there is no name to type.
+    /// Init is the sole naming event: it mints the keypair and the persona is
+    /// derived from it. Users never type this — `wire up` runs it, and
+    /// `wire up --offline` covers offline keygen. Kept as a callable command
+    /// only because `wire up` / `wire session new` invoke it internally.
     #[command(hide = true)]
     Init {
-        /// Vestigial seed — ignored; your handle is your DID-derived persona.
-        handle: String,
-        /// Optional display name (defaults to capitalized handle).
-        #[arg(long)]
-        name: Option<String>,
         /// Relay URL — binds an inbound slot in the same step. Required
         /// unless `--offline` is passed. Example:
         /// `--relay http://127.0.0.1:8771` (local), `--relay https://wireup.net`
@@ -630,10 +627,11 @@ pub enum Command {
         /// or a full URL. Omit for the default public relay. No nick — your
         /// handle is your DID-derived persona.
         relay: Option<String>,
-        /// Optional display name for your profile card (cosmetic; distinct
-        /// from your addressable handle/persona).
-        #[arg(long)]
-        name: Option<String>,
+        /// Mint your identity offline — keypair + DID-derived persona, no
+        /// relay bound and nothing claimed. Bind later with `wire up <relay>`
+        /// or `wire bind-relay <relay>`. For air-gapped keygen / bind-later.
+        #[arg(long, conflicts_with_all = ["relay", "with_local"])]
+        offline: bool,
         /// Also additively dual-bind a LOCAL relay slot for fast same-box
         /// sister-session routing. Defaults to probing
         /// `http://127.0.0.1:8771`; pass a URL to override. Local relays
@@ -1710,18 +1708,10 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init {
-            handle,
-            name,
             relay,
             offline,
             json,
-        } => cmd_init(
-            Some(&handle),
-            name.as_deref(),
-            relay.as_deref(),
-            offline,
-            json,
-        ),
+        } => cmd_init(relay.as_deref(), offline, json),
         Command::Status { peer, json } => {
             if let Some(peer) = peer {
                 status::cmd_status_peer(&peer, json)
@@ -1922,13 +1912,13 @@ pub fn run() -> Result<()> {
         } => pairing::cmd_add(&handle, relay.as_deref(), local_sister, json),
         Command::Up {
             relay,
-            name,
+            offline,
             with_local,
             no_local,
             json,
         } => setup::cmd_up(
             relay.as_deref(),
-            name.as_deref(),
+            offline,
             with_local.as_deref(),
             no_local,
             json,
