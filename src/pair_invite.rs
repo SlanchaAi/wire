@@ -423,10 +423,12 @@ pub fn accept_invite(url: &str) -> Result<Value> {
     }
 
     // Pin issuer in trust + relay-state.
-    let mut trust = config::read_trust()?;
-    crate::trust::add_agent_card_pin(&mut trust, &payload.card, Some("VERIFIED"))
-        .map_err(anyhow::Error::msg)?;
-    config::write_trust(&trust)?;
+    // #246: atomic read-modify-write so a concurrent daemon pull-pin can't
+    // lost-update this foreground pin.
+    config::update_trust(|trust| {
+        crate::trust::add_agent_card_pin(trust, &payload.card, Some("VERIFIED"))
+            .map_err(anyhow::Error::msg)
+    })?;
 
     let peer_handle = crate::agent_card::display_handle_from_did(&payload.did).to_string();
     let mut relay_state = config::read_relay_state()?;
@@ -684,10 +686,10 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
     if let Some(org_did) =
         org_auto_pin_decision(&peer_card, &crate::org_policy::FileOrgPolicy::load())
     {
-        let mut trust = crate::config::read_trust()?;
-        crate::trust::add_agent_card_pin(&mut trust, &peer_card, Some("ORG_VERIFIED"))
-            .map_err(anyhow::Error::msg)?;
-        crate::config::write_trust(&trust)?;
+        crate::config::update_trust(|trust| {
+            crate::trust::add_agent_card_pin(trust, &peer_card, Some("ORG_VERIFIED"))
+                .map_err(anyhow::Error::msg)
+        })?;
 
         let endpoints_to_pin = if peer_endpoints.is_empty() {
             vec![crate::endpoints::Endpoint::federation(
