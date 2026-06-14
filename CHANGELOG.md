@@ -14,6 +14,7 @@ the PR description linked in each section.
 
 - **`wire upgrade` no longer corrupts systemd/launchd units after a `cargo install` in-place replace** (#274): the kernel marks the replaced running binary's `/proc/self/exe` with a trailing ` (deleted)`, which was written verbatim into `ExecStart=`, leaving the daemon flapping forever (`error: unrecognized subcommand '(deleted)'`). The exe path is now resolved (marker stripped) before it reaches a unit file.
 - **`wire upgrade` no longer false-warns about a PATH shadow when the active PATH entry is a symlink to the upgraded binary** (#276): the same `(deleted)` marker made `current_exe()` un-canonicalizable, so the symlink never matched and an "off-PATH / old binary" warning fired even though both PATH entries resolved to the freshly-upgraded binary.
+- **`wire claim --relay <URL>` (and `wire add --relay`, accept-invite) now honor the requested relay** (#279): the shared `ensure_self_with_relay` returned any existing self slot regardless of the relay asked for, so `claim --relay wireup.net` reused a loopback primary slot and POSTed the claim to `127.0.0.1`. It now reuses a slot only if it's already on the requested relay, otherwise allocates one there (additively).
 
 
 ## [v0.16.0] — 2026-06-14
