@@ -65,13 +65,22 @@ fn read_handle(home: &PathBuf) -> String {
     card["handle"].as_str().unwrap().to_string()
 }
 
+/// RFC-006 Part A: a named session created by `wire session new <name>`
+/// lives at `sessions/by-key/<hash(name)>` — the single on-disk layout.
+/// Resolve that home from the operator-typed name the same way the
+/// production resolver (`session_dir`) does.
+fn session_home_for(root: &std::path::Path, session_name: &str) -> std::path::PathBuf {
+    let key = wire::session::sanitize_name(session_name);
+    root.join("sessions")
+        .join("by-key")
+        .join(wire::session::by_key_dir_name(&key))
+}
+
 /// v0.11: read the DID-derived character handle for a session by its
 /// on-disk session name. Used by tests that did `wire session new
 /// <name>` and then need to look up the actual peer handle.
 fn handle_for_session(root: &std::path::Path, session_name: &str) -> String {
-    let card_path = root
-        .join("sessions")
-        .join(session_name)
+    let card_path = session_home_for(root, session_name)
         .join("config")
         .join("wire")
         .join("agent-card.json");
@@ -333,7 +342,6 @@ async fn pair_all_local_mesh_pairs_every_sister_session_v0_6_0() {
     // v0.11: peer entries are keyed by the peer's CARD HANDLE (DID-
     // derived character), not the session name. We look up each
     // session's actual handle and assert on that.
-    let sessions_root = home.join("sessions");
     let handle_alpha = handle_for_session(&home, "alpha");
     let handle_beth = handle_for_session(&home, "beth");
     let handle_charlie = handle_for_session(&home, "charlie");
@@ -343,8 +351,7 @@ async fn pair_all_local_mesh_pairs_every_sister_session_v0_6_0() {
         ("charlie", handle_charlie.as_str()),
     ];
     for (name, _self_handle) in &session_handles {
-        let relay_path = sessions_root
-            .join(name)
+        let relay_path = session_home_for(&home, name)
             .join("config")
             .join("wire")
             .join("relay.json");
@@ -437,10 +444,8 @@ async fn local_only_sessions_pair_without_federation_v0_6_6() {
     }
 
     // Verify each session has ONLY a local endpoint (no federation slot).
-    let sessions_dir = home.join("sessions");
     for name in &session_names {
-        let relay_path = sessions_dir
-            .join(name)
+        let relay_path = session_home_for(&home, name)
             .join("config")
             .join("wire")
             .join("relay.json");
@@ -493,8 +498,7 @@ async fn local_only_sessions_pair_without_federation_v0_6_6() {
         .map(|n| (*n, handle_for_session(&home, n)))
         .collect();
     for (name, _self_h) in &session_handles {
-        let relay_path = sessions_dir
-            .join(name)
+        let relay_path = session_home_for(&home, name)
             .join("config")
             .join("wire")
             .join("relay.json");
@@ -516,7 +520,7 @@ async fn local_only_sessions_pair_without_federation_v0_6_6() {
     // mesh broadcast from `wire` (the reserved-nick session) to the
     // other two should land — proving the routing layer treats local-
     // only sessions as first-class.
-    let wire_home = sessions_dir.join("wire");
+    let wire_home = session_home_for(&home, "wire");
     let bcast = wire(
         &wire_home,
         &[
@@ -608,12 +612,12 @@ async fn mesh_route_picks_one_sister_per_strategy_v0_6_5() {
         String::from_utf8_lossy(&pair_out.stderr)
     );
     for (name, role) in &session_roles {
-        let session_home = home.join("sessions").join(name);
+        let session_home = session_home_for(&home, name);
         let out = wire(&session_home, &["mesh", "role", "set", role]);
         assert!(out.status.success(), "set role {role} for {name}");
     }
 
-    let alpha_home = home.join("sessions").join("alpha");
+    let alpha_home = session_home_for(&home, "alpha");
 
     // v0.11: peers are keyed by DID-derived character handle, so route
     // result + --exclude argument both reference the handle, not the
@@ -810,7 +814,7 @@ async fn mesh_role_set_list_round_trips_v0_6_4() {
     // Set role per session by running `wire mesh role set` against each
     // session's WIRE_HOME directly.
     for (name, role) in &session_roles {
-        let session_home = home.join("sessions").join(name);
+        let session_home = session_home_for(&home, name);
         let out = wire(&session_home, &["mesh", "role", "set", role]);
         assert!(
             out.status.success(),
@@ -821,7 +825,7 @@ async fn mesh_role_set_list_round_trips_v0_6_4() {
 
     // List from each session's WIRE_HOME and check it sees all 3 roles.
     for (name, _) in &session_roles {
-        let session_home = home.join("sessions").join(name);
+        let session_home = session_home_for(&home, name);
         let out = wire(&session_home, &["mesh", "role", "list", "--json"]);
         assert!(
             out.status.success(),
@@ -832,11 +836,17 @@ async fn mesh_role_set_list_round_trips_v0_6_4() {
         let rows = view["sessions"].as_array().expect("sessions array");
         assert_eq!(rows.len(), 3, "list should see 3 sister sessions: {view}");
         for (expected_name, expected_role) in &session_roles {
+            // RFC-006 Part A: sessions surface by their DID-derived persona
+            // handle (one-name identity), not the operator-typed name.
+            let expected_handle = handle_for_session(&home, expected_name);
             let found = rows
                 .iter()
-                .find(|r| r["name"].as_str() == Some(expected_name));
-            let row = found
-                .unwrap_or_else(|| panic!("session {expected_name} missing from list: {view}"));
+                .find(|r| r["name"].as_str() == Some(expected_handle.as_str()));
+            let row = found.unwrap_or_else(|| {
+                panic!(
+                    "session {expected_name} (handle {expected_handle}) missing from list: {view}"
+                )
+            });
             assert_eq!(
                 row["role"].as_str(),
                 Some(*expected_role),
@@ -846,7 +856,7 @@ async fn mesh_role_set_list_round_trips_v0_6_4() {
     }
 
     // Role validation: illegal char + oversize must reject.
-    let alpha_home = home.join("sessions").join("alpha");
+    let alpha_home = session_home_for(&home, "alpha");
     let illegal = wire(&alpha_home, &["mesh", "role", "set", "bad role"]);
     assert!(
         !illegal.status.success(),
@@ -870,9 +880,13 @@ async fn mesh_role_set_list_round_trips_v0_6_4() {
     let after: Value =
         serde_json::from_slice(&wire(&alpha_home, &["mesh", "role", "list", "--json"]).stdout)
             .expect("JSON");
+    let alpha_handle = handle_for_session(&home, "alpha");
     let alpha_row = after["sessions"]
         .as_array()
-        .and_then(|a| a.iter().find(|r| r["name"].as_str() == Some("alpha")))
+        .and_then(|a| {
+            a.iter()
+                .find(|r| r["name"].as_str() == Some(alpha_handle.as_str()))
+        })
         .expect("alpha row");
     assert!(
         alpha_row["role"].is_null(),
@@ -937,7 +951,7 @@ async fn mesh_broadcast_fans_to_every_paired_sister_v0_6_3() {
     );
 
     // alpha broadcasts to beth + charlie via the local relay.
-    let alpha_home = home.join("sessions").join("alpha");
+    let alpha_home = session_home_for(&home, "alpha");
     let out = wire(
         &alpha_home,
         &[
@@ -982,8 +996,8 @@ async fn mesh_broadcast_fans_to_every_paired_sister_v0_6_3() {
     // in their inbox files. Each pull is per-session-home. v0.11: inbox
     // file is keyed by sender's CARD HANDLE (alpha's character), not the
     // operator-typed session name "alpha".
-    let beth_home = home.join("sessions").join("beth");
-    let charlie_home = home.join("sessions").join("charlie");
+    let beth_home = session_home_for(&home, "beth");
+    let charlie_home = session_home_for(&home, "charlie");
     let alpha_h = handle_for_session(&home, "alpha");
     let pull_deadline = Instant::now() + Duration::from_secs(5);
     let mut beth_lines = 0;
@@ -1269,9 +1283,7 @@ async fn regression_session_new_with_local_writes_dual_endpoints_v0_5_20() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let relay_path = home
-        .join("sessions")
-        .join("test-alpha")
+    let relay_path = session_home_for(&home, "test-alpha")
         .join("config")
         .join("wire")
         .join("relay.json");
@@ -1320,9 +1332,12 @@ async fn regression_session_new_with_local_writes_dual_endpoints_v0_5_20() {
         .iter()
         .filter_map(|s| s["name"].as_str())
         .collect();
+    // RFC-006 Part A: the session surfaces by its persona handle, not the
+    // operator-typed `test-alpha` name.
+    let expected_handle = handle_for_session(&home, "test-alpha");
     assert!(
-        nicks.contains(&"test-alpha"),
-        "list-local must surface the session we just created: {nicks:?} in group {local_url}"
+        nicks.contains(&expected_handle.as_str()),
+        "list-local must surface the session we just created (handle {expected_handle}): {nicks:?} in group {local_url}"
     );
 }
 

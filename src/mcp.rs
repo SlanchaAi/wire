@@ -2233,12 +2233,15 @@ mod tests {
     #[test]
     fn detect_session_wire_home_resolves_registered_cwd() {
         crate::config::test_support::with_temp_home(|| {
-            // Set up sessions/registry.json + sessions/test-alpha/ under
-            // the temp WIRE_HOME so session::read_registry +
-            // session::session_dir resolve through it.
+            // Set up sessions/registry.json + the by-key home for
+            // `test-alpha` under the temp WIRE_HOME so session::read_registry
+            // + session::session_dir resolve through it. RFC-006 Part A: a
+            // named session's home is `sessions/by-key/<hash(name)>`, not a
+            // top-level `sessions/<name>` dir.
             let wire_home = std::env::var("WIRE_HOME").unwrap();
             let sessions_root = std::path::PathBuf::from(&wire_home).join("sessions");
-            let session_home = sessions_root.join("test-alpha");
+            std::fs::create_dir_all(&sessions_root).unwrap();
+            let session_home = crate::session::session_dir("test-alpha").unwrap();
             std::fs::create_dir_all(&session_home).unwrap();
             let fake_cwd = "/tmp/fake-project-cwd-abc123";
             let registry = json!({"by_cwd": {fake_cwd: "test-alpha"}});

@@ -408,7 +408,13 @@ fn write_session_fixture(
     cwd_key: Option<&str>,
 ) -> std::path::PathBuf {
     let sessions_root = home.join("sessions");
-    let session_home = sessions_root.join(session_name);
+    // RFC-006 Part A: the single on-disk layout is `by-key/<hash>`. A named
+    // session's key is its (sanitized) name, so its home is the by-key home
+    // for that key — mirror exactly what `session_dir`/`list_sessions` use.
+    let key = wire::session::sanitize_name(session_name);
+    let session_home = sessions_root
+        .join("by-key")
+        .join(wire::session::by_key_dir_name(&key));
     let card_dir = session_home.join("config").join("wire");
     std::fs::create_dir_all(&card_dir).unwrap();
     let card = serde_json::json!({
@@ -489,7 +495,11 @@ fn session_env_emits_export_line_for_named_session_v0_5_16() {
     assert!(out.status.success(), "session env failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.starts_with("export WIRE_HOME="), "got: {stdout}");
-    assert!(stdout.contains("/sessions/wire"), "got: {stdout}");
+    // RFC-006 Part A: a named session's home is its by-key home, not a
+    // top-level `sessions/<name>` dir.
+    let key = wire::session::sanitize_name("wire");
+    let expected = format!("/sessions/by-key/{}", wire::session::by_key_dir_name(&key));
+    assert!(stdout.contains(&expected), "got: {stdout}");
 }
 
 #[test]
