@@ -215,13 +215,12 @@ fn kill_wire_processes() -> Vec<u32> {
                     .split(',')
                     .nth(1)
                     .and_then(|s| s.trim().trim_matches('"').parse::<u32>().ok())
+                    && pid != self_pid
                 {
-                    if pid != self_pid {
-                        let _ = std::process::Command::new("taskkill")
-                            .args(["/F", "/PID", &pid.to_string()])
-                            .output();
-                        killed.push(pid);
-                    }
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/F", "/PID", &pid.to_string()])
+                        .output();
+                    killed.push(pid);
                 }
             }
         }
@@ -248,7 +247,7 @@ fn purge_binary_and_shell(warnings: &mut Vec<String>) -> bool {
         eprintln!("purge: a running .exe can't delete itself. Remove it manually:");
         eprintln!("  del \"{}\"", exe.display());
         warnings.push("binary self-delete skipped on Windows (manual del printed)".into());
-        return false;
+        false
     }
     #[cfg(unix)]
     {
