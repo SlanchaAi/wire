@@ -121,8 +121,76 @@ fn cargo_on_path() -> bool {
         .unwrap_or(false)
 }
 
+/// Stream a `reqwest::blocking::Response` into a `Vec<u8>` while emitting
+/// periodic progress to stderr. Replacement for `resp.bytes()`'s "consume
+/// everything silently" semantics — operators on a slow or wedged
+/// download see how far it got instead of staring at a frozen terminal.
+///
+/// `expected_len`, when known via `Content-Length`, is rendered as a
+/// percentage; without it the line shows only bytes-so-far. Progress
+/// updates fire at most every 500ms so a fast download isn't drowned in
+/// noise. The total still respects the blocking client's wall-clock
+/// timeout (120s) — read errors surface here as the loop bails.
+fn stream_response_with_progress(
+    resp: &mut reqwest::blocking::Response,
+    expected_len: Option<u64>,
+    url: &str,
+) -> Result<Vec<u8>> {
+    use std::io::{Read, Write};
+    let mut buf: Vec<u8> = match expected_len {
+        Some(n) if n < 256 * 1024 * 1024 => Vec::with_capacity(n as usize),
+        _ => Vec::with_capacity(8 * 1024 * 1024),
+    };
+    let mut chunk = [0u8; 64 * 1024];
+    let started = std::time::Instant::now();
+    let mut last_print = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap_or_else(std::time::Instant::now);
+    loop {
+        let n = resp
+            .read(&mut chunk)
+            .with_context(|| format!("reading chunk from {url}"))?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if last_print.elapsed() >= std::time::Duration::from_millis(500) {
+            let line = format_download_progress(buf.len() as u64, expected_len);
+            eprint!("\rwire upgrade: {line}");
+            let _ = std::io::stderr().flush();
+            last_print = std::time::Instant::now();
+        }
+    }
+    let final_line = format_download_progress(buf.len() as u64, expected_len);
+    eprintln!("\rwire upgrade: {final_line} in {:?}", started.elapsed());
+    Ok(buf)
+}
+
+/// Pure formatter for the in-place download progress line. Extracted so
+/// the format is unit-testable without touching reqwest.
+pub(crate) fn format_download_progress(got: u64, expected: Option<u64>) -> String {
+    match expected {
+        Some(total) if total > 0 => {
+            let pct = (got.saturating_mul(100) / total).min(100);
+            format!("downloaded {got} / {total} bytes ({pct}%)")
+        }
+        _ => format!("downloaded {got} bytes (unknown size)"),
+    }
+}
+
 /// Download the prebuilt release binary for `latest` and replace THIS binary
 /// in place — the toolchain-free update path (for boxes with no `cargo`).
+///
+/// #284.3: previously called `resp.bytes()` which blocked until the entire
+/// body landed with no progress output. On Willard's Windows host the call
+/// silently hung with zero stderr output and the binary's mtime unchanged,
+/// so the operator had no way to tell whether the upgrade was making
+/// progress, blocked on TLS, or wedged on something else entirely. The
+/// download now streams in 64 KiB chunks and prints a periodic
+/// `downloaded N bytes …` line to stderr so a hang is visible (and an
+/// operator can ctrl-C cleanly) instead of looking like a frozen process.
+/// Existing `reqwest::blocking::Client::timeout` (120s) is preserved as the
+/// total-wall-clock backstop.
 fn self_update_from_release(latest: &str) -> Result<()> {
     let (triple, ext) = release_asset_triple().ok_or_else(|| {
         anyhow!(
@@ -135,14 +203,15 @@ fn self_update_from_release(latest: &str) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
-    let resp = client
+    let mut resp = client
         .get(&base)
         .header("User-Agent", "wire-self-update")
         .send()?;
     if !resp.status().is_success() {
         bail!("downloading {base} returned {}", resp.status());
     }
-    let bytes = resp.bytes()?;
+    let expected_len = resp.content_length();
+    let bytes = stream_response_with_progress(&mut resp, expected_len, &base)?;
 
     // Verify the SHA-256 sidecar if present (best-effort; absence is non-fatal).
     if let Ok(sha) = client
@@ -1547,5 +1616,42 @@ mod upgrade_tests {
             warn.contains("which -a wire") || warn.contains("none of the PATH-resident"),
             "must guide the operator to a fix; got: {warn}"
         );
+    }
+
+    // ---------- #284.3: streaming download progress line ----------
+
+    #[test]
+    fn format_download_progress_includes_percent_when_total_known() {
+        let line = format_download_progress(2_500_000, Some(10_000_000));
+        assert!(line.contains("2500000"));
+        assert!(line.contains("10000000"));
+        assert!(line.contains("25%"));
+    }
+
+    #[test]
+    fn format_download_progress_clamps_percent_at_100_when_overshoot() {
+        // Defensive — Content-Length is advisory, a bad server could
+        // serve more bytes than it promised. Don't render `120%`.
+        let line = format_download_progress(12_000, Some(10_000));
+        assert!(
+            line.contains("100%"),
+            "must clamp at 100%, even on overshoot; got: {line}"
+        );
+    }
+
+    #[test]
+    fn format_download_progress_falls_back_to_unknown_size_when_total_missing() {
+        let line = format_download_progress(99, None);
+        assert!(line.contains("99 bytes"));
+        assert!(line.contains("unknown size"));
+    }
+
+    #[test]
+    fn format_download_progress_falls_back_to_unknown_size_when_total_zero() {
+        // `Content-Length: 0` is a real (degenerate) server response;
+        // treat it as "unknown" to avoid a divide-by-zero in the
+        // percent calc.
+        let line = format_download_progress(1024, Some(0));
+        assert!(line.contains("unknown size"), "got: {line}");
     }
 }
