@@ -169,21 +169,10 @@ pub fn peer_endpoints_in_priority_order(relay_state: &Value, peer_handle: &str) 
         }
     }
 
-    // Back-compat: peer was pinned by v0.5.16 or earlier and has no
-    // `endpoints` array, just the top-level legacy fields. Synthesize
-    // one federation Endpoint from them so routing still finds a path.
-    if all.is_empty() {
-        let relay_url = peer.get("relay_url").and_then(Value::as_str).unwrap_or("");
-        let slot_id = peer.get("slot_id").and_then(Value::as_str).unwrap_or("");
-        let slot_token = peer.get("slot_token").and_then(Value::as_str).unwrap_or("");
-        if !relay_url.is_empty() && !slot_id.is_empty() && !slot_token.is_empty() {
-            all.push(Endpoint::federation(
-                relay_url.to_string(),
-                slot_id.to_string(),
-                slot_token.to_string(),
-            ));
-        }
-    }
+    // RFC-006 Part B: `endpoints[]` is the only peer-routing source. The
+    // former flat-field synthesis fallback (for pre-v0.5.16 pins with no
+    // `endpoints` array) is gone — every pin now carries `endpoints[]`
+    // (`pin_peer_endpoints` writes it; invite-accept routes through it too).
 
     // Sort: UDS (same-host trust anchor) first, then local-loopback-
     // with-matching-self-local, then LAN (cross-machine same-network),
@@ -280,6 +269,17 @@ pub fn self_primary_endpoint(relay_state: &Value) -> Option<Endpoint> {
     self_endpoints(relay_state).into_iter().next()
 }
 
+/// The single best (highest-priority) endpoint to reach `peer_handle`, or
+/// `None` if the peer has no pinned endpoints. RFC-006 Part B: the canonical
+/// replacement for reading the old flat `relay_url`/`slot_id`/`slot_token` peer
+/// fields — every peer-pin reader resolves through this (or
+/// `peer_endpoints_in_priority_order` when it needs failover).
+pub fn peer_primary_endpoint(relay_state: &Value, peer_handle: &str) -> Option<Endpoint> {
+    peer_endpoints_in_priority_order(relay_state, peer_handle)
+        .into_iter()
+        .next()
+}
+
 /// Pin a peer's full set of endpoints into `relay_state.json` under
 /// `peers[handle]`. Preserves the v0.5.16-and-earlier `relay_url` /
 /// `slot_id` / `slot_token` top-level fields (pointing at the
@@ -290,12 +290,6 @@ pub fn pin_peer_endpoints(
     peer_handle: &str,
     endpoints: &[Endpoint],
 ) -> Result<()> {
-    // Pick the federation endpoint (if any) to fill the legacy fields.
-    // v0.7.0-alpha.9: when no federation present, prefer LAN over Local
-    // for the legacy fields — LAN is cross-machine-reachable.
-    let fed = endpoints
-        .iter()
-        .find(|e| e.scope == EndpointScope::Federation);
     let peers = relay_state
         .as_object_mut()
         .map(|m| {
@@ -330,26 +324,13 @@ pub fn pin_peer_endpoints(
                 .collect()
         })
         .unwrap_or_default();
+    // RFC-006 Part B: `endpoints[]` is the SINGLE peer-routing source. The
+    // top-level flat `relay_url`/`slot_id`/`slot_token` fields are no longer
+    // written — they were a redundant synthesized copy (the "stale flat beats
+    // fresh array" routing hazard). All peer-pin readers now resolve through
+    // `peer_endpoints_in_priority_order`. (Self-slot flat is a separate
+    // representation, untouched here.)
     let mut entry = preserved;
-    if let Some(f) = fed {
-        entry.insert("relay_url".into(), Value::String(f.relay_url.clone()));
-        entry.insert("slot_id".into(), Value::String(f.slot_id.clone()));
-        entry.insert("slot_token".into(), Value::String(f.slot_token.clone()));
-    } else if let Some(lan_ep) = endpoints.iter().find(|e| e.scope == EndpointScope::Lan) {
-        entry.insert("relay_url".into(), Value::String(lan_ep.relay_url.clone()));
-        entry.insert("slot_id".into(), Value::String(lan_ep.slot_id.clone()));
-        entry.insert(
-            "slot_token".into(),
-            Value::String(lan_ep.slot_token.clone()),
-        );
-    } else if let Some(loc) = endpoints.iter().find(|e| e.scope == EndpointScope::Local) {
-        // No federation, no LAN? Local is the only option. Unusual
-        // (peer would only be reachable from same loopback), but keeps
-        // schema invariant intact.
-        entry.insert("relay_url".into(), Value::String(loc.relay_url.clone()));
-        entry.insert("slot_id".into(), Value::String(loc.slot_id.clone()));
-        entry.insert("slot_token".into(), Value::String(loc.slot_token.clone()));
-    }
     entry.insert("endpoints".into(), serde_json::to_value(endpoints)?);
     peers.insert(peer_handle.to_string(), Value::Object(entry));
     Ok(())
@@ -469,20 +450,17 @@ mod tests {
     }
 
     #[test]
-    fn peer_endpoints_back_compat_falls_back_to_legacy_fields() {
+    fn peer_endpoints_ignores_flat_only_pin_post_rfc006() {
+        // RFC-006 Part B: `endpoints[]` is the single peer-routing source. A
+        // peer with ONLY the old flat fields and no `endpoints[]` array yields
+        // NO endpoints — the synthesis fallback was removed. (No users to
+        // migrate; every real pin now carries `endpoints[]`.)
         let state = json!({
             "peers": {
-                "alice": {
-                    "relay_url": "https://wireup.net",
-                    "slot_id": "abc",
-                    "slot_token": "tok"
-                }
+                "alice": { "relay_url": "https://wireup.net", "slot_id": "abc", "slot_token": "tok" }
             }
         });
-        let eps = peer_endpoints_in_priority_order(&state, "alice");
-        assert_eq!(eps.len(), 1);
-        assert_eq!(eps[0].relay_url, "https://wireup.net");
-        assert_eq!(eps[0].scope, EndpointScope::Federation);
+        assert!(peer_endpoints_in_priority_order(&state, "alice").is_empty());
     }
 
     #[test]
@@ -562,11 +540,9 @@ mod tests {
     }
 
     #[test]
-    fn pin_peer_endpoints_uses_lan_as_legacy_when_no_federation() {
-        // Backward compat: when peer has no federation endpoint but has
-        // a LAN one, the legacy top-level relay_url/slot_id/slot_token
-        // should point at the LAN address (since LAN is cross-machine
-        // reachable; Local loopback wouldn't be).
+    fn pin_peer_endpoints_writes_no_flat_fields_post_rfc006() {
+        // RFC-006 Part B: pin writes `endpoints[]` ONLY — no synthesized
+        // top-level relay_url/slot_id/slot_token. Routing reads the array.
         let mut state = json!({});
         let endpoints = vec![
             Endpoint::lan(
@@ -582,11 +558,14 @@ mod tests {
         ];
         pin_peer_endpoints(&mut state, "alice", &endpoints).unwrap();
         let alice = &state["peers"]["alice"];
+        assert!(alice.get("relay_url").is_none(), "no flat relay_url");
+        assert!(alice.get("slot_id").is_none(), "no flat slot_id");
+        assert!(alice.get("slot_token").is_none(), "no flat slot_token");
         assert_eq!(
-            alice["relay_url"], "http://192.168.1.50:8771",
-            "LAN wins legacy fields"
+            alice["endpoints"].as_array().map(Vec::len),
+            Some(2),
+            "endpoints[] is the routing source"
         );
-        assert_eq!(alice["slot_id"], "lan-slot");
     }
 
     #[test]
@@ -662,7 +641,9 @@ mod tests {
     }
 
     #[test]
-    fn pin_peer_endpoints_preserves_legacy_top_level_fields() {
+    fn pin_then_resolve_round_trips_through_endpoints_array() {
+        // RFC-006 Part B: pin writes endpoints[]; routing resolves from it
+        // (priority order), with NO flat fields involved on either side.
         let mut state = json!({"peers": {}});
         let endpoints = vec![
             Endpoint::federation("https://wireup.net".into(), "abc".into(), "tok".into()),
@@ -674,13 +655,18 @@ mod tests {
         ];
         pin_peer_endpoints(&mut state, "alice", &endpoints).unwrap();
         let alice = &state["peers"]["alice"];
-        // Legacy fields point at the federation endpoint.
-        assert_eq!(alice["relay_url"], "https://wireup.net");
-        assert_eq!(alice["slot_id"], "abc");
-        assert_eq!(alice["slot_token"], "tok");
-        // Endpoints array carries the full set.
-        let eps = alice["endpoints"].as_array().unwrap();
-        assert_eq!(eps.len(), 2);
+        assert!(alice.get("relay_url").is_none(), "no flat fields written");
+        assert_eq!(alice["endpoints"].as_array().map(Vec::len), Some(2));
+        // Resolve from the array (no flat). Without a matching self-local relay,
+        // the peer's loopback endpoint isn't reachable for us, so federation is
+        // the primary route.
+        // Priority order drops the unreachable loopback (no matching
+        // self-local), leaving the federation route.
+        let ordered = peer_endpoints_in_priority_order(&state, "alice");
+        assert_eq!(ordered.len(), 1, "only the reachable federation route");
+        let primary = peer_primary_endpoint(&state, "alice").unwrap();
+        assert_eq!(primary.scope, EndpointScope::Federation);
+        assert_eq!(primary.slot_id, "abc");
     }
 
     #[test]
