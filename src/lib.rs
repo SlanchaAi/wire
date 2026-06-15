@@ -31,6 +31,7 @@ pub mod macaroon;
 pub mod mcp;
 pub mod nostr_event;
 pub mod nostr_key;
+pub mod nostr_relay;
 pub mod nuke;
 pub mod org_bind;
 pub mod org_membership;
