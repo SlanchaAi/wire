@@ -399,7 +399,7 @@ pub(super) fn cmd_send(
                 SyncDelivery::SlotStale {
                     event_id, detail, ..
                 } => println!(
-                    "FAILED {event_id} → {peer}: relay says slot is stale ({detail}). Run `wire dial {peer}` to re-pair."
+                    "FAILED {event_id} → {peer}: relay says slot is stale ({detail}) — the peer likely rotated. Run `wire dial {peer}@<relay>` to re-pair; if you're already paired, their daemon auto-refreshes (no manual accept needed) and `wire send --queue` will deliver once it re-acks."
                 ),
                 SyncDelivery::TransportError {
                     event_id, detail, ..
