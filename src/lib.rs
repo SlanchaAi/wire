@@ -32,6 +32,7 @@ pub mod mcp;
 pub mod nostr_event;
 pub mod nostr_key;
 pub mod nostr_relay;
+pub mod nostr_ws;
 pub mod nuke;
 pub mod org_bind;
 pub mod org_membership;
