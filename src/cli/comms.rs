@@ -393,6 +393,13 @@ pub(super) fn cmd_send(
                 } => println!(
                     "duplicate {event_id} → {peer} (already on relay {relay_url} slot {slot_id} — change the body to send a distinct event)"
                 ),
+                SyncDelivery::DeliveredNostr {
+                    event_id,
+                    relay_url,
+                    npub,
+                } => println!(
+                    "delivered {event_id} → {peer} over nostr (relay {relay_url}, p-tagged {npub})"
+                ),
                 SyncDelivery::PeerUnknown { event_id } => println!(
                     "FAILED {event_id} → {peer}: peer not pinned. Run `wire dial {peer}` to pair, or `wire send --queue {peer} ...` to write to outbox for the daemon to retry later."
                 ),
@@ -587,6 +594,9 @@ pub(super) fn cmd_send_project(
                 }
                 SyncDelivery::Duplicate { event_id, .. } => {
                     println!("  duplicate {event_id} → {peer} (change body for a distinct event)")
+                }
+                SyncDelivery::DeliveredNostr { event_id, .. } => {
+                    println!("  delivered {event_id} → {peer} over nostr")
                 }
                 other => println!(
                     "  FAILED → {peer}: {}",
