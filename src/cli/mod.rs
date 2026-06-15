@@ -1177,6 +1177,18 @@ pub enum NostrCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Accept a pending pair-request from a peer's npub (NIP-W1 bilateral gate):
+    /// pull it, verify the card + its nostr binding (tying the npub to the wire
+    /// identity), pin the peer VERIFIED, and send a pair-ack back over the relay.
+    Accept {
+        /// The peer's Nostr public key — 64-char hex x-only.
+        npub: String,
+        /// Relay to pull the request from + publish the ack to.
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `wire org …` — trust organizations by their domain (RFC-001 §2 DNS-TXT
