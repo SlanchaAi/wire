@@ -143,16 +143,43 @@ pub fn build_binding(
     let payload = binding_payload(session_did, &xonly);
     let ed_sig = sign_did_cert(session_ed_sk, &payload).map_err(NostrKeyError::IdentitySig)?;
 
-    // Possession direction: schnorr (BIP-340) over the 32-byte digest. 0.31
-    // takes the message as a raw &[u8] (the digest), not a `Message`.
+    // Possession direction: schnorr (BIP-340) over the 32-byte digest.
     let digest = binding_digest(session_did, &xonly);
-    let sig = secp.sign_schnorr_no_aux_rand(&digest, &kp);
+    let sig = schnorr_sign_digest(nostr_secp_sk, &digest)?;
 
     Ok(NostrBinding {
         pubkey: b64encode(&xonly),
         ed_sig,
-        schnorr_sig: b64encode(sig.as_ref()),
+        schnorr_sig: b64encode(&sig),
     })
+}
+
+/// Sign a 32-byte digest with a secp256k1 key (BIP-340 schnorr, no aux rand →
+/// deterministic). Returns the 64-byte signature. The low-level secp primitive
+/// behind the binding's possession proof AND the NIP-01 event signature (D3.2a),
+/// so secp usage stays centralized in this module.
+pub fn schnorr_sign_digest(
+    secp_sk: &[u8; 32],
+    digest: &[u8; 32],
+) -> Result<[u8; 64], NostrKeyError> {
+    let secp = Secp256k1::new();
+    let kp = Keypair::from_seckey_byte_array(&secp, *secp_sk).map_err(|_| NostrKeyError::Secp)?;
+    Ok(*secp.sign_schnorr_no_aux_rand(digest, &kp).as_ref())
+}
+
+/// Verify a 64-byte schnorr signature over a 32-byte digest under an x-only
+/// public key. `Err(PossessionSig)` on any failure (malformed key/sig or bad
+/// signature) — fail-closed.
+pub fn schnorr_verify_digest(
+    xonly: &[u8; 32],
+    digest: &[u8; 32],
+    sig: &[u8; 64],
+) -> Result<(), NostrKeyError> {
+    let secp = Secp256k1::new();
+    let pk = XOnlyPublicKey::from_byte_array(*xonly).map_err(|_| NostrKeyError::Secp)?;
+    let sig = Signature::from_byte_array(*sig);
+    secp.verify_schnorr(&sig, digest, &pk)
+        .map_err(|_| NostrKeyError::PossessionSig)
 }
 
 /// Verify a card's Nostr binding (both directions). `session_ed_pubkey` is the
@@ -178,17 +205,13 @@ pub fn verify_binding(
         .map_err(NostrKeyError::IdentitySig)?;
 
     // Possession proof (schnorr over the digest).
-    let secp = Secp256k1::new();
-    let xonly = XOnlyPublicKey::from_byte_array(xonly_arr).map_err(|_| NostrKeyError::Secp)?;
     let sig_bytes = b64decode(schnorr_sig_b64).map_err(|_| NostrKeyError::BadEncoding)?;
     let sig_arr: [u8; 64] = sig_bytes
         .as_slice()
         .try_into()
         .map_err(|_| NostrKeyError::BadEncoding)?;
-    let sig = Signature::from_byte_array(sig_arr);
     let digest = binding_digest(session_did, &xonly_arr);
-    secp.verify_schnorr(&sig, &digest, &xonly)
-        .map_err(|_| NostrKeyError::PossessionSig)?;
+    schnorr_verify_digest(&xonly_arr, &digest, &sig_arr)?;
 
     Ok(xonly_arr)
 }
