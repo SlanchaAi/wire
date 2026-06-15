@@ -29,6 +29,7 @@ pub mod inbox_watch;
 pub mod init;
 pub mod macaroon;
 pub mod mcp;
+pub mod nip44;
 pub mod nostr_event;
 pub mod nostr_key;
 pub mod nostr_relay;
