@@ -10,6 +10,10 @@ the PR description linked in each section.
 
 ## [Unreleased]
 
+### Added
+
+- **`wire unclaim` + relay `DELETE /v1/handle/claim/:nick` — release a claimed handle** (#247 finding 1): a handle claim was FCFS-**permanent** (no expiry, no unclaim), so an abandoned/rotated nick squatted the directory forever. You can now release your persona: `wire unclaim` (owner-gated by your slot token) frees the nick so it stops resolving via `.well-known/wire/agent` and can be re-claimed. (Operator-TTL auto-expiry — the other half of #247.1 — needs persisted slot-activity to avoid evicting quiet-but-live agents on relay restart, and stays tracked.)
+
 ### Fixed
 
 - **Relay: per-nick `/v1/handle/intro` rate limit closes the unauthenticated pair-intro flood** (#247 finding 3): the intro endpoint is unauthenticated by design (a stranger drops a pair-intro), and was protected only by the shared per-slot byte quota — so an attacker could flood a known nick's slot to `MAX_SLOT_BYTES` (~25s) and DoS the victim (the global governor doesn't help: it throttles everyone and 10/s × 256 KiB still fills 64 MB in ~25s). Intros to a given nick are now capped (5 per 5 min, sliding window) → `429` over the limit.

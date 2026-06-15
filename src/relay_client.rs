@@ -774,6 +774,23 @@ impl RelayClient {
         Ok(resp.json()?)
     }
 
+    /// `DELETE /v1/handle/claim/:nick` — release a claimed handle (#247.1).
+    /// Owner-gated by the slot's bearer token.
+    pub fn handle_unclaim(&self, nick: &str, slot_token: &str) -> Result<Value> {
+        let resp = self
+            .client
+            .delete(format!("{}/v1/handle/claim/{nick}", self.base_url))
+            .bearer_auth(slot_token)
+            .send()
+            .with_context(|| format!("DELETE {}/v1/handle/claim/{nick}", self.base_url))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let detail = resp.text().unwrap_or_default();
+            return Err(anyhow!("handle_unclaim failed: {status}: {detail}"));
+        }
+        Ok(resp.json()?)
+    }
+
     /// POST an intro (zero-paste pair-drop) event to a known nick's slot
     /// without holding that slot's bearer token. Relay validates the event
     /// is kind=1100 with an embedded signed agent-card; otherwise refuses.
