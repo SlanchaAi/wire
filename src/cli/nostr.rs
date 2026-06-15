@@ -126,6 +126,17 @@ fn cmd_accept(npub: &str, relay: &str, as_json: bool) -> Result<()> {
         crate::trust::add_agent_card_pin(t, &card, Some("VERIFIED")).map_err(anyhow::Error::msg)
     })?;
 
+    // Record the peer's Nostr reachability (npub + the relay we paired on) so a
+    // later send can route to them over Nostr. Keyed by the peer's handle.
+    let peer_handle = card
+        .get("handle")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::agent_card::display_handle_from_did(&peer_did).to_string());
+    crate::config::update_relay_state(|rs| {
+        crate::endpoints::pin_peer_nostr_transport(rs, &peer_handle, npub, relay)
+    })?;
+
     // Send the pair-ack (our card) back over the relay.
     let ack = nip_w1::build_pair_event(PairKind::Ack, &nsk, &peer, &my_card, now_unix())
         .map_err(|e| anyhow!("build pair-ack: {e}"))?;

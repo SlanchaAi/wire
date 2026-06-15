@@ -317,7 +317,14 @@ pub fn pin_peer_endpoints(
                 .filter(|(k, _)| {
                     matches!(
                         k.as_str(),
-                        "bilateral_completed_at" | "persona" | "profile" | "first_seen_at"
+                        "bilateral_completed_at"
+                            | "persona"
+                            | "profile"
+                            | "first_seen_at"
+                            // RFC-007 D3.4: a peer's Nostr transport coords are
+                            // durable reachability state — must survive an
+                            // HTTP-endpoint re-pin (same monotonic-state rule).
+                            | "nostr_transport"
                     )
                 })
                 .map(|(k, v)| (k.clone(), v.clone()))
@@ -334,6 +341,53 @@ pub fn pin_peer_endpoints(
     entry.insert("endpoints".into(), serde_json::to_value(endpoints)?);
     peers.insert(peer_handle.to_string(), Value::Object(entry));
     Ok(())
+}
+
+/// RFC-007 D3.4: record a peer's **Nostr transport** reachability — their
+/// x-only npub (hex) + a `wss://` relay to reach them on — under
+/// `peers[handle].nostr_transport`. Read-modify-write so it composes with
+/// `pin_peer_endpoints` (which preserves this field). Reachability only; trust
+/// is a separate pin. Idempotent.
+pub fn pin_peer_nostr_transport(
+    relay_state: &mut Value,
+    peer_handle: &str,
+    npub_hex: &str,
+    relay_url: &str,
+) -> Result<()> {
+    let peers = relay_state
+        .as_object_mut()
+        .map(|m| {
+            m.entry("peers")
+                .or_insert_with(|| Value::Object(Default::default()))
+        })
+        .ok_or_else(|| anyhow::anyhow!("relay_state.json root is not an object"))?
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("relay_state.peers is not an object"))?;
+    let entry = peers
+        .entry(peer_handle.to_string())
+        .or_insert_with(|| Value::Object(Default::default()))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("relay_state.peers[{peer_handle}] is not an object"))?;
+    entry.insert(
+        "nostr_transport".into(),
+        serde_json::json!({ "npub": npub_hex, "relay": relay_url }),
+    );
+    Ok(())
+}
+
+/// Read a peer's Nostr transport coords `(npub_hex, relay_url)`, or `None` if
+/// the peer has no Nostr transport recorded.
+pub fn peer_nostr_transport(relay_state: &Value, peer_handle: &str) -> Option<(String, String)> {
+    let nt = relay_state
+        .get("peers")?
+        .get(peer_handle)?
+        .get("nostr_transport")?;
+    let npub = nt.get("npub")?.as_str()?.to_string();
+    let relay = nt.get("relay")?.as_str()?.to_string();
+    if npub.is_empty() || relay.is_empty() {
+        return None;
+    }
+    Some((npub, relay))
 }
 
 /// Infer an endpoint scope from a relay URL: `unix://` -> Uds, a loopback
@@ -696,5 +750,57 @@ mod tests {
         });
         let eps = self_endpoints(&state);
         assert_eq!(eps.len(), 2);
+    }
+
+    // ── RFC-007 D3.4: per-peer Nostr transport reachability ──
+    #[test]
+    fn nostr_transport_roundtrips() {
+        let mut state = serde_json::json!({});
+        let npub = "a".repeat(64);
+        pin_peer_nostr_transport(&mut state, "raven-kettle", &npub, "wss://relay.damus.io")
+            .unwrap();
+        assert_eq!(
+            peer_nostr_transport(&state, "raven-kettle"),
+            Some((npub.clone(), "wss://relay.damus.io".to_string()))
+        );
+        // Unknown peer → None.
+        assert_eq!(peer_nostr_transport(&state, "nobody"), None);
+    }
+
+    #[test]
+    fn nostr_transport_survives_endpoint_repin() {
+        // The #162 hazard: a later HTTP-endpoint pin must NOT wipe the recorded
+        // Nostr transport (it's monotonic reachability state).
+        let mut state = serde_json::json!({});
+        let npub = "b".repeat(64);
+        pin_peer_nostr_transport(&mut state, "p", &npub, "wss://nos.lol").unwrap();
+        pin_peer_endpoints(
+            &mut state,
+            "p",
+            &[Endpoint::federation(
+                "https://wireup.net".into(),
+                "slot1".into(),
+                "tok1".into(),
+            )],
+        )
+        .unwrap();
+        // Both survive.
+        assert_eq!(
+            peer_nostr_transport(&state, "p"),
+            Some((npub, "wss://nos.lol".to_string()))
+        );
+        assert_eq!(peer_endpoints_in_priority_order(&state, "p").len(), 1);
+    }
+
+    #[test]
+    fn nostr_transport_is_idempotent_and_updatable() {
+        let mut state = serde_json::json!({});
+        pin_peer_nostr_transport(&mut state, "p", &"c".repeat(64), "wss://a").unwrap();
+        // Re-record with a new relay → updates.
+        pin_peer_nostr_transport(&mut state, "p", &"c".repeat(64), "wss://b").unwrap();
+        assert_eq!(
+            peer_nostr_transport(&state, "p"),
+            Some(("c".repeat(64), "wss://b".to_string()))
+        );
     }
 }
