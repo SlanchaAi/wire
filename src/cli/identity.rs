@@ -517,7 +517,102 @@ pub(super) fn cmd_enroll(cmd: super::EnrollCommand) -> Result<()> {
         super::EnrollCommand::RotateOrgKey { org_did, json } => {
             cmd_enroll_rotate_org_key(&org_did, json)
         }
+        super::EnrollCommand::FleetLink {
+            dry_run,
+            rotate_machine,
+            json,
+        } => cmd_enroll_fleet_link(dry_run, rotate_machine, json),
     }
+}
+
+/// `wire enroll fleet-link` — RFC-001 amendment #182. Attach an op_sk-signed
+/// same-machine attestation to every enrolled sibling session's card so any two
+/// of this operator's sessions on this machine auto-pin each other at
+/// ORG_VERIFIED. Idempotent: the canonical signed message is deterministic, so a
+/// re-run reproduces byte-identical attestations.
+fn cmd_enroll_fleet_link(dry_run: bool, rotate_machine: bool, as_json: bool) -> Result<()> {
+    // §D precondition: the machine fingerprint must be computable, else there is
+    // no same-machine identity to sign.
+    crate::same_machine::local_fingerprint().context(
+        "could not read this machine's fingerprint (machine-id / OS-user id unreadable) — \
+         same-machine attestation unavailable on this platform",
+    )?;
+
+    let sessions = crate::session::list_sessions()?;
+    let saved_home = std::env::var("WIRE_HOME").ok();
+
+    let mut linked: Vec<String> = Vec::new();
+    let mut skipped: Vec<(String, String)> = Vec::new();
+
+    for s in &sessions {
+        let label = s
+            .did
+            .clone()
+            .unwrap_or_else(|| s.home_dir.display().to_string());
+        // Operate in each sibling's own home so config_dir() resolves to that
+        // session's card + keys. SAFETY: `wire enroll fleet-link` is a one-shot,
+        // single-threaded CLI command — no other thread reads WIRE_HOME
+        // concurrently — and we restore it before returning.
+        unsafe { std::env::set_var("WIRE_HOME", &s.home_dir) };
+
+        if crate::config::read_op_key().is_err() {
+            skipped.push((label, "not enrolled (no op.key)".to_string()));
+            continue;
+        }
+        if dry_run {
+            linked.push(label);
+            continue;
+        }
+        // rebuild_card_with_current_claims re-attaches a FRESH same-machine
+        // attestation (built against the current machine fingerprint, so this
+        // doubles as --rotate-machine) and re-signs locally — no publish.
+        match crate::enroll::rebuild_card_with_current_claims() {
+            Ok(_) => linked.push(label),
+            Err(e) => skipped.push((label, format!("rebuild failed: {e}"))),
+        }
+    }
+
+    // Restore the caller's WIRE_HOME.
+    match saved_home {
+        Some(h) => unsafe { std::env::set_var("WIRE_HOME", h) },
+        None => unsafe { std::env::remove_var("WIRE_HOME") },
+    }
+
+    let verb = if dry_run {
+        "would link"
+    } else if rotate_machine {
+        "re-signed (machine rotation)"
+    } else {
+        "linked"
+    };
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "dry_run": dry_run,
+                "rotate_machine": rotate_machine,
+                "linked": linked,
+                "skipped": skipped.iter().map(|(d, why)| json!({"session": d, "reason": why})).collect::<Vec<_>>(),
+            }))?
+        );
+    } else {
+        if linked.is_empty() && !sessions.is_empty() {
+            println!("→ no enrolled sibling sessions found to link — run `wire enroll op` first");
+        }
+        for d in &linked {
+            println!("  ✓ {verb}: {d}");
+        }
+        for (d, why) in &skipped {
+            println!("  – skipped {d}: {why}");
+        }
+        println!(
+            "→ {} session(s) {verb}, {} skipped",
+            linked.len(),
+            skipped.len()
+        );
+    }
+    Ok(())
 }
 
 /// `wire enroll rotate-op-key` — RFC-001 §T20 operator key rotation.

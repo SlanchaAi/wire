@@ -64,6 +64,9 @@ pub fn build_member_claims(
         op_pubkey: Some(b64encode(op_pk)),
         org_memberships,
         project,
+        // Attached separately by `with_op_claims_if_enrolled_inner` (needs the
+        // local machine fingerprint, which is I/O, not pure key material).
+        same_machine_attestation: None,
     })
 }
 
@@ -103,6 +106,7 @@ pub fn rebuild_card_with_current_claims() -> anyhow::Result<crate::agent_card::A
         obj.remove("op_cert");
         obj.remove("op_pubkey");
         obj.remove("org_memberships");
+        obj.remove("same_machine_attestation"); // #182: rebuilt fresh below
         obj.remove("signature");
 
         // v0.14.2 (#126): refresh the wire/* entry in `capabilities[]` so
@@ -190,7 +194,7 @@ fn with_op_claims_if_enrolled_inner(
     // Fail-soft: a cert-build / attach error degrades to "no claims" rather than
     // breaking card-build (init/up is critical-path; a broken identity config
     // must never stop a basic agent from coming up).
-    let claims = match build_member_claims(
+    let mut claims = match build_member_claims(
         &op_handle,
         &op_sk,
         &op_pk,
@@ -204,6 +208,17 @@ fn with_op_claims_if_enrolled_inner(
             return Ok(card);
         }
     };
+
+    // RFC-001 amendment #182: attach a same-machine attestation when the local
+    // machine fingerprint is readable. Op-enrolled (we have op_sk) + same disk
+    // ⇒ a receiver on this same (machine, OS user) can auto-pin us at
+    // ORG_VERIFIED. Fail-soft: an unreadable fingerprint just omits the field.
+    if let Some(fp) = crate::same_machine::local_fingerprint() {
+        match crate::same_machine::build_attestation(&op_sk, &fp, &session_did) {
+            Ok(att) => claims.same_machine_attestation = Some(att),
+            Err(e) => eprintln!("wire: same-machine attestation skipped (sign failed: {e:?})"),
+        }
+    }
     match crate::agent_card::with_identity_claims(&card, &claims) {
         Ok(c) => Ok(c),
         Err(e) => {
@@ -419,6 +434,7 @@ mod tests {
                         member_cert: issue_member_cert(&org_sk, &op_did).unwrap(),
                     }],
                     project: None,
+                    same_machine_attestation: None,
                 },
             )
             .unwrap();

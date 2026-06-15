@@ -65,6 +65,59 @@ fn commits_to(did: &str, pubkey: &[u8; 32]) -> bool {
     did.ends_with(&format!("-{}", agent_card::long_fingerprint(pubkey)))
 }
 
+/// The verified operator anchor of a card: its `op_did` plus the inline
+/// `op_pubkey` (already checked to commit to that `op_did`). Returned by
+/// [`verify_op_anchor`] once the RFC-001 §1 op-chain checks pass.
+pub struct OpAnchor {
+    pub op_did: String,
+    pub op_pubkey: [u8; 32],
+}
+
+/// Verify a card's RFC-001 §1 operator anchor (the op-chain, independent of any
+/// org vouch). Returns the verified `(op_did, op_pubkey)` on success:
+///  1. well-formed `op_did` + inline `op_pubkey` that commits to it, + `op_cert`;
+///  2. `op_cert` verifies — `op_pubkey` signed this card's `did` (session DID).
+///
+/// `Ok(None)` means "no operator claim at all" (an ordinary peer). `Err` means
+/// a claim was present but is broken (fail closed). Shared by
+/// [`evaluate_card_membership`] (org lane) and the same-machine attestation lane
+/// (#182), which both need a *verified* operator identity before acting.
+pub fn verify_op_anchor(card: &AgentCard) -> Result<Option<OpAnchor>, String> {
+    let op_did = match agent_card::card_op_did(card) {
+        Some(d) => d,
+        None => return Ok(None),
+    };
+    let session_did = card.get("did").and_then(|v| v.as_str()).unwrap_or_default();
+    if session_did.is_empty() {
+        return Err("card has no `did` to bind the operator cert to".into());
+    }
+    if !agent_card::is_op_did(op_did) {
+        return Err(format!("`op_did` slot holds a non-operator DID: {op_did}"));
+    }
+    let op_pubkey = match key32(card.get("op_pubkey")) {
+        Some(k) => k,
+        None => return Err("`op_pubkey` missing or not a 32-byte base64 key".into()),
+    };
+    if !commits_to(op_did, &op_pubkey) {
+        return Err("`op_pubkey` does not match the `op_did` hash commitment".into());
+    }
+    let op_cert = match agent_card::card_op_cert(card) {
+        Some(c) => c,
+        None => {
+            return Err(
+                "`op_did` present without an `op_cert` — operator binding unprovable".into(),
+            );
+        }
+    };
+    if verify_op_cert(&op_pubkey, op_cert, session_did).is_err() {
+        return Err("`op_cert` does not bind this session to the operator".into());
+    }
+    Ok(Some(OpAnchor {
+        op_did: op_did.to_string(),
+        op_pubkey,
+    }))
+}
+
 /// Verify a received card's organizational claims. Fully offline.
 ///
 /// For [`MembershipOutcome::Verified`] all must hold:
@@ -79,49 +132,12 @@ fn commits_to(did: &str, pubkey: &[u8; 32]) -> bool {
 /// Any membership entry that fails a check is skipped (others may vouch); none
 /// verifying → `Rejected`. A bad `op_pubkey` commitment / `op_cert` is fatal.
 pub fn evaluate_card_membership(card: &AgentCard) -> MembershipOutcome {
-    let op_did = match agent_card::card_op_did(card) {
-        Some(d) => d,
-        None => return MembershipOutcome::NoClaim,
+    let anchor = match verify_op_anchor(card) {
+        Ok(Some(a)) => a,
+        Ok(None) => return MembershipOutcome::NoClaim,
+        Err(reason) => return MembershipOutcome::Rejected { reason },
     };
-
-    let session_did = card.get("did").and_then(|v| v.as_str()).unwrap_or_default();
-    if session_did.is_empty() {
-        return MembershipOutcome::Rejected {
-            reason: "card has no `did` to bind the operator cert to".into(),
-        };
-    }
-    if !agent_card::is_op_did(op_did) {
-        return MembershipOutcome::Rejected {
-            reason: format!("`op_did` slot holds a non-operator DID: {op_did}"),
-        };
-    }
-    let op_pubkey = match key32(card.get("op_pubkey")) {
-        Some(k) => k,
-        None => {
-            return MembershipOutcome::Rejected {
-                reason: "`op_pubkey` missing or not a 32-byte base64 key".into(),
-            };
-        }
-    };
-    if !commits_to(op_did, &op_pubkey) {
-        return MembershipOutcome::Rejected {
-            reason: "`op_pubkey` does not match the `op_did` hash commitment".into(),
-        };
-    }
-    let op_cert = match agent_card::card_op_cert(card) {
-        Some(c) => c,
-        None => {
-            return MembershipOutcome::Rejected {
-                reason: "`op_did` present without an `op_cert` — operator binding unprovable"
-                    .into(),
-            };
-        }
-    };
-    if verify_op_cert(&op_pubkey, op_cert, session_did).is_err() {
-        return MembershipOutcome::Rejected {
-            reason: "`op_cert` does not bind this session to the operator".into(),
-        };
-    }
+    let op_did = anchor.op_did.as_str();
 
     // At least one org must vouch for the operator — each entry self-certifying.
     let mut verified_orgs = Vec::new();

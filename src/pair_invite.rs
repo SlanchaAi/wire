@@ -717,6 +717,44 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
         return Ok(Some(peer_did));
     }
 
+    // RFC-001 amendment #182: same-machine signed attestation. If the peer's
+    // card proves — cryptographically, not by filesystem witness — that it is
+    // owned by the SAME operator (op_did == mine) AND lives on THIS exact
+    // (machine, OS user) (fingerprint match + op_sk signature), pin it
+    // ORG_VERIFIED + ack now. The op_sk signature is what makes this stronger
+    // than `pull::maybe_autopin_local_sister`'s disk read (coral's #182
+    // constraint 1). Never crosses into VERIFIED (that needs the per-peer SAS
+    // gesture); ORG_VERIFIED < VERIFIED, same as the org-auto lane above.
+    if crate::same_machine::auto_pin_decision(&peer_card).is_some() {
+        crate::config::update_trust(|trust| {
+            crate::trust::add_agent_card_pin(trust, &peer_card, Some("ORG_VERIFIED"))
+                .map_err(anyhow::Error::msg)
+        })?;
+
+        let endpoints_to_pin = if peer_endpoints.is_empty() {
+            vec![crate::endpoints::Endpoint::federation(
+                peer_relay.to_string(),
+                peer_slot_id.to_string(),
+                peer_slot_token.to_string(),
+            )]
+        } else {
+            peer_endpoints.clone()
+        };
+        let mut relay_state = crate::config::read_relay_state()?;
+        crate::endpoints::pin_peer_endpoints(&mut relay_state, &peer_handle, &endpoints_to_pin)?;
+        crate::config::write_relay_state(&relay_state)?;
+
+        send_pair_drop_ack(&peer_handle, &endpoints_to_pin)
+            .with_context(|| format!("same-machine pair_drop_ack send to {peer_handle} failed"))?;
+
+        crate::os_notify::toast_dedup(
+            &format!("same-machine:{peer_handle}"),
+            &format!("wire — auto-paired {peer_handle}"),
+            "Same operator, same machine; pinned ORG_VERIFIED (same-machine attestation).",
+        );
+        return Ok(Some(peer_did));
+    }
+
     // #15 rotation-refresh: a re-intro (no nonce) from a peer whose DID is
     // ALREADY pinned at a consented tier (we accepted THIS exact identity) is a
     // TRANSPORT refresh — typically after a RUDE slot rotation that left our

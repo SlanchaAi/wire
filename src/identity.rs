@@ -124,6 +124,17 @@ pub fn verify_succession_cert(
     )
 }
 
+/// Verify an Ed25519 signature (base64) by `pubkey` over an arbitrary UTF-8
+/// `payload`. This is the generic primitive under `op_cert` / `member_cert` /
+/// succession-cert verification; exposed for the same-machine attestation
+/// (RFC-001 amendment #182), which signs a domain-separated payload *string*
+/// (`wire-same-machine-v1|<fp_hex>|<session_did>`) rather than a bare DID. The
+/// caller must independently confirm `pubkey` is the right key (here: the
+/// inline `op_pubkey` already verified to commit to `op_did`).
+pub fn verify_payload_sig(pubkey: &[u8], sig_b64: &str, payload: &str) -> Result<(), CertError> {
+    verify_did_cert(pubkey, sig_b64, payload)
+}
+
 fn verify_did_cert(pubkey: &[u8], cert_b64: &str, payload_did: &str) -> Result<(), CertError> {
     if pubkey.len() != 32 {
         return Err(CertError::BadKey);

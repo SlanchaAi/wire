@@ -1105,6 +1105,26 @@ pub enum EnrollCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Link every sibling wire session on THIS machine into the same-machine
+    /// auto-pair lane (RFC-001 amendment #182). Attaches a fresh op_sk-signed
+    /// same-machine attestation to each enrolled sibling's agent card so any two
+    /// of your sessions on this box + OS user auto-pin each other at
+    /// ORG_VERIFIED on first contact — no per-pair `wire dial`. Idempotent.
+    ///
+    /// Requires an enrolled operator (`wire enroll op` first); siblings without
+    /// an `op.key` are skipped. `--rotate-machine` re-signs against the current
+    /// machine fingerprint after a laptop replace / OS reinstall.
+    FleetLink {
+        /// Print the plan without writing any cards.
+        #[arg(long)]
+        dry_run: bool,
+        /// Re-sign every sibling attestation against the (now-new) machine
+        /// fingerprint. Use after the machine itself moves.
+        #[arg(long)]
+        rotate_machine: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `wire org …` — trust organizations by their domain (RFC-001 §2 DNS-TXT
