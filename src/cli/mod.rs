@@ -435,6 +435,17 @@ pub enum Command {
         peer: Option<String>,
         #[arg(long)]
         json: bool,
+        /// Block until `daemon_running:true`, then exit 0. Polls
+        /// internally every 200ms up to `--timeout` seconds. Exit 1
+        /// on timeout (with the last seen status to stderr). Replaces
+        /// fragile external `until wire status … | grep daemon_running:true`
+        /// shell loops that piled up hundreds of `wire status`
+        /// invocations on a never-healthy host (#284.2).
+        #[arg(long)]
+        wait_daemon_running: bool,
+        /// Bound for `--wait-daemon-running`. Default 30s.
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
     },
     /// Publish or inspect auto-responder health for this slot.
     Responder {
@@ -1733,9 +1744,16 @@ pub fn run() -> Result<()> {
             offline,
             json,
         } => cmd_init(relay.as_deref(), offline, json),
-        Command::Status { peer, json } => {
+        Command::Status {
+            peer,
+            json,
+            wait_daemon_running,
+            timeout,
+        } => {
             if let Some(peer) = peer {
                 status::cmd_status_peer(&peer, json)
+            } else if wait_daemon_running {
+                status::cmd_status_wait_daemon_running(json, timeout)
             } else {
                 status::cmd_status(json)
             }

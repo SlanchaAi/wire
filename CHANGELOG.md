@@ -23,6 +23,7 @@ the PR description linked in each section.
 ### Added
 
 - **`wire unclaim` + relay `DELETE /v1/handle/claim/:nick` — release a claimed handle** (#247 finding 1): a handle claim was FCFS-**permanent** (no expiry, no unclaim), so an abandoned/rotated nick squatted the directory forever. You can now release your persona: `wire unclaim` (owner-gated by your slot token) frees the nick so it stops resolving via `.well-known/wire/agent` and can be re-claimed. (Operator-TTL auto-expiry — the other half of #247.1 — needs persisted slot-activity to avoid evicting quiet-but-live agents on relay restart, and stays tracked.)
+- **`wire status --wait-daemon-running [--timeout <secs>]`** (#284.2): a bounded, in-process replacement for fragile external shell loops like `until wire status … | grep -q 'daemon_running":true'; do sleep 3; done`. The external pattern + a never-healthy daemon piled up 254 stale `wire.exe` processes on Willard's box (each `wire status` invocation hanging on a wedged probe, the loop spawning a fresh one every 3s). The new flag polls the daemon-liveness snapshot every 200ms in-process, exits 0 with the full status when `daemon_running:true`, or bails after `--timeout` (default 30s) with the last-seen `pidfile_pid` / `pgrep_pids` on stderr so the operator knows what wasn't healthy. Replaces the loop with one bounded subcommand call; no spawn pressure, no orphan accumulation. Pure-logic `wait_step` decision is split out and unit-tested.
 
 ### Fixed
 
