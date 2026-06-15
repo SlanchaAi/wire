@@ -49,6 +49,10 @@ pub struct PullResult {
     /// Surfaces to operators in `wire pull` non-JSON output so silent stall
     /// is visible.
     pub blocked: bool,
+    /// RFC-004: verified inbound probes seen this batch, as `(from_handle,
+    /// nonce)`. The network-capable caller (the daemon pull cycle) auto-responds
+    /// with a probe_ack — `process_events` itself stays network-free.
+    pub probes: Vec<(String, String)>,
 }
 
 /// Check whether a peer inbox file already contains an event with this
@@ -209,6 +213,7 @@ pub fn process_events(
     let mut rejected = Vec::new();
     let mut last_advanced = initial_cursor.clone();
     let mut first_block_idx: Option<usize> = None;
+    let mut probes: Vec<(String, String)> = Vec::new();
 
     for (idx, event) in events.iter().enumerate() {
         let event_id = event
@@ -410,6 +415,11 @@ pub fn process_events(
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
+                // RFC-004: a verified probe → record it so the caller can
+                // auto-respond (the daemon, no LLM). Trust-neutral, plaintext.
+                if let Some(nonce) = crate::probe::probe_nonce(event) {
+                    probes.push((from.clone(), nonce));
+                }
                 written.push(json!({
                     "event_id": event_id,
                     "from": from,
@@ -449,6 +459,7 @@ pub fn process_events(
         rejected: rejected.clone(),
         advance_cursor_to: last_advanced.clone(),
         blocked: first_block_idx.is_some(),
+        probes: probes.clone(),
     };
 
     // P2.10: structured trace. No-op when WIRE_DIAG is not set; one line

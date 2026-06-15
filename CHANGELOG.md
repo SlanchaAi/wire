@@ -10,6 +10,10 @@ the PR description linked in each section.
 
 ## [Unreleased]
 
+### Added
+
+- **`wire ping <peer>` — connection health probing (RFC-004 Tier-1)** (#142): liveness-probe a paired peer and get the round-trip time. The peer's **daemon auto-responds** — no LLM / MCP on the responder side (RFC-004's AC-HP2 kill criterion). Probe + ack ride the existing `kind=100` heartbeat carrier with a body `t` discriminator (`probe`/`probe_ack`), not a new top-level kind; they're plaintext (only a correlation nonce) and trust-neutral (never mutate a tier). Per-peer ack rate-limit bounds a probe flood (AC-HP3). Validated end-to-end (`tests/it/80-health-probe.sh`). Tier-2 (`responder_state` introspection), `wire health` rendering, and MCP `wire_ping` parity are tracked follow-ups.
+
 ### Security
 
 - **Relay: backstop ceilings on slot / handle / pair / invite counts** (#291 H1): the relay's in-memory maps (and their persistence files) grew without bound — an unauthenticated client could `allocate_slot` (or open pairs / register invites) in a loop to exhaust RAM + disk. Allocating handlers now refuse with `503` once a generous ceiling is reached (200k slots / 100k handles / 50k pairs / 50k invites); same-DID handle re-claims are exempt (they don't grow the map). The remaining #291 items — per-IP rate keying (currently global; deferred-behind-WAF + fiddly across the UDS path) and governing/paginating the read endpoints — stay tracked.
