@@ -291,6 +291,12 @@ pub struct IdentityClaims {
     pub org_memberships: Vec<OrgMembership>,
     /// Opaque routing tag — NEVER trust-bearing. RFC-001 §6.
     pub project: Option<String>,
+    /// Same-machine attestation (RFC-001 amendment #182): `(machine_fingerprint
+    /// b64, signature b64)`. Present only when this session is op-enrolled AND
+    /// the local machine fingerprint is readable. Field-additive: pre-v0.15
+    /// receivers tolerate it as an opaque extra (AC-SM5). Built + verified by
+    /// `same_machine`.
+    pub same_machine_attestation: Option<(String, String)>,
 }
 
 /// Layer identity claims onto an existing (unsigned) card. The returned
@@ -346,6 +352,15 @@ pub fn with_identity_claims(
     }
     if let Some(project) = &claims.project {
         out.insert("project".into(), Value::String(project.clone()));
+    }
+    if let Some((fingerprint, signature)) = &claims.same_machine_attestation {
+        out.insert(
+            "same_machine_attestation".into(),
+            json!({
+                "machine_fingerprint": fingerprint,
+                "signature": signature,
+            }),
+        );
     }
 
     // v0.14.x retro-fix: when ANY RFC-001 op claim lands on the card,
@@ -824,10 +839,22 @@ mod tests {
                 member_cert: "BBBB".into(),
             }],
             project: Some("wire-codex-integration".into()),
+            same_machine_attestation: Some(("ZmluZ2VycHJpbnQ=".into(), "c2ln".into())),
         };
         let with = with_identity_claims(&card, &claims).unwrap();
         assert_eq!(card_op_did(&with), Some(op_did.as_str()));
         assert_eq!(card_op_cert(&with), Some("AAAA"));
+        // #182: the attestation lands as a nested object with both fields.
+        assert_eq!(
+            with.pointer("/same_machine_attestation/machine_fingerprint")
+                .and_then(|v| v.as_str()),
+            Some("ZmluZ2VycHJpbnQ=")
+        );
+        assert_eq!(
+            with.pointer("/same_machine_attestation/signature")
+                .and_then(|v| v.as_str()),
+            Some("c2ln")
+        );
         assert_eq!(
             with.get("op_pubkey").and_then(|v| v.as_str()),
             Some(op_pubkey.as_str())

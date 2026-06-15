@@ -82,6 +82,7 @@ fn signed_card(
             member_cert,
         }],
         project: Some("print-shop".into()),
+        same_machine_attestation: None,
     };
     let unsigned = with_identity_claims(&base, &claims).unwrap();
     sign_agent_card(&unsigned, &sess_sk)

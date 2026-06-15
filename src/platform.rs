@@ -411,6 +411,148 @@ pub fn strip_deleted_suffix(p: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
+/// Raw, stable machine identifier bytes for the same-machine attestation
+/// fingerprint (RFC-001 amendment #182, `same_machine::machine_fingerprint`).
+///
+/// - **Linux:** `/etc/machine-id` (systemd), falling back to
+///   `/var/lib/dbus/machine-id`.
+/// - **macOS:** `IOPlatformUUID` from `ioreg -rd1 -c IOPlatformExpertDevice`.
+/// - **Windows:** `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid`
+///   (`reg query`).
+///
+/// Returns `None` on any read failure — the caller omits the attestation and
+/// the session still functions, it just can't join the same-machine lane
+/// (fail-closed, §A). The bytes are used only as hash input; their exact
+/// encoding is irrelevant as long as it is stable for a given machine.
+pub fn machine_id_raw() -> Option<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    {
+        for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+            if let Ok(s) = std::fs::read_to_string(path) {
+                let t = s.trim();
+                if !t.is_empty() {
+                    return Some(t.as_bytes().to_vec());
+                }
+            }
+        }
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("ioreg")
+            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        parse_ioreg_platform_uuid(&text).map(|s| s.into_bytes())
+    }
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("reg.exe");
+        cmd.args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Cryptography",
+            "/v",
+            "MachineGuid",
+        ]);
+        let out = run_with_timeout(cmd, platform_shell_timeout())?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        parse_reg_machine_guid(&text).map(|s| s.into_bytes())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        None
+    }
+}
+
+/// Stable per-OS-user identifier bytes — the salt that keeps two different
+/// users on one shared host (same `machine_id`) from cross-pairing (#182 §S1).
+///
+/// - **Unix:** `id -u` (the numeric uid). Shelled out rather than pulling in a
+///   `libc` dependency, matching this module's existing shell-out idiom.
+/// - **Windows:** the current user's SID from `whoami /user`.
+///
+/// `None` on read failure (fail-closed, same as [`machine_id_raw`]).
+pub fn os_user_id_bytes() -> Option<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        let out = Command::new("id").arg("-u").output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.into_bytes())
+        }
+    }
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("whoami.exe");
+        cmd.args(["/user", "/fo", "csv", "/nh"]);
+        let out = run_with_timeout(cmd, platform_shell_timeout())?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        parse_whoami_sid(&text).map(|s| s.into_bytes())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
+/// Extract the `IOPlatformUUID` value from `ioreg` output. The line looks like
+/// `    "IOPlatformUUID" = "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD"`. Hoisted +
+/// tested on every platform so the parse is locked without a macOS runner.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn parse_ioreg_platform_uuid(text: &str) -> Option<String> {
+    let line = text.lines().find(|l| l.contains("IOPlatformUUID"))?;
+    let after = line.split_once('=')?.1.trim();
+    let unquoted = after.trim_matches('"').trim();
+    if unquoted.is_empty() {
+        None
+    } else {
+        Some(unquoted.to_string())
+    }
+}
+
+/// Extract `MachineGuid` from `reg query` output. The value line looks like
+/// `    MachineGuid    REG_SZ    DDDDDDDD-DDDD-...`. Tested on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_reg_machine_guid(text: &str) -> Option<String> {
+    let line = text.lines().find(|l| l.contains("MachineGuid"))?;
+    // Split on REG_SZ; the value is the last whitespace-trimmed token after it.
+    let after = line.split("REG_SZ").nth(1)?.trim();
+    if after.is_empty() {
+        None
+    } else {
+        Some(after.to_string())
+    }
+}
+
+/// Extract the SID from `whoami /user /fo csv /nh` output, a single CSV row
+/// `"<domain>\<user>","S-1-5-21-...."`. Tested on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_whoami_sid(text: &str) -> Option<String> {
+    let row = text.lines().find(|l| l.contains("S-1-"))?;
+    // The SID is the last quoted field.
+    let sid = row.rsplit(',').next()?.trim().trim_matches('"').trim();
+    if sid.is_empty() {
+        None
+    } else {
+        Some(sid.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,6 +756,46 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "must return well inside the wedged child's runtime; elapsed={elapsed:?}"
         );
+    }
+
+    // ---------- #182: same-machine fingerprint platform parsers ----------
+
+    #[test]
+    fn parse_ioreg_platform_uuid_extracts_value() {
+        let sample = "\
++-o IOPlatformExpertDevice  <class IOPlatformExpertDevice>
+  {
+    \"IOPlatformUUID\" = \"564D5E2F-AAAA-BBBB-CCCC-0123456789AB\"
+    \"IOPlatformSerialNumber\" = \"C02XX\"
+  }
+";
+        assert_eq!(
+            parse_ioreg_platform_uuid(sample),
+            Some("564D5E2F-AAAA-BBBB-CCCC-0123456789AB".to_string())
+        );
+        assert_eq!(parse_ioreg_platform_uuid("no uuid here"), None);
+    }
+
+    #[test]
+    fn parse_reg_machine_guid_extracts_value() {
+        let sample = "\r\n\
+HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography\r\n\
+    MachineGuid    REG_SZ    11112222-3333-4444-5555-666677778888\r\n";
+        assert_eq!(
+            parse_reg_machine_guid(sample),
+            Some("11112222-3333-4444-5555-666677778888".to_string())
+        );
+        assert_eq!(parse_reg_machine_guid("no guid"), None);
+    }
+
+    #[test]
+    fn parse_whoami_sid_extracts_last_quoted_field() {
+        let sample = "\"contoso\\\\alice\",\"S-1-5-21-1111111111-2222222222-3333333333-1001\"\r\n";
+        assert_eq!(
+            parse_whoami_sid(sample),
+            Some("S-1-5-21-1111111111-2222222222-3333333333-1001".to_string())
+        );
+        assert_eq!(parse_whoami_sid("no sid"), None);
     }
 
     #[test]

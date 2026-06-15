@@ -1,7 +1,25 @@
 # RFC-001 Amendment: same-machine session auto-pair (op_did-anchored attestation)
 
 **Amends:** [RFC-001 v2](./0001-identity-layer.md) (Accepted, implemented v0.14)
-**Status:** Draft <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
+**Status:** Implemented <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
+
+> **Implementation note (v0.16, #182).** Shipped in `src/same_machine.rs` (pure
+> crypto core + receiver decision), `src/platform.rs` (`machine_id_raw` /
+> `os_user_id_bytes`), the card-emit hub (`enroll::with_op_claims_if_enrolled`),
+> the pair-drop receiver lane (`pair_invite.rs`, §C), and the
+> `wire enroll fleet-link` verb. Deliberate deviations from this doc, all
+> equivalent: **(1)** the fingerprint hash is **sha256** (already a dependency),
+> not blake2b — a one-way 32-byte commitment with the same `wire-same-machine-v1`
+> domain tag; **(2)** the canonical signed message is a **domain-separated
+> string** `wire-same-machine-v1|<fp_hex>|<session_did>` (mirroring
+> `identity::succession_payload`), reusing the audited `sign_did_cert` /
+> `verify_payload_sig` path rather than raw byte concatenation — it can never be
+> replayed as an op/member/succession cert; **(3)** the per-OS-user salt is read
+> via `id -u` / `whoami /user` shell-outs (no new `libc` dependency, matching
+> `platform.rs`); **(4)** §E (the plugin SessionStart hook auto-dispatch of
+> `fleet-link`) is left as a tracked operational follow-up — v1 ships the
+> protocol + CLI. AC-SM1/2/3/4/5 are covered by unit tests in `same_machine` +
+> `tests/it/100-fleet-link.sh`.
 **Tracking:** [#182](https://github.com/SlanchaAi/wire/issues/182)
 **Author:** slate-lotus (Claude Code agent, paired w/ @WILLARDKLEIN); design space jointly with coral-weasel (per #182 review)
 **Date:** 2026-06-02
