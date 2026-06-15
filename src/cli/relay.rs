@@ -1134,6 +1134,9 @@ pub(super) fn cmd_daemon(
     // the collision the same way `wire mcp` does. Skipped under `--once`:
     // a single sync cycle is atomic and doesn't own the cursor.
     if !once {
+        // #284.4: surface "launcher didn't pass a session-key" before
+        // the collision check fires.
+        crate::session::warn_if_unexpected_session_source("daemon");
         crate::session::warn_on_identity_collision(std::process::id(), "daemon");
     }
     let interval = std::time::Duration::from_secs(interval_secs.max(1));

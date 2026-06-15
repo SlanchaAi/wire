@@ -1086,6 +1086,9 @@ pub(super) fn cmd_monitor(
     if !inbox_dir.exists() && !as_json {
         eprintln!("wire monitor: inbox dir {inbox_dir:?} missing — has the daemon ever run?");
     }
+    // #284.4: surface "launcher didn't pass a session-key" before the
+    // collision check fires.
+    crate::session::warn_if_unexpected_session_source("monitor");
     // v0.13.x identity work: monitor owns the inbox cursor across the
     // long-running poll loop; collision with another wire process under
     // the same WIRE_HOME causes "I'm not seeing X's events" debugging
@@ -1345,6 +1348,9 @@ pub(super) fn cmd_notify(
     // collision detection can reverse-map our pid back to our home.
     if !once {
         let _ = crate::ensure_up::write_self_role_pid("notify");
+        // #284.4: surface "launcher didn't pass a session-key" before
+        // the collision check.
+        crate::session::warn_if_unexpected_session_source("notify");
         crate::session::warn_on_identity_collision(std::process::id(), "notify");
     }
 
