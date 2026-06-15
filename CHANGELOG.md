@@ -10,6 +10,10 @@ the PR description linked in each section.
 
 ## [Unreleased]
 
+### Security
+
+- **Relay: backstop ceilings on slot / handle / pair / invite counts** (#291 H1): the relay's in-memory maps (and their persistence files) grew without bound — an unauthenticated client could `allocate_slot` (or open pairs / register invites) in a loop to exhaust RAM + disk. Allocating handlers now refuse with `503` once a generous ceiling is reached (200k slots / 100k handles / 50k pairs / 50k invites); same-DID handle re-claims are exempt (they don't grow the map). The remaining #291 items — per-IP rate keying (currently global; deferred-behind-WAF + fiddly across the UDS path) and governing/paginating the read endpoints — stay tracked.
+
 ### Added
 
 - **`wire unclaim` + relay `DELETE /v1/handle/claim/:nick` — release a claimed handle** (#247 finding 1): a handle claim was FCFS-**permanent** (no expiry, no unclaim), so an abandoned/rotated nick squatted the directory forever. You can now release your persona: `wire unclaim` (owner-gated by your slot token) frees the nick so it stops resolving via `.well-known/wire/agent` and can be re-claimed. (Operator-TTL auto-expiry — the other half of #247.1 — needs persisted slot-activity to avoid evicting quiet-but-live agents on relay restart, and stays tracked.)
