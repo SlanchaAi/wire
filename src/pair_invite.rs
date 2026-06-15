@@ -717,6 +717,59 @@ pub fn maybe_consume_pair_drop(event: &Value) -> Result<Option<String>> {
         return Ok(Some(peer_did));
     }
 
+    // #15 rotation-refresh: a re-intro (no nonce) from a peer whose DID is
+    // ALREADY pinned at a consented tier (we accepted THIS exact identity) is a
+    // TRANSPORT refresh — typically after a RUDE slot rotation that left our
+    // peers holding a now-410 slot. Re-pin their advertised endpoints and re-ack
+    // (restoring our write-token) WITHOUT a fresh manual accept: no NEW consent
+    // is needed for an identity we already trust, and the verified card sig +
+    // #245's DID-keyed pin mean only the real key-holder can trigger it. The
+    // tier is unchanged; this never crosses UNTRUSTED → trusted (a not-yet-
+    // accepted or different-DID peer still falls through to pending-inbound).
+    {
+        let trust = config::read_trust()?;
+        let existing = trust.get("agents").and_then(|a| a.get(&peer_handle));
+        let existing_did = existing.and_then(|e| e.get("did")).and_then(Value::as_str);
+        let existing_tier = existing
+            .and_then(|e| e.get("tier"))
+            .and_then(Value::as_str)
+            .unwrap_or("UNTRUSTED");
+        if existing_did == Some(peer_did.as_str()) && existing_tier != "UNTRUSTED" {
+            let endpoints_to_pin = if peer_endpoints.is_empty() {
+                vec![crate::endpoints::Endpoint::federation(
+                    peer_relay.to_string(),
+                    peer_slot_id.to_string(),
+                    peer_slot_token.to_string(),
+                )]
+            } else {
+                peer_endpoints.clone()
+            };
+            let mut relay_state = config::read_relay_state()?;
+            crate::endpoints::pin_peer_endpoints(
+                &mut relay_state,
+                &peer_handle,
+                &endpoints_to_pin,
+            )?;
+            config::write_relay_state(&relay_state)?;
+            // Refresh the card pin at the SAME tier (covers key-succession:
+            // same DID, added key). #245 guard allows it — same DID.
+            let tier_owned = existing_tier.to_string();
+            config::update_trust(|t| {
+                crate::trust::add_agent_card_pin(t, &peer_card, Some(&tier_owned))
+                    .map_err(anyhow::Error::msg)
+            })?;
+            send_pair_drop_ack(&peer_handle, &endpoints_to_pin).with_context(|| {
+                format!("rotation-refresh pair_drop_ack to {peer_handle} failed")
+            })?;
+            crate::os_notify::toast_dedup(
+                &format!("rotate-refresh:{peer_handle}"),
+                &format!("wire — {peer_handle} rotated; refreshed"),
+                "Re-acked their new relay slot (already-trusted identity).",
+            );
+            return Ok(Some(peer_did));
+        }
+    }
+
     let now_iso = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();

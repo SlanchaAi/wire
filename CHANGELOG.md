@@ -12,6 +12,8 @@ the PR description linked in each section.
 
 ### Added
 
+- **Rotation-refresh: an already-trusted peer that rotates its relay slot re-pairs automatically** (#15): a rude slot rotation (no `wire_close`) used to leave peers holding a now-`410` slot, and re-pairing required a fresh **manual `wire accept`** on the receiver. Now a re-intro from a peer whose **DID is already pinned at a consented tier** (we accepted *that exact identity*) is treated as a transport refresh — the receiver's daemon re-pins their new endpoints and re-acks (restoring the write-token) with **no manual accept**, tier unchanged. Safe: keyed on the full DID with the verified card signature + the #245 collision guard, so only the real key-holder triggers it; a first-contact stranger still goes to pending-inbound (consent gate unchanged). (Sender-side auto-trigger of the re-intro on a `slot_stale` send — so no manual `wire dial` is needed at all — is a tracked follow-up on #15.)
+
 - **`wire ping <peer>` — connection health probing (RFC-004 Tier-1)** (#142): liveness-probe a paired peer and get the round-trip time. The peer's **daemon auto-responds** — no LLM / MCP on the responder side (RFC-004's AC-HP2 kill criterion). Probe + ack ride the existing `kind=100` heartbeat carrier with a body `t` discriminator (`probe`/`probe_ack`), not a new top-level kind; they're plaintext (only a correlation nonce) and trust-neutral (never mutate a tier). Per-peer ack rate-limit bounds a probe flood (AC-HP3). Validated end-to-end (`tests/it/80-health-probe.sh`). Tier-2 (`responder_state` introspection), `wire health` rendering, and MCP `wire_ping` parity are tracked follow-ups.
 
 ### Security
