@@ -126,6 +126,9 @@ pub fn init_self_idempotent(
     // is enrolled. Fail-soft no-op when not enrolled — non-enrolled cards are
     // byte-identical. Signed below, so the self-signature covers the claims.
     let card = crate::enroll::with_op_claims_if_enrolled(card)?;
+    // RFC-007 D3.1: attach the cross-signed Nostr transport binding if a
+    // transport key is present. Additive + fail-soft (no-op when not keyed).
+    let card = crate::nostr_key::with_nostr_binding_if_keyed(card)?;
     let signed = sign_agent_card(&card, &sk_seed);
     crate::config::write_agent_card(&signed)?;
     let mut trust = empty_trust();

@@ -425,6 +425,18 @@ pub fn write_op_key(seed: &[u8; 32]) -> Result<()> {
 pub fn read_op_key() -> Result<[u8; 32]> {
     read_seed(&op_key_path()?)
 }
+
+/// secp256k1 Nostr **transport** key (RFC-007 D3.1). Transport-only, never an
+/// identity anchor — stored separately from the Ed25519 session/op keys.
+pub fn nostr_key_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("nostr.key"))
+}
+pub fn write_nostr_key(secret: &[u8; 32]) -> Result<()> {
+    write_seed_0600(&nostr_key_path()?, secret)
+}
+pub fn read_nostr_key() -> Result<[u8; 32]> {
+    read_seed(&nostr_key_path()?)
+}
 pub fn write_org_key(org_did: &str, seed: &[u8; 32]) -> Result<()> {
     write_seed_0600(&org_key_path(org_did)?, seed)
 }

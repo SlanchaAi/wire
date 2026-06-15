@@ -1125,6 +1125,21 @@ pub enum EnrollCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Mint this session's secp256k1 **Nostr transport** key (RFC-007 D3.1) and
+    /// cross-sign it with the Ed25519 identity. The key is transport-only — it
+    /// addresses the agent on the Nostr network (`npub`) but is NEVER a persona
+    /// or identity anchor (the one-name invariant holds: `did:wire` is the only
+    /// name). The cross-signed `nostr_pubkey` binding lands on the agent card on
+    /// the next emit; run `wire enroll republish` to surface it immediately.
+    ///
+    /// Idempotent unless `--rotate`: re-running reuses the existing key.
+    Nostr {
+        /// Mint a FRESH transport key even if one already exists (rotation).
+        #[arg(long)]
+        rotate: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `wire org …` — trust organizations by their domain (RFC-001 §2 DNS-TXT

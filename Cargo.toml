@@ -65,6 +65,7 @@ chacha20poly1305 = "0.10"
 chacha20 = "0.9"
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 zeroize = "1"
+secp256k1 = { version = "0.31.1", features = ["rand", "std", "global-context"] }
 
 [dev-dependencies]
 proptest = "1"
