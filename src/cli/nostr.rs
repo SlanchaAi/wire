@@ -52,7 +52,111 @@ pub(crate) fn cmd_nostr(cmd: super::NostrCommand) -> Result<()> {
     match cmd {
         super::NostrCommand::Pair { npub, relay, json } => cmd_pair(&npub, &relay, json),
         super::NostrCommand::Fetch { relay, limit, json } => cmd_fetch(&relay, limit, json),
+        super::NostrCommand::Accept { npub, relay, json } => cmd_accept(&npub, &relay, json),
     }
+}
+
+/// The card's primary Ed25519 identity verify-key bytes (used to check its
+/// nostr binding).
+fn card_identity_pubkey(card: &Value) -> Result<Vec<u8>> {
+    let b64 = card
+        .get("verify_keys")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next())
+        .and_then(|v| v.get("key"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("peer card missing verify_keys[*].key"))?;
+    crate::signing::b64decode(b64).map_err(|_| anyhow!("peer card verify key is not valid base64"))
+}
+
+fn cmd_accept(npub: &str, relay: &str, as_json: bool) -> Result<()> {
+    let nsk = require_transport_key()?;
+    let peer = parse_npub_hex(npub)?;
+    let my_xonly = crate::nostr_key::xonly_from_secret(&nsk)
+        .map_err(|e| anyhow!("transport key unusable: {e}"))?;
+    let my_card =
+        crate::config::read_agent_card().context("no agent card — run `wire up` first")?;
+
+    // Pull the peer's pair-request addressed to us.
+    let filter = Filter {
+        authors: vec![npub.to_string()],
+        kinds: vec![nip_w1::PAIR_REQUEST_KIND],
+        p_tags: vec![hex::encode(my_xonly)],
+        limit: Some(20),
+        ..Default::default()
+    };
+    let events = block_on(async {
+        let mut ws = NostrWs::connect(relay)
+            .await
+            .with_context(|| format!("connect {relay}"))?;
+        ws.pull(filter).await.context("pull pair-request")
+    })??;
+
+    // Find + open the first pair-request from this peer.
+    let card = events
+        .iter()
+        .find_map(|ev| match nip_w1::open_pair_event(ev, &nsk) {
+            Ok((PairKind::Request, card)) => Some(card),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("no pair-request from {npub} found on {relay}"))?;
+
+    // Verify the card: signature, then its nostr binding must resolve to the
+    // EXACT npub that sent the request (ties the Nostr transport key to this
+    // wire identity — no relaying someone else's card).
+    crate::agent_card::verify_agent_card(&card)
+        .map_err(|e| anyhow!("peer card signature invalid: {e}"))?;
+    let id_pubkey = card_identity_pubkey(&card)?;
+    let bound = crate::nostr_key::card_nostr_binding(&card, &id_pubkey)
+        .map_err(|e| anyhow!("peer card nostr binding invalid: {e}"))?
+        .ok_or_else(|| anyhow!("peer card carries no nostr binding — cannot tie it to {npub}"))?;
+    if bound != peer {
+        bail!("peer card's bound npub does not match the sender — refusing to pin");
+    }
+
+    let peer_did = card
+        .get("did")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>")
+        .to_string();
+
+    // The explicit accept IS the consent: pin VERIFIED (same gate semantics as
+    // `wire accept`; the #245 collision guard applies inside add_agent_card_pin).
+    crate::config::update_trust(|t| {
+        crate::trust::add_agent_card_pin(t, &card, Some("VERIFIED")).map_err(anyhow::Error::msg)
+    })?;
+
+    // Send the pair-ack (our card) back over the relay.
+    let ack = nip_w1::build_pair_event(PairKind::Ack, &nsk, &peer, &my_card, now_unix())
+        .map_err(|e| anyhow!("build pair-ack: {e}"))?;
+    let acked = block_on(async {
+        let mut ws = NostrWs::connect(relay)
+            .await
+            .with_context(|| format!("connect {relay}"))?;
+        ws.publish(&ack).await.context("publish pair-ack")
+    })??;
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "pinned": peer_did, "tier": "VERIFIED", "ack_sent": acked, "npub": npub, "relay": relay,
+            }))?
+        );
+    } else {
+        println!(
+            "→ paired with {peer_did}\n  pinned VERIFIED; pair-ack {} via {relay}",
+            if acked {
+                "sent"
+            } else {
+                "NOT accepted by relay"
+            }
+        );
+        println!(
+            "  note: trust is established; routing wire messages over Nostr (vs the trust pin) is a separate step."
+        );
+    }
+    Ok(())
 }
 
 fn cmd_pair(npub: &str, relay: &str, as_json: bool) -> Result<()> {
@@ -80,7 +184,7 @@ fn cmd_pair(npub: &str, relay: &str, as_json: bool) -> Result<()> {
         );
     } else if accepted {
         println!(
-            "→ pair-request sent to {npub} via {relay}\n  event {event_id}\n  peer accepts with `wire accept` once their session pulls it."
+            "→ pair-request sent to {npub} via {relay}\n  event {event_id}\n  the peer accepts with `wire nostr accept <your-npub> --relay {relay}`."
         );
     } else {
         bail!("relay {relay} rejected the pair-request (OK=false)");
