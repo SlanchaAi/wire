@@ -159,21 +159,29 @@ pub fn wire_to_nostr(
 /// and the D3.1 `npub → did` binding before trusting the message — this function
 /// only authenticates the *transport* hop.
 pub fn verify_and_decode(ev: &NostrEvent) -> Result<Value, NostrEventError> {
-    let pubkey = hex32(&ev.pubkey)?;
-    let claimed_id = hex32(&ev.id)?;
-    let sig = hex64(&ev.sig)?;
-
-    let id = nostr_event_id(&ev.pubkey, ev.created_at, ev.kind, &ev.tags, &ev.content);
-    if id != claimed_id {
-        return Err(NostrEventError::IdMismatch);
-    }
-    schnorr_verify_digest(&pubkey, &id, &sig).map_err(NostrEventError::Sig)?;
-
+    verify_transport(ev)?;
     let wire: Value = serde_json::from_str(&ev.content).map_err(|_| NostrEventError::BadContent)?;
     if !wire.is_object() {
         return Err(NostrEventError::BadContent);
     }
     Ok(wire)
+}
+
+/// Authenticate a Nostr event's transport layer **without** interpreting its
+/// `content`: recompute the NIP-01 id and verify the schnorr signature under
+/// `ev.pubkey`. Returns the sender's x-only pubkey on success. Used for events
+/// whose content is not a wire event — e.g. a NIP-44-encrypted pairing payload
+/// (NIP-W1, D3.4) — where `verify_and_decode`'s wire-event parse doesn't apply.
+pub fn verify_transport(ev: &NostrEvent) -> Result<[u8; 32], NostrEventError> {
+    let pubkey = hex32(&ev.pubkey)?;
+    let claimed_id = hex32(&ev.id)?;
+    let sig = hex64(&ev.sig)?;
+    let id = nostr_event_id(&ev.pubkey, ev.created_at, ev.kind, &ev.tags, &ev.content);
+    if id != claimed_id {
+        return Err(NostrEventError::IdMismatch);
+    }
+    schnorr_verify_digest(&pubkey, &id, &sig).map_err(NostrEventError::Sig)?;
+    Ok(pubkey)
 }
 
 fn hex32(s: &str) -> Result<[u8; 32], NostrEventError> {

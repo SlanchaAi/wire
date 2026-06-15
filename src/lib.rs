@@ -30,6 +30,7 @@ pub mod init;
 pub mod macaroon;
 pub mod mcp;
 pub mod nip44;
+pub mod nip_w1;
 pub mod nostr_event;
 pub mod nostr_key;
 pub mod nostr_relay;
