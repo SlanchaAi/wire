@@ -731,22 +731,9 @@ pub fn read_relay_state() -> Result<Value> {
 /// semantics make the interleave easy to hit) but the race was cross-platform.
 pub fn write_relay_state(state: &Value) -> Result<()> {
     use fs2::FileExt;
-    let lock_path = relay_state_lock_path()?;
-    if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
-    }
-    let lock_file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .with_context(|| format!("opening {lock_path:?}"))?;
-    lock_file
-        .lock_exclusive()
-        .with_context(|| format!("flock {lock_path:?}"))?;
+    let lock_file = acquire_relay_lock(std::process::id())?;
     let r = write_relay_state_unlocked(state);
-    let _ = fs2::FileExt::unlock(&lock_file);
+    let _ = FileExt::unlock(&lock_file);
     r
 }
 
@@ -772,6 +759,149 @@ fn relay_state_lock_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("relay.lock"))
 }
 
+/// Bounded timeout for acquiring `relay.lock`. Overridable via
+/// `WIRE_RELAY_LOCK_TIMEOUT_SECS` (mostly for tests / operator escape
+/// hatch). Default 10s — well-behaved holders release in well under
+/// 100ms, so anything past 10s is a hung peer worth surfacing.
+fn relay_lock_timeout() -> std::time::Duration {
+    std::env::var("WIRE_RELAY_LOCK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or_else(|| std::time::Duration::from_secs(10))
+}
+
+/// Outcome of a single non-blocking lock attempt against `relay.lock`.
+/// Extracted as pure data + decision so the contention classification
+/// is unit-testable without spinning real subprocesses.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LockAttemptOutcome {
+    /// Lock is held by a live PID — caller should bounded-wait and
+    /// retry, then time out with this PID surfaced to the operator.
+    HeldByAlive(u32),
+    /// Lock-file body's PID points at a dead/missing process, or has
+    /// no parseable PID at all. The OS already released the underlying
+    /// flock when the owning process died, so the next `try_lock`
+    /// attempt will succeed — caller should retry immediately.
+    HeldByDeadOrAbsent(Option<u32>),
+}
+
+/// Pure-logic classification of contention on `relay.lock`. Given the
+/// raw bytes of the lock file body (which `acquire_relay_lock` writes
+/// the owning PID into as a decimal ASCII string) and an oracle for
+/// "is this PID alive?", decide whether to retry-immediately (dead /
+/// absent owner) or bounded-wait (live owner).
+///
+/// Issue #284.5: a hung wire daemon left a lock with stale PID body
+/// that other CLI invocations would block on forever. Splitting the
+/// "live holder vs dead holder" decision out keeps the IO path simple
+/// and the policy testable on every platform.
+pub(crate) fn classify_contention(
+    body: &[u8],
+    is_alive: impl Fn(u32) -> bool,
+) -> LockAttemptOutcome {
+    let pid = std::str::from_utf8(body)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    match pid {
+        Some(p) if is_alive(p) => LockAttemptOutcome::HeldByAlive(p),
+        Some(p) => LockAttemptOutcome::HeldByDeadOrAbsent(Some(p)),
+        None => LockAttemptOutcome::HeldByDeadOrAbsent(None),
+    }
+}
+
+/// Companion file alongside `relay.lock` that carries the owning PID
+/// as decimal ASCII. Kept separate from the flock file because Windows
+/// byte-range locks (`LockFileEx`) deny reads against the locked file
+/// even from separate handles, so a waiter cannot read a "who owns
+/// this?" body off of `relay.lock` itself.
+fn relay_state_lock_owner_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("relay.lock.owner"))
+}
+
+/// Acquire `relay.lock` with a bounded timeout and stale-owner reclaim.
+///
+/// 1. Open / create the lock file and try `try_lock_exclusive`
+///    non-blocking.
+/// 2. On success: stamp our PID into the sidecar `relay.lock.owner`
+///    file and return the handle. Caller drops (or explicitly
+///    `unlock`s) to release. The OS auto-releases the flock on
+///    process exit, so the sidecar's PID surviving past a crash is
+///    a hint, not a held resource.
+/// 3. On contention: read the sidecar for the owning PID and consult
+///    [`classify_contention`]. Dead / missing owner → retry
+///    immediately (the OS has already let go of the flock; the next
+///    attempt should win). Live owner → exponential backoff up to
+///    200ms per attempt until [`relay_lock_timeout`] elapses, then
+///    fail with the holder's PID in the error.
+///
+/// Issue #284.5: on Windows a hung `wire daemon` (or any wire process
+/// stuck in a relay long-poll, see #284.1) held `relay.lock` forever.
+/// Every subsequent `wire status` / `wire send` / `wire daemon` then
+/// blocked on `lock_exclusive` indefinitely — the kernel only releases
+/// the flock at PID exit, and the wedged process never exited.
+/// Operator-visible symptom: 254 wire.exe processes piled up by the
+/// SessionStart `until wire status …` loop. Bounded wait + stale-
+/// owner reclaim turns "hang forever" into either "complete fast"
+/// (uncontended / dead owner) or "fail loudly with a PID to kill"
+/// (live but wedged owner), which is what `wire doctor` and the
+/// SessionStart loop need.
+fn acquire_relay_lock(our_pid: u32) -> Result<fs::File> {
+    use fs2::FileExt;
+    let lock_path = relay_state_lock_path()?;
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
+    }
+    let owner_path = relay_state_lock_owner_path()?;
+    let deadline = std::time::Instant::now() + relay_lock_timeout();
+    let mut backoff = std::time::Duration::from_millis(10);
+    loop {
+        let lock_file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("opening {lock_path:?}"))?;
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => {
+                // Stamp our PID into the sidecar via a best-effort
+                // write. A failure here is not fatal — the worst case
+                // is a future waiter sees "no owner PID" and treats
+                // it as the dead-owner case (retry immediately), which
+                // is correct: we are holding the flock, the next try
+                // will see contention and read the sidecar again.
+                let _ = fs::write(&owner_path, our_pid.to_string());
+                return Ok(lock_file);
+            }
+            Err(_) => {
+                drop(lock_file);
+                let body = fs::read(&owner_path).unwrap_or_default();
+                match classify_contention(&body, crate::platform::process_alive) {
+                    LockAttemptOutcome::HeldByDeadOrAbsent(_) => {
+                        // OS will have released the flock at PID exit;
+                        // a tiny sleep dodges a tight spin if the
+                        // platform serializes flock release lazily.
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    LockAttemptOutcome::HeldByAlive(holder_pid) => {
+                        if std::time::Instant::now() >= deadline {
+                            return Err(anyhow!(
+                                "relay.lock held by live pid {holder_pid} after {}s — \
+                                 likely a hung wire process. Run `wire doctor`, or \
+                                 kill {holder_pid} and retry.",
+                                relay_lock_timeout().as_secs(),
+                            ));
+                        }
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(std::time::Duration::from_millis(200));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Atomic read-modify-write against `relay.json`. Holds an exclusive
 /// `fs2::FileExt::lock_exclusive` for the whole transaction so concurrent
 /// `wire` processes (multiple daemons, CLI vs daemon, CLI vs MCP) cannot
@@ -791,22 +921,7 @@ where
     F: FnOnce(&mut Value) -> Result<()>,
 {
     use fs2::FileExt;
-    let lock_path = relay_state_lock_path()?;
-    if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
-    }
-    // Open / create the lock file. Holding a handle keeps the file
-    // alive for the lifetime of the transaction.
-    let lock_file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .with_context(|| format!("opening {lock_path:?}"))?;
-    lock_file
-        .lock_exclusive()
-        .with_context(|| format!("flock {lock_path:?}"))?;
+    let lock_file = acquire_relay_lock(std::process::id())?;
 
     // Read fresh state INSIDE the lock — any prior snapshot would be a
     // race window. Then run the modifier. Then write atomically.
@@ -821,7 +936,7 @@ where
     };
     // RAII: drop releases the lock. Explicit unlock for clarity + to
     // ensure unlock happens even if Drop ordering ever changes.
-    let _ = fs2::FileExt::unlock(&lock_file);
+    let _ = FileExt::unlock(&lock_file);
     result?;
     write_result?;
     Ok(())
@@ -1246,6 +1361,150 @@ mod tests {
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "got {:o}", mode & 0o777);
+        });
+    }
+
+    // ---------- #284.5: stale relay.lock reclaim ----------
+
+    #[test]
+    fn classify_contention_dead_pid_says_reclaim() {
+        let body = b"12345";
+        // Oracle: nothing is alive.
+        let outcome = classify_contention(body, |_| false);
+        assert_eq!(outcome, LockAttemptOutcome::HeldByDeadOrAbsent(Some(12345)));
+    }
+
+    #[test]
+    fn classify_contention_live_pid_says_wait() {
+        let body = b"54321";
+        // Oracle: 54321 is alive, nothing else is.
+        let outcome = classify_contention(body, |pid| pid == 54321);
+        assert_eq!(outcome, LockAttemptOutcome::HeldByAlive(54321));
+    }
+
+    #[test]
+    fn classify_contention_empty_body_says_reclaim() {
+        let outcome = classify_contention(b"", |_| true);
+        assert_eq!(outcome, LockAttemptOutcome::HeldByDeadOrAbsent(None));
+    }
+
+    #[test]
+    fn classify_contention_garbage_body_says_reclaim() {
+        let outcome = classify_contention(b"not-a-pid\n\0\xff", |_| true);
+        assert_eq!(outcome, LockAttemptOutcome::HeldByDeadOrAbsent(None));
+    }
+
+    #[test]
+    fn classify_contention_trims_whitespace() {
+        let body = b"  789\n";
+        let outcome = classify_contention(body, |pid| pid == 789);
+        assert_eq!(outcome, LockAttemptOutcome::HeldByAlive(789));
+    }
+
+    #[test]
+    fn acquire_relay_lock_stamps_our_pid_into_owner_sidecar() {
+        use fs2::FileExt;
+        with_temp_home(|| {
+            ensure_dirs().unwrap();
+            let pid = std::process::id();
+            let lock = acquire_relay_lock(pid).expect("acquire fresh lock");
+            // The sidecar is intentionally NOT byte-range-locked, so
+            // we can read it while still holding the flock.
+            let body = fs::read(relay_state_lock_owner_path().unwrap()).unwrap();
+            assert_eq!(
+                std::str::from_utf8(&body).unwrap().trim(),
+                pid.to_string(),
+                "owner sidecar must hold our PID after acquire"
+            );
+            let _ = FileExt::unlock(&lock);
+            drop(lock);
+        });
+    }
+
+    #[test]
+    fn acquire_relay_lock_reclaims_when_owner_pid_is_dead() {
+        with_temp_home(|| {
+            ensure_dirs().unwrap();
+            // Pre-populate the owner sidecar with a PID that cannot be
+            // alive. `u32::MAX` is reserved on Linux + Windows and is
+            // never an assigned PID — `process_alive(u32::MAX)`
+            // returns false on every platform. No flock is held on
+            // `relay.lock`, so the OS state matches the "owner died"
+            // case (kernel auto-released on PID exit).
+            let owner_path = relay_state_lock_owner_path().unwrap();
+            if let Some(parent) = owner_path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(&owner_path, u32::MAX.to_string()).unwrap();
+
+            // Force a tight deadline — should reclaim well within it.
+            // SAFETY: ENV_LOCK already held by `with_temp_home`.
+            unsafe { std::env::set_var("WIRE_RELAY_LOCK_TIMEOUT_SECS", "2") };
+            let started = std::time::Instant::now();
+            let lock =
+                acquire_relay_lock(std::process::id()).expect("dead-owner lock must be reclaimed");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "reclaim should be fast (well inside timeout); took {:?}",
+                started.elapsed()
+            );
+            drop(lock);
+            unsafe { std::env::remove_var("WIRE_RELAY_LOCK_TIMEOUT_SECS") };
+        });
+    }
+
+    #[test]
+    fn acquire_relay_lock_times_out_when_owner_is_alive() {
+        use fs2::FileExt;
+        with_temp_home(|| {
+            ensure_dirs().unwrap();
+            // Hold the lock from this same process. `process_alive`
+            // will return true for our PID, so the acquire attempt
+            // must NOT reclaim — it must wait out the bounded timeout
+            // and then surface our PID in its error.
+            let lock_path = relay_state_lock_path().unwrap();
+            if let Some(parent) = lock_path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            let holder = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .unwrap();
+            holder.lock_exclusive().unwrap();
+            // Stamp our (live) PID into the owner sidecar so the
+            // contention classifier sees a live owner. The sidecar
+            // is intentionally NOT under any byte-range lock.
+            let our_pid = std::process::id();
+            fs::write(relay_state_lock_owner_path().unwrap(), our_pid.to_string()).unwrap();
+
+            // 1-second timeout keeps the test fast.
+            unsafe { std::env::set_var("WIRE_RELAY_LOCK_TIMEOUT_SECS", "1") };
+            let started = std::time::Instant::now();
+            let result = acquire_relay_lock(our_pid);
+            let elapsed = started.elapsed();
+
+            // Always release the holder before asserting so a failing
+            // assertion doesn't leak the lock into a sibling test.
+            let _ = FileExt::unlock(&holder);
+            unsafe { std::env::remove_var("WIRE_RELAY_LOCK_TIMEOUT_SECS") };
+
+            let err = result.expect_err("live-owner contention must time out");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(&our_pid.to_string()),
+                "timeout error must surface the live holder's PID; got: {msg}"
+            );
+            assert!(
+                elapsed >= std::time::Duration::from_secs(1),
+                "must respect the bounded timeout; elapsed={elapsed:?}"
+            );
+            assert!(
+                elapsed < std::time::Duration::from_secs(3),
+                "must not run wildly past the bounded timeout; elapsed={elapsed:?}"
+            );
         });
     }
 }
