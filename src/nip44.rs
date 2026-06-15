@@ -21,12 +21,12 @@
 //!   time before decryption.
 //! - **payload** = `base64(0x02 ‖ nonce[32] ‖ ciphertext ‖ mac[32])`.
 //!
-//! Scope: this is the cryptographic core (encrypt/decrypt + conversation-key
-//! derivation), faithful to the written spec and round-trip / symmetry / tamper
-//! tested. **Cross-implementation interop is NOT yet proven against the official
-//! `nip44.vectors.json`** — that vector test is a required follow-up before
-//! claiming wire DMs interoperate with other NIP-44 implementations (flagged so
-//! the gap is explicit, not silent).
+//! Interop: validated **byte-exact against the official NIP-44 v2 vectors**
+//! (`testdata/nip44_official_vectors.json` — the `valid` subset from the
+//! reference implementation, public domain). All 35 conversation-key, 10
+//! encrypt/decrypt (including exact ciphertext payloads), and 24 padded-length
+//! cases pass, so wire's NIP-44 interoperates with other implementations — plus
+//! round-trip / ECDH-symmetry / tamper / wrong-key unit tests.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -338,6 +338,87 @@ mod tests {
             assert_eq!(p % 32, 0, "padded {p} not a multiple of 32");
             assert!(p >= prev, "padded len must be monotonic");
             prev = p;
+        }
+    }
+
+    // ───────────────────────── Official NIP-44 v2 vectors ─────────────────────
+    //
+    // The canonical conformance vectors from the NIP-44 reference
+    // (github.com/paulmillr/nip44 → nip44.vectors.json; the `valid` v2 subset,
+    // which the repo marks public-domain, copied from nostr-protocol/nips).
+    // Byte-exact agreement here is what proves wire's NIP-44 interoperates with
+    // every other implementation — closing the gap D3.3 flagged.
+
+    const OFFICIAL_VECTORS: &str = include_str!("testdata/nip44_official_vectors.json");
+
+    fn hex32(s: &str) -> [u8; 32] {
+        let v = hex::decode(s).expect("vector hex");
+        v.as_slice().try_into().expect("vector is 32 bytes")
+    }
+
+    #[test]
+    fn official_get_conversation_key_vectors() {
+        let v: serde_json::Value = serde_json::from_str(OFFICIAL_VECTORS).unwrap();
+        let cases = v["get_conversation_key"].as_array().unwrap();
+        assert!(cases.len() >= 30, "expected the full vector set");
+        for (i, c) in cases.iter().enumerate() {
+            let sec1 = hex32(c["sec1"].as_str().unwrap());
+            let pub2 = hex32(c["pub2"].as_str().unwrap());
+            let expected = hex32(c["conversation_key"].as_str().unwrap());
+            assert_eq!(
+                conversation_key(&sec1, &pub2).unwrap(),
+                expected,
+                "get_conversation_key vector #{i}"
+            );
+        }
+    }
+
+    #[test]
+    fn official_encrypt_decrypt_vectors() {
+        let v: serde_json::Value = serde_json::from_str(OFFICIAL_VECTORS).unwrap();
+        let cases = v["encrypt_decrypt"].as_array().unwrap();
+        assert!(!cases.is_empty());
+        for (i, c) in cases.iter().enumerate() {
+            let sec1 = hex32(c["sec1"].as_str().unwrap());
+            let sec2 = hex32(c["sec2"].as_str().unwrap());
+            let ck = hex32(c["conversation_key"].as_str().unwrap());
+            let nonce = hex32(c["nonce"].as_str().unwrap());
+            let plaintext = c["plaintext"].as_str().unwrap();
+            let payload = c["payload"].as_str().unwrap();
+
+            // conversation key derives from sec1 + pub(sec2), and equals the vector.
+            let pub2 = crate::nostr_key::xonly_from_secret(&sec2).unwrap();
+            assert_eq!(
+                conversation_key(&sec1, &pub2).unwrap(),
+                ck,
+                "ck derivation #{i}"
+            );
+            // Byte-exact ciphertext under the fixed nonce — the interop proof.
+            assert_eq!(
+                encrypt_with_nonce(&ck, &nonce, plaintext).unwrap(),
+                payload,
+                "encrypt vector #{i}"
+            );
+            // And decrypt of the official payload recovers the plaintext.
+            assert_eq!(
+                decrypt(&ck, payload).unwrap(),
+                plaintext,
+                "decrypt vector #{i}"
+            );
+        }
+    }
+
+    #[test]
+    fn official_calc_padded_len_vectors() {
+        let v: serde_json::Value = serde_json::from_str(OFFICIAL_VECTORS).unwrap();
+        for pair in v["calc_padded_len"].as_array().unwrap() {
+            let unpadded = pair[0].as_u64().unwrap() as usize;
+            let expected = pair[1].as_u64().unwrap() as usize;
+            assert_eq!(
+                calc_padded_len(unpadded),
+                expected,
+                "calc_padded_len({unpadded})"
+            );
         }
     }
 }
