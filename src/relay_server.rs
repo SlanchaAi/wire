@@ -35,7 +35,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use rand::RngCore;
 use serde::Deserialize;
@@ -464,6 +464,7 @@ impl Relay {
                 .route("/phonebook", get(landing_phonebook_html))
                 .route("/phonebook.html", get(landing_phonebook_html))
                 .route("/v1/handle/claim", post(handle_claim))
+                .route("/v1/handle/claim/:nick", delete(handle_unclaim))
                 .route("/v1/handles", get(handles_directory))
                 .route("/v1/invite/register", post(invite_register))
                 .route("/i/:token", get(invite_script))
@@ -478,7 +479,9 @@ impl Relay {
             // slot AND claims a handle on the local relay so peers can
             // resolve it). The claim is gated to loopback-only callers
             // by the bind, not by the route.
-            router = router.route("/v1/handle/claim", post(handle_claim));
+            router = router
+                .route("/v1/handle/claim", post(handle_claim))
+                .route("/v1/handle/claim/:nick", delete(handle_unclaim));
         }
 
         router.merge(hot_writes).with_state(self)
@@ -1367,6 +1370,57 @@ async fn handle_claim(
             "did": did,
             "status": if first_claim { "claimed" } else { "re-claimed" },
         })),
+    )
+        .into_response()
+}
+
+/// `DELETE /v1/handle/claim/:nick` — release a claimed handle (#247.1). Without
+/// this, a claim is FCFS-permanent (no expiry, no unclaim) and an abandoned
+/// handle squats the directory forever. Owner-gated: the caller must present the
+/// bearer `slot_token` of the handle's slot, so only the holder can release it.
+/// Removes the in-memory entry and its on-disk file. Idempotent-ish: an
+/// unknown nick is 404.
+async fn handle_unclaim(
+    State(relay): State<Relay>,
+    Path(nick): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Validate before any filesystem use (the nick is interpolated into a path).
+    if !crate::pair_profile::is_valid_nick(&nick) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid nick"})),
+        )
+            .into_response();
+    }
+    // Resolve the handle's slot so we can owner-gate the unclaim.
+    let slot_id = {
+        let inner = relay.inner.lock().await;
+        match inner.handles.get(&nick) {
+            Some(rec) => rec.slot_id.clone(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": format!("{nick:?} isn't claimed")})),
+                )
+                    .into_response();
+            }
+        }
+    };
+    // Owner-only: must hold the slot_token for the handle's slot.
+    if let Err(resp) = check_token(&relay, &headers, &slot_id).await {
+        return resp;
+    }
+    // Remove on-disk file (best-effort — absence is fine) then in-memory entry.
+    let path = relay.state_dir.join("handles").join(format!("{nick}.json"));
+    let _ = tokio::fs::remove_file(&path).await;
+    {
+        let mut inner = relay.inner.lock().await;
+        inner.handles.remove(&nick);
+    }
+    (
+        StatusCode::OK,
+        Json(json!({"nick": nick, "status": "unclaimed"})),
     )
         .into_response()
 }

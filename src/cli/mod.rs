@@ -784,6 +784,18 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Release your claimed persona from a relay's handle directory (#247.1).
+    /// Frees the nick so it no longer resolves via `.well-known/wire/agent`
+    /// and can be re-claimed (yours is FCFS-permanent otherwise). Owner-gated
+    /// by your slot token — only the holder can unclaim. Defaults to your own
+    /// persona on the relay your slot is on.
+    Unclaim {
+        /// Relay to unclaim on. Default = relay our slot is on.
+        #[arg(long)]
+        relay: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Edit profile fields (display_name, emoji, motto, vibe, pronouns,
     /// avatar_url, handle, now). Re-signs the agent-card atomically.
     ///
@@ -1943,6 +1955,7 @@ pub fn run() -> Result<()> {
             hidden,
             json,
         } => identity::cmd_claim(&nick, relay.as_deref(), public_url.as_deref(), hidden, json),
+        Command::Unclaim { relay, json } => identity::cmd_unclaim(relay.as_deref(), json),
         Command::Profile { action } => identity::cmd_profile(action),
         Command::Setup {
             apply,

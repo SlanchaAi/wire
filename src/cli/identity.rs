@@ -1085,6 +1085,38 @@ pub(crate) fn cmd_claim(
     Ok(())
 }
 
+/// `wire unclaim` (#247.1) — release your persona from a relay's handle
+/// directory. Owner-gated by your slot token. Frees the nick so it stops
+/// resolving and can be re-claimed (a claim is FCFS-permanent otherwise).
+pub(crate) fn cmd_unclaim(relay_override: Option<&str>, as_json: bool) -> Result<()> {
+    if !config::is_initialized()? {
+        bail!("not initialized — nothing to unclaim (run `wire up` first)");
+    }
+    // Our self slot on the target relay holds the claim; we present its token.
+    let (did, relay_url, _slot_id, slot_token) =
+        crate::pair_invite::ensure_self_with_relay(relay_override)?;
+    let handle = crate::agent_card::display_handle_from_did(&did).to_string();
+    let client = crate::relay_client::RelayClient::new(&relay_url);
+    let resp = client.handle_unclaim(&handle, &slot_token)?;
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "nick": handle,
+                "relay": relay_url,
+                "response": resp,
+            }))?
+        );
+    } else {
+        let domain = relay_url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        println!("unclaimed {handle} on {relay_url} — {handle}@{domain} no longer resolves");
+    }
+    Ok(())
+}
+
 pub(super) fn cmd_profile(action: super::ProfileAction) -> Result<()> {
     match action {
         super::ProfileAction::Set { field, value, json } => {
