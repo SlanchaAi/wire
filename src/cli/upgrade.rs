@@ -1479,9 +1479,11 @@ mod upgrade_tests {
         let real_dir = tempfile::tempdir().unwrap();
         let link_dir = tempfile::tempdir().unwrap();
         let real = write_fake_wire(real_dir.path(), b"#!/bin/sh\necho upgraded\n");
-        let link = link_dir.path().join("wire");
+        // Bound to the symlink call on unix; on Windows the test is ignored,
+        // so the var is unused — the underscore tells clippy to allow it.
+        let _link = link_dir.path().join("wire");
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&real, &link).unwrap();
+        std::os::unix::fs::symlink(&real, &_link).unwrap();
         let real_canon = real.canonicalize().unwrap();
 
         // Symlink dir precedes the real dir on PATH (the #276 layout).
