@@ -57,6 +57,33 @@ const MAX_EVENT_BYTES: usize = 256 * 1024;
 /// in ~25 seconds, then gets 413 forever — disk impact bounded.
 const MAX_SLOT_BYTES: usize = 64 * 1024 * 1024;
 
+/// Per-nick `/v1/handle/intro` rate limit (#247.3): at most this many intros to
+/// a given nick within `INTRO_WINDOW_SECS`, else 429. Pair-intro is a rare,
+/// human-paced action (you dial a peer once), so a tight cap is safe and stops
+/// an unauthenticated flood from filling the victim's slot to MAX_SLOT_BYTES.
+const INTRO_MAX_PER_WINDOW: usize = 5;
+const INTRO_WINDOW_SECS: u64 = 300;
+
+/// Wall-clock unix seconds (best-effort; 0 on a pre-epoch clock).
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Per-nick intro rate gate (#247.3). Prunes `times` to entries within `window`
+/// of `now`, then: if `>= max` remain it's over the limit → return `false`
+/// (reject); otherwise record `now` and return `true` (allow). Pure → unit-tested.
+fn record_intro_within_rate(times: &mut Vec<u64>, now: u64, window: u64, max: usize) -> bool {
+    times.retain(|t| now.saturating_sub(*t) < window);
+    if times.len() >= max {
+        return false;
+    }
+    times.push(now);
+    true
+}
+
 #[derive(Clone)]
 pub struct Relay {
     inner: Arc<Mutex<Inner>>,
@@ -140,6 +167,11 @@ struct Inner {
     /// Token is the path segment in `GET /i/{token}`. Record holds the
     /// underlying `wire://pair?...` URL plus TTL/uses bookkeeping.
     invites: HashMap<String, InviteRecord>,
+    /// nick -> unix-second timestamps of recent `/v1/handle/intro` deliveries
+    /// (#247.3). Pruned to the rate-limit window on each access; bounds the
+    /// unauthenticated pair-intro flood that could otherwise fill a victim's
+    /// slot to `MAX_SLOT_BYTES`.
+    intro_times: HashMap<String, Vec<u64>>,
 }
 
 /// One entry in the short-URL invite map. Persisted to
@@ -256,6 +288,7 @@ impl Relay {
             handles: HashMap::new(),
             responder_health: HashMap::new(),
             invites: HashMap::new(),
+            intro_times: HashMap::new(),
         };
         // Reload tokens
         let token_path = state_dir.join("tokens.json");
@@ -1690,8 +1723,8 @@ async fn handle_intro(
 ) -> impl IntoResponse {
     // Look up the nick. Must already be claimed.
     let slot_id = {
-        let inner = relay.inner.lock().await;
-        match inner.handles.get(&nick) {
+        let mut inner = relay.inner.lock().await;
+        let slot_id = match inner.handles.get(&nick) {
             Some(rec) => rec.slot_id.clone(),
             None => {
                 return (
@@ -1700,7 +1733,27 @@ async fn handle_intro(
                 )
                     .into_response();
             }
+        };
+        // #247.3: per-nick intro rate-limit. This endpoint is unauthenticated
+        // by design (a stranger drops a pair-intro), so without a per-nick cap
+        // an attacker can flood a known nick's slot to MAX_SLOT_BYTES and DoS
+        // them. The global governor doesn't help (it also throttles everyone,
+        // and 10/s × 256KiB still fills 64MB in ~25s). Cap intros per nick per
+        // window; over the limit → 429.
+        let now = unix_now();
+        let times = inner.intro_times.entry(nick.clone()).or_default();
+        if !record_intro_within_rate(times, now, INTRO_WINDOW_SECS, INTRO_MAX_PER_WINDOW) {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({
+                    "error": format!(
+                        "too many pair-intros to {nick:?} — rate limited ({INTRO_MAX_PER_WINDOW} per {INTRO_WINDOW_SECS}s). Try again shortly."
+                    ),
+                })),
+            )
+                .into_response();
         }
+        slot_id
     };
 
     // Only allow kind=1100 pair_drop / agent_card here. Anything else routes
@@ -2343,6 +2396,33 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"abcd")); // length mismatch
+    }
+
+    #[test]
+    fn intro_rate_gate_allows_up_to_max_then_429s_then_recovers() {
+        // #247.3: 5 intros in the window pass, the 6th is rejected; after the
+        // window elapses the old ones prune and intros flow again.
+        let mut times: Vec<u64> = Vec::new();
+        let t0 = 1_000_000u64;
+        // 5 allowed at the same instant.
+        for i in 0..5 {
+            assert!(
+                record_intro_within_rate(&mut times, t0, 300, 5),
+                "intro {i} within limit must pass"
+            );
+        }
+        // 6th in-window → rejected, and NOT recorded (still 5).
+        assert!(!record_intro_within_rate(&mut times, t0 + 10, 300, 5));
+        assert_eq!(times.len(), 5, "rejected intro must not be recorded");
+        // Still rejected just inside the window.
+        assert!(!record_intro_within_rate(&mut times, t0 + 299, 300, 5));
+        // Past the window → all 5 prune → allowed again.
+        assert!(record_intro_within_rate(&mut times, t0 + 301, 300, 5));
+        assert_eq!(
+            times.len(),
+            1,
+            "stale entries pruned, only the new one remains"
+        );
     }
 
     #[test]
