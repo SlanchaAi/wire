@@ -64,6 +64,21 @@ const MAX_SLOT_BYTES: usize = 64 * 1024 * 1024;
 const INTRO_MAX_PER_WINDOW: usize = 5;
 const INTRO_WINDOW_SECS: u64 = 300;
 
+/// Backstop ceilings on the COUNT of in-memory objects (audit H1 / #291).
+/// Generous — they don't bind a healthy relay — but stop an attacker from
+/// allocating millions of slots/handles/pairs/invites to exhaust RAM + disk
+/// (every allocation also rewrites a persistence file). `503` when reached.
+const MAX_SLOTS: usize = 200_000;
+const MAX_HANDLES: usize = 100_000;
+const MAX_PAIR_SLOTS: usize = 50_000;
+const MAX_INVITES: usize = 50_000;
+
+/// True iff a map at `len` entries is at/over the `max` ceiling — i.e. a new
+/// allocation must be refused. Pure → unit-tested (#291 H1).
+fn at_capacity(len: usize, max: usize) -> bool {
+    len >= max
+}
+
 /// Wall-clock unix seconds (best-effort; 0 on a pre-epoch clock).
 fn unix_now() -> u64 {
     SystemTime::now()
@@ -823,6 +838,13 @@ async fn allocate_slot(
     let slot_token = random_hex(32);
     {
         let mut inner = relay.inner.lock().await;
+        if at_capacity(inner.slots.len(), MAX_SLOTS) {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "relay slot capacity reached"})),
+            )
+                .into_response();
+        }
         inner.slots.insert(slot_id.clone(), Vec::new());
         inner.tokens.insert(slot_id.clone(), slot_token.clone());
     }
@@ -1048,6 +1070,13 @@ async fn pair_open(
     let pair_id = match inner.pair_lookup.get(&req.code_hash).cloned() {
         Some(id) => id,
         None => {
+            if at_capacity(inner.pair_slots.len(), MAX_PAIR_SLOTS) {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error": "relay pair-slot capacity reached"})),
+                )
+                    .into_response();
+            }
             let new_id = random_hex(16);
             inner
                 .pair_lookup
@@ -1298,6 +1327,20 @@ async fn handle_claim(
         }
     };
 
+    // #291 H1: cap the directory size — but only on a NEW nick. A same-DID
+    // re-claim (profile update / re-publish) must always succeed even at the
+    // ceiling, since it doesn't grow the map.
+    if first_claim {
+        let inner = relay.inner.lock().await;
+        if at_capacity(inner.handles.len(), MAX_HANDLES) {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "relay handle-directory capacity reached"})),
+            )
+                .into_response();
+        }
+    }
+
     // v0.5.19 (#9.5): round claimed_at to whole seconds. Nanosecond
     // precision served no client purpose (display only) and acted as a
     // cross-tab fingerprint correlating one operator's multiple handles
@@ -1513,6 +1556,13 @@ async fn invite_register(
     };
     {
         let mut inner = relay.inner.lock().await;
+        if at_capacity(inner.invites.len(), MAX_INVITES) {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "relay invite capacity reached"})),
+            )
+                .into_response();
+        }
         if inner.invites.contains_key(&token) {
             return (
                 StatusCode::CONFLICT,
@@ -2450,6 +2500,15 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"abcd")); // length mismatch
+    }
+
+    #[test]
+    fn at_capacity_is_inclusive_at_the_ceiling() {
+        // #291 H1: a new allocation is refused once the map reaches `max`.
+        assert!(!at_capacity(0, 5));
+        assert!(!at_capacity(4, 5));
+        assert!(at_capacity(5, 5), "at the ceiling, refuse");
+        assert!(at_capacity(6, 5));
     }
 
     #[test]
