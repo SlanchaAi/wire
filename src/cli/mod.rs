@@ -23,6 +23,7 @@ mod group;
 mod identity;
 mod lifecycle;
 mod mesh;
+mod nostr;
 mod pairing;
 mod relay;
 mod session;
@@ -571,6 +572,12 @@ pub enum Command {
     /// `wire org bind <domain>` / `wire org list` / `wire org forget <org_did>`.
     #[command(subcommand)]
     Org(OrgCommand),
+    /// Speak Nostr (RFC-007): pair with + message a peer over a Nostr relay using
+    /// this session's secp transport key (`wire enroll nostr`). `wire nostr pair
+    /// <npub> --relay wss://…` sends an encrypted pair-request; `wire nostr fetch
+    /// --relay wss://…` pulls + decrypts events addressed to your npub.
+    #[command(subcommand)]
+    Nostr(NostrCommand),
     /// Detect known MCP host config locations (Claude Desktop, Claude Code,
     /// Cursor, project-local) and either print or auto-merge the wire MCP
     /// server entry. Default prints; pass `--apply` to actually modify config
@@ -1137,6 +1144,36 @@ pub enum EnrollCommand {
         /// Mint a FRESH transport key even if one already exists (rotation).
         #[arg(long)]
         rotate: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `wire nostr …` — speak Nostr (RFC-007). Uses this session's secp transport
+/// key (`wire enroll nostr`) to pair with + message peers over a Nostr relay.
+#[derive(Subcommand, Debug)]
+pub enum NostrCommand {
+    /// Send an encrypted **pair-request** (your signed agent card) to a peer's
+    /// npub over a Nostr relay (NIP-W1, no-SPAKE2). The peer accepts with the
+    /// usual bilateral gate.
+    Pair {
+        /// The peer's Nostr public key — 64-char hex x-only (npub material).
+        npub: String,
+        /// Relay to publish to, e.g. `wss://relay.damus.io`.
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fetch + decrypt the events addressed to your npub from a Nostr relay
+    /// (pair-requests, pair-acks, and wire messages).
+    Fetch {
+        /// Relay to pull from.
+        #[arg(long)]
+        relay: String,
+        /// Max stored events to request.
+        #[arg(long, default_value = "20")]
+        limit: usize,
         #[arg(long)]
         json: bool,
     },
@@ -1940,6 +1977,7 @@ pub fn run() -> Result<()> {
         Command::Group(cmd) => cmd_group(cmd),
         Command::Enroll(cmd) => identity::cmd_enroll(cmd),
         Command::Org(cmd) => identity::cmd_org(cmd),
+        Command::Nostr(cmd) => nostr::cmd_nostr(cmd),
         Command::Invite {
             relay,
             ttl,
