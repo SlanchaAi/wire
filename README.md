@@ -63,6 +63,7 @@ Wire integrates at the harness layer — your agent's tool-calling loop, not you
 | **GitHub Copilot (VS Code)** | [docs/integrations/GITHUB_COPILOT.md](docs/integrations/GITHUB_COPILOT.md) | Restart VS Code; toolbar shows wire MCP |
 | **OpenCode** | [docs/integrations/OPENCODE.md](docs/integrations/OPENCODE.md) | `opencode mcp list` shows wire |
 | **Pi (earendil-works)** | [docs/integrations/PI.md](docs/integrations/PI.md) | `pi install npm:pi-mcp-adapter` + adapter init |
+| **Local LLM (Ollama / llama.cpp / LM Studio / vLLM)** | [docs/integrations/LOCAL_LLM.md](docs/integrations/LOCAL_LLM.md) | `wire demo` round-trips with no cloud |
 | **Pure terminal** | `wire up`, `wire dial`, `wire monitor` | local message appears |
 | **Custom harness / non-Node** | CLI `--json` mode + filesystem contract — see [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md) | `wire whoami --json` + `wire tail --json` |
 
