@@ -107,6 +107,7 @@ pub fn rebuild_card_with_current_claims() -> anyhow::Result<crate::agent_card::A
         obj.remove("op_pubkey");
         obj.remove("org_memberships");
         obj.remove("same_machine_attestation"); // #182: rebuilt fresh below
+        obj.remove("nostr_pubkey"); // RFC-007 D3.1: rebuilt fresh below
         obj.remove("signature");
 
         // v0.14.2 (#126): refresh the wire/* entry in `capabilities[]` so
@@ -134,6 +135,10 @@ pub fn rebuild_card_with_current_claims() -> anyhow::Result<crate::agent_card::A
         obj.insert("capabilities".into(), serde_json::Value::Array(new_caps));
     }
     let card = with_op_claims_if_enrolled_inner(card)?;
+    // RFC-007 D3.1: (re)attach the Nostr transport binding so `wire enroll
+    // republish` surfaces a transport key minted after init. Fail-soft no-op
+    // when not keyed.
+    let card = crate::nostr_key::with_nostr_binding_if_keyed(card)?;
     let sk = crate::config::read_private_key()
         .context("no session signing key on disk — re-run `wire init`")?;
     let signed = crate::agent_card::sign_agent_card(&card, &sk);

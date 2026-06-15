@@ -376,6 +376,11 @@ pub(super) fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()
         for (k, v) in op_claims_from_card(&card) {
             payload.insert(k, v);
         }
+        // RFC-007 D3.1: surface the Nostr transport npub (hex) when the card
+        // carries a verified binding. Transport-only — never the identity.
+        if let Some(npub_hex) = card_nostr_pubkey_hex(&card, &pk_bytes) {
+            payload.insert("nostr_pubkey_hex".into(), json!(npub_hex));
+        }
         println!("{}", serde_json::to_string(&payload)?);
     } else {
         println!("{}", character.colored());
@@ -395,8 +400,21 @@ pub(super) fn cmd_whoami(as_json: bool, short: bool, colored: bool) -> Result<()
             let plural = if memberships == 1 { "" } else { "s" };
             println!("enrolled: {op_did} ({memberships} org membership{plural})");
         }
+        if let Some(npub_hex) = card_nostr_pubkey_hex(&card, &pk_bytes) {
+            println!("nostr transport: {npub_hex}");
+        }
     }
     Ok(())
+}
+
+/// The Nostr transport npub (lowercase hex) from a card, IF the cross-signed
+/// binding verifies under this card's identity key. `None` when absent or
+/// invalid (fail-closed — never surface an unverified transport key).
+fn card_nostr_pubkey_hex(card: &Value, identity_pubkey: &[u8]) -> Option<String> {
+    match crate::nostr_key::card_nostr_binding(card, identity_pubkey) {
+        Ok(Some(xonly)) => Some(hex::encode(xonly)),
+        _ => None,
+    }
 }
 
 // ---------- identity (v0.7.0-alpha.3) ----------
@@ -522,7 +540,44 @@ pub(super) fn cmd_enroll(cmd: super::EnrollCommand) -> Result<()> {
             rotate_machine,
             json,
         } => cmd_enroll_fleet_link(dry_run, rotate_machine, json),
+        super::EnrollCommand::Nostr { rotate, json } => cmd_enroll_nostr(rotate, json),
     }
+}
+
+/// `wire enroll nostr` — mint (or reuse) this session's secp256k1 Nostr
+/// transport key (RFC-007 D3.1). Transport-only; cross-signed by the Ed25519
+/// identity at card-emit. Never an identity anchor (one-name invariant).
+fn cmd_enroll_nostr(rotate: bool, as_json: bool) -> Result<()> {
+    let existing = crate::config::read_nostr_key().ok();
+    let (secret, minted) = match (&existing, rotate) {
+        (Some(sk), false) => (*sk, false),
+        _ => {
+            let (sk, _x) = crate::nostr_key::generate_transport_key();
+            crate::config::write_nostr_key(&sk)?;
+            (sk, true)
+        }
+    };
+    let xonly = crate::nostr_key::xonly_from_secret(&secret)
+        .map_err(|e| anyhow::anyhow!("nostr key unusable: {e}"))?;
+    let npub_hex = hex::encode(xonly);
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "nostr_pubkey_hex": npub_hex,
+                "minted": minted,
+                "key_path": crate::config::nostr_key_path()?.display().to_string(),
+            }))?
+        );
+    } else {
+        let verb = if minted { "minted" } else { "reusing existing" };
+        println!(
+            "→ Nostr transport key {verb}\n  nostr_pubkey (hex): {npub_hex}\n  key saved 0600 at {:?}\n  run `wire enroll republish` to attach the cross-signed binding to your card",
+            crate::config::nostr_key_path()?
+        );
+    }
+    Ok(())
 }
 
 /// `wire enroll fleet-link` — RFC-001 amendment #182. Attach an op_sk-signed
