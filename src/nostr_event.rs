@@ -116,6 +116,31 @@ pub fn wire_to_nostr(
     wire_event: &Value,
     nostr_secp_sk: &[u8; 32],
 ) -> Result<NostrEvent, NostrEventError> {
+    wire_to_nostr_tagged(wire_event, nostr_secp_sk, &[])
+}
+
+/// Encode a signed wire event as a NIP-01 event **addressed to a recipient** —
+/// same as [`wire_to_nostr`] but adds a `["p", <peer_xonly_hex>]` tag so the
+/// peer's `#p`-filtered relay subscription (see `wire nostr fetch`) selects it.
+/// The p-tag is part of the signed `id` preimage, so it must be baked in here,
+/// before signing — it cannot be appended after the fact.
+pub fn wire_to_nostr_addressed(
+    wire_event: &Value,
+    nostr_secp_sk: &[u8; 32],
+    peer_xonly_hex: &str,
+) -> Result<NostrEvent, NostrEventError> {
+    let p_tag = vec!["p".to_string(), peer_xonly_hex.to_string()];
+    wire_to_nostr_tagged(wire_event, nostr_secp_sk, std::slice::from_ref(&p_tag))
+}
+
+/// Shared builder: encode `wire_event` as a NIP-01 event signed by the secp
+/// transport key, with `["wire", <from_did>]` first and any `extra_tags`
+/// appended (e.g. a recipient `p`-tag) — all covered by the signed id.
+fn wire_to_nostr_tagged(
+    wire_event: &Value,
+    nostr_secp_sk: &[u8; 32],
+    extra_tags: &[Vec<String>],
+) -> Result<NostrEvent, NostrEventError> {
     let kind = wire_event
         .get("kind")
         .and_then(Value::as_u64)
@@ -133,6 +158,7 @@ pub fn wire_to_nostr(
     if let Some(from) = wire_event.get("from").and_then(Value::as_str) {
         tags.push(vec!["wire".to_string(), from.to_string()]);
     }
+    tags.extend(extra_tags.iter().cloned());
 
     // content = the full signed wire event (inner Ed25519 sig preserved).
     let content = serde_json::to_string(wire_event).map_err(|_| NostrEventError::BadContent)?;
@@ -249,6 +275,28 @@ mod tests {
         );
         // The sender's did rides as a wire tag.
         assert!(ev.tags.iter().any(|t| t[0] == "wire"));
+    }
+
+    #[test]
+    fn addressed_event_carries_p_tag_and_still_verifies() {
+        let wire = signed_wire_event();
+        let (nsk, _x) = generate_transport_key();
+        let (_psk, peer_x) = generate_transport_key();
+        let peer_hex = hex::encode(peer_x);
+        let ev = wire_to_nostr_addressed(&wire, &nsk, &peer_hex).unwrap();
+        // The recipient p-tag is present (this is what the peer's #p filter selects on).
+        assert!(
+            ev.tags
+                .iter()
+                .any(|t| t.first().map(String::as_str) == Some("p") && t.get(1) == Some(&peer_hex)),
+            "addressed event must carry a [\"p\", <peer>] tag, tags={:?}",
+            ev.tags
+        );
+        // The wire did-tag still leads (order is stable).
+        assert_eq!(ev.tags[0][0], "wire");
+        // Transport still authenticates and the inner wire event survives intact —
+        // proving the p-tag was part of the signed id, not appended after.
+        assert_eq!(verify_and_decode(&ev).unwrap(), wire);
     }
 
     #[test]

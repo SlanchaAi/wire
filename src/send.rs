@@ -74,6 +74,16 @@ pub enum SyncDelivery {
         relay_url: String,
         slot_id: String,
     },
+    /// Delivered over the peer's **Nostr** transport (RFC-007 D3): no HTTP slot
+    /// was reachable, but the peer has a recorded `nostr_transport` and the
+    /// relay accepted the published NIP-01 event. `npub` is the peer's x-only
+    /// transport key the event was `p`-tagged to. Counts as relay-reached: the
+    /// peer can pull it with `wire nostr fetch`.
+    DeliveredNostr {
+        event_id: String,
+        relay_url: String,
+        npub: String,
+    },
     /// Peer isn't in `relay_state.peers` — no slot coords to POST to.
     /// This is the explicit "you haven't paired yet" case. The
     /// caller should either suggest `wire dial <peer>` or write
@@ -106,6 +116,7 @@ impl SyncDelivery {
         match self {
             SyncDelivery::Delivered { .. } => "delivered",
             SyncDelivery::Duplicate { .. } => "duplicate",
+            SyncDelivery::DeliveredNostr { .. } => "delivered_nostr",
             SyncDelivery::PeerUnknown { .. } => "peer_unknown",
             SyncDelivery::SlotStale { .. } => "slot_stale",
             SyncDelivery::TransportError { .. } => "transport_error",
@@ -117,7 +128,9 @@ impl SyncDelivery {
     pub fn reached_relay(&self) -> bool {
         matches!(
             self,
-            SyncDelivery::Delivered { .. } | SyncDelivery::Duplicate { .. }
+            SyncDelivery::Delivered { .. }
+                | SyncDelivery::Duplicate { .. }
+                | SyncDelivery::DeliveredNostr { .. }
         )
     }
 
@@ -125,6 +138,7 @@ impl SyncDelivery {
         match self {
             SyncDelivery::Delivered { event_id, .. }
             | SyncDelivery::Duplicate { event_id, .. }
+            | SyncDelivery::DeliveredNostr { event_id, .. }
             | SyncDelivery::PeerUnknown { event_id }
             | SyncDelivery::SlotStale { event_id, .. }
             | SyncDelivery::TransportError { event_id, .. } => event_id,
@@ -157,9 +171,6 @@ pub fn attempt_deliver(peer_handle: &str, signed_event: &Value) -> Result<SyncDe
     // backup); if all fail, the last failure verdict is returned.
     let state = crate::config::read_relay_state().context("reading relay state")?;
     let endpoints = crate::endpoints::peer_endpoints_in_priority_order(&state, peer_handle);
-    if endpoints.is_empty() {
-        return Ok(SyncDelivery::PeerUnknown { event_id });
-    }
 
     let mut last_failure: Option<SyncDelivery> = None;
     for ep in endpoints {
@@ -219,8 +230,83 @@ pub fn attempt_deliver(peer_handle: &str, signed_event: &Value) -> Result<SyncDe
         }
     }
 
+    // No HTTP slot reached the peer (none recorded, or all failed). RFC-007 D3:
+    // if the peer has a recorded Nostr transport and this session is enrolled
+    // with a secp transport key, route the same signed wire event over Nostr.
+    // This is strictly a fallback — when the peer has no `nostr_transport` the
+    // HTTP verdict above is returned byte-identical.
+    if let Some((peer_npub, nostr_relay)) =
+        crate::endpoints::peer_nostr_transport(&state, peer_handle)
+        && let Ok(nsk) = crate::config::read_nostr_key()
+    {
+        match deliver_over_nostr(&peer_npub, &nostr_relay, signed_event, &nsk) {
+            Ok(true) => {
+                return Ok(SyncDelivery::DeliveredNostr {
+                    event_id,
+                    relay_url: nostr_relay,
+                    npub: peer_npub,
+                });
+            }
+            Ok(false) => {
+                last_failure = Some(SyncDelivery::TransportError {
+                    event_id: event_id.clone(),
+                    relay_url: nostr_relay,
+                    slot_id: String::new(),
+                    detail: "nostr relay rejected the event (OK=false)".to_string(),
+                });
+            }
+            Err(e) => {
+                last_failure = Some(SyncDelivery::TransportError {
+                    event_id: event_id.clone(),
+                    relay_url: nostr_relay,
+                    slot_id: String::new(),
+                    detail: format!("nostr publish failed: {e:#}"),
+                });
+            }
+        }
+    }
+
     // Every endpoint failed (or all carried empty coords).
     Ok(last_failure.unwrap_or(SyncDelivery::PeerUnknown { event_id }))
+}
+
+/// Encode `signed_event` as a NIP-01 event addressed (`p`-tagged) to the peer's
+/// x-only transport key `peer_npub_hex`, sign it with our secp transport key
+/// `nsk`, and publish it to `relay_url`. Returns the relay's OK verdict.
+///
+/// HTTP-slot transport is sync (`reqwest` blocking) but `NostrWs` is async, so
+/// we drive the one-shot publish on a fresh runtime (the bridge pattern shared
+/// with `cli/relay.rs` + `cli/nostr.rs`). Pure event-building is factored into
+/// [`build_addressed_nostr`] so it's unit-testable without a relay.
+fn deliver_over_nostr(
+    peer_npub_hex: &str,
+    relay_url: &str,
+    signed_event: &Value,
+    nsk: &[u8; 32],
+) -> Result<bool> {
+    let ev = build_addressed_nostr(signed_event, nsk, peer_npub_hex)?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build nostr runtime")?;
+    rt.block_on(async {
+        let mut ws = crate::nostr_ws::NostrWs::connect(relay_url)
+            .await
+            .with_context(|| format!("connect {relay_url}"))?;
+        ws.publish(&ev).await.context("publish over nostr")
+    })
+}
+
+/// Build the NIP-01 event for a Nostr-routed send: the full signed wire event
+/// rides in `content` (inner Ed25519 sig intact), schnorr-signed by our secp
+/// key and `p`-tagged to the peer. Surfaced for unit tests.
+fn build_addressed_nostr(
+    signed_event: &Value,
+    nsk: &[u8; 32],
+    peer_npub_hex: &str,
+) -> Result<crate::nostr_event::NostrEvent> {
+    crate::nostr_event::wire_to_nostr_addressed(signed_event, nsk, peer_npub_hex)
+        .map_err(|e| anyhow::anyhow!("encode wire event as nostr: {e}"))
 }
 
 /// Build the actionable `peer_unknown` reason string from the three states the
@@ -276,6 +362,13 @@ pub fn delivery_json(d: &SyncDelivery, peer: &str) -> Value {
         } => {
             obj.insert("relay_url".into(), json!(relay_url));
             obj.insert("slot_id".into(), json!(slot_id));
+        }
+        SyncDelivery::DeliveredNostr {
+            relay_url, npub, ..
+        } => {
+            obj.insert("relay_url".into(), json!(relay_url));
+            obj.insert("transport".into(), json!("nostr"));
+            obj.insert("npub".into(), json!(npub));
         }
         SyncDelivery::SlotStale {
             relay_url,
@@ -390,6 +483,68 @@ mod tests {
         };
         assert_eq!(d.status_str(), "transport_error");
         assert!(!d.reached_relay());
+    }
+
+    #[test]
+    fn delivered_nostr_counts_as_reached_and_renders_transport() {
+        let d = SyncDelivery::DeliveredNostr {
+            event_id: "ev1".into(),
+            relay_url: "wss://relay.example".into(),
+            npub: "ab".repeat(32),
+        };
+        assert_eq!(d.status_str(), "delivered_nostr");
+        assert!(
+            d.reached_relay(),
+            "nostr delivery means the peer can pull it"
+        );
+        assert_eq!(d.event_id(), "ev1");
+
+        let v = delivery_json(&d, "alice");
+        assert_eq!(v["status"], "delivered_nostr");
+        assert_eq!(v["peer"], "alice");
+        assert_eq!(v["event_id"], "ev1");
+        assert_eq!(v["relay_url"], "wss://relay.example");
+        assert_eq!(v["transport"], "nostr");
+        assert_eq!(v["npub"], "ab".repeat(32));
+        // No HTTP-slot field on the nostr path.
+        assert!(v.get("slot_id").is_none(), "nostr send has no slot_id");
+        assert!(v.get("reason").is_none(), "success has no reason");
+    }
+
+    #[test]
+    fn build_addressed_nostr_is_verifiable_and_addressed() {
+        use crate::nostr_key::generate_transport_key;
+        use crate::signing::{generate_keypair, sign_message_v31};
+
+        let (sk, pk) = generate_keypair();
+        let wire = sign_message_v31(
+            &json!({
+                "v": "3.1",
+                "timestamp": "2026-06-14T12:00:00Z",
+                "from": "did:wire:slate-lotus-88232017",
+                "to": "did:wire:raven-kettle-1234",
+                "kind": 1,
+                "body": {"content": "routed over nostr"},
+            }),
+            &sk,
+            &pk,
+            "slate-lotus",
+        )
+        .unwrap();
+
+        let (nsk, _x) = generate_transport_key();
+        let (_psk, peer_x) = generate_transport_key();
+        let peer_hex = hex::encode(peer_x);
+
+        let ev = build_addressed_nostr(&wire, &nsk, &peer_hex).unwrap();
+        // Addressed to the peer (their #p filter selects on this).
+        assert!(
+            ev.tags
+                .iter()
+                .any(|t| t.first().map(String::as_str) == Some("p") && t.get(1) == Some(&peer_hex))
+        );
+        // Transport authenticates and the full signed wire event survives intact.
+        assert_eq!(crate::nostr_event::verify_and_decode(&ev).unwrap(), wire);
     }
 
     #[test]
