@@ -714,6 +714,9 @@ pub(super) fn cmd_pull(as_json: bool) -> Result<()> {
         };
         total_seen += events.len();
         let result = crate::pull::process_events(&events, last_event_id.clone(), &inbox_dir)?;
+        // RFC-004 AC-HP2: auto-respond to inbound probes from the daemon's pull
+        // cycle — no LLM/MCP in the loop. Rate-limited + best-effort inside.
+        crate::probe::respond_to_probes(&result.probes);
         all_written.extend(result.written.iter().cloned());
         all_rejected.extend(result.rejected.iter().cloned());
         if result.blocked {
@@ -744,6 +747,9 @@ pub(super) fn cmd_pull(as_json: bool) -> Result<()> {
         rejected: all_rejected,
         blocked: all_blocked,
         advance_cursor_to: all_advance_cursor_to,
+        // Probes were already auto-responded to inside the per-endpoint loop
+        // above; this aggregate result doesn't re-carry them.
+        probes: Vec::new(),
     };
     let events_len = total_seen;
 
@@ -1330,6 +1336,75 @@ pub fn run_sync_push() -> Result<Value> {
 /// `self.endpoints[]`, not the legacy top-level fields) actually pull.
 /// Pre-v0.9 this function read only the top-level fields and silently
 /// returned `{}` for any v0.5.17+ session.
+/// `wire ping <peer>` (RFC-004 Tier-1) — send a liveness probe and wait for the
+/// peer's daemon to auto-respond, reporting the round-trip. Does its own
+/// synchronous pull (works even if our local daemon is down — it's the PEER's
+/// daemon liveness we're measuring). Trust-neutral: never mutates any tier.
+pub fn cmd_ping(peer: &str, as_json: bool) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let bare = crate::agent_card::bare_handle(peer);
+    let nonce = hex::encode(rand::random::<[u8; 8]>());
+    let inbox_path = config::inbox_dir()?.join(format!("{bare}.jsonl"));
+
+    let start = Instant::now();
+    crate::probe::send_probe(peer, &nonce).with_context(|| format!("sending probe to {peer}"))?;
+
+    let deadline = start + Duration::from_secs(5);
+    let mut rtt_ms: Option<u128> = None;
+    while Instant::now() < deadline {
+        // Pull our slot(s) so an auto-responded ack lands in the inbox.
+        let _ = run_sync_pull();
+        if inbox_contains_probe_ack(&inbox_path, &nonce) {
+            rtt_ms = Some(start.elapsed().as_millis());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    match rtt_ms {
+        Some(ms) => {
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "peer": bare, "alive": true, "rtt_ms": ms,
+                    }))?
+                );
+            } else {
+                println!("{bare}: alive — probe round-trip {ms}ms");
+            }
+            Ok(())
+        }
+        None => {
+            if as_json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "peer": bare, "alive": false, "rtt_ms": null,
+                        "reason": "no probe_ack within 5s",
+                    }))?
+                );
+                Ok(())
+            } else {
+                bail!(
+                    "{bare}: no response within 5s — their daemon may be down, unreachable, or not yet on a probe-capable build"
+                )
+            }
+        }
+    }
+}
+
+/// Scan an inbox JSONL file for a probe_ack carrying `nonce`. Best-effort:
+/// unreadable file / unparsable lines are skipped.
+fn inbox_contains_probe_ack(path: &std::path::Path, nonce: &str) -> bool {
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    body.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .any(|e| crate::probe::is_probe_ack_for(&e, nonce))
+}
+
 pub fn run_sync_pull() -> Result<Value> {
     let state = config::read_relay_state()?;
     if state.get("self").map(Value::is_null).unwrap_or(true) {
@@ -1402,6 +1477,8 @@ pub fn run_sync_pull() -> Result<Value> {
         // P0.1 shared cursor-blocking logic (matches `wire pull`). A block on
         // one slot only stalls THAT slot's cursor; other slots keep flowing.
         let result = crate::pull::process_events(&events, cursor, &inbox_dir)?;
+        // RFC-004 AC-HP2: daemon auto-responds to inbound probes (no LLM).
+        crate::probe::respond_to_probes(&result.probes);
         if let Some(eid) = &result.advance_cursor_to {
             cursors.insert(ep.slot_id.clone(), Value::String(eid.clone()));
         }

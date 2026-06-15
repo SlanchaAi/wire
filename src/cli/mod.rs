@@ -418,6 +418,15 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Liveness probe a paired peer (RFC-004). Sends a probe and waits for the
+    /// peer's daemon to auto-respond, reporting the round-trip — no LLM on the
+    /// responder side. Trust-neutral: never changes any peer's tier.
+    Ping {
+        /// Peer handle (a pinned peer, or `nick@relay`).
+        peer: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a summary of identity, relay binding, peers, inbox/outbox queue depth.
     /// Useful as a single "where am I" check.
     Status {
@@ -1856,6 +1865,7 @@ pub fn run() -> Result<()> {
         } => relay::cmd_add_peer_slot(&handle, &url, &slot_id, &slot_token, json),
         Command::Push { peer, json } => relay::cmd_push(peer.as_deref(), json),
         Command::Pull { json } => relay::cmd_pull(json),
+        Command::Ping { peer, json } => relay::cmd_ping(&peer, json),
         Command::Pin { card_file, json } => pairing::cmd_pin(&card_file, json),
         Command::RotateSlot { no_announce, json } => relay::cmd_rotate_slot(no_announce, json),
         Command::ForgetPeer {
