@@ -1234,6 +1234,7 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn private_key_is_mode_0600() {
         use std::os::unix::fs::PermissionsExt;
