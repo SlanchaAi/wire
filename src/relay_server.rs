@@ -1412,10 +1412,7 @@ async fn handle_unclaim(
         return resp;
     }
     // Remove on-disk file (best-effort — absence is fine) then in-memory entry.
-    let path = relay
-        .state_dir
-        .join("handles")
-        .join(format!("{nick}.json"));
+    let path = relay.state_dir.join("handles").join(format!("{nick}.json"));
     let _ = tokio::fs::remove_file(&path).await;
     {
         let mut inner = relay.inner.lock().await;
