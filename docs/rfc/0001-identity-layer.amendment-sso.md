@@ -1,7 +1,7 @@
 # RFC-001 Amendment: SSO-attestation channel (organization tier)
 
 **Amends:** [RFC-001 v2](./0001-identity-layer.md) (merged as PR #76, squash `a6b4163`)
-**Status:** Accepted — ratified by @laulpogan 2026-05-28 (direction blessed; AC-SSO1–5 + the 90-day kill criterion still gate the v0.14 build) <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
+**Status:** Accepted — ratified by @laulpogan 2026-05-28 (direction blessed; AC-SSO1–5). **2026-06-16 (push-to-1.0):** the 90-day kill-criterion timer is **disarmed** — the OIDC channel (§B–§E) is scoped *outside* the 1.0 frozen-surface guarantee (experimental/post-1.0, evidence-gated under the deprecation policy); the DNS-TXT floor (§A) + `ORG_VERIFIED` tier are in 1.0. See §H. <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
 **Tracking:** [#73](https://github.com/SlanchaAi/wire/issues/73)
 **Author:** swift-harbor (Copilot CLI agent, paired w/ @dthoma1)
 **Date:** 2026-05-28
@@ -201,7 +201,12 @@ Three questions for slate-lotus's owning side of #73 (filtering surface + projec
 
 ## §H. Kill criterion
 
-If, 90 days after v0.14 ships, the SSO channel has produced zero `ORG_VERIFIED` mediations in observed deployments — i.e., everyone is either using the wire-native roster path or staying in pure-SAS — the SSO channel is reverted in v0.15. The DNS-TXT floor (§A) is harmless even if no SSO is ever attempted (it just gives receivers a fast `org_did` resolution); the OIDC channel (§B–§E) costs implementation complexity and ongoing dependency surface. Revert if no demonstrated usage.
+**Disarmed for 1.0 (2026-06-16, "push to 1.0" pass).** The original criterion auto-reverted the OIDC channel in v0.15 if it produced zero `ORG_VERIFIED` mediations within 90 days of v0.14. `ROAD_TO_1.0.md` §5 is explicit that you cannot freeze a 1.0 surface with a version-pinned self-destruct timer armed against it — so the timer is removed, **not** by force-cutting SSO (the code is written, tested, and additive) but by **scoping the OIDC channel OUT of the 1.0 frozen-surface guarantee**:
+
+- The **DNS-TXT floor (§A)** and the **`ORG_VERIFIED` tier + `org_attestation.via` provenance** are in 1.0 and frozen (harmless, additive on the v3.2 card).
+- The **OIDC channel (§B–§E)** is **experimental / post-1.0**: it is not covered by the 1.0 compatibility promise and may be evolved or removed after 1.0 under the normal **deprecation policy** (a deprecation window, not a silent break), on the same zero-usage evidence — just without a hard `v0.15` revert date.
+
+Net effect: 1.0 ships with no armed timer, SSO stays available for the orgs piloting it, and a future removal (if usage stays zero) is a deprecation, not a surprise. The keep-or-cut decision is now evidence-gated and continuous, not a one-shot version gate.
 
 ## References
 

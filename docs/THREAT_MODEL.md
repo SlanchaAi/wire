@@ -1,6 +1,6 @@
 # wire threat model
 
-This document enumerates the threats `wire` is designed to resist, the threats it explicitly does NOT resist (deferred or out of scope), and the security properties of the **current shipped implementation** (v0.15, on the 1.0 track). Threat entries are dated/versioned inline where the posture changed; "v0.1" labels below mark the original baseline, not a claim about today's code — read the per-threat **Status** and **Mitigation (current)** lines for the live posture.
+This document enumerates the threats `wire` is designed to resist, the threats it explicitly does NOT resist (deferred or out of scope), and the security properties of the **current shipped implementation** (v0.16, on the 1.0 track). Threat entries are dated/versioned inline where the posture changed; "v0.1" labels below mark the original baseline, not a claim about today's code — read the per-threat **Status** and **Mitigation (current)** lines for the live posture.
 
 ## Trust boundaries
 
@@ -27,6 +27,12 @@ The trust model in one sentence: **operators trust their own machines and each o
 - **No forward secrecy / no post-compromise security:** the conversation key is static per identity-pair, so an Ed25519-seed compromise retroactively decrypts every message ever exchanged with that peer. The seed is a long-term root secret. Per-message FS would need an epoch/ephemeral input (MLS-class; deferred — `ANTI_FEATURES.md`, `BACKLOG.md`).
 
 **Status:** DM confidentiality against the relay is **present** for modern peers (sealed) and **by-design absent** for group content + legacy-card peers + all routing metadata. Operators with stricter needs self-host the relay (`wire relay-server`). Full MLS group confidentiality + forward secrecy are explicitly **out of 1.0**; see `BACKLOG.md`.
+
+**1.0 confidentiality posture (explicit, per `ROAD_TO_1.0.md` §4):**
+- **In 1.0 — DM body sealing is ON by default**, not a flag: `wire send`/`tool_send` seal automatically whenever the *pinned* peer card carries a `dh_pubkey`. There is no "encrypt: true" the operator can forget.
+- **Downgrade resistance:** the only path to a plaintext DM is a pinned card with **no** `dh_pubkey` (a genuine pre-D1 legacy card). A network attacker cannot strip `dh_pubkey` to force plaintext — the card is Ed25519-signed and pinned, so a tampered card fails verification. Downgrade is therefore bounded by what the operator *pinned*, not by what the relay serves at send time.
+- **Operator visibility:** the plaintext fallback is not silent — a peer whose pinned card lacks `dh_pubkey` is observable in `wire whois`, and the receive surfaces flag an undecryptable/`enc` mismatch rather than rendering ciphertext as a green-verified body (#281/#285/#287). A stale pre-D1 binary that can't decrypt is flagged via the `stale_binary` signal (#247).
+- **Explicitly OUT of 1.0 (deferred, not implied):** group-body confidentiality + cryptographic eviction (T15), forward secrecy / post-compromise security, and all routing-metadata privacy (who-talks-to-whom, timing, padded sizes). These ride the reserved `enc` slot post-1.0 (MLS-class) without breaking the 1.0 envelope. The 1.0 promise is: *modern DMs are sealed by default and downgrade-bounded; everything above is named here, not hidden.*
 
 > Historical note: pre-D1, all bodies were plaintext-on-the-wire, and pair-time bootstrap payloads were ChaCha20-Poly1305-sealed under a SPAKE2-derived key. The SPAKE2/SAS pairing flow was removed (RFC-005 follow-on); pairing is now `wire dial` + bilateral accept (T2), and body confidentiality is the D1 layer above.
 
