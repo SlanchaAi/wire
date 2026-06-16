@@ -1,7 +1,7 @@
 # RFC-001 Amendment: SSO-attestation channel (organization tier)
 
 **Amends:** [RFC-001 v2](./0001-identity-layer.md) (merged as PR #76, squash `a6b4163`)
-**Status:** Accepted — ratified by @laulpogan 2026-05-28 (direction blessed; AC-SSO1–5). **2026-06-16 (push-to-1.0):** the 90-day kill-criterion timer is **disarmed** — the OIDC channel (§B–§E) is scoped *outside* the 1.0 frozen-surface guarantee (experimental/post-1.0, evidence-gated under the deprecation policy); the DNS-TXT floor (§A) + `ORG_VERIFIED` tier are in 1.0. See §H. <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
+**Status:** Accepted — ratified by @laulpogan 2026-05-28 (direction blessed; AC-SSO1–5). **2026-06-16 (push-to-1.0):** the 90-day kill-criterion timer is **disarmed** and SSO is promoted to a **supported 1.0 feature** (it's the enterprise day-one hook). The wire-side contract — `ORG_VERIFIED` tier, `org_attestation.via` provenance, DNS-TXT floor (§A) — is **frozen**; the IdP-integration *config* (JWKS handling, OIDC claims→org mapping, tenant config) carries the normal deprecation window since it has external-dependency churn. See §H. <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
 **Tracking:** [#73](https://github.com/SlanchaAi/wire/issues/73)
 **Author:** swift-harbor (Copilot CLI agent, paired w/ @dthoma1)
 **Date:** 2026-05-28
@@ -199,14 +199,15 @@ Three questions for slate-lotus's owning side of #73 (filtering surface + projec
 2. **T21 alarm-window policy hook location:** global config, per-org config, or per-filter-rule. Affects where the §C grace-window + §E alarm-debounce timers are configured.
 3. **Filter-expression shape for "fan-out project:X to same-tenant ORG_VERIFIED":** the filter DSL needs to express both project-tag selectors and org-attestation predicates; the §C JWKS hard-refresh + grace-window mechanics produce cache-invalidation events that the filter compiler should subscribe to. Need slate's preferred event shape so §C degrade announcements are emitted as compatible cache-invalidations.
 
-## §H. Kill criterion
+## §H. Kill criterion → superseded: SSO is a supported 1.0 feature
 
-**Disarmed for 1.0 (2026-06-16, "push to 1.0" pass).** The original criterion auto-reverted the OIDC channel in v0.15 if it produced zero `ORG_VERIFIED` mediations within 90 days of v0.14. `ROAD_TO_1.0.md` §5 is explicit that you cannot freeze a 1.0 surface with a version-pinned self-destruct timer armed against it — so the timer is removed, **not** by force-cutting SSO (the code is written, tested, and additive) but by **scoping the OIDC channel OUT of the 1.0 frozen-surface guarantee**:
+**Resolved for 1.0 (2026-06-16, "push to 1.0" pass).** The original criterion auto-reverted the OIDC channel in v0.15 if it produced zero `ORG_VERIFIED` mediations within 90 days of v0.14. That armed version-pinned self-destruct can't cross a 1.0 freeze (`ROAD_TO_1.0.md` §5) — but the *fix is not to scope SSO out*. Org-verification is the **enterprise day-one hook** (it leads the enterprise pitch); enterprises must be able to build on a stable contract, so SSO is **promoted into the supported 1.0 surface**, split by stability:
 
-- The **DNS-TXT floor (§A)** and the **`ORG_VERIFIED` tier + `org_attestation.via` provenance** are in 1.0 and frozen (harmless, additive on the v3.2 card).
-- The **OIDC channel (§B–§E)** is **experimental / post-1.0**: it is not covered by the 1.0 compatibility promise and may be evolved or removed after 1.0 under the normal **deprecation policy** (a deprecation window, not a silent break), on the same zero-usage evidence — just without a hard `v0.15` revert date.
+- **Frozen in 1.0 (no-break guarantee):** the DNS-TXT floor (§A), the **`ORG_VERIFIED` tier**, and the **`org_attestation.via` provenance** subfield. A consumer can program against these.
+- **Supported, but evolves under the deprecation policy:** the **IdP-integration config** — JWKS endpoint handling, OIDC claims→`org` mapping, tenant/issuer config shape (§B–§E). This carries external-dependency churn (IdP quirks, claim conventions), so its *shape* may change across 1.x **through a deprecation window** (announce → warn → ≥1 MINOR & ≥90 days), never a silent break. The *capability* (SSO-mediated `ORG_VERIFIED`) is a 1.0 feature, not experimental.
+- **Removed:** the 90-day auto-revert timer. Keep/cut is now an ordinary evidence-gated deprecation decision, not a one-shot armed version gate.
 
-Net effect: 1.0 ships with no armed timer, SSO stays available for the orgs piloting it, and a future removal (if usage stays zero) is a deprecation, not a surprise. The keep-or-cut decision is now evidence-gated and continuous, not a one-shot version gate.
+Net effect: 1.0 ships SSO as a real, supported feature with a frozen wire-side contract; only the inherently-churny IdP plumbing is iterable, and even that only via the documented deprecation window. No surprise revert, no experimental asterisk on the enterprise hook.
 
 ## References
 

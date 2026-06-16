@@ -179,10 +179,12 @@ deprecation policy, **without breaking the promise.**
    DM-confidentiality posture explicitly (default-on, downgrade-bounded,
    operator-visible; group/FS/metadata out); `ANTI_FEATURES.md` #2 reconciled
    with the shipped opt-in org-SSO.
-4. ✅ **SSO kill criterion decided** (#325) — the 90-day auto-revert timer is
-   *disarmed*: the OIDC channel is scoped OUTSIDE the 1.0 frozen-surface
-   guarantee (experimental/post-1.0, deprecation-policy-gated), the DNS-TXT floor
-   + `ORG_VERIFIED` tier are in 1.0. No armed timer crosses the freeze.
+4. ✅ **SSO kill criterion decided** (#325, revised #330) — the 90-day
+   auto-revert timer is *disarmed* and SSO is **promoted to a supported 1.0
+   feature** (the enterprise day-one hook). Wire-side contract (`ORG_VERIFIED`
+   tier + `org_attestation.via` + DNS-TXT floor) is frozen; the IdP-integration
+   config evolves only under the deprecation window. No armed timer crosses the
+   freeze; no experimental asterisk on the enterprise hook.
 5. ✅ **Freeze the surface** (#326) — `docs/DEPRECATION_POLICY.md` published;
    `mcp_catalog_schema_is_frozen` golden-locks all 27 MCP tools' shape.
    *Stretch:* golden-locking every `--json` builder (beyond `delivery_json`) is
