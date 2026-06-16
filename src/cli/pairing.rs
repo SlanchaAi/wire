@@ -1362,6 +1362,11 @@ fn cmd_add_accept_pending(
     // 4. Delete the pending-inbound record now that bilateral is complete.
     crate::pending_inbound_pair::consume_pending_inbound(peer_nick)?;
 
+    // #277 honesty: the trust pin is real, but if the peer advertised only
+    // loopback/same-host endpoints, the reply path can't reach them off-box —
+    // don't report a clean success that's actually a half-working link.
+    let reply_path_reachable = !crate::endpoints::endpoints_are_local_only(&endpoints_to_pin);
+
     if as_json {
         println!(
             "{}",
@@ -1371,6 +1376,7 @@ fn cmd_add_accept_pending(
                 "peer_handle": pending.peer_handle,
                 "status": "bilateral_accepted",
                 "via": "pending_inbound",
+                "reply_path_reachable": reply_path_reachable,
             }))?
         );
     } else {
@@ -1378,6 +1384,12 @@ fn cmd_add_accept_pending(
             "→ accepted pending pair from {peer}\n→ pinned VERIFIED, slot_token recorded\n→ shipped our slot_token back via pair_drop_ack\nbilateral pair complete. Send with `wire send {peer} \"...\"`.",
             peer = pending.peer_handle,
         );
+        if !reply_path_reachable {
+            eprintln!(
+                "⚠ {peer} advertised only loopback/same-host endpoints — the reply path may not work off-box. If they're a remote peer, they need to re-bind to a public relay (`wire bind-relay https://<relay> --replace` + `wire claim`) and re-pair.",
+                peer = pending.peer_handle,
+            );
+        }
     }
     Ok(())
 }

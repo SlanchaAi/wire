@@ -442,6 +442,25 @@ pub fn infer_scope_from_url(url: &str) -> EndpointScope {
     }
 }
 
+/// True iff this endpoint set is reachable ONLY from the same box — every
+/// endpoint resolves (by URL) to a loopback/`Local` or `Uds` address, with no
+/// off-box `Federation`/LAN host. A peer pinned this way can't complete a
+/// bilateral reply path with a *remote* peer: the reply has nowhere off-box to
+/// land. This is the #277 honesty signal — `wire accept` reported
+/// `bilateral_accepted` even when the resulting pin advertised only loopback
+/// endpoints. Inferred from the URL (not the advertised `scope`) so a loopback
+/// address mislabeled `federation` (exactly the #277 case) is still caught.
+/// Empty set → false (no pin to judge).
+pub fn endpoints_are_local_only(endpoints: &[Endpoint]) -> bool {
+    !endpoints.is_empty()
+        && endpoints.iter().all(|e| {
+            matches!(
+                infer_scope_from_url(&e.relay_url),
+                EndpointScope::Local | EndpointScope::Uds
+            )
+        })
+}
+
 /// Build the `self` block for `relay_state.json` from an endpoint set:
 /// the additive `endpoints[]` array plus legacy top-level
 /// relay_url/slot_id/slot_token pointing at the federation endpoint (or,
@@ -543,6 +562,25 @@ mod tests {
             }
         });
         assert!(peer_endpoints_in_priority_order(&state, "alice").is_empty());
+    }
+
+    #[test]
+    fn endpoints_are_local_only_catches_loopback_pin_incl_mislabeled_scope() {
+        // Empty → false (nothing to judge).
+        assert!(!endpoints_are_local_only(&[]));
+        // A loopback URL mislabeled `federation` (the #277 case) is still caught
+        // — we infer from the URL, not the advertised scope.
+        let mislabeled =
+            Endpoint::federation("http://127.0.0.1:18791".into(), "s".into(), "t".into());
+        assert!(endpoints_are_local_only(std::slice::from_ref(&mislabeled)));
+        // A real federation host → reachable, not local-only.
+        let fed = Endpoint::federation("https://wireup.net".into(), "s".into(), "t".into());
+        assert!(!endpoints_are_local_only(std::slice::from_ref(&fed)));
+        // Mixed (loopback + federation) → reachable off-box via the federation one.
+        assert!(!endpoints_are_local_only(&[mislabeled.clone(), fed]));
+        // UDS is same-host only → local-only.
+        let uds = Endpoint::uds("unix:///tmp/wire.sock".into(), "s".into(), "t".into());
+        assert!(endpoints_are_local_only(&[uds]));
     }
 
     #[test]
