@@ -17,10 +17,13 @@ jobs:
       # Force single-threaded test execution to keep the heavy real-process
       # e2e binaries (e.g. e2e_detached_pair, with real daemons + a SAS
       # handshake under a tight deadline) from self-contending under default
-      # parallelism on the 2-core ubuntu-latest runner. Also reduces the UDS
-      # round-trip flake seen intermittently on Broken-pipe (os error 32).
-      # Lib + non-heavy e2e cost is negligible serialized; heavy e2e is where
-      # the wins are. See feedback/heavy-e2e-subprocess-contention.
+      # parallelism on the 2-core ubuntu-latest runner. Lib + non-heavy e2e
+      # cost is negligible serialized; heavy e2e is where the wins are. See
+      # feedback/heavy-e2e-subprocess-contention. (The UDS round-trip
+      # Broken-pipe/os-error-32 flake this also used to mask was root-caused +
+      # fixed in #241 — the canned test server's single-read racing
+      # uds_request's two-write — so serialization now stands on heavy-e2e
+      # contention alone, not a live flake.)
       - run: cargo test --all-targets -- --test-threads=1
 
   fmt:
@@ -67,6 +70,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --bin wire
       - run: ./target/release/wire demo --json | tee /dev/stderr | grep -q '"ok":true'
+
+  hello-world:
+    # The canonical FIRST-CONNECTION round-trip gate (ROAD_TO_1.0 §3 lifecycle
+    # hardening). Reproduces the README "60-second local demo" exactly — local
+    # relay + two independent `wire up` agents + dial-by-persona + receive +
+    # autonomous reply — across several fresh-box iterations to catch the
+    # intermittent daemon-survival / first-connection regressions a single-shot
+    # `wire demo` or install-smoke wouldn't. This is the harness that caught the
+    # #263 daemon-self-abort + one-directional-pin bugs; it must stay green.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y bc
+      - run: cargo build --release --bin wire
+      - run: WIRE_BIN=./target/release/wire bash scripts/hello-world-validate.sh 5
 
   demo-hotline:
     # Runs demo-hotline.sh end-to-end: local relay + 5 agents with vibes +
