@@ -1670,7 +1670,8 @@ fn try_reresolve_peer_on_slot_4xx(
             })
         })
         .and_then(|e| e.get("relay_url").and_then(Value::as_str))
-        .or_else(|| peer_entry.get("relay_url").and_then(Value::as_str))
+        // RFC-006 Part B: `endpoints[]` is the only peer-routing source; the old
+        // flat `peers[h].relay_url` fallback is gone (Part B stopped writing it).
         .ok_or_else(|| {
             anyhow!("peer `{peer_handle}` has no federation endpoint to re-resolve against")
         })?

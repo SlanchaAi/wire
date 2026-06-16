@@ -17,25 +17,30 @@
 //! the event, fall back to the next endpoint on failure. Pulling: the
 //! daemon reads from BOTH slots, dedupes by `event_id`.
 //!
-//! Storage shape in `relay_state.json` is purely additive:
+//! Storage shape in `relay_state.json`:
 //!
 //! ```jsonc
 //! {
 //!   "self": {
-//!     "relay_url": "https://wireup.net",     // legacy federation pointer
+//!     // Self-slot still carries the flat triple (the #263 daemon-survival
+//!     // fix synthesizes a sister's flat fields; self-collapse is Part A /
+//!     // a separate slice — see RFC-006).
+//!     "relay_url": "https://wireup.net",
 //!     "slot_id":   "abc...",
 //!     "slot_token":"...",
-//!     "endpoints": [                          // v0.5.17 additive
+//!     "endpoints": [
 //!       {"relay_url": "https://wireup.net",     "slot_id": "abc...",  "slot_token": "...", "scope": "federation"},
 //!       {"relay_url": "http://127.0.0.1:8771",  "slot_id": "loop...", "slot_token": "...", "scope": "local"}
 //!     ]
 //!   },
 //!   "peers": {
 //!     "wire-mesh": {
-//!       "relay_url": "https://wireup.net",   // legacy back-compat
-//!       "slot_id":   "...",
-//!       "slot_token":"...",
-//!       "endpoints": [...]                    // v0.5.17 additive
+//!       // RFC-006 Part B (#268): peers carry `endpoints[]` ONLY — the single
+//!       // peer-routing source. The flat relay_url/slot_id/slot_token triple
+//!       // is no longer written (it was the "stale flat beats fresh array"
+//!       // routing hazard). All peer-pin readers resolve through
+//!       // `peer_endpoints_in_priority_order` / `peer_primary_endpoint`.
+//!       "endpoints": [...]
 //!     }
 //!   }
 //! }
@@ -138,9 +143,9 @@ impl Endpoint {
 ///    can't reach them.
 /// 2. Federation endpoints second.
 ///
-/// Back-compat: peers stored by v0.5.16 or earlier have only the
-/// top-level `relay_url`/`slot_id`/`slot_token`; this falls back to
-/// synthesizing a single federation `Endpoint` from those fields.
+/// RFC-006 Part B (#268): reads `endpoints[]` only — the single peer-routing
+/// source. There is no flat-field synthesis fallback; a peer pin with no
+/// `endpoints[]` array yields no endpoints (every real pin carries it).
 pub fn peer_endpoints_in_priority_order(relay_state: &Value, peer_handle: &str) -> Vec<Endpoint> {
     let our_local_relay_url = relay_state
         .get("self")
@@ -280,11 +285,34 @@ pub fn peer_primary_endpoint(relay_state: &Value, peer_handle: &str) -> Option<E
         .next()
 }
 
+/// The `slot_token` of a peer's pinned **federation** endpoint on `relay_url`,
+/// or `""` if there's no such endpoint (or it hasn't acked yet).
+///
+/// RFC-006 Part B: the canonical way to carry a peer's already-arrived reply
+/// token forward across a re-pin. It replaces the old flat `peers[h].slot_token`
+/// read — which Part B (#268) stopped *writing*, so any dial path still reading
+/// it now reads `""` and silently wipes the peer's reply token on re-dial. Both
+/// dial paths (`cli::pairing` and the MCP `tool_dial`) route through here so
+/// they can't drift apart again.
+pub fn peer_federation_token(relay_state: &Value, peer_handle: &str, relay_url: &str) -> String {
+    relay_state
+        .get("peers")
+        .and_then(|p| p.get(peer_handle))
+        .and_then(|e| e.get("endpoints"))
+        .and_then(|a| serde_json::from_value::<Vec<Endpoint>>(a.clone()).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .find(|e| e.scope == EndpointScope::Federation && e.relay_url == relay_url)
+        .map(|e| e.slot_token)
+        .unwrap_or_default()
+}
+
 /// Pin a peer's full set of endpoints into `relay_state.json` under
-/// `peers[handle]`. Preserves the v0.5.16-and-earlier `relay_url` /
-/// `slot_id` / `slot_token` top-level fields (pointing at the
-/// federation endpoint) so older code paths and back-compat readers
-/// don't break. The new `endpoints` array is additive.
+/// `peers[handle]`. RFC-006 Part B (#268): writes `endpoints[]` ONLY — the
+/// single peer-routing source. The flat `relay_url`/`slot_id`/`slot_token`
+/// triple is no longer written. Durable non-routing fields
+/// (`bilateral_completed_at`, `persona`, `profile`, `first_seen_at`,
+/// `nostr_transport`) are preserved across re-pins (see below).
 pub fn pin_peer_endpoints(
     relay_state: &mut Value,
     peer_handle: &str,
@@ -515,6 +543,41 @@ mod tests {
             }
         });
         assert!(peer_endpoints_in_priority_order(&state, "alice").is_empty());
+    }
+
+    #[test]
+    fn peer_federation_token_carries_forward_from_endpoints_not_flat() {
+        // RFC-006 Part B regression: re-dial must carry the peer's already-acked
+        // reply token forward from `endpoints[]`. Reading the old flat
+        // `slot_token` (which Part B stopped writing) returned "" and wiped it.
+        let state = json!({
+            "peers": {
+                "alice": {
+                    // A stale flat field must NOT be the source of truth...
+                    "slot_token": "STALE_FLAT",
+                    "endpoints": [
+                        {"relay_url": "https://wireup.net", "slot_id": "s1", "slot_token": "REAL_TOK", "scope": "federation"},
+                        {"relay_url": "http://127.0.0.1:8771", "slot_id": "l1", "slot_token": "LOCAL_TOK", "scope": "local"}
+                    ]
+                }
+            }
+        });
+        // ...the federation endpoint's token on the matching relay is.
+        assert_eq!(
+            peer_federation_token(&state, "alice", "https://wireup.net"),
+            "REAL_TOK"
+        );
+        // A different relay (no matching federation endpoint) → empty, not the
+        // local token and not the stale flat field.
+        assert_eq!(
+            peer_federation_token(&state, "alice", "https://other.example"),
+            ""
+        );
+        // Unknown peer → empty.
+        assert_eq!(
+            peer_federation_token(&state, "nobody", "https://wireup.net"),
+            ""
+        );
     }
 
     #[test]

@@ -1169,13 +1169,10 @@ pub(super) fn cmd_add(
         .and_then(|e| e.get("endpoints"))
         .and_then(|a| serde_json::from_value::<Vec<crate::endpoints::Endpoint>>(a.clone()).ok())
         .unwrap_or_default();
-    let fed_token = endpoints
-        .iter()
-        .find(|e| {
-            e.relay_url == peer_relay && e.scope == crate::endpoints::EndpointScope::Federation
-        })
-        .map(|e| e.slot_token.clone())
-        .unwrap_or_default();
+    // RFC-006 Part B: carry forward a prior federation token via the one
+    // canonical reader (shared with the MCP dial path so they can't drift).
+    let fed_token =
+        crate::endpoints::peer_federation_token(&relay_state, &peer_handle, &peer_relay);
     let fed_ep = crate::endpoints::Endpoint {
         relay_url: peer_relay.clone(),
         slot_id: peer_slot_id.clone(),
