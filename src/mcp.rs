@@ -1802,21 +1802,10 @@ fn tool_pair_accept(args: &Value) -> Result<Value, String> {
     })
     .map_err(|e| format!("{e:#}"))?;
 
-    // Record peer's relay coords + slot_token from the stored drop.
-    let mut relay_state = crate::config::read_relay_state().map_err(|e| format!("{e:#}"))?;
-    relay_state["peers"][&pending.peer_handle] = json!({
-        "relay_url": pending.peer_relay_url,
-        "slot_id": pending.peer_slot_id,
-        "slot_token": pending.peer_slot_token,
-    });
-    crate::config::write_relay_state(&relay_state).map_err(|e| format!("{e:#}"))?;
-
-    // Ship our slot_token via pair_drop_ack — Bug 2 fix: iterate the peer's
-    // advertised endpoints in priority order, only fail if all are dead. The
-    // pending record's `peer_endpoints` carries the full advertised list when
-    // the pair_drop was written by a v0.5.17+ peer; fall back to a one-element
-    // slice from the legacy triple for older records so we still hit the
-    // failover helper with a valid input.
+    // Record peer's relay coords from the stored drop. The pending record's
+    // `peer_endpoints` carries the full advertised list when the pair_drop was
+    // written by a v0.5.17+ peer; fall back to a one-element federation entry
+    // from the legacy triple for older records.
     let ack_endpoints: Vec<crate::endpoints::Endpoint> = if pending.peer_endpoints.is_empty() {
         vec![crate::endpoints::Endpoint::federation(
             pending.peer_relay_url.clone(),
@@ -1826,6 +1815,17 @@ fn tool_pair_accept(args: &Value) -> Result<Value, String> {
     } else {
         pending.peer_endpoints.clone()
     };
+    // RFC-006 Part B: pin via `endpoints[]` (the single routing source) — NOT
+    // the flat `peers[h]={relay_url,slot_id,slot_token}` shape this used to
+    // write, which Part B no longer reads (a peer accepted over MCP that way got
+    // an empty routing set → `wire send` couldn't reach them).
+    let mut relay_state = crate::config::read_relay_state().map_err(|e| format!("{e:#}"))?;
+    crate::endpoints::pin_peer_endpoints(&mut relay_state, &pending.peer_handle, &ack_endpoints)
+        .map_err(|e| format!("{e:#}"))?;
+    crate::config::write_relay_state(&relay_state).map_err(|e| format!("{e:#}"))?;
+
+    // Ship our slot_token via pair_drop_ack — iterate the peer's advertised
+    // endpoints in priority order, only fail if all are dead.
     crate::pair_invite::send_pair_drop_ack(&pending.peer_handle, &ack_endpoints).map_err(|e| {
         format!(
             "pair_drop_ack send to {} (across {} endpoint(s)) failed: {e:#}",
@@ -1836,12 +1836,17 @@ fn tool_pair_accept(args: &Value) -> Result<Value, String> {
 
     crate::pending_inbound_pair::consume_pending_inbound(nick).map_err(|e| format!("{e:#}"))?;
 
+    // #277 honesty: trust is pinned, but flag when the peer advertised only
+    // loopback/same-host endpoints (the reply path can't reach them off-box).
+    let reply_path_reachable = !crate::endpoints::endpoints_are_local_only(&ack_endpoints);
+
     Ok(json!({
         "status": "bilateral_accepted",
         "peer_handle": pending.peer_handle,
         "peer_did": pending.peer_did,
         "peer_relay_url": pending.peer_relay_url,
         "via": "pending_inbound",
+        "reply_path_reachable": reply_path_reachable,
     }))
 }
 
