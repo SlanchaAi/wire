@@ -3,6 +3,12 @@
 > Draft reflection, 2026-06-13. Author: Claude Code (paired w/ @laulpogan).
 > Status: thinking-out-loud, not a ratified plan. Meant to be argued with.
 
+> **Progress update — 2026-06-16 ("do it all" pass).** Items 1–6 of the §9 work
+> list are landed on `main` (post-v0.16.0, unreleased); items 7–8 are the only
+> things left, and item 8 (the soak) is a wall-clock gate, not code. See the
+> per-item status in §9. Net: **the engineering + discipline for a tight 1.0 is
+> done; what remains is a maintainer hygiene call and a ≥2-week soak.**
+
 ## 1. What 1.0 actually *means* (the only question that matters)
 
 1.0 is not a feature count. It is a **promise to not break four things**:
@@ -158,17 +164,42 @@ deprecation policy, **without breaking the promise.**
 
 ### Ordered work list
 
-1. **Resolve RFC-006** (collapse dual representations, or bless both forever).
-   *The structural blocker.*
-2. **Harden + gate the lifecycle** — harness #262 → required CI; lifecycle e2e
-   sweep; kill the flake.
-3. **Threat-model truth pass** — confidentiality in-or-out; mark deferrals;
-   `ANTI_FEATURES.md` current.
-4. **Decide the SSO kill criterion** — keep or cut, no armed timer into 1.0.
-5. **Freeze the surface** — verb/tool/JSON golden tests + deprecation policy.
-6. **Outward-truth audit** — README/landing/AGENTS/help all match the binary.
-7. **Repo hygiene** — remove the dead files; legible tree.
-8. **Soak** — ≥ 2 weeks, harness-as-canary, real peers, clean upgrade roll.
+1. ✅ **Resolve RFC-006** — Part B done. The collapse itself landed in #268; the
+   2026-06-16 pass closed three stale peer-flat readers #268 missed (incl. a real
+   MCP re-dial token-wipe regression) and added the canonical
+   `endpoints::peer_federation_token` both dial paths share (#323). Part A
+   (sessions) was already collapsed (#269). **Part A self-slot flat collapse**
+   stays deferred — `self_endpoints()` flat synthesis backs the #263
+   daemon-survival fix; it's a later slice, not a 1.0 blocker.
+2. ✅ **Harden + gate the lifecycle** — the #262 hello-world round-trip is now a
+   required CI job (#324); the UDS Broken-pipe flake was already fixed (#241) and
+   `main` has been green across it. *Residual:* the deeper reboot/login/upgrade
+   sweep is exercised during the soak (item 8), not pre-soak.
+3. ✅ **Threat-model truth pass** (#325) — `THREAT_MODEL.md` now states the 1.0
+   DM-confidentiality posture explicitly (default-on, downgrade-bounded,
+   operator-visible; group/FS/metadata out); `ANTI_FEATURES.md` #2 reconciled
+   with the shipped opt-in org-SSO.
+4. ✅ **SSO kill criterion decided** (#325) — the 90-day auto-revert timer is
+   *disarmed*: the OIDC channel is scoped OUTSIDE the 1.0 frozen-surface
+   guarantee (experimental/post-1.0, deprecation-policy-gated), the DNS-TXT floor
+   + `ORG_VERIFIED` tier are in 1.0. No armed timer crosses the freeze.
+5. ✅ **Freeze the surface** (#326) — `docs/DEPRECATION_POLICY.md` published;
+   `mcp_catalog_schema_is_frozen` golden-locks all 27 MCP tools' shape.
+   *Stretch:* golden-locking every `--json` builder (beyond `delivery_json`) is
+   ongoing, tracked in the policy doc.
+6. ✅ **Outward-truth audit** (#327) — README now says v0.16.0 (was a stale
+   "v0.15.0"); landing version is dynamic + already post-SAS-correct (#264),
+   AGENTS/`--help` carry no stale current-claims.
+7. ⏳ **Repo hygiene** — *maintainer call.* A pile of tracked root scratch
+   (`SESSION_LOG_*`, `.issue-*`, `SHOW_HN_DRAFT.md`, `LAUNCH_POSTS.md`,
+   `REDDIT_LOCALLLAMA_POST.md`, `PROMPT_*`, etc.) wants to move to `docs/history/`
+   or `.gitignore`. Left to the maintainer rather than auto-deleted — these are
+   the operator's launch/session work, not agent-generated cruft, and #265
+   already did the safe root declutter.
+8. ⏳ **Soak** — ≥ 2 weeks, harness-as-canary, real peers, clean upgrade roll.
+   The one true remaining gate; wall-clock, not code. Start the window once item
+   7 is dispositioned.
 
-Items 1–2 are the real engineering. 3–6 are mostly discipline. 7–8 are time.
-None of it is "build more features" — and that's the point of a good 1.0.
+Items 1–2 were the real engineering (done). 3–6 were discipline (done). 7–8 are
+time + a hygiene call. None of it was "build more features" — and that's the
+point of a good 1.0.
