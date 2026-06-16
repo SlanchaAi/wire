@@ -2183,12 +2183,15 @@ mod tier_tests {
     #[test]
     fn verified_when_slot_token_present() {
         let trust = trust_with("willard", "VERIFIED");
+        // RFC-006 Part B: the reply slot lives in `endpoints[]` (the single
+        // routing source), not the flat triple — a non-empty token there is what
+        // promotes a VERIFIED pin past PENDING_ACK.
         let relay_state = json!({
             "peers": {
                 "willard": {
-                    "relay_url": "https://relay",
-                    "slot_id": "abc",
-                    "slot_token": "tok123",
+                    "endpoints": [
+                        {"relay_url": "https://relay", "slot_id": "abc", "slot_token": "tok123", "scope": "federation"}
+                    ]
                 }
             }
         });

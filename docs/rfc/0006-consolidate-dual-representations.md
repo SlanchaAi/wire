@@ -103,11 +103,18 @@ Gate (kill criterion): `cargo build` + `e2e_invite_pair` / `e2e_bilateral` /
 `hello-world-validate.sh` local-sister round-trip all green. If routing can't
 survive on `endpoints[]` alone, abandon and keep the dual peer-pin.
 
-> Status: NOT implemented — this section is the execute-ready checklist. The work
-> is a ~10-site reader refactor of the delivery/daemon/status surface, mechanical
-> but hot-path; it belongs in a focused pass with the e2e gate above. The survey
-> IS the de-risking — implementation is now "migrate these 10 sites through one
-> helper, then delete two blocks," not a discovery exercise.
+> Status: **Part B IMPLEMENTED** — #268 collapsed the writer (`pin_peer_endpoints`
+> writes `endpoints[]` only), deleted the priority-order synthesis fallback, added
+> the canonical `peer_primary_endpoint` resolver, and migrated the hot-path readers
+> (send/daemon/status/CLI-dial). A follow-up cleanup (`fix/rfc006-partb-stale-peer-flat-reads`)
+> closed three stragglers #268's reader list missed — all reading peer flat fields
+> the writer no longer emits: the MCP `tool_dial` token carry-forward (a real
+> regression — re-dial wiped the peer's reply token), the `cli/relay.rs`
+> re-resolve `relay_url` fallback (dead), and the `trust.rs` PENDING_ACK
+> `slot_token` check (dead) — and added `peer_federation_token` as the one
+> canonical token reader both dial paths share so they can't drift again.
+> **Remaining: Part A self-slot flat collapse** (deferred — the #263 daemon-survival
+> fix depends on `self_endpoints()` flat synthesis; its own slice).
 **Question this answers:** wire stores two things two ways — sessions (named dir vs by-key hash) and peer endpoints (array vs flat fields). The de-deprecation (RFC-005) removed every *dead* legacy format but had to leave these because current code actively reads/writes both. How do we collapse each to a single representation without reintroducing the #170/#174 multi-session fork-storm?
 
 ---

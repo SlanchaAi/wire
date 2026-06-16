@@ -1706,13 +1706,12 @@ fn tool_add(args: &Value) -> Result<Value, String> {
     })
     .map_err(|e| format!("{e:#}"))?;
     let mut relay_state = crate::config::read_relay_state().map_err(|e| format!("{e:#}"))?;
-    let existing_token = relay_state
-        .get("peers")
-        .and_then(|p| p.get(&peer_handle))
-        .and_then(|p| p.get("slot_token"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_default();
+    // RFC-006 Part B: carry the peer's already-arrived reply token forward from
+    // `endpoints[]` (the single routing source) — NOT the flat `slot_token`
+    // field, which Part B stopped writing (reading it here silently wiped the
+    // token on every re-dial). Same canonical reader the CLI dial path uses.
+    let existing_token =
+        crate::endpoints::peer_federation_token(&relay_state, &peer_handle, &peer_relay);
     // RFC-006 Part B: pin as an `endpoints[]` entry (single routing source).
     crate::endpoints::pin_peer_endpoints(
         &mut relay_state,

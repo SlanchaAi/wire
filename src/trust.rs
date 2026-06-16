@@ -117,18 +117,12 @@ pub fn effective_tier(trust: &Value, relay_state: &Value, handle: &str) -> Strin
         return raw;
     }
     // A VERIFIED pin isn't effectively usable until we hold the peer's reply
-    // slot. RFC-006 Part B: the slot lives in `endpoints[]`, not a flat
-    // `slot_token` field — so check the endpoints (keeping the flat read for
-    // any legacy relay-state). Pre-Part-B this only read the flat field, which
-    // Part B emptied → every freshly-paired peer wrongly showed PENDING_ACK.
-    let has_slot = peer_obj
-        .and_then(|p| p.get("slot_token"))
-        .and_then(Value::as_str)
-        .map(|t| !t.is_empty())
-        .unwrap_or(false)
-        || crate::endpoints::peer_endpoints_in_priority_order(relay_state, handle)
-            .iter()
-            .any(|e| !e.slot_token.is_empty());
+    // slot. RFC-006 Part B: the slot lives in `endpoints[]` — the single
+    // peer-routing source — not a flat `slot_token` field (Part B stopped
+    // writing it; reading it here is dead, no legacy state to tolerate).
+    let has_slot = crate::endpoints::peer_endpoints_in_priority_order(relay_state, handle)
+        .iter()
+        .any(|e| !e.slot_token.is_empty());
     if has_slot {
         raw
     } else {
@@ -644,9 +638,10 @@ mod tests {
         let trust = json!({"agents": {"a": {"tier": "VERIFIED"}}});
         let relay = json!({"peers": {"a": {"bilateral_completed_at": "t"}}});
         assert_eq!(effective_tier(&trust, &relay, "a"), "VERIFIED");
-        // VERIFIED in trust + slot_token non-empty (back-compat path) → VERIFIED.
+        // RFC-006 Part B: a flat-only `slot_token` (no endpoints[]) is NOT a
+        // routing source anymore — it reads PENDING_ACK, like any flat-only pin.
         let relay = json!({"peers": {"a": {"slot_token": "tok"}}});
-        assert_eq!(effective_tier(&trust, &relay, "a"), "VERIFIED");
+        assert_eq!(effective_tier(&trust, &relay, "a"), "PENDING_ACK");
         // VERIFIED in trust + no bilateral_at + empty slot_token → PENDING_ACK.
         let relay = json!({"peers": {"a": {"slot_token": ""}}});
         assert_eq!(effective_tier(&trust, &relay, "a"), "PENDING_ACK");
