@@ -1408,23 +1408,34 @@ fn inbox_contains_probe_ack(path: &std::path::Path, nonce: &str) -> bool {
         .any(|e| crate::probe::is_probe_ack_for(&e, nonce))
 }
 
-/// RFC-007 D3 pull-loop helper: the distinct relays any peer is reachable on
-/// over Nostr (`peers[*].nostr_transport.relay`). In the common symmetric
-/// pairing (both sides `wire nostr pair/accept --relay X`) this is exactly the
-/// relay a peer publishes our inbound messages to, so it's where we pull from.
+/// RFC-007 D3 pull-loop helper: the distinct Nostr relays to pull our inbound
+/// from. Two sources, deduped:
+/// 1. `self.nostr_relays[]` — relays WE are reachable on (recorded when we
+///    `wire nostr pair/accept/fetch --relay X`). A peer sends to us by
+///    publishing to a relay *we're* reachable on, so this is the authoritative
+///    set — correct even when pairing is asymmetric.
+/// 2. `peers[*].nostr_transport.relay` — relays we reach *peers* on. Covers the
+///    symmetric same-relay case even before a self-relay was recorded.
+///
 /// Pure — unit-tested.
 fn nostr_relays_from_peers(state: &Value) -> Vec<String> {
     let mut relays: Vec<String> = Vec::new();
+    let mut push_distinct = |r: &str| {
+        if !r.is_empty() && !relays.iter().any(|x| x == r) {
+            relays.push(r.to_string());
+        }
+    };
+    for r in crate::endpoints::self_nostr_relays(state) {
+        push_distinct(&r);
+    }
     if let Some(peers) = state.get("peers").and_then(Value::as_object) {
         for p in peers.values() {
             if let Some(r) = p
                 .get("nostr_transport")
                 .and_then(|n| n.get("relay"))
                 .and_then(Value::as_str)
-                && !r.is_empty()
-                && !relays.iter().any(|x| x == r)
             {
-                relays.push(r.to_string());
+                push_distinct(r);
             }
         }
     }
@@ -1858,8 +1869,11 @@ mod slot_reresolve_tests {
     use super::*;
 
     #[test]
-    fn nostr_relays_from_peers_distinct_and_skips_transportless() {
+    fn nostr_relays_from_peers_unions_self_and_peers_distinct() {
         let state = serde_json::json!({
+            // Relays we're reachable on (the authoritative set) — incl. one no
+            // peer-transport mentions (the asymmetric case).
+            "self": { "nostr_relays": ["wss://self", "wss://r1"] },
             "peers": {
                 "alice": { "nostr_transport": { "npub": "aa", "relay": "wss://r1" } },
                 "bob":   { "nostr_transport": { "npub": "bb", "relay": "wss://r2" } },
@@ -1873,8 +1887,16 @@ mod slot_reresolve_tests {
         });
         let mut relays = nostr_relays_from_peers(&state);
         relays.sort();
-        assert_eq!(relays, vec!["wss://r1".to_string(), "wss://r2".to_string()]);
-        // No peers / no transports → empty (the additive no-op case).
+        // self (wss://self, wss://r1) ∪ peers (r1 dup, r2) → 3 distinct.
+        assert_eq!(
+            relays,
+            vec![
+                "wss://r1".to_string(),
+                "wss://r2".to_string(),
+                "wss://self".to_string()
+            ]
+        );
+        // No peers / no transports / no self → empty (the additive no-op case).
         assert!(nostr_relays_from_peers(&serde_json::json!({})).is_empty());
         assert!(nostr_relays_from_peers(&serde_json::json!({"peers": {}})).is_empty());
     }

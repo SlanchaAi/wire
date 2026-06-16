@@ -418,6 +418,54 @@ pub fn peer_nostr_transport(relay_state: &Value, peer_handle: &str) -> Option<(S
     Some((npub, relay))
 }
 
+/// RFC-007 D3: record a Nostr relay this session is *reachable on* — one we've
+/// paired/fetched over (`wire nostr pair/accept/fetch --relay X`). Persisted as
+/// the distinct set `self.nostr_relays[]`. The daemon pull-loop reads this as
+/// the authoritative "where do peers publish my inbound" set: a peer sends to me
+/// by publishing to a relay *I'm* reachable on, which isn't necessarily a relay
+/// *I* reach *them* on (the asymmetric case the peer-transport set misses).
+/// Read-modify-write, idempotent (dedups).
+pub fn pin_self_nostr_relay(relay_state: &mut Value, relay_url: &str) -> Result<()> {
+    if relay_url.is_empty() {
+        return Ok(());
+    }
+    let self_obj = relay_state
+        .as_object_mut()
+        .map(|m| {
+            m.entry("self")
+                .or_insert_with(|| Value::Object(Default::default()))
+        })
+        .ok_or_else(|| anyhow::anyhow!("relay_state.json root is not an object"))?
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("relay_state.self is not an object"))?;
+    let arr = self_obj
+        .entry("nostr_relays")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("relay_state.self.nostr_relays is not an array"))?;
+    if !arr.iter().any(|v| v.as_str() == Some(relay_url)) {
+        arr.push(Value::String(relay_url.to_string()));
+    }
+    Ok(())
+}
+
+/// The distinct Nostr relays this session is reachable on (`self.nostr_relays[]`).
+/// Empty when never paired over Nostr.
+pub fn self_nostr_relays(relay_state: &Value) -> Vec<String> {
+    relay_state
+        .get("self")
+        .and_then(|s| s.get("nostr_relays"))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Infer an endpoint scope from a relay URL: `unix://` -> Uds, a loopback
 /// host -> Local, otherwise Federation. LAN is never inferred (a private-
 /// range IP is indistinguishable from a federation host by URL alone) and
@@ -562,6 +610,26 @@ mod tests {
             }
         });
         assert!(peer_endpoints_in_priority_order(&state, "alice").is_empty());
+    }
+
+    #[test]
+    fn self_nostr_relay_roundtrips_and_dedups() {
+        let mut state = json!({});
+        pin_self_nostr_relay(&mut state, "wss://r1").unwrap();
+        pin_self_nostr_relay(&mut state, "wss://r2").unwrap();
+        pin_self_nostr_relay(&mut state, "wss://r1").unwrap(); // dup → no-op
+        pin_self_nostr_relay(&mut state, "").unwrap(); // empty → no-op
+        assert_eq!(
+            self_nostr_relays(&state),
+            vec!["wss://r1".to_string(), "wss://r2".to_string()]
+        );
+        // Composes with an existing self block (doesn't clobber other self keys).
+        let mut state2 = json!({"self": {"relay_url": "https://wireup.net", "slot_id": "s"}});
+        pin_self_nostr_relay(&mut state2, "wss://x").unwrap();
+        assert_eq!(state2["self"]["relay_url"], "https://wireup.net");
+        assert_eq!(self_nostr_relays(&state2), vec!["wss://x".to_string()]);
+        // Absent → empty.
+        assert!(self_nostr_relays(&json!({})).is_empty());
     }
 
     #[test]
