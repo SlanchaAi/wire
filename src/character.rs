@@ -11,9 +11,8 @@
 //! signing, or peer routing — those continue to use the DID. Character is the
 //! human-friendly handle the operator sees.
 //!
-//! See `.planning/research/identity-primitive-survey-2026-05-22.md` for the
-//! ecosystem survey that motivated the field naming (`persona` not `soul`,
-//! per Letta convention) and lifecycle gating.
+//! Field naming follows the ecosystem convention (`persona` not `soul`, per
+//! Letta) surfaced in the identity-primitive survey that motivated this layer.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

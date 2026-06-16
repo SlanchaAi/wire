@@ -10,9 +10,8 @@ fn resolve_session_name(name: Option<&str>) -> Result<String> {
     Ok(crate::session::derive_name_from_cwd(&cwd, &registry))
 }
 
-#[allow(clippy::too_many_arguments)] // 11 transport-mix flags; the v0.8 audit
-// (.planning/research/codebase-audit-2026-05-23.md) recommends a config-struct
-// refactor for v0.8. For v0.7.0 we ship the flag-explosion as-is.
+#[allow(clippy::too_many_arguments)] // 11 transport-mix flags; a config-struct
+// refactor is the eventual cleanup. For now we ship the flag-explosion as-is.
 pub(super) fn cmd_session_new(
     name_arg: Option<&str>,
     relay: &str,

@@ -1,7 +1,7 @@
 # RFC-005: Remove backwards compatibility (de-deprecation) + `wire nuke`
 
 **Status:** Implemented <!-- Draft | Discussion | Accepted | Rejected | Implemented | Superseded -->
-**Tracking:** Phase 1 [#220], Phase 2 [#231], Phase 3 [#232], Phase 4 [#233], SAS-flow removal [#236]; spec in `.planning/specs/2026-06-05-remove-backwards-compat-design.md`
+**Tracking:** Phase 1 [#220], Phase 2 [#231], Phase 3 [#232], Phase 4 [#233], SAS-flow removal [#236]
 
 > **Status update (2026-06-07):** Shipped — Phases 1–4 + the full SAS code-phrase pairing removal (dial is now the sole pairing path). All deprecated MCP/CLI aliases, the SAS flow, legacy pidfile/DID formats, and the dead v3.1-card / pre-v0.5.19 / v0.4-profile version-tolerance shims are gone; breadcrumbs advertise only canonical verbs. **Two items in Phase 4's scope turned out to be LIVE code, not dead shims** — the v0.6 *named* session layout (`wire session new/list/…` use it; by-key is a parallel, not replacement, layout) and the flat peer-endpoint fields (the live invite flow reads/writes them). Removing those is a representation *consolidation*, not cruft removal, and carries the #170/#174 fork-storm risk — moved to **[RFC-006](0006-consolidate-dual-representations.md)**.
 **Author:** Claude Code agent (paired w/ @laulpogan)
