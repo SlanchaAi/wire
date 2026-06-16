@@ -133,8 +133,11 @@ fn cmd_accept(npub: &str, relay: &str, as_json: bool) -> Result<()> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| crate::agent_card::display_handle_from_did(&peer_did).to_string());
+    // Also record this relay as one WE are reachable on (we received + ack here)
+    // so the daemon pull-loop pulls our inbound from it — see pin_self_nostr_relay.
     crate::config::update_relay_state(|rs| {
-        crate::endpoints::pin_peer_nostr_transport(rs, &peer_handle, npub, relay)
+        crate::endpoints::pin_peer_nostr_transport(rs, &peer_handle, npub, relay)?;
+        crate::endpoints::pin_self_nostr_relay(rs, relay)
     })?;
 
     // Send the pair-ack (our card) back over the relay.
@@ -186,6 +189,10 @@ fn cmd_pair(npub: &str, relay: &str, as_json: bool) -> Result<()> {
         ws.publish(&ev).await.context("publish pair-request")
     })??;
 
+    // Record this relay as one we're reachable on (the peer will ack + later
+    // send to us here) so the daemon pull-loop services it.
+    crate::config::update_relay_state(|rs| crate::endpoints::pin_self_nostr_relay(rs, relay))?;
+
     if as_json {
         println!(
             "{}",
@@ -207,6 +214,9 @@ fn cmd_fetch(relay: &str, limit: usize, as_json: bool) -> Result<()> {
     let nsk = require_transport_key()?;
     let my_xonly = crate::nostr_key::xonly_from_secret(&nsk)
         .map_err(|e| anyhow!("transport key unusable: {e}"))?;
+    // Fetching here means we treat this relay as one we're reachable on — record
+    // it so the daemon pull-loop keeps servicing it without a manual fetch.
+    crate::config::update_relay_state(|rs| crate::endpoints::pin_self_nostr_relay(rs, relay))?;
     let filter = Filter {
         p_tags: vec![hex::encode(my_xonly)],
         kinds: vec![
