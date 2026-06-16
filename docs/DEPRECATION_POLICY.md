@@ -59,14 +59,19 @@ work until they choose to move to `2.0`.
 These may change in a MINOR without a deprecation window, because 1.0 never
 promised them — they are documented as out-of-scope/experimental:
 
-- The **OIDC/SSO channel** (RFC-001 amendment §B–§E) — experimental/post-1.0,
-  evidence-gated (RFC-001 SSO amendment §H). The DNS-TXT floor + `ORG_VERIFIED`
-  tier ARE frozen; the OIDC mediation channel is not.
 - Anything in `BACKLOG.md` marked deferred (MLS group confidentiality, forward
   secrecy, multi-relay redundancy, file-share, registry).
 - Internal-only output behind a documented `--unstable`/experimental flag.
 - Human-facing prose: `--help` wording, log lines, stderr phrasing (the *machine*
   surface — `--json`, exit codes — is frozen; the prose around it is not).
+
+**Note — org-SSO is supported, not windowless.** The OIDC/SSO channel
+(RFC-001 amendment §B–§E) is a supported 1.0 feature, *not* an exception above:
+its wire-side contract (`ORG_VERIFIED` tier + `org_attestation.via` provenance +
+the DNS-TXT floor) is **frozen**, and its IdP-integration *config* (JWKS, claims
+mapping, tenant/issuer shape) changes only **through the deprecation window** —
+the external-dependency churn is real, so the config is iterable, but never
+silently.
 
 ## Enforcement
 

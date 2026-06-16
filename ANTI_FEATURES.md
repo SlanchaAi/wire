@@ -10,7 +10,7 @@ Default reference relay is a convenience. Self-host with `wire relay-server`. Wo
 
 Your **identity** is an Ed25519 keypair you generate locally — never an OAuth token, never an IdP account, never a vendor handle. The DID is the key; no login mints it. Won't change.
 
-The one nuance (so this doc doesn't lie about shipped code): an org **may optionally** stand up an OIDC/SSO channel to *mediate the `ORG_VERIFIED` tier* — a faster path to org-membership attestation than the DNS-TXT floor or a hand-built roster. It is **opt-in, org-scoped, additive, and outside the 1.0 frozen-surface guarantee** (RFC-001 SSO amendment §H). It attests *org membership*, never *identity*, and never substitutes for the bilateral `wire dial` + accept gesture that earns `VERIFIED` (anti-feature #3). Turn it off and nothing about wire identity changes.
+The one nuance (so this doc doesn't lie about shipped code): an org **may optionally** stand up an OIDC/SSO channel to *mediate the `ORG_VERIFIED` tier* — a faster path to org-membership attestation than the DNS-TXT floor or a hand-built roster, and the enterprise day-one hook. It is **opt-in, org-scoped, and a supported 1.0 feature** (RFC-001 SSO amendment §H): the wire-side contract (`ORG_VERIFIED` tier + `org_attestation.via` provenance) is frozen, while the IdP-integration config evolves only under the deprecation policy. It attests *org membership*, never *identity*, and never substitutes for the bilateral `wire dial` + accept gesture that earns `VERIFIED` (anti-feature #3). Turn it off and nothing about wire identity changes.
 
 ## 3. No central trust authority
 
