@@ -2139,6 +2139,80 @@ mod tests {
         );
     }
 
+    /// The shape of the MCP catalog that 1.0 freezes: per tool, its name + the
+    /// sorted input-schema property keys + the sorted `required` list. Values
+    /// (descriptions, prose) are intentionally NOT locked — only the
+    /// machine-contract an agent parses.
+    fn catalog_shape() -> Vec<String> {
+        tool_defs()
+            .iter()
+            .map(|t| {
+                let name = t["name"].as_str().unwrap_or("<noname>");
+                let mut props: Vec<String> = t["inputSchema"]["properties"]
+                    .as_object()
+                    .map(|m| m.keys().cloned().collect())
+                    .unwrap_or_default();
+                props.sort();
+                let mut req: Vec<String> = t["inputSchema"]["required"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                req.sort();
+                format!("{name}({})[req:{}]", props.join(","), req.join(","))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mcp_catalog_schema_is_frozen() {
+        // ROAD_TO_1.0 §6: the MCP tool catalog (names + input-schema props +
+        // required) is a FROZEN 1.0 surface — the API agents program against. A
+        // diff here is a breaking agent-API change: it must go through
+        // docs/DEPRECATION_POLICY.md (a deprecation window, not a silent break),
+        // and only then update this golden. Additive *optional* params on a new
+        // MINOR are allowed — but they still change this golden, forcing the
+        // change to be explicit and reviewed, never silent.
+        let golden: &[&str] = &[
+            "wire_whoami()[req:]",
+            "wire_peers()[req:]",
+            "wire_here()[req:]",
+            "wire_status()[req:]",
+            "wire_send(body,kind,peer,queue,time_sensitive_until)[req:body,kind,peer]",
+            "wire_pull()[req:]",
+            "wire_tail(limit,oldest,peer)[req:]",
+            "wire_verify(event)[req:event]",
+            "wire_init(handle,name,relay_url)[req:handle]",
+            "wire_invite_mint(relay_url,ttl_secs,uses)[req:]",
+            "wire_invite_accept(url)[req:url]",
+            "wire_add(handle,relay_url)[req:handle]",
+            "wire_dial(name)[req:name]",
+            "wire_accept(peer)[req:peer]",
+            "wire_reject(peer)[req:peer]",
+            "wire_pending()[req:]",
+            "wire_claim(nick,public_url,relay_url)[req:]",
+            "wire_whois(handle,relay_url)[req:]",
+            "wire_profile_set(field,value)[req:field,value]",
+            "wire_profile_get()[req:]",
+            "wire_group_create(name)[req:name]",
+            "wire_group_add(group,peer)[req:group,peer]",
+            "wire_group_send(group,message)[req:group,message]",
+            "wire_group_tail(group,limit)[req:group]",
+            "wire_group_list()[req:]",
+            "wire_group_invite(group)[req:group]",
+            "wire_group_join(code)[req:code]",
+        ];
+        let actual = catalog_shape();
+        assert_eq!(
+            actual, golden,
+            "MCP catalog drifted from the frozen 1.0 surface — see docs/DEPRECATION_POLICY.md"
+        );
+        assert_eq!(actual.len(), 27, "the frozen 1.0 MCP catalog is 27 tools");
+    }
+
     #[test]
     fn agent_docs_match_advertised_tools() {
         // The agent-facing docs must not lie about the MCP surface:
