@@ -14,15 +14,14 @@
 #
 # Exit 0 iff every iteration connected and the hello landed.
 #
-# NOTE (2026-06-13): on current main this harness FAILS on a fresh box — the
-# receiver's `wire up`-spawned daemon does not survive in a non-interactive
-# (scripted / CI / agent) context, so it never pulls the delivered message and
-# the round-trip never completes. Root-caused to `ensure_up::ensure_background`
-# spawning the daemon without session-detachment (no setsid / new-session); it
-# persists only under a launchd/systemd supervisor (`wire service install`) or
-# an interactive terminal. This script is the repro AND the regression guard
-# for that fix — promote it to a required CI job once daemon-survival is fixed.
-# Until then it is a manual/local validation tool, not a blocking gate.
+# STATUS (2026-06-16): daemon-survival is fixed (#263 — `wire up`'s daemon now
+# detaches via setsid/new-session and survives a non-interactive/scripted/CI
+# context), so this harness passes deterministically. It is now wired into CI as
+# the `hello-world` job (.github/workflows/ci.yml) — the canonical first-connection
+# round-trip gate the ROAD_TO_1.0 §3 lifecycle hardening calls for. It exercises
+# what `wire demo` and `install-smoke` don't: a real relay + two independent
+# daemons + receive + autonomous reply, across multiple fresh-box iterations to
+# catch intermittent regressions a single-shot demo would miss.
 
 set -uo pipefail
 
