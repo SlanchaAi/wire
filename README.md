@@ -94,8 +94,9 @@ Knowing a handle (`alice@wireup.net`) and being able to resolve it to a signed a
 
 ## Recent releases
 
-Currently shipping **v0.15.0**. Highlights:
+Currently shipping **v0.16.0**. Highlights:
 
+- **v0.16.0** (2026-06-14) — **the 1.0 format-freeze pass**: RFC-006 collapses the dual representations that fork-stormed (one by-key session store; `endpoints[]` the single peer-routing source), the identity layer grows on the additive v3.2 card (DNS-TXT org binding, op/org key rotation, project fan-out, per-peer block-list, DID bound to key + one-name enforced server-side), and a launch-hardening sweep lands `wire demo` (two agents talking in one command), a cleaner `wire --help`, MCP first-run fixes, and the daemon-survival fix behind the hello-world round-trip harness
 - **v0.15.0** (2026-06-07) — **the de-deprecation (BREAKING)**: removed all backwards compatibility — deprecated MCP/CLI aliases, the entire SAS code-phrase pairing flow (`wire dial` is now the sole pairing path), and dead legacy on-disk formats. New `wire nuke` clean-slate command. Agents only ever see canonical verbs
 - **v0.14.2** (2026-06-05) — multi-session supervisor + queue collapse (synchronous send/pull verdicts), dual-roots TLS, then a launch-hardening pass: `--all-sessions` fork-storm fix, hermetic tests, REUSE-compliant license, install-smoke CI
 - **v0.14.1** (2026-05-30) — DX completion: identity layer visible end-to-end, operator quality-of-life
@@ -115,12 +116,13 @@ Currently shipping **v0.15.0**. Highlights:
 
 ## Status & API stability
 
-wire is **pre-1.0** (currently 0.15.x) and ships fast — treat it as a maturing prototype, not a frozen API:
+wire is **pre-1.0** (currently 0.16.x) and ships fast — treat it as a maturing prototype, not a frozen API:
 
 - **CLI flags & human output** may change between minor versions. If you script `wire`, pin a version and read the [CHANGELOG](CHANGELOG.md) before upgrading. The `--json` output on every command is the most stable surface — prefer it for automation.
 - **On-wire protocol** is explicitly versioned (event-kind ranges + canonical schema in [`docs/PROTOCOL.md`](docs/PROTOCOL.md)). Breaking protocol changes bump the version and are called out in the release notes; wire handles also serve the A2A v1.0 AgentCard schema (above).
 - **Identity, trust & signed-event formats** are stabilizing toward 1.0 — kept backward-compatible where we can, flagged in the CHANGELOG when not.
 - **No compatibility guarantees until 1.0.** Pin versions for anything load-bearing. Threat model: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+- **At 1.0, the surface freezes** under a written contract: [`docs/DEPRECATION_POLICY.md`](docs/DEPRECATION_POLICY.md) — from then on, frozen surfaces (CLI verbs, `--json` shapes, the MCP tool catalog, on-disk state, protocol) change only through a deprecation window, never a silent break.
 
 ---
 
