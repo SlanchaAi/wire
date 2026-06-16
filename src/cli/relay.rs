@@ -1408,6 +1408,84 @@ fn inbox_contains_probe_ack(path: &std::path::Path, nonce: &str) -> bool {
         .any(|e| crate::probe::is_probe_ack_for(&e, nonce))
 }
 
+/// RFC-007 D3 pull-loop helper: the distinct relays any peer is reachable on
+/// over Nostr (`peers[*].nostr_transport.relay`). In the common symmetric
+/// pairing (both sides `wire nostr pair/accept --relay X`) this is exactly the
+/// relay a peer publishes our inbound messages to, so it's where we pull from.
+/// Pure — unit-tested.
+fn nostr_relays_from_peers(state: &Value) -> Vec<String> {
+    let mut relays: Vec<String> = Vec::new();
+    if let Some(peers) = state.get("peers").and_then(Value::as_object) {
+        for p in peers.values() {
+            if let Some(r) = p
+                .get("nostr_transport")
+                .and_then(|n| n.get("relay"))
+                .and_then(Value::as_str)
+                && !r.is_empty()
+                && !relays.iter().any(|x| x == r)
+            {
+                relays.push(r.to_string());
+            }
+        }
+    }
+    relays
+}
+
+/// Pull wire events addressed to us (`#p: <my npub>`, `kind:1`) from each Nostr
+/// relay, transport-verify them (`verify_and_decode` — recompute the NIP-01 id +
+/// check the schnorr sig), and return the inner signed wire events. The caller
+/// feeds these through the SAME `process_events` path as HTTP-pulled events, so
+/// the inner Ed25519 signature + trust pin are verified there (transport-verified
+/// here, identity-verified there). Per-relay errors are logged and skipped — one
+/// dead relay can't black-hole the others. Sync wrapper over the async NostrWs
+/// (the daemon loop is sync); mirrors the send-path `block_on` bridge.
+fn pull_nostr_wire_events(relays: &[String], my_xonly: &[u8; 32]) -> Vec<Value> {
+    let my_p_tag = hex::encode(my_xonly);
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("daemon: nostr pull runtime build failed: {e:#}");
+            return Vec::new();
+        }
+    };
+    rt.block_on(async {
+        let mut out: Vec<Value> = Vec::new();
+        for relay in relays {
+            let filter = crate::nostr_relay::Filter {
+                p_tags: vec![my_p_tag.clone()],
+                kinds: vec![1],
+                limit: Some(200),
+                ..Default::default()
+            };
+            let events = match crate::nostr_ws::NostrWs::connect(relay).await {
+                Ok(mut ws) => match ws.pull(filter).await {
+                    Ok(evs) => evs,
+                    Err(e) => {
+                        eprintln!("daemon: nostr pull on {relay} failed (continuing): {e:#}");
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    eprintln!("daemon: nostr connect {relay} failed (continuing): {e:#}");
+                    continue;
+                }
+            };
+            for ev in &events {
+                // verify_and_decode authenticates the transport hop only; the
+                // inner wire event's Ed25519 sig + trust are checked downstream
+                // in process_events.
+                if let Ok(wire) = crate::nostr_event::verify_and_decode(ev) {
+                    out.push(wire);
+                }
+            }
+        }
+        out
+    })
+}
+
 pub fn run_sync_pull() -> Result<Value> {
     let state = config::read_relay_state()?;
     if state.get("self").map(Value::is_null).unwrap_or(true) {
@@ -1488,6 +1566,30 @@ pub fn run_sync_pull() -> Result<Value> {
         blocked_any |= result.blocked;
         all_written.extend(result.written);
         all_rejected.extend(result.rejected);
+    }
+
+    // RFC-007 D3 pull-loop: also pull Nostr-delivered events. Additive — a
+    // no-op when this session isn't `wire enroll nostr`'d or no peer carries a
+    // nostr transport, so the HTTP-slot path above is byte-identical. We pull
+    // from the relays peers are reachable on (symmetric pairing → where they
+    // publish to us), transport-verify, then feed the SAME `process_events`
+    // path (which re-verifies the inner Ed25519 sig + trust + dedups against
+    // the inbox). Cursor None: Nostr re-pulls a recent window each cycle and
+    // process_events dedups by event_id, so repeats are free.
+    if let Ok(nsk) = config::read_nostr_key()
+        && let Ok(my_xonly) = crate::nostr_key::xonly_from_secret(&nsk)
+    {
+        let relays = nostr_relays_from_peers(&state);
+        if !relays.is_empty() {
+            let wire_events = pull_nostr_wire_events(&relays, &my_xonly);
+            if !wire_events.is_empty() {
+                total_seen += wire_events.len();
+                let result = crate::pull::process_events(&wire_events, None, &inbox_dir)?;
+                crate::probe::respond_to_probes(&result.probes);
+                all_written.extend(result.written);
+                all_rejected.extend(result.rejected);
+            }
+        }
     }
 
     // P0.3 flock-protected RMW: persist per-slot cursors + keep the legacy
@@ -1754,6 +1856,28 @@ fn try_reresolve_peer_on_slot_4xx(
 #[cfg(test)]
 mod slot_reresolve_tests {
     use super::*;
+
+    #[test]
+    fn nostr_relays_from_peers_distinct_and_skips_transportless() {
+        let state = serde_json::json!({
+            "peers": {
+                "alice": { "nostr_transport": { "npub": "aa", "relay": "wss://r1" } },
+                "bob":   { "nostr_transport": { "npub": "bb", "relay": "wss://r2" } },
+                // same relay as alice → de-duped
+                "carol": { "nostr_transport": { "npub": "cc", "relay": "wss://r1" } },
+                // no nostr transport → skipped (HTTP-only peer)
+                "dave":  { "endpoints": [] },
+                // empty relay → skipped
+                "erin":  { "nostr_transport": { "npub": "ee", "relay": "" } },
+            }
+        });
+        let mut relays = nostr_relays_from_peers(&state);
+        relays.sort();
+        assert_eq!(relays, vec!["wss://r1".to_string(), "wss://r2".to_string()]);
+        // No peers / no transports → empty (the additive no-op case).
+        assert!(nostr_relays_from_peers(&serde_json::json!({})).is_empty());
+        assert!(nostr_relays_from_peers(&serde_json::json!({"peers": {}})).is_empty());
+    }
 
     /// Issue #15: the gating logic of try_reresolve_peer_on_slot_4xx
     /// must short-circuit BEFORE any network call when the error shape
