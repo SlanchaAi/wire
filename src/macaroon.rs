@@ -59,7 +59,7 @@ impl Macaroon {
 
     pub fn verify(&self, root_key: &[u8], context: &VerifyContext) -> Result<()> {
         let expected = compute_signature(root_key, &self.identifier, &self.caveats)?;
-        if self.signature != expected {
+        if !constant_time_eq(self.signature.as_bytes(), expected.as_bytes()) {
             bail!("macaroon signature mismatch");
         }
         for caveat in &self.caveats {
@@ -120,4 +120,16 @@ fn hmac_bytes(key: &[u8], body: &[u8]) -> Result<Vec<u8>> {
 fn parse_rfc3339(s: &str) -> Result<time::OffsetDateTime> {
     time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
         .map_err(|e| anyhow!("invalid RFC3339 timestamp {s:?}: {e}"))
+}
+
+/// Constant-time comparison to avoid timing side-channels on signature checks.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        acc |= x ^ y;
+    }
+    acc == 0
 }

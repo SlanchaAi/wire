@@ -1544,9 +1544,8 @@ async fn invite_register(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // 6-hex token → 16.7M space. Collision probability negligible at v0.5
-    // scale; if a collision happens (1 in 16M) we 409 and the caller retries.
-    let token = random_hex(3);
+    // 16-hex token → 2^64 space. Brute-force infeasible.
+    let token = random_hex(8);
     let rec = InviteRecord {
         token: token.clone(),
         invite_url: req.invite_url,
@@ -1864,7 +1863,7 @@ async fn handle_intro(
     // to the standard /v1/events/:slot_id with bearer auth.
     let kind = req.event.get("kind").and_then(Value::as_u64).unwrap_or(0);
     let type_str = req.event.get("type").and_then(Value::as_str).unwrap_or("");
-    if kind != 1100 && type_str != "pair_drop" && type_str != "agent_card" {
+    if kind != 1100 || (type_str != "pair_drop" && type_str != "agent_card") {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -2203,6 +2202,13 @@ async fn responder_health_set(
     }
     if let Err(resp) = check_token(&relay, &headers, &slot_id).await {
         return resp;
+    }
+    if !is_valid_slot_id(&slot_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid slot_id format"})),
+        )
+            .into_response();
     }
     let path = relay
         .state_dir
