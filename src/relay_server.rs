@@ -1863,7 +1863,7 @@ async fn handle_intro(
     // to the standard /v1/events/:slot_id with bearer auth.
     let kind = req.event.get("kind").and_then(Value::as_u64).unwrap_or(0);
     let type_str = req.event.get("type").and_then(Value::as_str).unwrap_or("");
-    if kind != 1100 || (type_str != "pair_drop" && type_str != "agent_card") {
+    if !intro_event_allowed(kind, type_str) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -2295,6 +2295,17 @@ fn is_valid_slot_id(s: &str) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
+/// The unauthenticated `/v1/handle/intro` endpoint accepts an event ONLY when it
+/// is a `kind=1100` pair-intro of type `pair_drop` or `agent_card`; everything
+/// else must route through the bearer-authed `/v1/events/:slot_id`. Extracted as
+/// a pure predicate so the accept/reject matrix is locked by a unit test — #334
+/// fixed a boolean bug here (`&&`-chain accepted a kind=1100 event of ANY type,
+/// and a wrong-kind event whose type happened to match), and this guards the
+/// security property against regressing.
+fn intro_event_allowed(kind: u64, type_str: &str) -> bool {
+    kind == 1100 && (type_str == "pair_drop" || type_str == "agent_card")
+}
+
 /// A claimant-advertised `relay_url` is acceptable for the public directory iff
 /// it is `http://` or `https://`, has a non-empty host authority, and carries NO
 /// userinfo (`user@host` — the `handle@relay` bug) and no embedded
@@ -2645,5 +2656,26 @@ mod tests {
         assert!(!is_valid_slot_id(
             "0123456789abcdef\0\x31\x32\x33456789abcdef"
         ));
+    }
+
+    #[test]
+    fn intro_filter_accepts_only_kind_1100_pair_drop_or_agent_card() {
+        // The two legitimate intros: kind=1100 with pair_drop or agent_card.
+        assert!(intro_event_allowed(1100, "pair_drop"));
+        assert!(intro_event_allowed(1100, "agent_card"));
+
+        // #334 HIGH regression guards — the pre-fix `&&`-chain wrongly accepted
+        // BOTH of these:
+        // (a) a kind=1100 event of ANY other type must be rejected,
+        assert!(!intro_event_allowed(1100, "decision"));
+        assert!(!intro_event_allowed(1100, ""));
+        assert!(!intro_event_allowed(1100, "trust_revoke_key"));
+        // (b) a wrong-kind event whose type happens to match must be rejected.
+        assert!(!intro_event_allowed(1, "pair_drop"));
+        assert!(!intro_event_allowed(1101, "agent_card"));
+        assert!(!intro_event_allowed(0, "pair_drop"));
+
+        // Neither matching → rejected (the only case the old logic got right).
+        assert!(!intro_event_allowed(1, "decision"));
     }
 }
