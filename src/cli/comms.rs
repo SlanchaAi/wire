@@ -112,6 +112,28 @@ pub(super) fn cmd_peers(as_json: bool) -> Result<()> {
 /// stderr if the peer hasn't polled in > 5min (or never has). Threshold of
 /// 300s is the same wire daemon polling cadence rule-of-thumb — a peer
 /// hasn't crossed two heartbeats means probably degraded.
+/// Resolve a `wire send` body argument into a JSON value: `-` reads stdin,
+/// `@/path` reads a file, anything else is a literal string. JSON is parsed when
+/// it parses, else the raw text becomes a string body. Lets shells pipe long
+/// content / heredocs without quoting ceremony. Shared by `cmd_send` and
+/// `cmd_send_project`.
+fn parse_body_arg(body_arg: &str) -> Result<Value> {
+    if body_arg == "-" {
+        use std::io::Read;
+        let mut raw = String::new();
+        std::io::stdin()
+            .read_to_string(&mut raw)
+            .with_context(|| "reading body from stdin")?;
+        Ok(serde_json::from_str(raw.trim_end()).unwrap_or(Value::String(raw)))
+    } else if let Some(path) = body_arg.strip_prefix('@') {
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading body file {path:?}"))?;
+        Ok(serde_json::from_str(&raw).unwrap_or(Value::String(raw)))
+    } else {
+        Ok(Value::String(body_arg.to_string()))
+    }
+}
+
 fn maybe_warn_peer_attentiveness(peer: &str) {
     let state = match config::read_relay_state() {
         Ok(s) => s,
@@ -301,26 +323,8 @@ pub(super) fn cmd_send(
         .ok_or_else(|| anyhow!("agent-card missing verify_keys[*].key"))?;
     let pk_bytes = crate::signing::b64decode(pk_b64)?;
 
-    // Body: literal string, `@/path/to/body.json`, or `-` for stdin.
-    // P0.S (0.5.11): stdin support lets shells pipe in long content
-    // without quoting/escaping ceremony, and supports heredocs naturally:
-    //   wire send peer - <<EOF ... EOF
-    let body_value: Value = if body_arg == "-" {
-        use std::io::Read;
-        let mut raw = String::new();
-        std::io::stdin()
-            .read_to_string(&mut raw)
-            .with_context(|| "reading body from stdin")?;
-        // Try parsing as JSON first; fall back to string literal for
-        // plain-text bodies.
-        serde_json::from_str(raw.trim_end()).unwrap_or(Value::String(raw))
-    } else if let Some(path) = body_arg.strip_prefix('@') {
-        let raw =
-            std::fs::read_to_string(path).with_context(|| format!("reading body file {path:?}"))?;
-        serde_json::from_str(&raw).unwrap_or(Value::String(raw))
-    } else {
-        Value::String(body_arg.to_string())
-    };
+    // Body: `@/path`, `-` (stdin, for piping/heredocs), or a literal string.
+    let body_value = parse_body_arg(body_arg)?;
 
     let kind_id = super::parse_kind(kind)?;
 
@@ -537,20 +541,7 @@ pub(super) fn cmd_send_project(
     }
 
     // Body parsed ONCE (shared across all recipients): literal, `@file`, or `-` stdin.
-    let body_value: Value = if body_arg == "-" {
-        use std::io::Read;
-        let mut raw = String::new();
-        std::io::stdin()
-            .read_to_string(&mut raw)
-            .with_context(|| "reading body from stdin")?;
-        serde_json::from_str(raw.trim_end()).unwrap_or(Value::String(raw))
-    } else if let Some(path) = body_arg.strip_prefix('@') {
-        let raw =
-            std::fs::read_to_string(path).with_context(|| format!("reading body file {path:?}"))?;
-        serde_json::from_str(&raw).unwrap_or(Value::String(raw))
-    } else {
-        Value::String(body_arg.to_string())
-    };
+    let body_value = parse_body_arg(body_arg)?;
 
     let kind_id = super::parse_kind(kind)?;
     let deadline_until = match deadline {

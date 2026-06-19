@@ -199,9 +199,9 @@ pub fn verify_and_decode(ev: &NostrEvent) -> Result<Value, NostrEventError> {
 /// whose content is not a wire event — e.g. a NIP-44-encrypted pairing payload
 /// (NIP-W1, D3.4) — where `verify_and_decode`'s wire-event parse doesn't apply.
 pub fn verify_transport(ev: &NostrEvent) -> Result<[u8; 32], NostrEventError> {
-    let pubkey = hex32(&ev.pubkey)?;
-    let claimed_id = hex32(&ev.id)?;
-    let sig = hex64(&ev.sig)?;
+    let pubkey = hex_exact::<32>(&ev.pubkey)?;
+    let claimed_id = hex_exact::<32>(&ev.id)?;
+    let sig = hex_exact::<64>(&ev.sig)?;
     let id = nostr_event_id(&ev.pubkey, ev.created_at, ev.kind, &ev.tags, &ev.content);
     if id != claimed_id {
         return Err(NostrEventError::IdMismatch);
@@ -210,14 +210,9 @@ pub fn verify_transport(ev: &NostrEvent) -> Result<[u8; 32], NostrEventError> {
     Ok(pubkey)
 }
 
-fn hex32(s: &str) -> Result<[u8; 32], NostrEventError> {
-    let v = hex::decode(s).map_err(|_| NostrEventError::BadEncoding)?;
-    v.as_slice()
-        .try_into()
-        .map_err(|_| NostrEventError::BadEncoding)
-}
-
-fn hex64(s: &str) -> Result<[u8; 64], NostrEventError> {
+/// Decode a hex string into exactly `N` bytes; wrong length or bad hex →
+/// `BadEncoding`.
+fn hex_exact<const N: usize>(s: &str) -> Result<[u8; N], NostrEventError> {
     let v = hex::decode(s).map_err(|_| NostrEventError::BadEncoding)?;
     v.as_slice()
         .try_into()
