@@ -72,6 +72,15 @@ const MAX_SLOTS: usize = 200_000;
 const MAX_HANDLES: usize = 100_000;
 const MAX_PAIR_SLOTS: usize = 50_000;
 const MAX_INVITES: usize = 50_000;
+/// Cap concurrent SSE subscribers per slot (audit). An authenticated slot-token
+/// holder can otherwise open unbounded `GET /v1/events/:slot_id/stream`
+/// connections, each a channel that every `post_event` fans out to (O(n)
+/// broadcast) — memory + latency DoS. Over the cap → 503.
+const MAX_STREAMS_PER_SLOT: usize = 256;
+/// Soft cap on nicks tracked in `intro_times`; once exceeded, fully-aged entries
+/// are swept so the map can't accumulate one stale entry per ever-touched nick
+/// (#247.3 hygiene; growth is already bounded by `MAX_HANDLES`).
+const MAX_INTRO_TRACKING_NICKS: usize = 10_000;
 
 /// True iff a map at `len` entries is at/over the `max` ceiling — i.e. a new
 /// allocation must be refused. Pure → unit-tested (#291 H1).
@@ -97,6 +106,13 @@ fn record_intro_within_rate(times: &mut Vec<u64>, now: u64, window: u64, max: us
     }
     times.push(now);
     true
+}
+
+/// Drop nicks from `times_by_nick` whose intro timestamps have all aged past
+/// `window` relative to `now`. Bounds `intro_times` growth (#247.3 hygiene).
+/// Pure → unit-tested.
+fn evict_stale_intro_nicks(times_by_nick: &mut HashMap<String, Vec<u64>>, now: u64, window: u64) {
+    times_by_nick.retain(|_, ts| ts.iter().any(|t| now.saturating_sub(*t) < window));
 }
 
 #[derive(Clone)]
@@ -997,6 +1013,21 @@ async fn stream_events(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     {
         let mut inner = relay.inner.lock().await;
+        // Audit: cap subscribers per slot so an authed token-holder can't open
+        // unbounded streams (each fans out on every post_event → memory + O(n)
+        // latency DoS). Over the ceiling → 503.
+        let current = inner.streams.get(&slot_id).map_or(0, Vec::len);
+        if at_capacity(current, MAX_STREAMS_PER_SLOT) {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": format!(
+                        "phyllis: too many open lines on that slot — max {MAX_STREAMS_PER_SLOT} subscribers"
+                    )
+                })),
+            )
+                .into_response();
+        }
         inner.streams.entry(slot_id.clone()).or_default().push(tx);
     }
 
@@ -1844,6 +1875,12 @@ async fn handle_intro(
         // and 10/s × 256KiB still fills 64MB in ~25s). Cap intros per nick per
         // window; over the limit → 429.
         let now = unix_now();
+        // Audit hygiene: before tracking this nick, opportunistically sweep
+        // fully-aged nicks once the map grows past a soft cap, so it can't
+        // retain one stale entry per ever-touched nick.
+        if at_capacity(inner.intro_times.len(), MAX_INTRO_TRACKING_NICKS) {
+            evict_stale_intro_nicks(&mut inner.intro_times, now, INTRO_WINDOW_SECS);
+        }
         let times = inner.intro_times.entry(nick.clone()).or_default();
         if !record_intro_within_rate(times, now, INTRO_WINDOW_SECS, INTRO_MAX_PER_WINDOW) {
             return (
@@ -2202,13 +2239,6 @@ async fn responder_health_set(
     }
     if let Err(resp) = check_token(&relay, &headers, &slot_id).await {
         return resp;
-    }
-    if !is_valid_slot_id(&slot_id) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid slot_id format"})),
-        )
-            .into_response();
     }
     let path = relay
         .state_dir
@@ -2677,5 +2707,30 @@ mod tests {
 
         // Neither matching → rejected (the only case the old logic got right).
         assert!(!intro_event_allowed(1, "decision"));
+    }
+
+    #[test]
+    fn stream_subscriber_ceiling_is_inclusive() {
+        // Audit: a new SSE subscriber is refused once a slot reaches the cap.
+        assert!(!at_capacity(0, MAX_STREAMS_PER_SLOT));
+        assert!(!at_capacity(MAX_STREAMS_PER_SLOT - 1, MAX_STREAMS_PER_SLOT));
+        assert!(at_capacity(MAX_STREAMS_PER_SLOT, MAX_STREAMS_PER_SLOT));
+        assert!(at_capacity(MAX_STREAMS_PER_SLOT + 1, MAX_STREAMS_PER_SLOT));
+    }
+
+    #[test]
+    fn evict_stale_intro_nicks_drops_only_fully_aged_entries() {
+        let now = 10_000u64;
+        let window = INTRO_WINDOW_SECS;
+        let mut m: HashMap<String, Vec<u64>> = HashMap::new();
+        m.insert("fresh".into(), vec![now - 1]); // within window → keep
+        m.insert("stale".into(), vec![now - window - 1]); // all aged → drop
+        m.insert("mixed".into(), vec![now - window - 5, now - 2]); // one fresh → keep
+        m.insert("empty".into(), vec![]); // no timestamps → drop
+        evict_stale_intro_nicks(&mut m, now, window);
+        assert!(m.contains_key("fresh"));
+        assert!(m.contains_key("mixed"));
+        assert!(!m.contains_key("stale"));
+        assert!(!m.contains_key("empty"));
     }
 }
