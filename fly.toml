@@ -46,10 +46,18 @@ min_machines_running = 1
 
 # Long timeouts so SSE keepalives don't disconnect.
 # (Fly's default 60s idle timeout would kill our 30s-keepalive streams.)
+#
+# Concurrency: with `type = "requests"`, every long-lived SSE `/stream` holds a
+# slot for its whole life, so the ceiling must cover (open streams + in-flight
+# pulls) across ALL wire daemons, not peak RPS. At 250 the single instance
+# saturated under the real federation fan-out — fly logged "reached hard limit
+# of 250 concurrent requests" + "could not find a good candidate" (PR04), which
+# surfaced to clients as the relay read-path hanging. Bumped to ~4x headroom;
+# idle keepalive connections are cheap on the larger VM below.
 [http_service.concurrency]
 type = "requests"
-soft_limit = 200
-hard_limit = 250
+soft_limit = 800
+hard_limit = 1000
 
 [[mounts]]
 source = "relay_state"
@@ -58,10 +66,12 @@ destination = "/data"
 initial_size = "1gb"
 
 [[vm]]
-size = "shared-cpu-1x"
-memory = "256mb"
+# Bumped from shared-cpu-1x/256mb: the SSE subscriber count outgrew the
+# >100 threshold noted previously, saturating the 250-request ceiling. 2x CPU +
+# 512mb gives the headroom to actually hold the raised concurrency limit above.
+size = "shared-cpu-2x"
+memory = "512mb"
 cpus = 1
-# Bump to "shared-cpu-2x" + 512mb when SSE subscriber count >100.
 
 [checks]
   [checks.healthz]
