@@ -338,7 +338,13 @@ pub(super) fn cmd_send(
     // pinned peers actually publish; mismatch risks receiver rejection
     // at canonical/cursor verification. resolve_peer_did falls back to
     // the bare form for unknown peers (pre-pair queue best-effort).
-    let trust_for_did = config::read_trust().unwrap_or_else(|_| json!({"agents": {}}));
+    //
+    // Fail CLOSED on a corrupt trust.json: `read_trust` returns Ok(empty) for a
+    // MISSING file (legit pre-pair), but Err on a parse failure. Swallowing that
+    // Err to an empty trust meant `peer_dh_pubkey` below found no key → the body
+    // went out as PLAINTEXT instead of sealed — a silent encryption downgrade.
+    // Propagate so the send aborts loudly rather than leaking cleartext.
+    let trust_for_did = config::read_trust()?;
     let to_did = crate::trust::resolve_peer_did(&trust_for_did, peer);
     let mut event = json!({
         "schema_version": crate::signing::EVENT_SCHEMA_VERSION,
