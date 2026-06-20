@@ -621,6 +621,12 @@ pub(super) fn cmd_push(peer_filter: Option<&str>, as_json: bool) -> Result<()> {
                 }
             }
         }
+        // Drain delivered events from this peer's outbox (same as run_sync_push):
+        // stops re-POSTing delivered events on the next push and bounds the file
+        // to the genuine backlog. Best-effort.
+        if let Err(e) = config::drain_outbox_delivered(peer_handle) {
+            eprintln!("wire push: WARN outbox drain for {peer_handle} failed: {e:#}");
+        }
     }
 
     // Issue #15: persist any in-place slot rotations from the per-peer loop
@@ -1359,6 +1365,13 @@ pub fn run_sync_push() -> Result<Value> {
                         .push(json!({"peer": peer_handle, "event_id": event_id, "reason": reason}));
                 }
             }
+        }
+        // Drain delivered events from this peer's outbox so the daemon stops
+        // re-POSTing them every cycle (the relay-load blast) and the file stays
+        // bounded to the genuine backlog. Best-effort: a drain failure must not
+        // fail the sync (the next cycle retries; the relay dedups regardless).
+        if let Err(e) = config::drain_outbox_delivered(peer_handle) {
+            eprintln!("daemon: outbox drain for {peer_handle} failed (non-fatal): {e:#}");
         }
     }
     Ok(json!({"pushed": pushed, "skipped": skipped}))
