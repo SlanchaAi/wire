@@ -134,6 +134,15 @@ fn run_subscriber(wake_tx: Sender<()>) {
             }
             Err(e) => {
                 reconnects += 1;
+                // A stream that stayed healthy for a while and then died DIRTY
+                // (mid-stream reset / relay restart surfacing as Err, not a clean
+                // EOF) shouldn't carry backoff accrued from earlier instant
+                // failures — otherwise repeated healthy-then-Err cycles ratchet
+                // toward the 30s cap despite each connection being fine. Reset
+                // first, mirroring the clean-close healthy path above.
+                if stayed_open >= Duration::from_secs(STREAM_HEALTHY_SECS) {
+                    backoff_secs = 1;
+                }
                 eprintln!("daemon-stream: error {e:#}; reconnecting in {backoff_secs}s");
                 write_stream_state("error", last_event_at.as_deref(), reconnects);
                 std::thread::sleep(Duration::from_secs(backoff_secs));
