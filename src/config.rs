@@ -1015,6 +1015,27 @@ mod tests {
     }
 
     #[test]
+    fn read_trust_missing_is_ok_empty_but_corrupt_is_err() {
+        // The fail-closed contract `wire send` / MCP `tool_send` rely on: a
+        // MISSING trust.json is a legit pre-pair empty (Ok), but a CORRUPT one
+        // must Err — callers propagate it rather than silently sending plaintext
+        // (a swallowed Err → empty trust → no seal key → cleartext downgrade).
+        with_temp_home(|| {
+            // missing → Ok(empty)
+            let t = read_trust().unwrap();
+            assert!(t.get("agents").is_some(), "missing trust → empty skeleton");
+
+            // corrupt → Err
+            ensure_dirs().unwrap();
+            std::fs::write(trust_path().unwrap(), b"{ this is not json").unwrap();
+            assert!(
+                read_trust().is_err(),
+                "corrupt trust.json must Err, not swallow"
+            );
+        });
+    }
+
+    #[test]
     fn config_dir_honors_wire_home() {
         with_temp_home(|| {
             let dir = config_dir().unwrap();
