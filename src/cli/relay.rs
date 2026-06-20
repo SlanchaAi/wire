@@ -1271,18 +1271,20 @@ pub fn run_sync_push() -> Result<Value> {
     }
     let mut pushed = Vec::new();
     let mut skipped = Vec::new();
-    for (peer_handle, slot_info) in peers.iter() {
+    for (peer_handle, _slot_info) in peers.iter() {
         let outbox = outbox_dir.join(format!("{peer_handle}.jsonl"));
         if !outbox.exists() {
             continue;
         }
-        let url = slot_info["relay_url"].as_str().unwrap_or("");
-        let slot_id = slot_info["slot_id"].as_str().unwrap_or("");
-        let slot_token = slot_info["slot_token"].as_str().unwrap_or("");
-        if url.is_empty() || slot_id.is_empty() || slot_token.is_empty() {
-            continue;
-        }
-        let client = crate::relay_client::RelayClient::new(url);
+        // v0.16 (RFC-006 Part B): resolve via `endpoints[]` in priority order —
+        // the canonical routing source. The pre-0.16 flat relay_url/slot_id/
+        // slot_token are no longer written for new pins, so reading them here
+        // made the daemon push a SILENT no-op (pushed=0) for every
+        // endpoints[]-only peer — the exact gap `run_sync_pull` was fixed for in
+        // v0.9. Mirror `cmd_push`'s endpoint-failover routing (minus the CLI-only
+        // whois slot-rotation retry: the daemon re-attempts every cycle anyway).
+        let ordered_endpoints =
+            crate::endpoints::peer_endpoints_in_priority_order(&state, peer_handle);
         let body = std::fs::read_to_string(&outbox)?;
         for line in body.lines() {
             let event: Value = match serde_json::from_str(line) {
@@ -1294,16 +1296,39 @@ pub fn run_sync_push() -> Result<Value> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            match client.post_event(slot_id, slot_token, &event) {
-                Ok(resp) => {
+            if ordered_endpoints.is_empty() {
+                // No reachable endpoint pinned — surface a loud reason rather
+                // than silently dropping the event (the old flat-field bug).
+                skipped.push(json!({
+                    "peer": peer_handle,
+                    "event_id": event_id,
+                    "reason": "no reachable endpoint pinned for peer",
+                }));
+                continue;
+            }
+            let last_err: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+            match crate::relay_client::try_post_event_with_failover(
+                &ordered_endpoints,
+                &event,
+                |endpoint, ev| {
+                    let client = crate::relay_client::RelayClient::new(&endpoint.relay_url);
+                    match client.post_event(&endpoint.slot_id, &endpoint.slot_token, ev) {
+                        Ok(resp) => Ok(resp),
+                        Err(e) => {
+                            // v0.5.13: flatten the anyhow chain so TLS / DNS /
+                            // timeout errors aren't hidden behind the URL string.
+                            *last_err.borrow_mut() =
+                                Some(crate::relay_client::format_transport_error(&e));
+                            Err(e)
+                        }
+                    }
+                },
+            ) {
+                Ok((endpoint, resp)) => {
                     // v0.14.2 (#162 fix #2): record the queued → pushed
-                    // transition in the per-peer lifecycle log. Both
-                    // `ok` and `duplicate` count as pushed — the relay
-                    // has the event either way, and an operator who
-                    // hits the dedup path didn't lose the event. Failure
-                    // here is non-fatal: the sync loop must keep
-                    // running even if the lifecycle log can't be
-                    // appended.
+                    // transition in the per-peer lifecycle log. Both `ok` and
+                    // `duplicate` count as pushed — the relay has the event
+                    // either way. Failure here is non-fatal.
                     let now = time::OffsetDateTime::now_utc()
                         .format(&time::format_description::well_known::Rfc3339)
                         .unwrap_or_default();
@@ -1313,16 +1338,16 @@ pub fn run_sync_push() -> Result<Value> {
                         );
                     }
                     if resp.status == "duplicate" {
-                        skipped.push(json!({"peer": peer_handle, "event_id": event_id, "reason": "duplicate"}));
+                        skipped.push(json!({"peer": peer_handle, "event_id": event_id, "reason": "duplicate", "endpoint": endpoint.relay_url}));
                     } else {
-                        pushed.push(json!({"peer": peer_handle, "event_id": event_id}));
+                        pushed.push(json!({"peer": peer_handle, "event_id": event_id, "endpoint": endpoint.relay_url}));
                     }
                 }
-                Err(e) => {
-                    // v0.5.13: flatten the anyhow chain so TLS / DNS / timeout
-                    // errors aren't hidden behind the topmost-context URL string.
-                    // Issue #6 highest-impact silent-fail fix.
-                    let reason = crate::relay_client::format_transport_error(&e);
+                Err(_) => {
+                    let reason = last_err
+                        .borrow()
+                        .clone()
+                        .unwrap_or_else(|| "all endpoints failed".to_string());
                     skipped
                         .push(json!({"peer": peer_handle, "event_id": event_id, "reason": reason}));
                 }
@@ -2122,5 +2147,62 @@ mod slot_reresolve_tests {
         assert!(!error_smells_like_slot_4xx(
             "post_event failed: 411 Length Required"
         ));
+    }
+
+    #[test]
+    fn run_sync_push_routes_endpoints_only_peer_not_just_flat_fields() {
+        // RFC-006 Part B regression: peers store `endpoints[]` ONLY (no flat
+        // relay_url/slot_id/slot_token). The daemon push (`run_sync_push`) must
+        // resolve via endpoints[] like `cmd_push` — pre-fix it read the
+        // now-absent flat fields and silently skipped, stranding outboxes
+        // (observed live: wildflower-gleam's message stuck at pushed=0).
+        config::test_support::with_temp_home(|| {
+            // endpoints[]-only peer; the endpoint points at a dead local port so
+            // the POST fails FAST (connection refused). We assert the push
+            // *attempts* delivery via endpoints[], not that it succeeds.
+            let state = serde_json::json!({
+                "self": { "endpoints": [] },
+                "peers": {
+                    "glossy-spindle": {
+                        "endpoints": [{
+                            "relay_url": "http://127.0.0.1:1",
+                            "scope": "federation",
+                            "slot_id": "8add6502f7cfec82ec2348a8c3263f08",
+                            "slot_token": "deadbeef"
+                        }]
+                    }
+                }
+            });
+            config::write_relay_state(&state).unwrap();
+
+            let outbox_dir = config::outbox_dir().unwrap();
+            std::fs::create_dir_all(&outbox_dir).unwrap();
+            std::fs::write(
+                outbox_dir.join("glossy-spindle.jsonl"),
+                "{\"event_id\":\"evt-regression-1\",\"kind\":1,\"body\":{}}\n",
+            )
+            .unwrap();
+
+            let out = run_sync_push().unwrap();
+            let pushed = out["pushed"].as_array().unwrap();
+            let skipped = out["skipped"].as_array().unwrap();
+
+            // Pre-fix (flat-field read): peer has no flat fields → loop
+            // `continue`d → BOTH arrays empty (silent drop). Post-fix: resolves
+            // the endpoint, attempts the POST, the dead port refuses → exactly
+            // one skipped entry with the event_id and a real transport reason.
+            assert!(pushed.is_empty(), "dead endpoint cannot succeed: {out}");
+            assert_eq!(
+                skipped.len(),
+                1,
+                "endpoints[]-only peer must be ATTEMPTED, not silently skipped: {out}"
+            );
+            assert_eq!(skipped[0]["event_id"], "evt-regression-1");
+            let reason = skipped[0]["reason"].as_str().unwrap_or("");
+            assert!(
+                !reason.is_empty() && reason != "no reachable endpoint pinned for peer",
+                "skip reason must be a transport error from the attempted POST, got: {reason:?}"
+            );
+        });
     }
 }
