@@ -892,38 +892,45 @@ pub(super) fn cmd_rotate_slot(no_announce: bool, as_json: bool) -> Result<()> {
                     continue;
                 }
             };
-            // Post to OUR old slot (we're announcing on our own slot, NOT
-            // peer's slot — peer reads from us). Wait, this is wrong: peers
-            // read from THEIR OWN slot via wire pull. To reach peer A, we
-            // post to peer A's slot. Use the existing per-peer slot mapping.
-            let peer_info = match state["peers"].get(peer_handle) {
-                Some(p) => p.clone(),
-                None => continue,
+            // To reach peer A we post to peer A's slot (they read from their
+            // OWN slot via `wire pull`). RFC-006 Part B: resolve that slot from
+            // the peer's `endpoints[]` (the single routing source) — reading the
+            // legacy flat peers[h].relay_url/slot_id/slot_token silently skipped
+            // EVERY peer pinned after #268 (they carry endpoints[] only), so the
+            // rotation announce reached nobody (the #339 bug class).
+            let ep = match crate::endpoints::peer_primary_endpoint(&state, peer_handle) {
+                Some(e) if !e.slot_id.is_empty() && !e.slot_token.is_empty() => e,
+                _ => continue, // no reachable endpoint pinned for this peer
             };
-            let peer_url = peer_info["relay_url"].as_str().unwrap_or(&url);
-            let peer_slot_id = peer_info["slot_id"].as_str().unwrap_or("");
-            let peer_slot_token = peer_info["slot_token"].as_str().unwrap_or("");
-            if peer_slot_id.is_empty() || peer_slot_token.is_empty() {
-                continue;
-            }
-            let peer_client = if peer_url == url {
+            let peer_client = if ep.relay_url == url {
                 client.clone()
             } else {
-                crate::relay_client::RelayClient::new(peer_url)
+                crate::relay_client::RelayClient::new(&ep.relay_url)
             };
-            match peer_client.post_event(peer_slot_id, peer_slot_token, &signed) {
+            match peer_client.post_event(&ep.slot_id, &ep.slot_token, &signed) {
                 Ok(_) => announced.push(peer_handle.clone()),
                 Err(e) => eprintln!("warn: announce to {peer_handle} failed: {e}"),
             }
         }
     }
 
-    // Swap the self-slot to the new one.
-    state["self"] = json!({
-        "relay_url": url,
-        "slot_id": new_slot_id,
-        "slot_token": new_slot_token,
-    });
+    // Swap the rotated slot to the new one. Use the ADDITIVE helper instead of
+    // overwriting `state["self"]` wholesale: a flat-triple clobber deleted
+    // self.endpoints[], silently dropping every local / LAN / UDS slot of a
+    // dual-slot session (`wire session new --with-local/--with-lan-relay/--with-uds`)
+    // — federation survived only via back-compat synthesis. upsert keys by
+    // relay_url, so it replaces the rotated endpoint in place, preserves the
+    // others, and rebuilds the legacy flat fields. Preserve the rotated
+    // endpoint's scope rather than assuming federation.
+    crate::endpoints::upsert_self_endpoint(
+        &mut state,
+        crate::endpoints::Endpoint {
+            relay_url: url.clone(),
+            slot_id: new_slot_id.clone(),
+            slot_token: new_slot_token.clone(),
+            scope: primary.scope,
+        },
+    );
     config::write_relay_state(&state)?;
 
     if as_json {
