@@ -141,7 +141,17 @@ impl InboxWatcher {
         let cursors = if cursor_path.exists() {
             let bytes = std::fs::read(cursor_path)
                 .with_context(|| format!("reading cursor file {cursor_path:?}"))?;
-            serde_json::from_slice(&bytes).unwrap_or_default()
+            // A corrupt cursor file silently reset ALL cursors to zero → the
+            // notifier replayed the whole inbox as duplicate toasts. Keep
+            // recovering (don't break a background notifier over a cosmetic
+            // file), but make the reset LOUD so the storm is explained.
+            serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                eprintln!(
+                    "wire: cursor file {cursor_path:?} is corrupt ({e}) — resetting cursors; \
+                     inbox history may re-notify once. Delete the file to silence this."
+                );
+                HashMap::new()
+            })
         } else {
             HashMap::new()
         };

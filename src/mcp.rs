@@ -1318,7 +1318,12 @@ fn tool_send(args: &Value) -> Result<Value, String> {
     // publish — mismatch risks receiver rejection at canonical/cursor
     // verification. resolve_peer_did falls back to the bare form when
     // the peer isn't pinned yet (pre-pair queue best-effort).
-    let trust_for_did = config::read_trust().unwrap_or_else(|_| json!({"agents": {}}));
+    //
+    // Fail CLOSED on a corrupt trust.json (missing → Ok(empty), legit pre-pair;
+    // parse failure → Err). Swallowing the Err to empty trust meant the seal
+    // key lookup below (`peer_dh_pubkey`) found nothing → a silent PLAINTEXT
+    // downgrade. Propagate, matching the `.map_err` convention used for seal/sign.
+    let trust_for_did = config::read_trust().map_err(|e| e.to_string())?;
     let to_did = crate::trust::resolve_peer_did(&trust_for_did, peer);
     let mut event = json!({
         // Parity with the CLI send skeleton (review finding #4): carry
