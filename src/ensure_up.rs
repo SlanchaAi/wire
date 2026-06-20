@@ -148,6 +148,23 @@ pub fn pid_is_alive(pid: u32) -> bool {
     crate::platform::process_alive(pid)
 }
 
+/// Cheap "is THIS session's daemon alive" — reads our own `daemon.pid` and
+/// checks that one pid. Unlike [`daemon_liveness`] it does NOT run the
+/// machine-wide process-enumeration scan (`find_processes_by_cmdline`) or
+/// `list_sessions` (which reads every by-key home's agent-card) or a
+/// per-session `pid_is_alive` sweep — work that only the orphan/`wire status`
+/// path needs. On Windows those each shell out (PowerShell CIM, `tasklist` ×N,
+/// hundreds of NTFS dir reads), so calling full `daemon_liveness` purely to read
+/// `pidfile_alive` made every `wire_send` cost seconds (#350). One pidfile read
+/// plus one `pid_is_alive` (one `tasklist` on Windows) yields the identical
+/// `daemon_seen` boolean for a fraction of the cost.
+pub fn daemon_pidfile_alive() -> bool {
+    read_pid_record("daemon")
+        .pid()
+        .map(pid_is_alive)
+        .unwrap_or(false)
+}
+
 /// Read the daemon pid file + pgrep in one shot, producing a snapshot
 /// every caller can interpret identically. The point of this helper
 /// is that three independent callers used to compute liveness three
@@ -748,6 +765,16 @@ mod tests {
     fn daemon_version_mismatch_returns_none_when_no_pidfile() {
         crate::config::test_support::with_temp_home(|| {
             assert_eq!(daemon_version_mismatch(), None);
+        });
+    }
+
+    #[test]
+    fn daemon_pidfile_alive_false_without_pidfile() {
+        // No daemon.pid → false, with no process-enumeration shell-out. (The
+        // send-path annotation reads only this, not the full daemon_liveness
+        // scan — the #350 Windows hot-path fix.)
+        crate::config::test_support::with_temp_home(|| {
+            assert!(!daemon_pidfile_alive());
         });
     }
 }
