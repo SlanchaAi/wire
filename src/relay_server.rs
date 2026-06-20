@@ -550,6 +550,17 @@ impl Relay {
     /// 60 seconds. Call once after `Relay::new`; the handle is leaked deliberately
     /// — process exit reaps it. Safe to skip in tests where you'd rather test
     /// eviction inline.
+    /// Proactively drop fully-aged nicks from `intro_times` on the background
+    /// tick, so the map rarely reaches the on-demand sweep threshold in
+    /// `handle_intro` — that keeps the 10k-entry `retain` scan off the hot,
+    /// globally-locked intro path (where it would block every other handler).
+    /// The on-demand sweep stays as a backstop, so the bound is unchanged.
+    async fn sweep_intro_times(&self) {
+        let now = unix_now();
+        let mut inner = self.inner.lock().await;
+        evict_stale_intro_nicks(&mut inner.intro_times, now, INTRO_WINDOW_SECS);
+    }
+
     pub fn spawn_pair_sweeper(&self) {
         let me = self.clone();
         tokio::spawn(async move {
@@ -557,6 +568,7 @@ impl Relay {
             loop {
                 tick.tick().await;
                 me.evict_expired_pair_slots().await;
+                me.sweep_intro_times().await;
             }
         });
     }
@@ -2653,6 +2665,29 @@ mod tests {
         let s = random_hex(16);
         assert_eq!(s.len(), 32); // 16 bytes -> 32 hex chars
         assert!(s.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sweep_intro_times_drops_aged_nicks_off_the_hot_path() {
+        let dir = std::env::temp_dir().join(format!("wire-introsweep-{}", random_hex(8)));
+        let _ = std::fs::remove_dir_all(&dir);
+        let relay = Relay::new(dir.clone()).await.unwrap();
+        let now = unix_now();
+        {
+            let mut inner = relay.inner.lock().await;
+            inner.intro_times.insert("fresh".into(), vec![now]); // within window
+            inner
+                .intro_times
+                .insert("stale".into(), vec![now - INTRO_WINDOW_SECS - 1]); // aged out
+            assert_eq!(inner.intro_times.len(), 2);
+        }
+        relay.sweep_intro_times().await;
+        {
+            let inner = relay.inner.lock().await;
+            assert!(inner.intro_times.contains_key("fresh"), "fresh nick kept");
+            assert!(!inner.intro_times.contains_key("stale"), "aged nick swept");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
