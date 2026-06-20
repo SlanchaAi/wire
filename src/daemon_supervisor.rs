@@ -84,9 +84,10 @@ const RAPID_FAIL_WINDOW: Duration = Duration::from_secs(10);
 /// home, a long-lived box accumulates hundreds (honey-pine's had 147).
 /// Spawning one daemon per home turns `--all-sessions` into a fork
 /// storm. A session is kept regardless of age if it has a registry cwd
-/// binding (operator deliberately bound it); an *unbound* session is
-/// only kept if it has been active within this window. Override via
-/// `WIRE_ALL_SESSIONS_MAX_IDLE_DAYS` (0 disables the filter → legacy
+/// binding (operator deliberately bound it) OR holds a real identity
+/// (`config/wire/private.key` — not a husk); an unbound, identity-less
+/// session is only kept if it has been active within this window. Override
+/// via `WIRE_ALL_SESSIONS_MAX_IDLE_DAYS` (0 disables the filter → legacy
 /// spawn-for-all behavior).
 const DEFAULT_MAX_IDLE_DAYS: u64 = 7;
 
@@ -136,37 +137,24 @@ fn fs_last_active(home: &Path) -> Option<SystemTime> {
         .max()
 }
 
-/// True iff the session home has at least one queued (un-pushed) outbox event
-/// — a non-empty `<peer>.jsonl` that is NOT a `<peer>.pushed.jsonl` archive.
-///
-/// A session with undelivered mail must keep a daemon to push it even when it
-/// is otherwise idle + registry-unbound. Otherwise a real session (identity +
-/// DID, but no cwd binding) that has *never synced* (`fs_last_active` → None)
-/// is permanently ineligible — and being ineligible it never gets a daemon, so
-/// it never syncs, so its outbox strands forever (the wildflower-gleam
-/// catch-22 a live audit surfaced). Husks never match: they have no outbox.
-/// Injected into `supervisor_eligible` so the filter stays unit-testable.
-fn fs_has_pending_outbox(home: &Path) -> bool {
-    let outbox = home.join("state").join("wire").join("outbox");
-    let Ok(entries) = std::fs::read_dir(&outbox) else {
-        return false; // no outbox dir → nothing queued
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(".jsonl") || name.ends_with(".pushed.jsonl") {
-            continue; // not a pending outbox file (or it's a delivered archive)
-        }
-        if std::fs::metadata(&path)
-            .map(|m| m.len() > 0)
-            .unwrap_or(false)
-        {
-            return true; // a non-empty queue file = undelivered mail
-        }
-    }
-    false
+/// True iff the session home holds a real wire identity (an initialized
+/// `config/wire/private.key`). Such a home ran `wire up`/`init` — it is NOT a
+/// husk, so it must keep a daemon to push its outbox AND pull inbound mail even
+/// when idle + registry-unbound. Otherwise a real-but-idle (or never-synced)
+/// session is starved forever: ineligible → no daemon → never syncs → never
+/// eligible (the wildflower-gleam catch-22 a live audit surfaced — for outbound
+/// mail and, equally, inbound never-pulled mail). Husks (ephemeral read-only
+/// home mints) have no private.key and stay excluded, so the idle filter still
+/// stops their fork-storm. This generalizes #340's pending-outbox keep: a queued
+/// outbox implies an identity, so identity subsumes it. Injected into
+/// `supervisor_eligible` so the filter stays unit-testable.
+fn fs_has_identity(home: &Path) -> bool {
+    // A real wire identity = an initialized `config/wire/private.key`. Same
+    // signal the husk-reaper uses to decide "not a husk".
+    home.join("config")
+        .join("wire")
+        .join("private.key")
+        .exists()
 }
 
 /// Filter `list_sessions()` down to the sessions the supervisor should
@@ -179,7 +167,7 @@ fn supervisor_eligible<F, G>(
     max_idle: Option<Duration>,
     now: SystemTime,
     last_active: F,
-    has_pending_outbox: G,
+    has_identity: G,
 ) -> Vec<crate::session::SessionInfo>
 where
     F: Fn(&Path) -> Option<SystemTime>,
@@ -194,11 +182,14 @@ where
             if s.cwd.is_some() {
                 return true;
             }
-            // Undelivered mail → keep a daemon to drain it, regardless of idle.
-            // Closes the wildflower-gleam catch-22: an unbound, never-synced
-            // session with a queued outbox would otherwise be ineligible
-            // forever and strand its mail.
-            if has_pending_outbox(&s.home_dir) {
+            // A real wire identity (private.key) is not a husk → keep a daemon so
+            // it can push its outbox AND pull inbound mail, regardless of idle.
+            // Closes the wildflower-gleam catch-22 (ineligible → no daemon →
+            // never syncs → never eligible) for BOTH outbound-queued and
+            // never-sent/inbound-waiting sessions. Generalizes #340's
+            // pending-outbox keep (an outbox implies an identity). Husks have no
+            // identity → still excluded, so the idle fork-storm guard stands.
+            if has_identity(&s.home_dir) {
                 return true;
             }
             match last_active(&s.home_dir) {
@@ -448,7 +439,7 @@ pub fn run_supervisor(interval_secs: u64, as_json: bool) -> Result<()> {
             max_idle,
             SystemTime::now(),
             fs_last_active,
-            fs_has_pending_outbox,
+            fs_has_identity,
         );
         if wanted.len() != total_sessions {
             eprintln!(
@@ -746,7 +737,7 @@ pub fn read_supervisor_state() -> Result<SupervisorState> {
         max_idle_from_env(),
         SystemTime::now(),
         fs_last_active,
-        fs_has_pending_outbox,
+        fs_has_identity,
     )
     .into_iter()
     .map(|s| s.name)
@@ -1194,23 +1185,24 @@ mod tests {
     }
 
     #[test]
-    fn eligible_keeps_unbound_idle_session_with_pending_outbox() {
-        // The wildflower-gleam catch-22: no cwd binding, never synced
-        // (last_active None → normally dropped), but has queued mail. It MUST
-        // stay eligible so a daemon spawns and drains the outbox — otherwise
-        // the message strands forever (ineligible → no daemon → never syncs →
-        // never eligible). The empty-outbox sibling is still correctly dropped.
+    fn eligible_keeps_unbound_idle_session_with_identity() {
+        // The wildflower-gleam catch-22, generalized: no cwd binding, never
+        // synced (last_active None → normally dropped). A home with a real
+        // identity (private.key) MUST stay eligible so a daemon spawns to push
+        // its outbox AND pull inbound mail — otherwise it strands forever
+        // (ineligible → no daemon → never syncs → never eligible). The
+        // identity-less husk sibling is still correctly dropped.
         let now = SystemTime::now();
-        let sessions = vec![mk_session("stranded", None), mk_session("empty", None)];
+        let sessions = vec![mk_session("real", None), mk_session("husk", None)];
         let out = supervisor_eligible(
             sessions,
             Some(Duration::from_secs(7 * 86_400)),
             now,
-            |_| None,                          // neither has ever synced
-            |home| home.ends_with("stranded"), // only this one has queued mail
+            |_| None,                      // neither has ever synced
+            |home| home.ends_with("real"), // only this one has a private.key
         );
         let names: Vec<_> = out.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["stranded"]);
+        assert_eq!(names, vec!["real"]);
     }
 
     #[test]
