@@ -1362,10 +1362,14 @@ fn tool_send(args: &Value) -> Result<Value, String> {
         // these are diagnostic-only (the verdict in `status` is the
         // authoritative answer), but they're cheap to compute and
         // existing consumers may key on them.
-        let snap = crate::ensure_up::daemon_liveness();
+        // Cheap pidfile-only liveness: the annotation needs just `daemon_seen`,
+        // NOT the machine-wide orphan scan `daemon_liveness` runs (PowerShell
+        // CIM + list_sessions over every by-key home + tasklist ×N on Windows —
+        // seconds per send, #350). One pidfile check gives the same boolean.
+        let daemon_seen = crate::ensure_up::daemon_pidfile_alive();
         let last_sync_age = crate::ensure_up::last_sync_age_seconds();
         if let Some(obj) = v.as_object_mut() {
-            obj.insert("daemon_seen".into(), json!(snap.pidfile_alive));
+            obj.insert("daemon_seen".into(), json!(daemon_seen));
             obj.insert("last_sync_age_seconds".into(), json!(last_sync_age));
             obj.insert(
                 "stale_sync".into(),
@@ -1378,7 +1382,9 @@ fn tool_send(args: &Value) -> Result<Value, String> {
     // Legacy --queue path. Outbox-write, daemon push loop drains.
     let line = serde_json::to_vec(&signed).map_err(|e| e.to_string())?;
     let outbox = config::append_outbox_record(peer, &line).map_err(|e| e.to_string())?;
-    let snap = crate::ensure_up::daemon_liveness();
+    // Cheap pidfile-only liveness (see the sync branch above) — avoids the
+    // machine-wide orphan scan on the hot send path (#350).
+    let daemon_seen = crate::ensure_up::daemon_pidfile_alive();
     let last_sync_age = crate::ensure_up::last_sync_age_seconds();
     // Honesty check mirror of the CLI: if the peer is BOTH
     // unpinned in trust AND has no pending pair (outbound or
@@ -1406,7 +1412,7 @@ fn tool_send(args: &Value) -> Result<Value, String> {
         "status": "queued",
         "peer": peer,
         "outbox": outbox.to_string_lossy(),
-        "daemon_seen": snap.pidfile_alive,
+        "daemon_seen": daemon_seen,
         "last_sync_age_seconds": last_sync_age,
         "stale_sync": config::stale_sync(last_sync_age),
     });
