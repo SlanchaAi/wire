@@ -23,7 +23,7 @@
 use anyhow::Result;
 use std::io::{BufRead, BufReader};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Stream-state file written by `run_subscriber` on every state
 /// transition. Surfaced via `tool_status` so an operator can tell
@@ -71,6 +71,13 @@ pub fn spawn_stream_subscriber(wake_tx: Sender<()>) {
         .expect("spawn wire-stream-sub thread");
 }
 
+/// A clean-closed SSE stream that stayed open at least this long is treated as
+/// a healthy long-lived stream → reconnect immediately. Shorter than that and
+/// the close is "instant EOF" (a saturated relay accepting then dropping the
+/// body), which gets the exponential backoff instead of a zero-delay re-spin.
+/// Well under the 30s server keepalive so genuine streams always clear it.
+const STREAM_HEALTHY_SECS: u64 = 10;
+
 fn run_subscriber(wake_tx: Sender<()>) {
     let mut backoff_secs = 1u64;
     let mut reconnects: u64 = 0;
@@ -90,22 +97,40 @@ fn run_subscriber(wake_tx: Sender<()>) {
         // events had arrived + previous reconnects had occurred.
         // Operator surface always read "last event never" on
         // long-running daemons.
+        let connected_at = Instant::now();
         let outcome = connect_and_read(
             &wake_tx,
             &mut latest_event_ts,
             last_event_at.as_deref(),
             reconnects,
         );
+        let stayed_open = connected_at.elapsed();
         if let Some(ts) = latest_event_ts.into_iter().last() {
             last_event_at = Some(ts);
         }
         match outcome {
             Ok(()) => {
-                // Stream closed cleanly (e.g., server reload). Quick reconnect.
-                backoff_secs = 1;
                 reconnects += 1;
-                eprintln!("daemon-stream: connection closed cleanly, reconnecting");
-                write_stream_state("reconnecting", last_event_at.as_deref(), reconnects);
+                // A long-lived stream closing (server reload) → reconnect fast.
+                // But a relay that ACCEPTS the connection (HTTP 200) then drops
+                // the body immediately — exactly what a concurrency-saturated
+                // instance does — returns Ok(()) instantly, and resetting backoff
+                // to 1 with no sleep span-loops the relay (amplifying the very
+                // saturation that caused the close). Only fast-reconnect if the
+                // stream actually stayed open; otherwise floor it with the same
+                // backoff as the error path.
+                if stayed_open >= Duration::from_secs(STREAM_HEALTHY_SECS) {
+                    backoff_secs = 1;
+                    eprintln!("daemon-stream: connection closed cleanly, reconnecting");
+                    write_stream_state("reconnecting", last_event_at.as_deref(), reconnects);
+                } else {
+                    eprintln!(
+                        "daemon-stream: stream closed after {stayed_open:?} (instant EOF — relay may be saturated); reconnecting in {backoff_secs}s"
+                    );
+                    write_stream_state("reconnecting", last_event_at.as_deref(), reconnects);
+                    std::thread::sleep(Duration::from_secs(backoff_secs));
+                    backoff_secs = (backoff_secs * 2).min(30);
+                }
             }
             Err(e) => {
                 reconnects += 1;

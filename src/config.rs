@@ -283,6 +283,55 @@ pub fn read_pushed_event_ids(peer: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// Remove already-delivered events from a peer's outbox `<peer>.jsonl`, keeping
+/// only lines whose `event_id` is NOT in the peer's pushed log — i.e. genuinely
+/// undelivered and transport-failed lines stay for retry. Without this the
+/// daemon re-reads + re-POSTs the whole append-only outbox every sync cycle
+/// (and on every inbound wake), re-blasting delivered events at the relay and
+/// growing the file unbounded. Atomic (tmp + rename) under the per-path outbox
+/// lock so it can't race [`append_outbox_record`]. No-op when nothing is
+/// delivered yet (avoids needless rewrites).
+pub fn drain_outbox_delivered(peer: &str) -> Result<()> {
+    let normalized = crate::agent_card::bare_handle(peer);
+    let path = outbox_dir()?.join(format!("{normalized}.jsonl"));
+    let delivered = read_pushed_event_ids(peer);
+    if delivered.is_empty() {
+        return Ok(());
+    }
+    let lock = outbox_lock(&path);
+    let _g = lock.lock().expect("outbox per-path mutex poisoned");
+    let body = match fs::read_to_string(&path) {
+        Ok(b) => b,
+        Err(_) => return Ok(()), // no outbox file → nothing to drain
+    };
+    let mut kept = String::with_capacity(body.len());
+    let mut dropped = 0usize;
+    for line in body.lines() {
+        let is_delivered = serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|v| {
+                v.get("event_id")
+                    .and_then(|e| e.as_str())
+                    .map(str::to_string)
+            })
+            .map(|id| delivered.contains(&id))
+            .unwrap_or(false); // unparseable / id-less lines are kept, never silently dropped
+        if is_delivered {
+            dropped += 1;
+        } else {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    if dropped == 0 {
+        return Ok(()); // nothing delivered is still queued → don't rewrite
+    }
+    let tmp = path.with_extension("jsonl.tmp");
+    fs::write(&tmp, kept.as_bytes()).with_context(|| format!("writing {tmp:?}"))?;
+    fs::rename(&tmp, &path).with_context(|| format!("renaming {tmp:?} -> {path:?}"))?;
+    Ok(())
+}
+
 pub fn append_outbox_record(peer: &str, record_bytes: &[u8]) -> Result<PathBuf> {
     ensure_dirs()?;
     let normalized = crate::agent_card::bare_handle(peer);
@@ -1032,6 +1081,28 @@ mod tests {
                 read_trust().is_err(),
                 "corrupt trust.json must Err, not swallow"
             );
+        });
+    }
+
+    #[test]
+    fn drain_outbox_removes_only_delivered_lines() {
+        with_temp_home(|| {
+            let peer = "alpha-fox";
+            for id in ["e1", "e2", "e3"] {
+                append_outbox_record(peer, format!("{{\"event_id\":\"{id}\"}}").as_bytes())
+                    .unwrap();
+            }
+            // e1 + e3 delivered (recorded in the pushed log); e2 still pending.
+            append_pushed_log(peer, "e1", "t").unwrap();
+            append_pushed_log(peer, "e3", "t").unwrap();
+
+            drain_outbox_delivered(peer).unwrap();
+
+            let body = fs::read_to_string(outbox_dir().unwrap().join("alpha-fox.jsonl")).unwrap();
+            assert!(body.contains("\"e2\""), "undelivered line kept");
+            assert!(!body.contains("\"e1\""), "delivered line dropped");
+            assert!(!body.contains("\"e3\""), "delivered line dropped");
+            assert_eq!(body.lines().count(), 1, "only the pending line remains");
         });
     }
 
