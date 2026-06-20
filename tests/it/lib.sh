@@ -41,6 +41,14 @@ it_home() { local d="$_IT_TMP/$1"; mkdir -p "$d"; echo "$d"; }
 # <host>:<port>, waits for /healthz, tracks the pid for cleanup. Echoes the URL.
 boot_relay_on() {
   local host="$1" port="$2"; shift 2
+  # Preflight: clear any relay leaked onto this fixed port by a prior run that
+  # was SIGKILL'd (the EXIT/INT/TERM trap below can't fire on -9). Without this
+  # a leaked orphan holds the port and the new boot fails "address in use" →
+  # spurious "relay never became healthy". Each script owns its port, so
+  # clearing a stale listener on it is safe. lsof-guarded (no-op if absent).
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti "tcp:$port" 2>/dev/null | while read -r _p; do kill "$_p" 2>/dev/null || true; done
+  fi
   local home="$_IT_TMP/relay-$port"; mkdir -p "$home"
   WIRE_HOME="$home" "$WIRE" relay-server --bind "$host:$port" "$@" \
     >"$_IT_TMP/relay-$port.log" 2>&1 &
