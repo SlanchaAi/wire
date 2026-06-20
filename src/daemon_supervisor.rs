@@ -136,19 +136,54 @@ fn fs_last_active(home: &Path) -> Option<SystemTime> {
         .max()
 }
 
+/// True iff the session home has at least one queued (un-pushed) outbox event
+/// — a non-empty `<peer>.jsonl` that is NOT a `<peer>.pushed.jsonl` archive.
+///
+/// A session with undelivered mail must keep a daemon to push it even when it
+/// is otherwise idle + registry-unbound. Otherwise a real session (identity +
+/// DID, but no cwd binding) that has *never synced* (`fs_last_active` → None)
+/// is permanently ineligible — and being ineligible it never gets a daemon, so
+/// it never syncs, so its outbox strands forever (the wildflower-gleam
+/// catch-22 a live audit surfaced). Husks never match: they have no outbox.
+/// Injected into `supervisor_eligible` so the filter stays unit-testable.
+fn fs_has_pending_outbox(home: &Path) -> bool {
+    let outbox = home.join("state").join("wire").join("outbox");
+    let Ok(entries) = std::fs::read_dir(&outbox) else {
+        return false; // no outbox dir → nothing queued
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".jsonl") || name.ends_with(".pushed.jsonl") {
+            continue; // not a pending outbox file (or it's a delivered archive)
+        }
+        if std::fs::metadata(&path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+        {
+            return true; // a non-empty queue file = undelivered mail
+        }
+    }
+    false
+}
+
 /// Filter `list_sessions()` down to the sessions the supervisor should
 /// own a daemon for. A session is eligible iff it has a registry cwd
 /// binding OR it was active within `max_idle`. `max_idle == None`
 /// disables the filter (every session eligible). Pure: the activity
 /// probe is injected so this is unit-testable without touching disk.
-fn supervisor_eligible<F>(
+fn supervisor_eligible<F, G>(
     sessions: Vec<crate::session::SessionInfo>,
     max_idle: Option<Duration>,
     now: SystemTime,
     last_active: F,
+    has_pending_outbox: G,
 ) -> Vec<crate::session::SessionInfo>
 where
     F: Fn(&Path) -> Option<SystemTime>,
+    G: Fn(&Path) -> bool,
 {
     let Some(max_idle) = max_idle else {
         return sessions;
@@ -157,6 +192,13 @@ where
         .into_iter()
         .filter(|s| {
             if s.cwd.is_some() {
+                return true;
+            }
+            // Undelivered mail → keep a daemon to drain it, regardless of idle.
+            // Closes the wildflower-gleam catch-22: an unbound, never-synced
+            // session with a queued outbox would otherwise be ineligible
+            // forever and strand its mail.
+            if has_pending_outbox(&s.home_dir) {
                 return true;
             }
             match last_active(&s.home_dir) {
@@ -401,8 +443,13 @@ pub fn run_supervisor(interval_secs: u64, as_json: bool) -> Result<()> {
         //    every ephemeral persona home (the 147-home fork storm).
         let all_sessions = crate::session::list_sessions().unwrap_or_default();
         let total_sessions = all_sessions.len();
-        let wanted: Vec<crate::session::SessionInfo> =
-            supervisor_eligible(all_sessions, max_idle, SystemTime::now(), fs_last_active);
+        let wanted: Vec<crate::session::SessionInfo> = supervisor_eligible(
+            all_sessions,
+            max_idle,
+            SystemTime::now(),
+            fs_last_active,
+            fs_has_pending_outbox,
+        );
         if wanted.len() != total_sessions {
             eprintln!(
                 "supervisor: {} of {} sessions eligible (skipped {} registry-unbound + idle > cutoff)",
@@ -699,6 +746,7 @@ pub fn read_supervisor_state() -> Result<SupervisorState> {
         max_idle_from_env(),
         SystemTime::now(),
         fs_last_active,
+        fs_has_pending_outbox,
     )
     .into_iter()
     .map(|s| s.name)
@@ -1090,9 +1138,13 @@ mod tests {
         let now = SystemTime::now();
         let ancient = now - Duration::from_secs(365 * 86_400);
         let sessions = vec![mk_session("wire", Some("/Users/p/Source/wire"))];
-        let out = supervisor_eligible(sessions, Some(Duration::from_secs(7 * 86_400)), now, |_| {
-            Some(ancient)
-        });
+        let out = supervisor_eligible(
+            sessions,
+            Some(Duration::from_secs(7 * 86_400)),
+            now,
+            |_| Some(ancient),
+            |_| false,
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "wire");
     }
@@ -1119,6 +1171,7 @@ mod tests {
                     Some(stale)
                 }
             },
+            |_| false,
         );
         let names: Vec<_> = out.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["rosy-rook"]);
@@ -1130,10 +1183,34 @@ mod tests {
         // dropped: nothing says it's a session anyone is using.
         let now = SystemTime::now();
         let sessions = vec![mk_session("husk", None)];
-        let out = supervisor_eligible(sessions, Some(Duration::from_secs(7 * 86_400)), now, |_| {
-            None
-        });
+        let out = supervisor_eligible(
+            sessions,
+            Some(Duration::from_secs(7 * 86_400)),
+            now,
+            |_| None,
+            |_| false,
+        );
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn eligible_keeps_unbound_idle_session_with_pending_outbox() {
+        // The wildflower-gleam catch-22: no cwd binding, never synced
+        // (last_active None → normally dropped), but has queued mail. It MUST
+        // stay eligible so a daemon spawns and drains the outbox — otherwise
+        // the message strands forever (ineligible → no daemon → never syncs →
+        // never eligible). The empty-outbox sibling is still correctly dropped.
+        let now = SystemTime::now();
+        let sessions = vec![mk_session("stranded", None), mk_session("empty", None)];
+        let out = supervisor_eligible(
+            sessions,
+            Some(Duration::from_secs(7 * 86_400)),
+            now,
+            |_| None,                          // neither has ever synced
+            |home| home.ends_with("stranded"), // only this one has queued mail
+        );
+        let names: Vec<_> = out.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["stranded"]);
     }
 
     #[test]
@@ -1142,7 +1219,7 @@ mod tests {
         let now = SystemTime::now();
         let ancient = now - Duration::from_secs(999 * 86_400);
         let sessions = vec![mk_session("husk", None), mk_session("agate-nimbus", None)];
-        let out = supervisor_eligible(sessions, None, now, |_| Some(ancient));
+        let out = supervisor_eligible(sessions, None, now, |_| Some(ancient), |_| false);
         assert_eq!(out.len(), 2);
     }
 
