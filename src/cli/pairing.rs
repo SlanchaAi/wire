@@ -62,6 +62,23 @@ pub(super) fn cmd_dial(name: &str, message: Option<&str>, as_json: bool) -> Resu
                 "kind": "already_pinned",
                 "handle": handle,
             }));
+            // A peer can be pinned in trust yet have NO usable relay slot — its
+            // endpoint token is still empty because the peer's pair_drop_ack
+            // hasn't landed (common right after pairing, a daemon/MCP restart,
+            // or when we're not federation-reachable so the ack can't arrive).
+            // The bare-nick dial used to stop at a reassuring `already_pinned`,
+            // so an operator whose `wire send`s were bouncing `peer_unknown`
+            // would re-dial the bare nick forever, never seeing the real cause
+            // (which only the send path surfaced). Surface the SAME actionable
+            // reason here, via the one shared classifier, so the two can't
+            // drift — the warning names the cause and the exact next command.
+            if let Some(reason) = crate::send::unsendable_reason(handle) {
+                steps.push(json!({
+                    "step": "warning",
+                    "kind": "no_usable_slot",
+                    "detail": reason,
+                }));
+            }
         }
         DialTarget::LocalSister { session_name, .. } => {
             steps.push(json!({
@@ -113,7 +130,16 @@ pub(super) fn cmd_dial(name: &str, message: Option<&str>, as_json: bool) -> Resu
         println!("wire dial: resolved `{name}` → handle `{send_handle}`");
         for s in &steps {
             let step = s.get("step").and_then(Value::as_str).unwrap_or("?");
-            println!("  - {step}");
+            // A `warning` step carries an actionable `detail` (e.g. pinned but
+            // no usable slot yet) — print it, not a bare "warning" label, so
+            // the operator sees the cause + next command inline.
+            if step == "warning"
+                && let Some(detail) = s.get("detail").and_then(Value::as_str)
+            {
+                println!("  - WARN: {detail}");
+            } else {
+                println!("  - {step}");
+            }
         }
         if message.is_some() {
             println!("  (use `wire tail {send_handle}` to read replies)");
