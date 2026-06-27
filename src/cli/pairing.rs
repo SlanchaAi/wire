@@ -62,6 +62,23 @@ pub(super) fn cmd_dial(name: &str, message: Option<&str>, as_json: bool) -> Resu
                 "kind": "already_pinned",
                 "handle": handle,
             }));
+            // A peer can be pinned in trust yet have NO usable relay slot — its
+            // endpoint token is still empty because the peer's pair_drop_ack
+            // hasn't landed (common right after pairing, a daemon/MCP restart,
+            // or when we're not federation-reachable so the ack can't arrive).
+            // The bare-nick dial used to stop at a reassuring `already_pinned`,
+            // so an operator whose `wire send`s were bouncing `peer_unknown`
+            // would re-dial the bare nick forever, never seeing the real cause
+            // (which only the send path surfaced). Surface the SAME actionable
+            // reason here, via the one shared classifier, so the two can't
+            // drift — the warning names the cause and the exact next command.
+            if let Some(reason) = crate::send::unsendable_reason(handle) {
+                steps.push(json!({
+                    "step": "warning",
+                    "kind": "no_usable_slot",
+                    "detail": reason,
+                }));
+            }
         }
         DialTarget::LocalSister { session_name, .. } => {
             steps.push(json!({
@@ -113,7 +130,16 @@ pub(super) fn cmd_dial(name: &str, message: Option<&str>, as_json: bool) -> Resu
         println!("wire dial: resolved `{name}` → handle `{send_handle}`");
         for s in &steps {
             let step = s.get("step").and_then(Value::as_str).unwrap_or("?");
-            println!("  - {step}");
+            // A `warning` step carries an actionable `detail` (e.g. pinned but
+            // no usable slot yet) — print it, not a bare "warning" label, so
+            // the operator sees the cause + next command inline.
+            if step == "warning"
+                && let Some(detail) = s.get("detail").and_then(Value::as_str)
+            {
+                println!("  - WARN: {detail}");
+            } else {
+                println!("  - {step}");
+            }
         }
         if message.is_some() {
             println!("  (use `wire tail {send_handle}` to read replies)");
@@ -275,6 +301,9 @@ pub(crate) fn resolve_name_to_target(name: &str) -> Result<DialTarget> {
     // keyed by handle (not an array); iterate as a map.
     if config::is_initialized().unwrap_or(false) {
         let trust = config::read_trust().unwrap_or(serde_json::Value::Null);
+        // For the effective (not raw) tier of a matched peer — same computation
+        // `wire status`/`wire peers` use, so dial/whois agree with them.
+        let relay_state = config::read_relay_state().unwrap_or_default();
         if let Some(agents) = trust.get("agents").and_then(Value::as_object) {
             for (handle_key, agent) in agents {
                 let did = agent.get("did").and_then(Value::as_str).unwrap_or("");
@@ -283,15 +312,16 @@ pub(crate) fn resolve_name_to_target(name: &str) -> Result<DialTarget> {
                 }
                 let handle = handle_key.clone();
                 let character = crate::character::Character::from_did(did);
-                let tier = agent
-                    .get("tier")
-                    .and_then(Value::as_str)
-                    .unwrap_or("UNKNOWN")
-                    .to_string();
                 let matches = handle.eq_ignore_ascii_case(needle)
                     || did.eq_ignore_ascii_case(needle)
                     || character.nickname.eq_ignore_ascii_case(needle);
                 if matches {
+                    // Surface the EFFECTIVE tier — the same PENDING_ACK
+                    // computation every other surface uses — not the raw stored
+                    // tier. A pinned-but-not-yet-acked peer then reports
+                    // PENDING_ACK on dial/whois consistently, instead of a
+                    // misleading VERIFIED that contradicts `wire status`.
+                    let tier = crate::trust::effective_tier(&trust, &relay_state, &handle);
                     return Ok(DialTarget::PinnedPeer {
                         handle,
                         did: did.to_string(),
@@ -1746,5 +1776,69 @@ mod self_pair_guard_tests {
             "did:wire:noble-canyon-cafef00d",
         )
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod resolve_tier_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `resolve_name_to_target` (the shared dial/whois resolver) must report
+    /// the EFFECTIVE tier — the same PENDING_ACK computation `wire status` /
+    /// `wire peers` use — not the raw stored tier. Regression guard for the
+    /// dial-says-VERIFIED-while-send-bounces-peer_unknown bug: before this,
+    /// the resolver passed the raw `VERIFIED` straight through, so a dial /
+    /// whois on a pinned-but-not-yet-acked peer contradicted every other
+    /// surface.
+    #[test]
+    fn resolution_reports_effective_pending_ack_then_verified_when_token_lands() {
+        config::test_support::with_temp_home(|| {
+            // Peer pinned VERIFIED in trust. (write_trust runs first: it
+            // create_dir_all's the config dir, so the bare-fs writes below land.)
+            config::write_trust(&json!({
+                "version": 1,
+                "agents": {
+                    "willard": {
+                        "tier": "VERIFIED",
+                        "did": "did:wire:willard-deadbeef",
+                        "card": {"capabilities": ["wire/v3.1"]}
+                    }
+                }
+            }))
+            .unwrap();
+            // Minimal init so is_initialized() (private key + card) is true.
+            config::write_private_key(&[1u8; 32]).unwrap();
+            config::write_agent_card(&json!({"did": "did:wire:self-0000", "handle": "self"}))
+                .unwrap();
+            // ...but its reply slot has no token yet (pair_drop_ack not landed).
+            config::write_relay_state(&json!({
+                "peers": {"willard": {"endpoints": [
+                    {"relay_url": "https://relay", "slot_id": "abc", "slot_token": "", "scope": "federation"}
+                ]}}
+            }))
+            .unwrap();
+            let tier = match resolve_name_to_target("willard").unwrap() {
+                DialTarget::PinnedPeer { tier, .. } => tier,
+                _ => panic!("expected PinnedPeer"),
+            };
+            assert_eq!(
+                tier, "PENDING_ACK",
+                "resolver must surface the effective tier, not the raw VERIFIED"
+            );
+
+            // Once the token lands, the same resolution reports VERIFIED.
+            config::write_relay_state(&json!({
+                "peers": {"willard": {"endpoints": [
+                    {"relay_url": "https://relay", "slot_id": "abc", "slot_token": "tok123", "scope": "federation"}
+                ]}}
+            }))
+            .unwrap();
+            let tier = match resolve_name_to_target("willard").unwrap() {
+                DialTarget::PinnedPeer { tier, .. } => tier,
+                _ => panic!("expected PinnedPeer"),
+            };
+            assert_eq!(tier, "VERIFIED");
+        });
     }
 }

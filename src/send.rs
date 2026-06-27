@@ -342,6 +342,47 @@ fn peer_unknown_reason(
     }
 }
 
+/// Classify why `peer` is (un)sendable from live trust + relay-state.
+/// Returns `None` when the peer has at least one endpoint carrying a
+/// non-empty `slot_token` — i.e. a send has a route. Returns
+/// `Some(reason)` — the SAME actionable string the send path surfaces on
+/// `peer_unknown` — when the peer is not pinned, has no endpoint, or has an
+/// endpoint whose `slot_token` is still empty (the `pair_drop_ack` hasn't
+/// landed yet). Shared by the send path (`delivery_json`) and the dial path
+/// (`cmd_dial`) so the two surfaces can't drift: a bare-nick `wire dial`
+/// that resolves an already-pinned-but-unsendable peer can show the operator
+/// the exact same cause + next-command that a bouncing `wire send` would.
+pub(crate) fn unsendable_reason(peer: &str) -> Option<String> {
+    let trust = crate::config::read_trust().unwrap_or_default();
+    let state = crate::config::read_relay_state().unwrap_or_default();
+    let trusted = trust.get("agents").and_then(|a| a.get(peer)).is_some();
+    let eps = crate::endpoints::peer_endpoints_in_priority_order(&state, peer);
+    let has_endpoint = !eps.is_empty();
+    // Mirror the send loop's usability test EXACTLY (the `continue` skip in
+    // `sync_send`): an endpoint routes only when relay_url + slot_id +
+    // slot_token are ALL non-empty. A token sitting on an otherwise-malformed
+    // endpoint is skipped there, so it must not read as "usable" here either.
+    let has_usable_slot = eps
+        .iter()
+        .any(|e| !e.relay_url.is_empty() && !e.slot_id.is_empty() && !e.slot_token.is_empty());
+    // RFC-007 D3: the send path also delivers over Nostr when no HTTP endpoint
+    // routes, provided the peer has a recorded `nostr_transport` AND this
+    // session holds a secp transport key. A peer reachable only that way IS
+    // sendable — don't warn on dial that its HTTP slot has no token.
+    let nostr_reachable = crate::endpoints::peer_nostr_transport(&state, peer).is_some()
+        && crate::config::read_nostr_key().is_ok();
+    if has_usable_slot || nostr_reachable {
+        None
+    } else {
+        Some(peer_unknown_reason(
+            peer,
+            trusted,
+            has_endpoint,
+            has_usable_slot,
+        ))
+    }
+}
+
 /// Render a `SyncDelivery` as the JSON value `wire send --json` /
 /// `tool_send` return. Fields are flat (no nested struct) so JSON
 /// consumers can read `.status` + `.event_id` directly without
@@ -394,21 +435,13 @@ pub fn delivery_json(d: &SyncDelivery, peer: &str) -> Value {
             // Classify against live state so the message names the real cause
             // and the real fix (a FULL `@relay` dial, not the nickname short-
             // circuit which reports already_pinned without re-registering).
-            let trust = crate::config::read_trust().unwrap_or_default();
-            let state = crate::config::read_relay_state().unwrap_or_default();
-            let trusted = trust.get("agents").and_then(|a| a.get(peer)).is_some();
-            let eps = crate::endpoints::peer_endpoints_in_priority_order(&state, peer);
-            let has_endpoint = !eps.is_empty();
-            let has_usable_slot = eps.iter().any(|e| !e.slot_token.is_empty());
-            obj.insert(
-                "reason".into(),
-                json!(peer_unknown_reason(
-                    peer,
-                    trusted,
-                    has_endpoint,
-                    has_usable_slot
-                )),
-            );
+            // Via the shared `unsendable_reason` classifier the dial path
+            // reuses. `None` here would mean a usable slot exists despite the
+            // send reporting PeerUnknown (a route raced away mid-send) — fall
+            // back to the generic "could not be reached" guidance.
+            let reason = unsendable_reason(peer)
+                .unwrap_or_else(|| peer_unknown_reason(peer, true, true, true));
+            obj.insert("reason".into(), json!(reason));
         }
     }
     Value::Object(obj)
@@ -437,6 +470,111 @@ mod tests {
         // Pinned + usable slot but unreachable (fallback wording).
         let r = peer_unknown_reason("p", true, true, true);
         assert!(r.contains("could not be reached"), "{r}");
+    }
+
+    #[test]
+    fn unsendable_reason_reads_live_state() {
+        use crate::endpoints::{Endpoint, EndpointScope, pin_peer_endpoints};
+        crate::config::test_support::with_temp_home(|| {
+            // Unknown peer, empty home → the send path's "not pinned" verdict.
+            let r = unsendable_reason("ghost").expect("unknown peer is unsendable");
+            assert!(r.contains("is not pinned"), "{r}");
+
+            // Peer with a usable federation slot → sendable → None. Guards the
+            // common bare-nick dial: no spurious warning when a route exists.
+            let mut st = crate::config::read_relay_state().unwrap();
+            pin_peer_endpoints(
+                &mut st,
+                "live",
+                &[Endpoint {
+                    relay_url: "https://wireup.net".into(),
+                    slot_id: "slot-live".into(),
+                    slot_token: "tok-abc".into(),
+                    scope: EndpointScope::Federation,
+                }],
+            )
+            .unwrap();
+            crate::config::write_relay_state(&st).unwrap();
+            assert!(
+                unsendable_reason("live").is_none(),
+                "peer with a non-empty slot_token must read as sendable"
+            );
+
+            // Pinned in trust but its endpoint token is still empty (the
+            // pair_drop_ack hasn't landed — the #284.6 desync the dial path
+            // must now surface instead of a bland `already_pinned`).
+            let mut st2 = crate::config::read_relay_state().unwrap();
+            pin_peer_endpoints(
+                &mut st2,
+                "pending",
+                &[Endpoint {
+                    relay_url: "https://wireup.net".into(),
+                    slot_id: "slot-pending".into(),
+                    slot_token: String::new(),
+                    scope: EndpointScope::Federation,
+                }],
+            )
+            .unwrap();
+            crate::config::write_relay_state(&st2).unwrap();
+            crate::config::update_trust(|t| {
+                t.get_mut("agents")
+                    .and_then(Value::as_object_mut)
+                    .unwrap()
+                    .insert(
+                        "pending".into(),
+                        json!({"did": "did:wire:pending-0000", "tier": "VERIFIED"}),
+                    );
+                Ok(())
+            })
+            .unwrap();
+            let r = unsendable_reason("pending").expect("empty-token peer is unsendable");
+            assert!(r.contains("no token yet"), "{r}");
+
+            // Reachable only over Nostr: empty HTTP token, but a recorded
+            // nostr_transport + a local nostr key → sendable (the RFC-007 D3
+            // fallback the send path takes), so NO dial warning.
+            let mut st3 = crate::config::read_relay_state().unwrap();
+            pin_peer_endpoints(
+                &mut st3,
+                "nostronly",
+                &[Endpoint {
+                    relay_url: "https://wireup.net".into(),
+                    slot_id: "slot-n".into(),
+                    slot_token: String::new(),
+                    scope: EndpointScope::Federation,
+                }],
+            )
+            .unwrap();
+            st3["peers"]["nostronly"]["nostr_transport"] =
+                json!({"npub": "npub1xxx", "relay": "wss://relay.example"});
+            crate::config::write_relay_state(&st3).unwrap();
+            crate::config::write_nostr_key(&[3u8; 32]).unwrap();
+            assert!(
+                unsendable_reason("nostronly").is_none(),
+                "a Nostr-reachable peer must read as sendable despite an empty HTTP token"
+            );
+
+            // Malformed endpoint: a token present but relay_url/slot_id empty is
+            // NOT a usable route (the send loop skips it), so still unsendable —
+            // matches the send path's `continue` skip exactly.
+            let mut st4 = crate::config::read_relay_state().unwrap();
+            pin_peer_endpoints(
+                &mut st4,
+                "malformed",
+                &[Endpoint {
+                    relay_url: String::new(),
+                    slot_id: String::new(),
+                    slot_token: "tok-orphan".into(),
+                    scope: EndpointScope::Federation,
+                }],
+            )
+            .unwrap();
+            crate::config::write_relay_state(&st4).unwrap();
+            assert!(
+                unsendable_reason("malformed").is_some(),
+                "a token on an endpoint with empty relay_url/slot_id is not usable"
+            );
+        });
     }
 
     #[test]

@@ -1647,13 +1647,32 @@ fn tool_dial(args: &Value) -> Result<Value, String> {
     match crate::cli::resolve_name_to_target(name) {
         Ok(crate::cli::DialTarget::PinnedPeer {
             handle, did, tier, ..
-        }) => Ok(json!({
-            "name_input": name,
-            "status": "already_pinned",
-            "peer_handle": handle,
-            "did": did,
-            "tier": tier,
-        })),
+        }) => {
+            // Pinned ≠ sendable. If the peer's relay slot still has no token
+            // (their pair_drop_ack hasn't landed — common right after pairing,
+            // an MCP/daemon restart, or when we're not federation-reachable so
+            // the ack can't arrive), a follow-up wire_send bounces
+            // `peer_unknown`. A bare `already_pinned` here is exactly what sent
+            // an MCP agent into the re-dial loop. Surface the SAME actionable
+            // reason the send path emits, via the one shared classifier, so the
+            // dial + send surfaces can't drift. `sendable` is the machine flag;
+            // `reason` (present only when blocked) the cause + next command.
+            let reason = crate::send::unsendable_reason(&handle);
+            let mut out = json!({
+                "name_input": name,
+                "status": "already_pinned",
+                "peer_handle": handle,
+                "did": did,
+                "tier": tier,
+                "sendable": reason.is_none(),
+            });
+            if let Some(r) = reason
+                && let Some(obj) = out.as_object_mut()
+            {
+                obj.insert("reason".into(), json!(r));
+            }
+            Ok(out)
+        }
         Ok(crate::cli::DialTarget::LocalSister { session_name, .. }) => {
             let drop =
                 crate::cli::add_local_sister_core(&session_name).map_err(|e| format!("{e:#}"))?;
