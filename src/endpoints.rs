@@ -483,11 +483,24 @@ pub fn infer_scope_from_url(url: &str) -> EndpointScope {
         .split(':')
         .next()
         .unwrap_or("");
-    if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+    if is_loopback_host(host) {
         EndpointScope::Local
     } else {
         EndpointScope::Federation
     }
+}
+
+/// True iff `host` (no scheme, no port) is a loopback address wire treats as
+/// `Local` scope. EXACT set — the single source of truth shared by
+/// `infer_scope_from_url`, `pair_profile::is_valid_domain` /
+/// `relay_url_for_domain` (E4 loopback handles), and the `is_known_relay_domain`
+/// phishing-warning suppression. Keeping one predicate is load-bearing: if these
+/// gates ever disagree on what "loopback" means, a handle could parse + get an
+/// `http://` URL while being classified `Federation` scope (advertised as
+/// off-box reachable) — exactly the drift the E4 review flagged. Do not broaden
+/// to the full 127.0.0.0/8 range here without updating every caller in lockstep.
+pub fn is_loopback_host(host: &str) -> bool {
+    host == "127.0.0.1" || host == "localhost" || host == "::1"
 }
 
 /// True iff this endpoint set is reachable ONLY from the same box — every

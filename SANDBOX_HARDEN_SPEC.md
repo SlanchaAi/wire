@@ -94,6 +94,31 @@ plan → gate#1 → develop → in-situ test → gate#2 → loop).
   sandbox/loopback relay can't be named in a `wire dial nick@host:port` handle.
   Recommend relaxing for local scope (V0_13_2 E4). Workaround shipped in docs: invite flow.
 
+## E4 — loopback handle port support (iteration 2, branch e4-local-relay, operator-authorized 2026-06-29)
+
+Tier HIGH (trust-path: federation handle domain validation). Goal: `wire dial nick@127.0.0.1:8771`
+reaches a loopback relay. Scope = **loopback only** (the clean boundary: loopback ⟹ http is certain;
+internal-DNS-name ⟹ http/https is a guess → those keep using the invite flow).
+
+Design:
+1. `is_valid_domain` (pair_profile.rs:163): split optional `:port` (rsplit_once); if port present,
+   accept ONLY when host is loopback (`localhost` / 127.0.0.0/8); validate port 1..=65535 + host labels.
+   Non-loopback + port stays REJECTED (preserves port-less public-handle convention). No-port unchanged.
+2. New `relay_url_for_domain(domain)` → `http://` for loopback host, else `https://`. Replaces the 3
+   `format!("https://{}", domain)` fallback sites (pair_profile.rs:266, cli/pairing.rs:1176, mcp.rs:1730).
+3. `is_known_relay_domain` (pairing.rs:685): loopback = implicitly-known (suppress spurious phishing warn).
+
+TDD contract (runnable check):
+- parse_handle Ok: `n@127.0.0.1:8771`, `n@localhost:8771`, `n@127.0.0.1` (already), `n@wireup.net` (unchanged).
+- parse_handle Err: `n@evil.com:1337`, `n@wireup.net:8443` (non-loopback+port), `n@127.0.0.1:0`,
+  `n@127.0.0.1:99999`, `n@:8771`, `n@127.0.0.1:abc`.
+- relay_url_for_domain: `127.0.0.1:8771`→http, `localhost:9`→http, `wireup.net`→https (public unchanged).
+- in-situ: `wire dial n@127.0.0.1:<port>` to a local relay → pairs + message lands.
+
+Gate#1 (design persona review): security + protocol/compat — DISPATCHED. Key risk under review:
+SSRF via `tool_add`/auto-dial on untrusted input hitting a loopback port (note: wire already GETs
+well-known on any operator-chosen domain; loopback is the sensitive subset, response not returned to attacker).
+
 ## Gate ledger
 - Gate#1 (plan): folded into gate#2 (de-scoped to MEDIUM — no trust-path code change).
 - Gate#2 (built-thing review over diff): **PASS after fixes.** 3 parallel Sonnet reviewers

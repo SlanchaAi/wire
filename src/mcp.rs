@@ -1716,6 +1716,23 @@ fn tool_add(args: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .ok_or("resolved missing did")?
         .to_string();
+
+    // Poisoned-discovery hard-refuse — parity with CLI `cmd_add` (#247 finding 4).
+    // A relay can serve a card with a VALID self-signature (so resolve_handle's
+    // verify passes) whose key does NOT hash to the fingerprint in its claimed
+    // DID — identity substitution. The CLI refused this; the MCP path did not, so
+    // an agent-driven `wire_dial` would pin it. E4 widens the reachable relay set
+    // (loopback), making the gap newly exploitable via a rogue local relay — so
+    // close it on both paths.
+    let (peer_fp, _did_fp, fp_matches) =
+        crate::cli::resolved_key_fingerprint(&peer_card, &peer_did);
+    if peer_fp.is_some() && !fp_matches {
+        return Err(format!(
+            "REFUSING to pair `{handle}` — the resolved card's key fingerprint ({}) does not match its claimed DID `{peer_did}` (poisoned discovery: the relay served a card whose key ≠ its identity). Verify with the peer out-of-band.",
+            peer_fp.as_deref().unwrap_or("?")
+        ));
+    }
+
     let peer_handle = crate::agent_card::display_handle_from_did(&peer_did).to_string();
     let peer_slot_id = resolved
         .get("slot_id")
@@ -1727,7 +1744,7 @@ fn tool_add(args: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| relay_override.map(str::to_string))
-        .unwrap_or_else(|| format!("https://{}", parsed.domain));
+        .unwrap_or_else(|| crate::pair_profile::relay_url_for_domain(&parsed.domain));
 
     // Pin peer in trust + relay-state. slot_token arrives via ack later.
     crate::config::update_trust(|trust| {

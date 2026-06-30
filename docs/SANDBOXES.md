@@ -44,28 +44,32 @@ message between two *separate* container identities, see the
 "custom-port relays" note below — on a non-wireup relay you must pair with the
 **invite flow**, not `wire dial <handle>`.
 
-## Custom-port / loopback / sandbox relays — use the invite flow
+## Custom-port relays — loopback by handle (E4), or the invite flow
 
 A wire **federation handle** is `nick@domain` and assumes a public, port-less
-HTTPS domain (e.g. `alice@wireup.net`, implicitly `:443`). The domain validator
-(`src/pair_profile.rs::is_valid_domain`) **rejects any `:port` suffix** — the `:`
-fails its per-label character check — so a custom-port relay can't be named in a
-handle at all. (A bare single-label host like `nick@relay` *passes* the validator
-but then fails at DNS/TCP, not with a clean error.) So inside a sandbox where the
-relay is `http://relay:8770` or `http://127.0.0.1:8771`:
+HTTPS domain (e.g. `alice@wireup.net`, implicitly `:443`).
 
-```text
-wire dial knit-ash@relay:8770  ->  error: domain "relay:8770" invalid
-                                   — must be lowercase ASCII, dot-separated
+**Loopback relays are dialable by handle (E4).** `is_valid_domain` accepts a
+`:port` suffix when the host is a loopback literal (`127.0.0.1` / `localhost`),
+and the client speaks `http://` to it (local relays don't terminate TLS). So a
+same-box / loopback sandbox relay works directly:
+
+```bash
+wire dial knit-ash@127.0.0.1:8771 "hello"   # resolves over http://127.0.0.1:8771
 ```
 
-**This is expected.** Pair via the invite flow instead, which carries the full
-relay URL (port included) in the invite token and bypasses handle resolution
-entirely — validated container-to-container on a `:8770` relay:
+Non-loopback hosts stay port-less (`evil.com:8443` is rejected) — a public relay
+on a custom port should sit behind a 443 TLS edge (Cloudflare Tunnel / Caddy).
+
+**A custom-port relay reached by an internal DNS name** (e.g. the Docker
+service name `relay.wire.local:8770`) still can't be a handle: http-vs-https
+isn't inferable from the name. Pair via the **invite flow**, which carries the
+full relay URL (scheme + port) in the token — validated container-to-container
+on a `:8770` relay:
 
 ```bash
 # On peer A (already `wire up`-ed against the local relay):
-A_INVITE=$(wire invite --relay http://relay:8770 --json | jq -r .invite_url)
+A_INVITE=$(wire invite --relay http://relay.wire.local:8770 --json | jq -r .invite_url)
 
 # On peer B:
 wire accept-invite "$A_INVITE"     # pins A, exchanges signed cards
@@ -76,10 +80,10 @@ Same-box sibling sessions (one `$WIRE_HOME`, distinct `WIRE_SESSION_ID`) can use
 bare-nick `wire dial` directly — they resolve as local sisters, not federation.
 See `scripts/hello-world-validate.sh` for that path.
 
-> Limitation tracked: relaxing `is_valid_domain` to accept `host:port` for
-> local/loopback scope (so `wire dial` works to a sandbox relay) is the E4 item
-> in `docs/V0_13_2_PLATFORM_HARDENING.md`. Until that lands, the invite flow is
-> the supported sandbox-relay pairing path.
+> Security note: loopback handle dialing widens the prompt-injection SSRF
+> surface to loopback ports (T14 in `docs/THREAT_MODEL.md`); the bilateral
+> `wire_accept` gate and the poisoned-card fingerprint hard-refuse (now on the
+> MCP path too) still apply.
 
 ## OpenShell (egress-policy sandboxes)
 
