@@ -37,7 +37,7 @@ Full rc10 Windows matrix GREEN (glossy): B + E2-bidirectional + pair-all-local +
 | id | gap | tier | note |
 |----|-----|------|------|
 | E3 | `add-peer-slot` REPLACES endpoints, doesn't merge → clobbers federation route (data loss) | 🟡 rc5 | now additive — upsert by relay_url into peer `endpoints[]` |
-| E4 | domain validator rejects loopback/IP → `dial`/`add` can't express `nick@127.0.0.1:8771` | bug | relax validator when scope=local |
+| E4 | domain validator rejects loopback/IP → `dial`/`add` can't express `nick@127.0.0.1:8771` | ✅ DONE (2026-06-29) | `is_valid_domain` accepts a loopback `host:port` (exact `127.0.0.1`/`localhost` via shared `endpoints::is_loopback_host`); new `relay_url_for_domain` picks `http://` for loopback at all 4 URL sites; loopback phishing-warn suppressed; MCP `tool_add` gained the CLI's poisoned-card fingerprint refuse; SSRF trade-off noted in THREAT_MODEL T14 |
 | E5 | `dial <peer>` on already-pinned returns `already_pinned`, won't refresh endpoints → peer that binds local AFTER pairing can't upgrade | bug | `wire repin/refresh <peer>` |
 | E2 | daemon never serviced a bind-relay'd local slot (`run_sync_pull` pulled only the primary endpoint) | 🟡 rc6 | pull ALL self endpoints with per-slot cursors; resilient to one slot erroring |
 | E1 | `wire up` doesn't register a local session / auto-start|detect local relay → same-box defaults to federation | feature | |

@@ -483,11 +483,30 @@ pub fn infer_scope_from_url(url: &str) -> EndpointScope {
         .split(':')
         .next()
         .unwrap_or("");
-    if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+    if is_loopback_host(host) {
         EndpointScope::Local
     } else {
         EndpointScope::Federation
     }
+}
+
+/// True iff `host` (no scheme, no port) is a loopback address the E4 trust-path
+/// gates treat as `Local` scope: `infer_scope_from_url`, the handle validator +
+/// URL builder (`pair_profile::is_valid_domain` / `relay_url_for_domain`), and
+/// the `is_known_relay_domain` phishing-warning suppression all key off THIS one
+/// predicate so scheme + scope can never disagree. Keeping one predicate is
+/// load-bearing: if these gates disagreed on "loopback", a handle could parse +
+/// get an `http://` URL while being classified `Federation` (advertised off-box).
+///
+/// IPv4 `127.0.0.1` + `localhost` only. IPv6 `::1` is intentionally excluded — an
+/// IPv6 authority needs bracketing (`[::1]:port`) the handle/URL path doesn't
+/// carry, so `nick@::1:port` is rejected rather than half-accepted into a
+/// malformed `http://::1:port`; use `127.0.0.1` for a loopback handle. Do not
+/// broaden the IPv4 set to the full /8 here without updating every caller. (NB:
+/// `session.rs::url_is_loopback` is a SEPARATE, deliberately-broader /8 predicate
+/// for same-box session discovery — not a trust gate.)
+pub fn is_loopback_host(host: &str) -> bool {
+    host == "127.0.0.1" || host == "localhost"
 }
 
 /// True iff this endpoint set is reachable ONLY from the same box — every

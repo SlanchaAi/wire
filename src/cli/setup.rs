@@ -30,7 +30,11 @@ pub(crate) fn cmd_up(
             if r.starts_with("http://") || r.starts_with("https://") {
                 r.to_string()
             } else {
-                format!("https://{r}")
+                // E4: schemeless relay arg → http:// for a loopback authority
+                // (local relays speak plaintext), https:// otherwise. Without
+                // this, `wire up --relay 127.0.0.1:8771` would publish an
+                // https:// self-relay and the loopback slot would be dead.
+                crate::pair_profile::relay_url_for_domain(r)
             }
         }
         None => crate::pair_invite::DEFAULT_RELAY.to_string(),

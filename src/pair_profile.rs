@@ -112,8 +112,10 @@ impl std::fmt::Display for Handle {
 /// Parse `nick@domain`. Returns `Err` on malformed inputs or reserved nicks.
 ///
 /// Nick rules: 2-32 chars, `[a-z0-9_-]`. Domain rules: DNS-label-shaped,
-/// dot-separated, lowercase ASCII. We don't fully validate domain syntax
-/// here — DNS resolution will fail later if the operator typo'd it.
+/// dot-separated, lowercase ASCII — OR (E4) a loopback authority with a port
+/// (`127.0.0.1:PORT` / `localhost:PORT`) for a local-dev / sandbox relay. We
+/// don't fully validate domain syntax here — DNS resolution will fail later if
+/// the operator typo'd it.
 pub fn parse_handle(s: &str) -> Result<Handle> {
     let (nick, domain) = s
         .split_once('@')
@@ -132,7 +134,9 @@ pub fn parse_handle(s: &str) -> Result<Handle> {
         );
     }
     if !is_valid_domain(domain) {
-        bail!("domain {domain:?} invalid — must be lowercase ASCII, dot-separated");
+        bail!(
+            "domain {domain:?} invalid — expected a dot-separated lowercase-ASCII domain (e.g. wireup.net) or a loopback authority (127.0.0.1:PORT / localhost:PORT)"
+        );
     }
     Ok(Handle {
         nick: nick.to_string(),
@@ -164,6 +168,15 @@ fn is_valid_domain(s: &str) -> bool {
     if s.is_empty() || s.len() > 253 {
         return false;
     }
+    // E4: a `host:port` authority is accepted ONLY when the host is a loopback
+    // literal — a local-dev / sandbox relay speaks http on a nonstandard port,
+    // and a federation handle can't otherwise carry a `:port`. Non-loopback
+    // host+port stays rejected (public handles are port-less by convention).
+    // Port is 1..=65535; 0 is the OS wildcard, not a bindable relay.
+    if let Some((host, port)) = s.rsplit_once(':') {
+        return crate::endpoints::is_loopback_host(host)
+            && matches!(port.parse::<u16>(), Ok(p) if p >= 1);
+    }
     // Lowercase ASCII, dot-separated labels of 1..=63 chars each.
     s.split('.').all(|label| {
         !label.is_empty()
@@ -174,6 +187,20 @@ fn is_valid_domain(s: &str) -> bool {
             && !label.starts_with('-')
             && !label.ends_with('-')
     })
+}
+
+/// Construct the relay base URL for a handle `domain` when no explicit
+/// `relay_url` hint is available. A loopback authority (E4) speaks plain http on
+/// its port; every other domain is a public relay → https (default 443). Shares
+/// `endpoints::is_loopback_host` with `infer_scope_from_url` so the scheme this
+/// picks and the scope that gets advertised can never diverge.
+pub fn relay_url_for_domain(domain: &str) -> String {
+    let host = domain.rsplit_once(':').map(|(h, _)| h).unwrap_or(domain);
+    if crate::endpoints::is_loopback_host(host) {
+        format!("http://{domain}")
+    } else {
+        format!("https://{domain}")
+    }
 }
 
 /// Editable profile fields. All optional; unset fields stay `null` in the
@@ -263,7 +290,7 @@ pub fn write_profile_field(field: &str, value: Value) -> Result<Value> {
 pub fn resolve_handle(handle: &Handle, relay_url: Option<&str>) -> anyhow::Result<Value> {
     let base = relay_url
         .map(str::to_string)
-        .unwrap_or_else(|| format!("https://{}", handle.domain));
+        .unwrap_or_else(|| relay_url_for_domain(&handle.domain));
     let client = crate::relay_client::RelayClient::new(&base);
 
     // v0.5.1: try the wire-native endpoint first (richer), fall back to the
@@ -416,6 +443,60 @@ mod tests {
     fn parse_handle_accepts_underscore_and_digits() {
         assert!(parse_handle("dragonfly_42@home.arpa").is_ok());
         assert!(parse_handle("v2@wireup.net").is_ok());
+    }
+
+    #[test]
+    fn parse_handle_accepts_loopback_with_port() {
+        // E4: loopback authorities carry a `:port` for local-dev / sandbox relays.
+        for h in [
+            "bob@127.0.0.1:8771",
+            "bob@localhost:8771",
+            "bob@127.0.0.1:65535",
+            "bob@127.0.0.1:1",
+        ] {
+            assert!(parse_handle(h).is_ok(), "expected {h:?} to parse");
+        }
+        // No-port loopback already parsed; keep it working.
+        assert!(parse_handle("bob@127.0.0.1").is_ok());
+        // Round-trip preserves the port.
+        assert_eq!(
+            parse_handle("bob@127.0.0.1:8771").unwrap().as_string(),
+            "bob@127.0.0.1:8771"
+        );
+    }
+
+    #[test]
+    fn parse_handle_rejects_nonloopback_port_and_bad_ports() {
+        // Non-loopback host + port stays rejected (public handles are port-less).
+        assert!(parse_handle("bob@evil.com:1337").is_err());
+        assert!(parse_handle("bob@wireup.net:8443").is_err());
+        // Port out of range / zero / non-numeric / empty.
+        assert!(parse_handle("bob@127.0.0.1:0").is_err());
+        assert!(parse_handle("bob@127.0.0.1:65536").is_err());
+        assert!(parse_handle("bob@127.0.0.1:abc").is_err());
+        assert!(parse_handle("bob@:8771").is_err()); // empty host
+        // IPv6 loopback is intentionally NOT accepted as a handle (would need
+        // `[::1]:port` bracketing the handle path doesn't carry) — use 127.0.0.1.
+        assert!(parse_handle("bob@::1:8771").is_err());
+        // A public domain is unchanged (no regression).
+        assert!(parse_handle("bob@wireup.net").is_ok());
+    }
+
+    #[test]
+    fn relay_url_for_domain_scheme() {
+        // Loopback → http (local relays speak plaintext); public → https.
+        assert_eq!(
+            relay_url_for_domain("127.0.0.1:8771"),
+            "http://127.0.0.1:8771"
+        );
+        assert_eq!(relay_url_for_domain("localhost:9"), "http://localhost:9");
+        assert_eq!(relay_url_for_domain("127.0.0.1"), "http://127.0.0.1");
+        // Public path is unchanged — the regression guard for the 4 call sites.
+        assert_eq!(relay_url_for_domain("wireup.net"), "https://wireup.net");
+        assert_eq!(
+            relay_url_for_domain("anthropic.dev"),
+            "https://anthropic.dev"
+        );
     }
 
     #[test]
