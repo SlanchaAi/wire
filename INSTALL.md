@@ -152,6 +152,10 @@ For AI agents (Claude Desktop, Claude Code, Cursor, Cline, Zed, anything MCP-awa
 }
 ```
 
+Running wire inside a container / egress-restricted / AI-scanner sandbox?
+See [docs/SANDBOXES.md](docs/SANDBOXES.md) for the validated hardening recipe and
+the invite-flow pairing path for custom-port relays.
+
 After restart the agent has:
 
 **Tools**:

@@ -5,8 +5,12 @@ path is the native binary (`curl install.sh | sh`); containers exist mainly
 for operators running a public-good relay or fitting wire into an existing
 k8s / Fly / Cloud Run stack. If neither applies, use [native install](../INSTALL.md).
 
-The Dockerfile produces a single distroless static image (~7 MB) that runs
+The Dockerfile produces a single distroless static image (~13 MB) that runs
 every wire role — pick at `CMD` time.
+
+For the **validated container-hardening recipe** (`--read-only --cap-drop=ALL
+--no-new-privileges …`), pairing inside sandboxes, OpenShell egress policy, and
+AI-security scanners, see [`docs/SANDBOXES.md`](../docs/SANDBOXES.md).
 
 ## Build
 
@@ -83,7 +87,7 @@ See `compose.yml` in repo root.
 - No shell → no shell injection
 - No package manager → no `curl | sh` from inside container
 - `nonroot` user by default (uid 65532) → no root access on filesystem mounts
-- ~7 MB total image vs ~150 MB for ubuntu base — smaller attack surface, faster pulls
+- ~13 MB total image vs ~150 MB for ubuntu base — smaller attack surface, faster pulls
 - Same binary as bare-metal install — no behavior drift
 
 ## Hardening flags worth adding (Docker)
