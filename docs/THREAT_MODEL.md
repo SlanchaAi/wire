@@ -208,6 +208,19 @@ in hostile-host scenarios. Documented as host responsibility. Operators
 choosing an MCP host should prefer one with explicit user-confirmation
 primitives for trust-mutating tools.
 
+**E4 trade-off (loopback handle ports, 2026-06-29):** allowing `nick@127.0.0.1:PORT`
+handles (so `wire dial` reaches a local-dev / sandbox relay) widens this residual:
+a prompt-injected agent told to dial `foo@127.0.0.1:<port>` now makes a
+`GET http://127.0.0.1:<port>/.well-known/wire/agent` against an arbitrary loopback
+port (blind SSRF — the response is verified-or-discarded locally, never returned to
+the attacker; non-loopback `host:port` stays rejected, so the surface is loopback
+only). The bilateral `wire_accept` gate is unaffected — no pair completes without
+operator consent — and the poisoned-card key/DID-fingerprint hard-refuse now fires
+on the MCP `tool_add` path too (parity with CLI `cmd_add`), so a rogue loopback
+relay serving a substituted card is rejected. A host wanting a tighter gate can key
+off the loopback target before letting an agent auto-dial; wire surfaces the dial
+target in the tool args so the host has the hook.
+
 ## Threat T13 — relay process compromise leaks to other host workloads
 
 **Threat:** the wire relay process (or any wire process) is exploited via a memory-safety bug in a Rust dependency, an axum/hyper HTTP CVE, or a malicious crate in the supply chain. Attacker now has code execution as the user that owns the wire process. On a shared host running wire alongside other workloads (a Spark box running forge / slancha-api / training pipelines / SSH keys / Anthropic API keys / etc.), this is a *lateral movement* problem distinct from the wire protocol's threat model.

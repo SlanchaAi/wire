@@ -663,7 +663,7 @@ fn print_resolved_profile(resolved: &Value) {
 /// a mismatch means the relay served a card whose key does not match its own
 /// DID (a poisoned-discovery red flag). `matches` is false when the card has no
 /// usable key or `did_fp` is empty. Pure → unit-tested.
-fn resolved_key_fingerprint(card: &Value, did: &str) -> (Option<String>, String, bool) {
+pub(crate) fn resolved_key_fingerprint(card: &Value, did: &str) -> (Option<String>, String, bool) {
     let did_fp = did.rsplit('-').next().unwrap_or("").to_string();
     let computed = card
         .get("verify_keys")
@@ -686,6 +686,17 @@ fn is_known_relay_domain(peer_domain: &str, our_relay_url: &str) -> bool {
     // Hard-coded known-good list. wireup.net is the default relay.
     const KNOWN_GOOD: &[&str] = &["wireup.net", "wire.laulpogan.com"];
     let peer_domain = peer_domain.trim().to_ascii_lowercase();
+    // E4: a loopback authority is the operator's OWN machine — there is no
+    // off-box relay to impersonate, so suppress the cross-relay phishing
+    // warning. (`peer_domain` carries the port, e.g. `127.0.0.1:8771`; strip it
+    // before the loopback check.)
+    let peer_host = peer_domain
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(peer_domain.as_str());
+    if crate::endpoints::is_loopback_host(peer_host) {
+        return true;
+    }
     if KNOWN_GOOD.iter().any(|k| *k == peer_domain) {
         return true;
     }
@@ -1173,7 +1184,7 @@ pub(super) fn cmd_add(
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| relay_override.map(str::to_string))
-        .unwrap_or_else(|| format!("https://{}", parsed.domain));
+        .unwrap_or_else(|| crate::pair_profile::relay_url_for_domain(&parsed.domain));
 
     // 3. Pin peer in trust + relay-state. slot_token will arrive via ack.
     config::update_trust(|trust| {

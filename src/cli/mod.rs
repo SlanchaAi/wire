@@ -33,6 +33,7 @@ mod upgrade;
 
 pub(crate) use comms::here_summary;
 pub(crate) use comms::parse_deadline_until;
+pub(crate) use pairing::resolved_key_fingerprint;
 pub(crate) use relay::cmd_bind_relay;
 pub use relay::error_smells_like_slot_4xx;
 pub use relay::run_sync_pull;
