@@ -65,15 +65,14 @@ openshell policy update "${SANDBOX_NAME}" --wait \
   --add-allow 'wireup.net:443:GET:/.well-known/wire/agent' \
   --add-allow 'wireup.net:443:GET:/.well-known/agent-card.json' \
   --add-allow 'wireup.net:443:GET:/v1/handles' \
-  --add-allow 'wireup.net:443:GET:/v1/handle/*' \
   --add-allow 'wireup.net:443:GET:/v1/slot/*/state' \
-  --add-allow 'wireup.net:443:GET:/v1/slot/*/responder-health' \
   --add-allow 'wireup.net:443:GET:/v1/events/*' \
   --add-allow 'wireup.net:443:GET:/v1/events/*/stream' \
   --add-allow 'wireup.net:443:GET:/v1/pair/*' \
   --add-allow 'wireup.net:443:GET:/i/*' \
   --add-allow 'wireup.net:443:POST:/v1/slot/allocate' \
   --add-allow 'wireup.net:443:POST:/v1/handle/claim' \
+  --add-allow 'wireup.net:443:DELETE:/v1/handle/claim/*' \
   --add-allow 'wireup.net:443:POST:/v1/handle/intro/*' \
   --add-allow 'wireup.net:443:POST:/v1/slot/*/responder-health' \
   --add-allow 'wireup.net:443:POST:/v1/events/*' \

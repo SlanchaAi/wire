@@ -5,8 +5,11 @@
 # ---- build stage ----
 FROM rust:1.88-alpine AS build
 
-# Static-linked binary via musl. ~14 deps need build tools.
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static
+# Static-linked binary via musl. `ring` (rustls' crypto backend) needs musl-dev
+# for its C/asm shims. wire is pure rustls (reqwest default-features=false +
+# rustls-tls; see Cargo.toml) — it links no OpenSSL — so openssl-dev / pkgconfig
+# are dead build deps and are intentionally omitted (smaller, faster build).
+RUN apk add --no-cache musl-dev
 
 WORKDIR /build
 # Cache deps separately from source for faster rebuilds.
@@ -22,7 +25,7 @@ RUN cargo build --release --locked --bin wire && \
 
 # ---- runtime stage ----
 # Distroless static — no shell, no package manager, no /tmp by default.
-# Keeps attack surface near zero. Image is ~7MB total.
+# Keeps attack surface near zero. Image is ~13MB total.
 FROM gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /home/nonroot
