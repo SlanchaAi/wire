@@ -470,10 +470,14 @@ mod tests {
         // Non-loopback host + port stays rejected (public handles are port-less).
         assert!(parse_handle("bob@evil.com:1337").is_err());
         assert!(parse_handle("bob@wireup.net:8443").is_err());
-        // Port out of range / zero / non-numeric.
+        // Port out of range / zero / non-numeric / empty.
         assert!(parse_handle("bob@127.0.0.1:0").is_err());
         assert!(parse_handle("bob@127.0.0.1:65536").is_err());
         assert!(parse_handle("bob@127.0.0.1:abc").is_err());
+        assert!(parse_handle("bob@:8771").is_err()); // empty host
+        // IPv6 loopback is intentionally NOT accepted as a handle (would need
+        // `[::1]:port` bracketing the handle path doesn't carry) — use 127.0.0.1.
+        assert!(parse_handle("bob@::1:8771").is_err());
         // A public domain is unchanged (no regression).
         assert!(parse_handle("bob@wireup.net").is_ok());
     }

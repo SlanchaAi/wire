@@ -490,17 +490,23 @@ pub fn infer_scope_from_url(url: &str) -> EndpointScope {
     }
 }
 
-/// True iff `host` (no scheme, no port) is a loopback address wire treats as
-/// `Local` scope. EXACT set — the single source of truth shared by
-/// `infer_scope_from_url`, `pair_profile::is_valid_domain` /
-/// `relay_url_for_domain` (E4 loopback handles), and the `is_known_relay_domain`
-/// phishing-warning suppression. Keeping one predicate is load-bearing: if these
-/// gates ever disagree on what "loopback" means, a handle could parse + get an
-/// `http://` URL while being classified `Federation` scope (advertised as
-/// off-box reachable) — exactly the drift the E4 review flagged. Do not broaden
-/// to the full 127.0.0.0/8 range here without updating every caller in lockstep.
+/// True iff `host` (no scheme, no port) is a loopback address the E4 trust-path
+/// gates treat as `Local` scope: `infer_scope_from_url`, the handle validator +
+/// URL builder (`pair_profile::is_valid_domain` / `relay_url_for_domain`), and
+/// the `is_known_relay_domain` phishing-warning suppression all key off THIS one
+/// predicate so scheme + scope can never disagree. Keeping one predicate is
+/// load-bearing: if these gates disagreed on "loopback", a handle could parse +
+/// get an `http://` URL while being classified `Federation` (advertised off-box).
+///
+/// IPv4 `127.0.0.1` + `localhost` only. IPv6 `::1` is intentionally excluded — an
+/// IPv6 authority needs bracketing (`[::1]:port`) the handle/URL path doesn't
+/// carry, so `nick@::1:port` is rejected rather than half-accepted into a
+/// malformed `http://::1:port`; use `127.0.0.1` for a loopback handle. Do not
+/// broaden the IPv4 set to the full /8 here without updating every caller. (NB:
+/// `session.rs::url_is_loopback` is a SEPARATE, deliberately-broader /8 predicate
+/// for same-box session discovery — not a trust gate.)
 pub fn is_loopback_host(host: &str) -> bool {
-    host == "127.0.0.1" || host == "localhost" || host == "::1"
+    host == "127.0.0.1" || host == "localhost"
 }
 
 /// True iff this endpoint set is reachable ONLY from the same box — every
